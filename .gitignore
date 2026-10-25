@@ -1,0 +1,110 @@
+# ==============================================================================
+# ProPlan VA Monorepo - Global .gitignore
+# ==============================================================================
+
+# Operating System & IDE Files
+.DS_Store
+Thumbs.db
+desktop.ini
+*.swp
+*.swo
+*~
+.idea/
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+
+# Environment Variables, Secrets & Keys (STRICT GUARDRAIL)
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.cert
+credentials.json
+client_secret*.json
+
+# Local Developer Personalization Profile (Per-Machine)
+DEVELOPER.md
+!DEVELOPER.example.md
+
+# Databases & Local Data (STRICT GUARDRAIL)
+*.db
+*.sqlite
+*.sqlite3
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Media, Audio & Recordings (UF4 Raw Audio Testing - STRICT GUARDRAIL)
+*.m4a
+*.wav
+*.mp3
+*.aac
+*.ogg
+recordings/
+temp_audio/
+uploads/
+
+# ==============================================================================
+# Backend: Python & FastAPI
+# ==============================================================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+ENV/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# ==============================================================================
+# Mobile: Flutter & Dart
+# ==============================================================================
+.dart_tool/
+.packages
+.pub-cache/
+.pub/
+mobile/build/
+build/
+
+# Flutter Android
+mobile/android/.gradle/
+mobile/android/local.properties
+mobile/android/gradle/
+mobile/android/app/build/
+*.apk
+*.aab
+
+# Flutter iOS
+mobile/ios/.symlinks/
+mobile/ios/Pods/
+mobile/ios/Podfile.lock
+mobile/ios/Flutter/Generated.xcconfig
+mobile/ios/Flutter/app.framework
+mobile/ios/Flutter/Flutter.framework
+mobile/ios/Flutter/Flutter.podspec
