@@ -1,0 +1,19 @@
+# ==============================================================================
+# ProPlan VA - GitHub CODEOWNERS
+# Tự động gán người kiểm duyệt (Reviewer) khi tạo Pull Request
+# ==============================================================================
+
+# Quản lý chung toàn bộ Monorepo (Git Manager & BA)
+* @hmintrun
+
+# Phân hệ Backend: Quốc Hưng (Backend Lead)
+/backend/ @quochung @hmintrun
+
+# Phân hệ Mobile: Thanh An (Mobile Lead)
+/mobile/ @thanhan @hmintrun
+
+# Tài liệu, Kiến trúc & Đặc tả: Minh Trung (BA / Git Manager)
+/docs/ @hmintrun
+Project.md @hmintrun
+AGENTS.md @hmintrun
+DEVELOPER.example.md @hmintrun
