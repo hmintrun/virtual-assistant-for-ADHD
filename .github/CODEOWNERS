@@ -4,16 +4,16 @@
 # ==============================================================================
 
 # Quản lý chung toàn bộ Monorepo (Git Manager & BA)
-* @mintrun
+* @hmintrun
 
 # Phân hệ Backend: Quốc Hưng (Backend Lead)
-/backend/ @quochung @mintrun
+/backend/ @quochung @hmintrun
 
 # Phân hệ Mobile: Thanh An (Mobile Lead)
-/mobile/ @thanhan @mintrun
+/mobile/ @thanhan @hmintrun
 
 # Tài liệu, Kiến trúc & Đặc tả: Minh Trung (BA / Git Manager)
-/docs/ @mintrun
-Project.md @mintrun
-AGENTS.md @mintrun
-DEVELOPER.example.md @mintrun
+/docs/ @hmintrun
+Project.md @hmintrun
+AGENTS.md @hmintrun
+DEVELOPER.example.md @hmintrun
