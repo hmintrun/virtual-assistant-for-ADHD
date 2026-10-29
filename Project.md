@@ -37,9 +37,9 @@ Não bộ người ADHD gặp **suy giảm chức năng điều hành (Executive
 | **1** | **Quên nhiệm vụ & thời điểm thực hiện** *(Prospective Memory Deficit)* | • Thiếu hụt lớn ở việc nhớ thực hiện ý định đúng thời điểm đã định *(Rambold et al.)*.<br>• 80% bỏ lỡ thông báo văn bản tĩnh.<br>• Tin nhắn SMS nhắc suông chỉ tăng tương tác ngắn hạn (40% vs 18.4%), không cải thiện mức hoàn thành tổng thể *(Frontiers in Digital Health, 2022)*. | • **Hệ thống ghi nhớ bên ngoài:** Nhập liệu nhanh bằng Voice/Text, đồng bộ lịch tạo task có cấu trúc.<br>• **Voice Check-in 2 chiều:** AI chủ động hỏi tiến độ và khích lệ bằng giọng nói thay vì chỉ đẩy thông báo tĩnh. |
 | **2** | **Công việc phức tạp, gây ngợp** *(Planning & Sequencing Deficit)* | • Suy giảm lớn ở khả năng lập kế hoạch nhiều bước *(Fuermaier et al., 2013)*.<br>• Chương trình CBT 12 tuần dạy lập kế hoạch/chia nhỏ việc giúp cải thiện triệu chứng 53%–67% so với 23%–33% ở nhóm chứng *(Safren et al., 2010)*. | • **AI Task Decomposition:** Tự động bẻ nhỏ mục tiêu lớn thành các bước nhỏ (*Steps*) và phiên làm việc (*Sessions*).<br>• **Giao diện 1-Step UI:** Chỉ hiển thị duy nhất **1 bước/phiên hiện tại** trên màn hình; hoàn thành hoặc bỏ qua mới hiện bước tiếp theo. |
 | **3** | **Lúng túng về thứ tự ưu tiên** *(Choice Overload)* | • Danh sách dài (To-do list truyền thống) gây tê liệt lựa chọn *(Neural Revolution, 2023; Frontiers in Psychology, 2022)*. | • **Algorithmic Priority Queue:** Tự động đề xuất công việc dựa trên hạn chót (deadline), độ quan trọng, giờ rảnh, mức năng lượng và lịch sử né tránh (logs bỏ qua việc). |
-| **4** | **"Mù thời gian"** *(Time Blindness)* | • Sai số lớn khi ước lượng thời gian *(Marx et al., 2022; phân tích gộp 27 nghiên cứu trên 1.620 người ADHD của HKU với độ lệch > 0.40)*.<br>• 60% SV ADHD tại Ireland phải xin gia hạn bài tập *(HEA & Taylor & Francis, 2025)*. | • **Buffer Time & Visual Timer:** AI gợi ý thời lượng gốc, thuật toán tự động chèn thời gian đệm dự phòng cá nhân hóa.<br>• Đồng hồ đếm ngược trực quan và đối chiếu thời gian dự kiến vs. thực tế để tinh chỉnh hệ số đệm cho các lần sau. |
+| **4** | **"Mù thời gian"** *(Time Blindness)* | • Sai số lớn khi ước lượng thời gian *(Marx et al., 2022; phân tích gộp 27 nghiên cứu trên 1.620 người ADHD của HKU với độ lệch > 0.40)*.<br>• 60% SV ADHD tại Ireland phải xin gia hạn bài tập *(HEA & Taylor & Francis, 2025)*. | • **Buffer Time & Visual Timer:** AI gợi ý thời lượng gốc, thuật toán tự động chèn thời gian đệm dự phòng cá nhân hóa.<br>• Thanh tiến độ trực quan và đối chiếu thời gian dự kiến vs. thực tế để tinh chỉnh hệ số đệm cho các lần sau. |
 | **5** | **Tê liệt khởi động** *(ADHD Paralysis / Task Initiation)* | • >70% SV ADHD chỉ làm bài trong 24–48 giờ cuối trước hạn *(Knouse & Mitchell, 2015)*.<br>• >70% người dùng biết cần làm gì nhưng cơ thể không thể bắt đầu *(Thawly, 2026)*. | • **Khởi động 2 phút (Micro-task):** Giao duy nhất 1 việc cực nhẹ trong 2–5 phút đầu trước phiên chính để hạ rào cản kích hoạt thần kinh (80% sẽ tiếp tục làm sau 2 phút). |
-| **6** | **Dễ mất tập trung** *(Ngoại cảnh & Nội tâm)* | • Thông báo điện thoại làm tăng triệu chứng mất tập trung *(Kushlev et al., CHI 2016)*.<br>• Đồng hồ nhắc tự kiểm tra giúp giảm hành vi lạc đề từ 46.8% xuống 27.3% *(Sluiter et al., 2020)*. | • **Bảo vệ chú ý kép:**<br>  1. *Ngoại cảnh:* Tự bật Không làm phiền (DND) khi vào phiên.<br>  2. *Nội tâm:* Nút Push-to-Talk **"Cất suy nghĩ"** thu âm nhanh ý tưởng chợt nảy ra (raw audio) vào hộp nháp mà không chuyển màn hình hay ngắt đồng hồ. |
+| **6** | **Dễ mất tập trung**  | • Thông báo điện thoại làm tăng triệu chứng mất tập trung *(Kushlev et al., CHI 2016)*.<br>• Đồng hồ nhắc tự kiểm tra giúp giảm hành vi lạc đề từ 46.8% xuống 27.3% *(Sluiter et al., 2020)*. | • **Bảo vệ chú ý kép:**<br>  1.  Tự bật Không làm phiền (DND) khi vào phiên.<br>  2.  Nút Push-to-Talk **"Cất suy nghĩ"** thu âm nhanh ý tưởng chợt nảy ra (raw audio) vào hộp nháp mà không chuyển màn hình hay ngắt đồng hồ. |
 | **7** | **Lặp lại sai lầm & Cảm giác tội lỗi khi trễ hạn** | • CBT nhấn mạnh việc review kế hoạch và điều chỉnh linh hoạt *(BBK Eprints)*. | • **Adaptive Rescheduling (Guilt-free):** Khi trễ/bận đột xuất, hệ thống tự đề xuất lịch mới kèm 1 câu giải thích lý do / động viên, tránh gây hoảng loạn hay tự trách.<br>• **Rolling Horizon Planning:** Lập kế hoạch cuốn chiếu (tổng quan cả dự án, xếp lịch chi tiết 2–3 tuần gần nhất). |
 | **8** | **Mất động lực & Tính cá nhân hóa** | • Công nghệ cho ADHD cần duy trì tương tác lâu dài *(Scoping Review, 2026)* và thích ứng với sự khác biệt từng cá nhân *(MDPI, 2021)*. | • Phát hiện dấu hiệu giảm tương tác để giảm tần suất thông báo chống bão hòa.<br>• Tùy chỉnh thời lượng tập trung, thời gian nghỉ, tần suất và phong cách nhắc của trợ lý. |
 
@@ -72,6 +72,7 @@ Các ứng dụng hiện có như **Goblin Tools** (chỉ bẻ nhỏ việc rờ
 | **AI / LLM Engine** | **Gemini API (Google AI Studio - Gemini Flash)**<br>*(Dự phòng: Llama-3 qua Groq Cloud)* | Phân tích mục tiêu tự nhiên, trích xuất thực thể (UF1), bẻ nhỏ công việc thành các bước (UF2), hiểu yêu cầu sửa lịch tự nhiên và sinh lời giải thích/động viên (UF2, UF6). |
 | **Giọng nói (STT & TTS)** | • **STT Primary:** Groq Cloud (`whisper-large-v3` / `whisper-large-v3-turbo`)<br>• **TTS Primary:** `edge-tts` (Python)<br>• **On-device Fallback:** `speech_to_text` & `flutter_tts` | • **Groq Whisper** nhận diện tiếng Việt cực nhanh và chuẩn xác cho UF1, UF2, UF5, UF6.<br>• **edge-tts** miễn phí, truyền qua stream/pipe dễ dàng, tùy chỉnh tốc độ và giọng đọc.<br>• Tự động fallback về `speech_to_text` / `flutter_tts` trên thiết bị khi mạng yếu hoặc mất kết nối. |
 | **Cơ sở dữ liệu (Database)** | • **ORM:** SQLAlchemy 2.0<br>• **Giai đoạn Code (Tuần 1–7):** SQLite (`.db` local)<br>• **Giai đoạn Deploy (Tuần 8–10):** PostgreSQL (Supabase / Neon.tech)<br>• **Mobile Local Cache:** SQLite (`sqflite`) / `shared_preferences` | Dùng SQLite local ở giai đoạn phát triển để tránh lỗi mạng và linh hoạt khi thay đổi schema; chuyển đổi mượt mà sang PostgreSQL trên Cloud ở giai đoạn cuối nhờ SQLAlchemy 2.0 mà không cần viết lại truy vấn. |
+| **Lịch Ngoại vi & Giao thức MCP** | • **Dịch vụ:** Google Calendar API (OAuth 2.0)<br>• **Giao thức:** **Model Context Protocol (MCP)** | • **Đọc lịch:** Tự động lấy các sự kiện bận từ Google Calendar để suy ra khung giờ rảnh ở UF1, giải phóng người dùng khỏi việc phải nhớ và gõ tay.<br>• **Ghi lịch:** Đồng bộ 2 chiều các phiên tập trung (`Focus Sessions`) lên Google Calendar sau khi chốt ở UF2 và UF6.<br>• **MCP Protocol:** Chuẩn hóa giao tiếp giữa AI Agent/Backend và các công cụ Calendar ngoại vi một cách an toàn và nhất quán. |
 
 ---
 
@@ -233,18 +234,37 @@ flowchart TD
 
 ---
 
-### UF1 – Tương tác và xác nhận công việc
-- **Mục tiêu:** Thu thập đủ thông tin công việc với ít vòng hỏi-đáp nhất, không tự suy diễn dữ liệu.
-- **Luồng xử lý:**
-  1. Người dùng nhập công việc bằng **Giọng nói** (ưu tiên Groq Whisper STT, fallback on-device STT) hoặc **Văn bản**.
-  2. LLM trích xuất mục tiêu và kiểm tra **4 nhóm thông tin bắt buộc**:
-     - Nội dung công việc (Task content)
-     - Phạm vi / đầu ra mong muốn (Scope)
-     - Khung thời gian rảnh (Free time slots)
-     - Hạn chót hoặc khoảng thời gian hoàn thành (Deadline / Timeframe)
-  3. **Quy tắc Gộp 1 vòng duy nhất:** Hệ thống hiển thị bản tóm tắt trực quan kèm câu hỏi làm rõ tất cả các chỗ còn thiếu hoặc mâu thuẫn trong **1 lần hiển thị** (tuyệt đối không hỏi lắt nhắt nhiều lượt, không tự đoán dữ liệu thiếu).
-  4. Nếu người dùng chưa muốn bổ sung ngay $\rightarrow$ cho phép **Lưu nháp (`status = draft`)** (và tự động lưu nháp nếu thoát app đột ngột).
-  5. Chỉ khi đủ 4 thông tin bắt buộc và người dùng bấm **Xác nhận 1 lần** $\rightarrow$ chuyển sang **UF2**.
+### 7.1. Nhóm Luồng Khởi tạo & Lập lịch (UF7, UF1, UF2)
+
+#### UF7 — Thiết lập ban đầu & Tùy chỉnh trợ lý
+- **Mục tiêu & Điểm bắt đầu:** Người dùng cấu hình trợ lý trước khi bắt đầu lập lịch lần đầu hoặc vào phần Cài đặt để tùy chỉnh phương thức nhắc nhở và tập trung.
+- **Luồng xử lý chính (4 bước):**
+  1. **Lựa chọn thông số:** Người dùng chọn thời lượng tập trung mỗi phiên (`focus_duration_min`, mặc định 25p), thời gian nghỉ ngắn (`break_duration_min`, mặc định 5p), tần suất nhắc trước phiên (`reminder_frequency`: 15p, 10p, 5p), phong cách nhắc/khích lệ (`assistant_style`: trực tiếp hoặc gợi mở) và bật/tắt các hình thức hỗ trợ.
+  2. **Đánh giá tác động & Giữ nguyên phiên hiện tại:** Hệ thống kiểm tra điều kiện thay đổi; giữ nguyên cấu hình cho phiên đang chạy ở UF3. Nếu thay đổi làm lệch các phiên đã lên lịch trong tương lai (đổi thời lượng phiên/nghỉ), chuyển sang **UF6 (Phương án chờ)** để người dùng duyệt lại lịch.
+  3. **Ghi nhận & Chu kỳ cập nhật hệ số đệm:** Cấu hình mới được áp dụng từ phiên tiếp theo. Hệ thống chạy ngầm việc đối chiếu thời gian dự kiến so với thực tế để tính hệ số đệm cá nhân hóa ($k_{\text{buffer}}$).
+  4. **Quy tắc Tính toán & Thứ tự Ưu tiên (Đã chốt):**
+     - **Công thức Hệ số đệm từ Lịch sử ($k_{\text{history}}$):** Áp dụng trung bình trượt (Moving Average) cho 7–10 phiên gần nhất:
+       $$k_{\text{history}} = \frac{1}{N} \sum_{j=1}^{N} \frac{\text{actual\_duration}_j}{\text{planned\_duration}_j}$$
+     - **Quy tắc ưu tiên cấu hình:** Luôn ưu tiên cấu hình thủ công của người dùng ($k_{\text{user}}$) để tôn trọng quyền tự chủ và tạo cảm giác kiểm soát.
+     - **Chu kỳ kiểm tra & Gợi ý (Weekly Check):** Định kỳ 1 lần/tuần (vào cuối tuần), nếu độ lệch giữa cấu hình người dùng và thực tế vượt quá 20% ($|k_{\text{user}} - k_{\text{history}}| > 0.2$), hệ thống hiển thị một gợi ý nhẹ nhàng, không phán xét (*guilt-free suggestion*) để người dùng cân nhắc cập nhật.
+
+---
+
+#### UF1 — Tương tác & Xác nhận công việc
+- **Mục tiêu & Điểm bắt đầu:** Hệ thống hiểu đúng công việc, khung giờ rảnh và deadline khi người dùng thêm mục tiêu mới; áp dụng cơ chế gộp câu hỏi làm rõ vào 1 vòng duy nhất để giải phóng trí nhớ ngắn hạn.
+- **Luồng xử lý chính (4 bước):**
+  1. **Nhập liệu đa phương thức:** Người dùng nhập công việc bằng **Giọng nói** (STT ưu tiên Groq Whisper `whisper-large-v3-turbo`, fallback on-device `speech_to_text`) hoặc **Văn bản**. LLM trích xuất mục tiêu, hạn chót, mốc thời gian và ghi chú.
+  2. **Kiểm tra 4 nhóm thông tin bắt buộc:** Hệ thống đối chiếu dữ liệu để đảm bảo có đủ 4 thành phần:
+     - *Nội dung công việc (Task content)*
+     - *Phạm vi / Đầu ra mong muốn (Scope)*
+     - *Khung giờ rảnh (Free time slots):* Hỗ trợ tự động đọc các sự kiện bận từ **Google Calendar MCP / API** để suy ra khung giờ rảnh, giảm thiểu gõ tay.
+     - *Hạn chót hoặc khoảng thời gian hoàn thành (Deadline / Timeframe)*
+     - **Nguyên tắc:** Đánh dấu rõ các điểm thiếu, mơ hồ hoặc mâu thuẫn; **tuyệt đối không tự đoán dữ liệu**.
+  3. **Gộp 1 vòng duy nhất (Single-Round Clarification):** Hiển thị bản tóm tắt trực quan kèm câu hỏi làm rõ tất cả các chỗ còn thiếu/mâu thuẫn trong **1 lần hiển thị duy nhất** (không hỏi lắt nhắt nhiều lượt). Người dùng bổ sung hoặc chỉnh sửa trực tiếp trên giao diện.
+  4. **Xác nhận & Chuyển luồng:** Khi đủ 4 thông tin bắt buộc và người dùng bấm Xác nhận 1 lần $\rightarrow$ chuyển sang **UF2**.
+- **Xử lý ngoại lệ & Bảo toàn dữ liệu:**
+  - Nếu thông tin chưa rõ/thiếu, hệ thống chỉ giữ ở bước 3, chưa chuyển sang UF2.
+  - Nếu người dùng thoát app hoặc chưa muốn bổ sung ngay $\rightarrow$ **tự động lưu nháp (`status = 'draft'`)** vào Hộp nháp (Draft Tasks) để không bao giờ mất dữ liệu.
 
 ```mermaid
 flowchart TD
@@ -263,44 +283,53 @@ flowchart TD
 
 ---
 
-### UF2 – Xem các bước và chốt kế hoạch
-- **Mục tiêu:** Bẻ nhỏ công việc thành `Steps -> Sessions`, kiểm tra tính khả thi so với hạn chót và chốt lịch.
-- **Phân định trách nhiệm AI vs. Thuật toán Python:**
-  - **LLM (Gemini Flash):** Phân tích ngữ nghĩa để chia `Task` thành danh sách `Steps`, gợi ý `micro_task_prompt` (việc khởi động 2 phút), ước lượng thời lượng gốc cho từng bước và viết câu giải thích lý do sắp xếp.
-  - **Thuật toán Python thuần túy:** Cắt các `Steps` thành các `Sessions` (kèm giờ nghỉ), nhân hệ số Buffer cá nhân hóa, kiểm tra va chạm lịch trong cửa sổ **Rolling Horizon (2–3 tuần đầu)** và tính toán độ khả thi trước Deadline.
-- **Công thức Kiểm tra Khả thi & Thời gian Bổ sung Tối thiểu:**
-  $$\text{Tổng thời gian cần } (T_{\text{req}}) = \sum_{i=1}^{N} \left( \text{Thời lượng dự kiến phiên}_i \times k_{\text{buffer}} + \text{Thời gian nghỉ}_i \right)$$
-  Trong đó $k_{\text{buffer}}$ là hệ số đệm cá nhân hóa (mặc định `1.2`, tự động tinh chỉnh dựa trên tỷ lệ `actual_duration / planned_duration` trong lịch sử của người dùng).
-  - Nếu $T_{\text{req}} > T_{\text{free}}$ (Tổng quỹ giờ rảnh khả dụng trước Deadline):
-    $$\text{Thời gian thiếu hụt tối thiểu } (\Delta T_{\text{deficit}}) = T_{\text{req}} - T_{\text{free}}$$
-  - **Quy tắc bắt buộc:** Hệ thống **không tự ý dời hạn chót** hay **tự ý cắt bớt việc**, mà phải thông báo rõ con số $\Delta T_{\text{deficit}}$ để người dùng quyết định (mở rộng thêm giờ rảnh hoặc chủ động lùi deadline).
-- **Chỉnh sửa & Chốt lịch:** Hỗ trợ sửa lịch bằng cả 2 cách: (1) Thao tác trực tiếp trên giao diện lịch, hoặc (2) Nói/nhập yêu cầu tự nhiên để AI + Thuật toán xếp lại. Chỉ lưu thành lịch chính thức sau khi người dùng bấm **Xác nhận**.
+#### UF2 — Xem các bước & Chốt kế hoạch
+- **Mục tiêu & Điểm bắt đầu:** Bẻ nhỏ công việc đã xác nhận ở UF1 thành các bước (`Steps`) và phiên (`Sessions`), xếp lịch vào khung giờ rảnh khả dụng và chốt lịch chính thức.
+- **Luồng xử lý chính (5 bước):**
+  1. **Đề xuất phân rã chủ động (Tránh Tê liệt khởi động):** Để giải quyết rào cản *Blank Canvas / ADHD Paralysis*, AI (Gemini Flash) **chủ động sinh sẵn một phương án chia bước chuẩn** (`Default Decomposition Proposal`) gồm danh sách các bước, thời lượng dự kiến và Micro-task khởi động 2 phút, kèm nút `"Tùy chỉnh theo ý tôi"` để người dùng tự điều chỉnh nếu muốn.
+  2. **Thuật toán Python xếp phiên & Kiểm tra khả thi:** Thuật toán Python (`scheduler_engine.py`) chia các bước thành các phiên (`Sessions`) theo cấu hình tập trung/nghỉ của UF7, nhân hệ số đệm cá nhân hóa ($k_{\text{buffer}}$) và xếp vào các khung giờ rảnh chưa có lịch ($T_{\text{free}}$) trước Deadline trong cửa sổ **Rolling Horizon (2–3 tuần gần nhất)**.
+  3. **Hiển thị Lịch tổng quan & Cảnh báo thiếu hụt:** Hiển thị tổng quan cả dự án, lịch chi tiết các phiên cho 2–3 tuần đầu kèm 1 câu giải thích ngắn gọn lý do sắp xếp.
+     - **Công thức kiểm tra khả thi:**
+       $$T_{\text{req}} = \sum_{i=1}^{N} \left( \text{PlannedDuration}_i \times k_{\text{buffer}} + \text{BreakDuration}_i \right)$$
+     - **Nếu $T_{\text{req}} > T_{\text{free}}$:** Hệ thống tính toán chính xác số phút thiếu hụt tối thiểu:
+       $$\Delta T_{\text{deficit}} = T_{\text{req}} - T_{\text{free}}$$
+     - **Phạm vi dời lịch khác (Đã chốt):** **Tuyệt đối không tự động dời hoặc xáo trộn các Task khác đã chốt**. Hệ thống thông báo rõ $\Delta T_{\text{deficit}}$ và nguyên nhân để người dùng quyết định: mở rộng thêm giờ rảnh hoặc lùi deadline.
+  4. **Chỉnh sửa linh hoạt:** Người dùng có thể chỉnh sửa trực tiếp trên giao diện lịch hoặc ra lệnh bằng giọng nói/văn bản để AI và thuật toán xếp lại. Nếu đồng ý thêm giờ rảnh hoặc lùi deadline, quay lại bước 2 để tính toán lại.
+  5. **Xác nhận & Đồng bộ Google Calendar 2 chiều:** Khi lịch đã khả thi và người dùng bấm **Xác nhận**, hệ thống ghi vào lịch chính thức (`Official Schedule`). Backend tự động đồng bộ các khối sự kiện (`Focus Blocks`) lên **Google Calendar qua MCP / API**.
+- **Cơ chế Dự phòng Đa tầng khi AI lỗi (3-Tier Fallback):**
+  - **Tầng 1:** `Gemini Flash API` (timeout $\le 2.5\text{s}$).
+  - **Tầng 2:** Chuyển sang LLM tốc độ cao dự phòng (`Llama-3` qua Groq Cloud hoặc model Gemini dự phòng).
+  - **Tầng 3:** Nếu mất mạng toàn diện tới AI, Thuật toán Python tự động chia công việc thành các phiên cố định `20–25 phút` (theo cấu hình user) + `5 phút nghỉ`, không bao giờ trả về lỗi trắng.
 
 ---
 
-### UF3 – Thông báo và bắt đầu phiên tập trung
-- **Mục tiêu:** Hạ rào cản khởi động (Task Initiation) và bảo vệ sự tập trung ngay khi vào phiên.
-- **Luồng xử lý:**
-  1. **Nhắc trước phiên:** Đẩy thông báo nhắc tại các mốc `15 phút`, `10 phút`, `5 phút` trước giờ bắt đầu phiên.
-  2. **Khởi động 2 phút (Micro-task):** Gợi ý thực hiện 1 hành động cực nhỏ trước giờ phiên (ví dụ: *"Mở sẵn file tài liệu và viết 1 dòng tiêu đề"*). Lưu ý: Bước khởi động này **không tính** vào thời lượng phiên chính đang chạy.
-  3. **Kích hoạt Gộp (1-Tap Start):** Đến giờ, người dùng bấm nút `"Bắt đầu đếm giờ [X]p"` $\rightarrow$ hệ thống lập tức thực hiện đồng thời 3 tác vụ:
-     - Bật **Chế độ tập trung (Focus Mode)** và giữ sáng màn hình nhẹ (`wakelock_plus`).
+### 7.2. Nhóm Luồng Thực thi Phiên Tập trung (UF3, UF4)
+
+#### UF3 — Thông báo & Thực hiện phiên tập trung
+- **Mục tiêu & Điểm bắt đầu:** Đưa người dùng vào trạng thái làm việc đơn nhiệm, bảo vệ sự tập trung tối đa theo lịch đã chốt.
+- **Luồng xử lý chính (5 bước):**
+  1. **Thông báo nhắc trước giờ:** Phát thông báo đẩy tại các mốc cấu hình (`15 phút`, `10 phút`, `5 phút`) trước giờ bắt đầu phiên.
+  2. **Micro-task khởi động 2 phút:** Trước phiên 3–5 phút, hiển thị gợi ý một việc siêu nhỏ (ví dụ: *"Mở sẵn tài liệu và đọc lướt mục lục"*). Bước này **không tính** vào thời lượng phiên chính. Nếu người dùng bắt đầu, chuyển sang bước 3; nếu không phản hồi đến giờ, chuyển sang UF5.
+  3. **Kích hoạt Gộp 1 chạm (1-Tap Focus):** Đến giờ làm việc, người dùng bấm nút `"Bắt đầu đếm giờ [X]p"` $\rightarrow$ hệ thống kích hoạt đồng thời 3 cơ chế:
+     - Bật **Chế độ Tập trung** và giữ sáng màn hình nhẹ (`wakelock_plus`).
      - Tự động bật **Không làm phiền (DND)** trên Android (`flutter_dnd`).
-     - Chạy đồng hồ đếm ngược trực quan trên **Giao diện 1-Step UI** (chỉ hiển thị duy nhất bước và phiên hiện tại).
+     - Chạy đồng hồ đếm ngược / thanh tiến độ trực quan trên **Giao diện 1-Step UI**.
+  4. **Bảo vệ Đơn nhiệm & Giữ DND:** Màn hình chỉ hiển thị duy nhất công việc, bước và phiên hiện tại. Chế độ DND được giữ xuyên suốt cả trong các quãng nghỉ ngắn giữa các phiên. Nếu nảy sinh ý nghĩ bên lề, người dùng kích hoạt **UF4**.
+  5. **Chuyển tiếp cuối phiên:** Khi hết giờ hoặc người dùng chủ động báo kết quả $\rightarrow$ chuyển sang **UF5**. Nếu người dùng báo có việc đột xuất $\rightarrow$ chuyển ngay sang **UF6**.
+- **Khả năng hoạt động Ngoại tuyến (Offline Resilience):** Nếu mất kết nối 4G/Wi-Fi trong phiên, ứng dụng vẫn duy trì đồng hồ đếm ngược, thanh tiến độ và báo thức chính xác (dung sai $\le 1\text{s}$) từ bộ nhớ đệm cục bộ (`sqflite` / `shared_preferences`).
 
 ---
 
-### UF4 – Cất suy nghĩ bằng bản ghi âm thô (Nhánh phụ trong UF3)
-- **Mục tiêu:** Giúp người ADHD giải tỏa ngay ý nghĩ bất chợt nảy ra trong đầu (Internal Distraction) mà không làm đứt mạch tập trung.
-- **Quy tắc Thiết kế Cốt lõi (Đã chốt sau họp kỹ thuật):**
-  - Khi đang trong phiên làm việc (UF3), người dùng bấm giữ nút Push-to-Talk **"Cất suy nghĩ"** và nói.
-  - Hệ thống **CHỈ thu và lưu bản ghi âm giọng nói thô (raw audio file `.m4a`/`.wav`)** vào Hộp nháp cục bộ.
-  - **TUYỆT ĐỐI BỎ QUA** bước chuyển giọng nói thành văn bản (STT), **KHÔNG gọi LLM**, và **KHÔNG bắt người dùng đọc/sửa lại chữ** ngay trong phiên.
-  - Thanh tiến độ và đồng hồ đếm ngược của phiên chính ở UF3 vẫn chạy xuyên suốt, không bị ngắt hay chuyển màn hình.
-- **Xử lý ngoại lệ (Edge Case Retry & Fallback):**
-  - **Ưu tiên 1:** Nếu thu hoặc lưu file âm thanh bị lỗi $\rightarrow$ báo nhẹ để người dùng thử ghi âm lại (tối đa **3 lần thử**).
-  - **Ưu tiên 2:** Nếu sau **3 lần thử vẫn lỗi** $\rightarrow$ tự động ghi nhận log lỗi gửi về server và mở ngay ô nhập văn bản nhanh (Text input fallback) ngay trên màn hình hiện tại để người dùng gõ tay cất suy nghĩ.
-- **Xử lý sau khi kết thúc phiên:** Khi đã ra khỏi phiên tập trung, người dùng có thể mở Hộp nháp để nghe lại file ghi âm hoặc bấm `"Tạo việc từ ghi âm này"` — lúc đó hệ thống mới gọi STT và đẩy sang **UF1**.
+#### UF4 — Cất suy nghĩ bằng bản ghi âm thô (Nhánh phụ trong UF3)
+- **Mục tiêu & Điểm bắt đầu:** Lưu tức thì ý nghĩ phát sinh trong 3 giây khi đang ở UF3 mà không làm đứt mạch tập trung (Internal Distraction Offloading).
+- **Luồng xử lý chính (4 bước):**
+  1. **Thao tác 1 chạm Push-to-Talk:** Người dùng bấm giữ nút `"Cất suy nghĩ"` ngay trên màn hình đếm ngược của UF3 và nói nội dung cần nhớ.
+  2. **Lưu Audio thô (Raw Audio):** Hệ thống thu âm và lưu trực tiếp file âm thanh thô (`.m4a`/`.wav`) vào Hộp nháp (`DraftThought`). **CẤM gọi STT, CẤM gọi LLM, CẤM bắt người dùng đọc/sửa chữ ngay trong phiên**.
+  3. **Tiếp tục mạch làm việc:** Hiển thị `SnackBar` nhẹ báo *"Đã cất vào hộp nháp"* (có nút Hoàn tác trong 5 giây). Đồng hồ đếm ngược và thanh tiến độ của UF3 tiếp tục chạy bình thường, không ngắt quãng.
+  4. **Xử lý sau phiên:** Khi kết thúc phiên tập trung, người dùng có thể mở Hộp nháp để nghe lại hoặc bấm *"Tạo việc từ ghi âm này"* $\rightarrow$ lúc này mới gọi STT và đẩy sang **UF1**.
+- **Cơ chế Xử lý Lỗi 2 Mức Ưu tiên:**
+  - **Ưu tiên 1 (Lỗi thu/lưu file):** Thông báo rung nhẹ để người dùng ghi âm lại ngay tại chỗ (thử lại tối đa **3 lần**).
+  - **Ưu tiên 2 (Sau 3 lần vẫn lỗi):** Tự động gửi log lỗi về server và mở ngay ô nhập văn bản nhanh (Text input) tại chỗ để người dùng gõ ngắn gọn ý nghĩ, không làm gián đoạn thêm.
 
 ```mermaid
 flowchart TD
@@ -317,25 +346,26 @@ flowchart TD
 
 ---
 
-### UF5 – Kiểm tra tiến độ và kết thúc phiên
-- **Mục tiêu:** Ghi nhận chính xác kết quả thực tế của phiên/bước, thực hiện Voice Check-in 2 chiều và quản lý trạng thái DND/Focus an toàn.
-- **Thời điểm kích hoạt:** Khi đồng hồ đếm ngược về `00:00`, đến mốc check-in giữa giờ, hoặc người dùng chủ động bấm báo kết quả sớm.
-- **Luồng xử lý & 5 Nhánh Kết quả:**
-  Hệ thống hỏi tiến độ / khích lệ bằng giọng nói (`edge-tts` / `flutter_tts`), ghi nhận `actual_duration_min` và **phân biệt rõ kết quả của Phiên (Session) với kết quả của Bước (Step)**:
-  1. **Hoàn thành phiên (`completed`):** Hỏi xem Bước hiện tại đã xong hoàn toàn chưa hay cần tiếp tục ở phiên kế tiếp.
-  2. **Chưa xong (`incomplete`):** Ghi nhận phần việc còn dở $\rightarrow$ chuyển sang **UF6** để dời/bổ sung phiên.
-  3. **Việc đột xuất (`busy/interrupted`):** Dừng phiên ngay, không trách móc $\rightarrow$ chuyển sang **UF6** để tái lập lịch.
-  4. **Bỏ qua (`skipped`):** Phân định rõ 3 mức để xử lý chính xác:
-     - *Chỉ bỏ qua phiên hiện tại*
-     - *Tạm hoãn để làm sau*
-     - *Bỏ qua toàn bộ Bước (Step) đó*
-  5. **Không phản hồi (`no_response`):** Nếu người dùng không trả lời Check-in, hệ thống **tuyệt đối không tự động đánh dấu hoàn thành**.
-- **Chính sách Tự động Tắt Focus Mode & DND (Đã chốt):**
-  - **Trong lúc đang chờ phản hồi Check-in cuối phiên:** Giữ nguyên DND và màn hình Focus Mode để người dùng không bị xao nhãng bởi thông báo ngoài lề khi đang tổng kết.
-  - **Tắt DND & Focus Mode ngay lập tức khi:**
-    1. Người dùng xác nhận bắt đầu giờ nghỉ, kết thúc phiên, báo bận hoặc bỏ qua.
-    2. **Quá 5 phút (Timeout 5 phút)** kể từ khi kết thúc phiên mà người dùng **Không phản hồi** Check-in $\rightarrow$ hệ thống đánh dấu phiên là `no_response`, **tự động tắt DND và thoát Focus Mode** (để tránh làm người dùng lỡ cuộc gọi/việc khẩn cấp ngoài đời), đồng thời để lại 1 thông báo nhẹ nhàng.
-  - **Giữ nguyên DND & Focus Mode xuyên suốt khi:** Người dùng chọn **"Làm tiếp ngay phiên sau / bước mới"** mà không nghỉ; đồng thời gọi **UF6** kiểm tra nhanh ảnh hưởng lịch trình.
+### 7.3. Nhóm Luồng Kiểm tra Tiến độ & Điều chỉnh Lịch (UF5, UF6)
+
+#### UF5 — Kiểm tra tiến độ & Kết thúc phiên
+- **Mục tiêu & Điểm bắt đầu:** Ghi nhận kết quả thực tế khi hết giờ, đến mốc check-in giữa giờ hoặc khi người dùng chủ động báo cáo; phân biệt rõ ràng giữa kết quả của Phiên (`Session`) và kết quả của Bước (`Step`).
+- **Luồng xử lý chính & 5 Nhánh Kết quả:**
+  Thực hiện Voice Check-in 2 chiều (`edge-tts` / `flutter_tts`), ghi nhận `actual_duration_min`:
+  1. **Hoàn thành phiên (`completed` — chưa phải phiên cuối của Bước):** Ghi thời gian thực tế; người dùng có thể chọn hoàn thành luôn cả Bước (chuyển sang UF6 đôn lịch) hoặc giữ nguyên lịch cho các phiên sau.
+  2. **Hoàn thành phiên (`completed` — là phiên cuối của Bước):** Ghi nhận hoàn thành Bước; người dùng chọn làm tiếp phiên/bước kế tiếp (chuyển sang UF6) hoặc nghỉ ngơi giải lao.
+  3. **Chưa hoàn thành phiên (`incomplete`):** Hệ thống ghi nhận phần việc còn lại; đưa ra lựa chọn (làm tiếp ở phiên sau hoặc nghỉ giải lao) và chuyển sang **UF6** để tính phương án lịch mới.
+  4. **Có việc đột xuất (`busy/interrupted`):** Dừng phiên ngay lập tức, không trách móc $\rightarrow$ chuyển thẳng sang **UF6**.
+  5. **Bỏ qua (`skipped` — Đã chốt tương tác):** Hiển thị **3 chip lựa chọn rõ ràng** kèm giọng nói hỏi ngắn gọn và thanh Hoàn tác 5 giây:
+     - `[Hoãn phiên này làm sau]`: Chuyển sang UF6 dời phiên này sang khung giờ rảnh khác.
+     - `[Bỏ qua phiên này]`: Hủy phiên hiện tại, giữ nguyên các phiên sau của bước.
+     - `[Bỏ toàn bộ bước này]`: Đánh dấu toàn bộ Step là `skipped`, chuyển sang UF6 để đôn các bước sau lên sớm hơn nếu muốn.
+  6. **Không phản hồi (`no_response`):** Nếu người dùng không trả lời, gán trạng thái `no_response` (**tuyệt đối không tự đánh dấu hoàn thành**).
+- **Chính sách Tự động Tắt DND & Focus Mode:**
+  - Giữ DND trong lúc đang hỏi Voice Check-in cuối phiên.
+  - Tắt DND & Focus Mode ngay khi người dùng xác nhận nghỉ / kết thúc / báo bận / bỏ qua.
+  - **Tự động tắt DND & Focus Mode sau 5 phút (Timeout 5p)** nếu người dùng không phản hồi Check-in (để tránh lỡ liên lạc quan trọng ngoài đời).
+  - Giữ nguyên DND nếu người dùng chọn làm tiếp ngay phiên kế tiếp mà không nghỉ.
 
 ```mermaid
 flowchart TD
@@ -343,7 +373,7 @@ flowchart TD
     B --> C{"Phản hồi của User trong 5 phút?"}
     C -->|"1. Hoàn thành phiên / Nghỉ giải lao"| D["Ghi nhận kết quả Phiên (Tách biệt với Bước) & Tắt DND + Focus Mode"]
     C -->|"2. Làm tiếp luôn phiên/bước sau"| E["Giữ nguyên DND + Focus Mode & Chuyển sang UF6 kiểm tra lịch"]
-    C -->|"3. Chưa xong / Việc đột xuất / Bỏ qua"| F["Ghi nhận trạng thái (Phân rõ bỏ phiên hay bỏ bước) & Tắt DND + Focus Mode"]
+    C -->|"3. Chưa xong / Việc đột xuất / Bỏ qua"| F["Ghi nhận trạng thái (3 chip: Hoãn làm sau / Bỏ phiên / Bỏ bước) & Tắt DND"]
     F --> G["Chuyển sang UF6 để tái lập lịch"]
     C -->|"4. Không phản hồi sau 5 phút (Timeout)"| H["Đánh dấu 'no_response' (Không tự đánh dấu xong)"]
     H --> I["Tự động Tắt DND + Focus Mode & Lưu trạng thái chờ tái lập lịch (UF6)"]
@@ -351,24 +381,24 @@ flowchart TD
 
 ---
 
-### UF6 – Đánh giá tiếp tục và điều chỉnh lịch
-- **Mục tiêu:** Tái lập lịch linh hoạt, không gây cảm giác tội lỗi (*Guilt-free Adaptive Rescheduling*) và bảo toàn dữ liệu khi người dùng đóng ứng dụng đột ngột.
-- **Nguồn kích hoạt:** Người dùng báo bận, làm chưa xong, muốn làm tiếp phiên/bước mới từ UF5, chủ động yêu cầu đổi lịch, hoặc thay đổi thời lượng phiên/nghỉ từ UF7.
-- **Luồng xử lý:**
-  1. Thuật toán Python đánh giá phần khối lượng công việc còn lại, kiểm tra các khung giờ rảnh khả dụng và ràng buộc Deadline để tính toán phương án lịch mới (`ScheduleProposal`).
-  2. LLM sinh 1 câu giải thích lý do đổi lịch ngắn gọn kèm lời động viên tinh thần.
-  3. **Xử lý trường hợp đóng App trước khi xác nhận (Quy tắc bắt buộc):**
-     - Việc người dùng tắt app hoặc thoát màn hình **KHÔNG được hiểu là đồng ý** với lịch mới.
-     - Hệ thống **giữ nguyên lịch cũ đã xác nhận** trước đó làm lịch chính thức.
-     - Lưu phương án mới vào trạng thái **"Phương án chờ" (`pending_approval`)** và gửi thông báo nhắc nhẹ.
-     - Khi người dùng mở lại app: Hệ thống **tự động kiểm tra lại tính khả thi của Phương án chờ** (do thời gian thực tế đã trôi qua, một số ô lịch trong phương án chờ có thể đã nằm trong quá khứ), cập nhật lại các mốc giờ nếu cần rồi mới hiển thị cho người dùng bấm duyệt.
+#### UF6 — Đánh giá tiếp tục & Điều chỉnh lịch (Adaptive Rescheduling)
+- **Mục tiêu & Điểm bắt đầu:** Tái lập lịch không gây áp lực (*Guilt-free Adaptive Rescheduling*) khi người dùng trễ tiến độ, bận đột xuất, yêu cầu đổi lịch, hoặc muốn đôn việc làm tiếp từ UF5.
+- **Luồng xử lý chính (5 bước):**
+  1. **Tiếp nhận lý do kích hoạt:** Nhận thông tin từ UF5 (chưa xong, bận, bỏ qua, làm sớm), từ UF7 (đổi thời lượng phiên/nghỉ), hoặc từ yêu cầu chỉnh sửa lịch thủ công của người dùng.
+  2. **Thuật toán đánh giá khối lượng & Tìm khe rảnh:** Thuật toán Python xác định các phiên bị ảnh hưởng, tìm các khung giờ rảnh chưa có lịch ($T_{\text{free}}$) khả dụng trước deadline trong cửa sổ Rolling Horizon (2–3 tuần) mà không làm xáo trộn các Task khác.
+  3. **Sinh giải thích khích lệ:** LLM (Gemini Flash) sinh **1 câu giải thích ngắn gọn lý do đổi lịch** kèm lời động viên tinh thần, xóa bỏ cảm giác tự trách.
+  4. **Hiển thị & Duyệt phương án:** Hiển thị phương án lịch mới cho người dùng xem và bấm Xác nhận. Chỉ ghi đè lịch chính thức sau khi người dùng bấm Xác nhận (và cập nhật sự kiện Google Calendar qua MCP).
+  5. **Xử lý thoát App trước khi xác nhận (Quy tắc bảo vệ dữ liệu):**
+     - Đóng app **KHÔNG** phải là đồng ý. Hệ thống **giữ nguyên lịch cũ đã xác nhận**.
+     - Lưu phương án mới vào `ScheduleProposal` với trạng thái `pending_approval` và gửi một thông báo nhắc nhẹ.
+     - **Khi người dùng mở lại app sau đó:** Bắt buộc chạy thuật toán kiểm tra lại tính khả thi theo thời gian thực tế tại thời điểm mở app (tịnh tiến các mốc giờ đã trôi qua) rồi mới hiển thị cho người dùng duyệt.
 
 ```mermaid
 flowchart TD
     A["Nhận yêu cầu điều chỉnh lịch (Từ UF5 / UF7 / User yêu cầu)"] --> B["Thuật toán tính Phương án lịch mới + LLM sinh câu giải thích động viên"]
     B --> C["Hiển thị Phương án lịch mới cho User duyệt"]
     C --> D{"User bấm Xác nhận hay Đóng App?"}
-    D -->|"Bấm Xác nhận"| E["Ghi đè thành Lịch chính thức & Cập nhật báo thức"]
+    D -->|"Bấm Xác nhận"| E["Ghi đè thành Lịch chính thức, Cập nhật Google Calendar qua MCP & Cập nhật báo thức"]
     D -->|"Đóng App / Chưa xác nhận"| F["Giữ nguyên Lịch cũ đã xác nhận"]
     F --> G["Lưu lịch mới vào 'Phương án chờ' (pending_approval) & Đẩy thông báo nhẹ"]
     G --> H["Khi User mở lại App sau đó"]
@@ -380,29 +410,37 @@ flowchart TD
 
 ---
 
-### UF7 – Thiết lập ban đầu và tùy chỉnh trợ lý
-- **Mục tiêu:** Cá nhân hóa trải nghiệm trợ lý cho từng người dùng ADHD mà không làm xáo trộn phiên đang chạy.
-- **Các thông số cấu hình:** Thời lượng tập trung mỗi phiên (mặc định 25p), thời gian nghỉ ngắn (mặc định 5p), tần suất nhắc, phong cách giọng nói/khích lệ của trợ lý, và khung giờ rảnh.
-- **Quy tắc Áp dụng Thay đổi (Đã thống nhất):**
-  1. **Không can thiệp phiên đang chạy:** Mọi thay đổi cài đặt được lưu ngay vào DB nhưng **chỉ áp dụng từ phiên làm việc tiếp theo** (phiên đang chạy ở UF3 giữ nguyên thiết lập cũ).
-  2. **Phân nhánh theo loại cài đặt:**
-     - **Nhóm 1 (Giọng đọc, phong cách khích lệ, tần suất nhắc trong phiên):** Áp dụng ngay cho phiên kế tiếp mà không cần tính lại lịch.
-     - **Nhóm 2 (Thời lượng phiên tập trung, thời lượng nghỉ, khung giờ rảnh):** Nếu thay đổi làm ảnh hưởng đến các phiên đã lên lịch trong tương lai (ví dụ: đổi độ dài phiên từ 30 phút xuống 20 phút), hệ thống sử dụng **Thuật toán Python** để tính toán lại ngay các phiên chưa bắt đầu và đẩy qua **UF6 (Phương án chờ)** để người dùng xác nhận (không tốn token LLM), đồng thời áp dụng cơ chế *Cooldown/Gom nhóm* đối với các gợi ý tái cấu trúc lịch lớn định kỳ để tránh làm phiền người dùng liên tục.
+### 7.4. Bảng Ma trận Chuyển trạng thái (State Transition Matrix) cho Agent & Developers
+
+Bảng dưới đây là kim chỉ nam bắt buộc cho toàn bộ logic điều hướng giữa các màn hình Flutter, trạng thái Database và các API Backend:
+
+| Mã Flow | Đầu vào (Trigger) | Trạng thái / Đầu ra (Output State) | Luồng đích (Next Flow) | Ràng buộc Nghiệp vụ Cốt lõi |
+| :--- | :--- | :--- | :--- | :--- |
+| **UF7** | Mở Cài đặt / Lần đầu dùng app | Cấu hình lưu vào `USER_PREFERENCE` (áp dụng từ phiên sau) | **UF1** (nếu cài đặt ban đầu) hoặc **UF6** (nếu lệch lịch đã chốt) | Giữ nguyên phiên đang chạy; tính $k_{\text{history}}$ theo Moving Average 7–10 phiên; gợi ý cập nhật 1 lần/tuần nếu lệch > 20%. |
+| **UF1** | Nhập công việc bằng Voice (Groq Whisper) hoặc Text | `TASK(status='draft')` nếu thiếu tin; `TASK(status='confirmed')` khi đủ 4 trường | **UF2** (khi đủ 4 thông tin & bấm xác nhận) | Gộp toàn bộ câu hỏi làm rõ vào 1 vòng duy nhất; tự động lưu nháp nếu thoát app; đọc giờ bận từ Google Calendar MCP. |
+| **UF2** | `TASK(status='confirmed')` từ UF1 | `SESSION(status='scheduled')` thuộc `Official Schedule` | **UF3** | AI sinh sẵn đề xuất chia bước tránh tê liệt khởi động; thuật toán tính $\Delta T_{\text{deficit}}$; tuyệt đối không tự ý dời Task khác; đồng bộ Google Calendar qua MCP sau khi bấm xác nhận. |
+| **UF3** | Đến mốc nhắc (15/10/5p) & User bấm "Bắt đầu" | Kích hoạt Focus Mode + Bật DND + Chạy Visual Timer trên 1-Step UI | **UF4** (nhánh phụ), **UF5** (hết giờ/báo kết quả), **UF6** (đột xuất) | Giao diện tuân thủ 1-Step UI; chạy offline hoàn toàn nếu mất mạng; chuông báo thức chính xác $\le 1\text{s}$. |
+| **UF4** | Bấm giữ nút Push-to-Talk "Cất suy nghĩ" trong UF3 | Lưu file ghi âm thô vào `DRAFT_THOUGHT(status='raw_saved')` | **Quay lại UF3 ngay lập tức** | KHÔNG gọi STT, KHÔNG gọi LLM trong phiên; thử lại tối đa 3 lần nếu lỗi $\rightarrow$ mở ô nhập text; timer UF3 vẫn chạy liên tục. |
+| **UF5** | Hết giờ phiên / Check-in / Báo kết quả | Ghi nhận `actual_duration_min` và trạng thái `completed`, `incomplete`, `busy`, `skipped`, hoặc `no_response` | **UF3** (nghỉ giải lao / giữ lịch) hoặc **UF6** (đổi lịch / đôn lịch) | Phân biệt rõ kết quả Phiên vs Bước; khi Bỏ qua hiện 3 chip rõ ràng; tự động tắt DND sau 5 phút nếu không phản hồi (`no_response`). |
+| **UF6** | Trễ tiến độ / Bận đột xuất / Bỏ qua / Đôn lịch / Đổi cài đặt UF7 | `SCHEDULE_PROPOSAL(status='pending_approval')` hoặc cập nhật `Official Schedule` | **UF3** (vào phiên làm việc kế tiếp) | Đóng app không phải là đồng ý; giữ nguyên lịch cũ; tính toán lại tính khả thi theo thời gian thực tế khi mở lại app; cập nhật Google Calendar qua MCP. |
 
 ---
 
 ## 8. Các Quyết định Thiết kế & Thuật toán Đã Chốt (Finalized Technical Decisions)
 
-Bảng dưới đây tổng hợp các quyết định kỹ thuật đã được chốt để toàn bộ thành viên và AI Agent triển khai thống nhất (giải quyết dứt điểm mục *Open Action Items* trong báo cáo trước đây):
+Bảng dưới đây tổng hợp các quyết định kỹ thuật và nghiệp vụ cốt lõi đã được thống nhất hoàn toàn giữa Lead BA và AI Agent:
 
 | Hạng mục | Quyết định Thiết kế Đã Chốt |
 | :--- | :--- |
-| **1. Ranh giới LLM vs. Thuật toán Python** | • **LLM (Gemini Flash):** Chỉ dùng cho các tác vụ ngôn ngữ & tư duy ngữ nghĩa: Trích xuất thông tin & đặt câu hỏi gộp (UF1), bẻ nhỏ `Task -> Steps` & gợi ý Micro-task 2 phút (UF2), hiểu yêu cầu đổi lịch bằng ngôn ngữ tự nhiên và viết lời giải thích/động viên không gây áp lực (UF2, UF6).<br>• **Thuật toán Python:** Đảm nhận 100% các phép toán thời gian và lịch biểu: Chia `Steps -> Sessions`, nhân hệ số Buffer cá nhân hóa, kiểm tra trùng lịch, tính số phút thiếu hụt so với Deadline, và tính lại khung giờ ở UF6/UF7. |
-| **2. Công thức Kiểm tra Khả thi & Buffer Time (UF2)** | • $T_{\text{req}} = \sum (\text{Thời lượng phiên dự kiến} \times k_{\text{buffer}} + \text{Thời gian nghỉ})$.<br>• Nếu $T_{\text{req}} > T_{\text{free}}$ trước Deadline trong cửa sổ Rolling Horizon (2–3 tuần), báo rõ số phút cần bổ sung tối thiểu $\Delta T = T_{\text{req}} - T_{\text{free}}$ để người dùng chọn mở rộng giờ rảnh hoặc dời Deadline. |
-| **3. Chính sách Tự tắt Focus Mode & DND (UF5)** | • Giữ DND trong lúc đang hỏi Check-in cuối phiên.<br>• Tắt DND & Focus Mode ngay khi người dùng xác nhận nghỉ/kết thúc/báo bận/bỏ qua, **HOẶC tự động tắt sau 5 phút nếu người dùng không phản hồi Check-in**.<br>• Giữ nguyên DND nếu người dùng chọn làm tiếp luôn phiên kế tiếp. |
-| **4. Phương án Dự phòng AI (Graceful Degradation)** | • **Đa tầng (3-Tier):** Tầng 1 (`Gemini Flash`, timeout $\le 2.5\text{s}$) $\rightarrow$ Tầng 2 (`Llama-3` qua Groq Cloud hoặc model Gemini dự phòng) $\rightarrow$ Tầng 3 (Thuật toán Python chia phiên cố định 20–25 phút theo cài đặt user). |
-| **5. Luồng Giọng nói (STT/TTS) & Hộp nháp UF4** | • **UF1, UF2, UF5, UF6:** Ưu tiên gọi **Groq Whisper (STT)** và **edge-tts (TTS)** qua Backend; tự động fallback về `speech_to_text` và `flutter_tts` trên thiết bị nếu mất mạng/timeout.<br>• **UF4 (Cất suy nghĩ):** Trong phiên chỉ lưu file ghi âm thô (`.m4a`/`.wav`) vào Hộp nháp cục bộ. Sau phiên, người dùng có thể nghe lại hoặc bấm *"Tạo việc từ ghi âm này"* để gọi STT và chuyển sang UF1. |
-| **6. Quy tắc Cập nhật Lịch khi đổi Cài đặt (UF7)** | • Giữ nguyên phiên đang chạy.<br>• Đổi giọng/tần suất nhắc $\rightarrow$ áp dụng từ phiên kế tiếp.<br>• Đổi thời lượng phiên/nghỉ ảnh hưởng lịch tương lai $\rightarrow$ Thuật toán Python tính lại các phiên chưa chạy và đẩy qua UF6 để người dùng duyệt (kèm cooldown chống spam). |
+| **1. Ranh giới LLM vs. Thuật toán Python** | • **LLM (Gemini Flash):** Chỉ dùng cho các tác vụ ngôn ngữ & ngữ nghĩa: Trích xuất thông tin & đặt câu hỏi gộp 1 vòng (UF1), sinh sẵn đề xuất chia `Task -> Steps` & gợi ý Micro-task 2 phút (UF2), hiểu yêu cầu đổi lịch tự nhiên và viết lời giải thích/động viên không gây áp lực (UF2, UF6).<br>• **Thuật toán Python (`scheduler_engine.py`):** Đảm nhận 100% các phép toán thời gian và lịch biểu: Chia `Steps -> Sessions`, nhân hệ số Buffer cá nhân hóa, kiểm tra trùng lịch, tính số phút thiếu hụt so với Deadline ($\Delta T_{\text{deficit}}$), tịnh tiến ô lịch ở UF6 và tính lại khung giờ ở UF7. |
+| **2. Công thức Kiểm tra Khả thi & Buffer Time (UF2, UF7)** | • **Công thức tổng thời gian:** $T_{\text{req}} = \sum (\text{PlannedDuration}_i \times k_{\text{buffer}} + \text{BreakDuration}_i)$.<br>• **Số phút thiếu hụt tối thiểu:** $\Delta T_{\text{deficit}} = T_{\text{req}} - T_{\text{free}}$ (trong cửa sổ Rolling Horizon 2–3 tuần).<br>• **Quy tắc dời lịch khác:** Tuyệt đối **không tự ý dời các Task khác**; chỉ xếp vào các khung giờ rảnh trống ($T_{\text{free}}$). Nếu thiếu giờ, báo rõ $\Delta T_{\text{deficit}}$ để người dùng nới deadline hoặc mở thêm giờ rảnh.<br>• **Tính toán $k_{\text{buffer}}$:** Tính $k_{\text{history}}$ theo Moving Average 7–10 phiên gần nhất. Ưu tiên cấu hình thủ công của người dùng; gợi ý cập nhật 1 lần/tuần vào cuối tuần nếu độ lệch $> 20\%$. |
+| **3. Trải nghiệm Phân rã Công việc (UF2)** | • Để tránh hội chứng **Tê liệt khởi động (ADHD Paralysis / Blank Canvas)**, khi vào UF2, AI **tự động sinh sẵn một phương án chia bước chuẩn (Default Proposal)** kèm các mốc thời lượng dự kiến và nút `"Tùy chỉnh theo ý tôi"` để người dùng nhanh chóng tinh chỉnh thay vì bắt đầu từ màn hình trống. |
+| **4. Chính sách Tự tắt Focus Mode & DND (UF5)** | • Giữ DND trong lúc đang hỏi Voice Check-in cuối phiên.<br>• Tắt DND & Focus Mode ngay khi người dùng xác nhận nghỉ/kết thúc/báo bận/bỏ qua, **HOẶC tự động tắt sau 5 phút nếu người dùng không phản hồi Check-in** (`no_response`).<br>• Giữ nguyên DND nếu người dùng chọn làm tiếp luôn phiên kế tiếp mà không nghỉ. |
+| **5. Phân định 3 mức khi Bỏ qua (Skip ở UF5)** | • Khi người dùng nói hoặc bấm "Bỏ qua", giao diện hiển thị **3 chip lựa chọn rõ ràng**: `[Hoãn phiên này làm sau]`, `[Bỏ qua phiên này]`, `[Bỏ toàn bộ bước này]`, kèm Voice Check-in ngắn gọn và thanh `SnackBar` Hoàn tác trong 5 giây để tuân thủ nguyên tắc W3C COGA. |
+| **6. Phương án Dự phòng AI Đa tầng (3-Tier Fallback)** | • **Tầng 1 (Primary):** `Gemini Flash API` (timeout $\le 2.5\text{s}$).<br>• **Tầng 2 (Secondary LLM):** Chuyển sang `Llama-3` qua Groq Cloud (hoặc model Gemini dự phòng).<br>• **Tầng 3 (Deterministic Rule-based):** Thuật toán Python chia phiên cố định 20–25 phút theo cài đặt user + 5 phút nghỉ để không bao giờ trả về lỗi trắng. |
+| **7. Luồng Giọng nói (STT/TTS) & Hộp nháp UF4** | • **UF1, UF2, UF5, UF6:** Ưu tiên gọi **Groq Whisper (STT)** và **edge-tts (TTS)** qua Backend; tự động fallback về `speech_to_text` và `flutter_tts` trên thiết bị nếu mất mạng/timeout.<br>• **UF4 (Cất suy nghĩ):** Trong phiên chỉ lưu file ghi âm thô (`.m4a`/`.wav`) vào Hộp nháp cục bộ (thử lại 3 lần $\rightarrow$ mở ô nhập text). Sau phiên, người dùng bấm *"Tạo việc từ ghi âm này"* mới gọi STT và chuyển sang UF1. |
+| **8. Bảo toàn Lịch khi Đóng App Đột ngột (UF6)** | • Đóng app **KHÔNG** đồng nghĩa với việc đồng ý lịch mới. Hệ thống giữ nguyên lịch cũ đã xác nhận, lưu lịch mới vào `ScheduleProposal(status='pending_approval')`.<br>• Khi người dùng mở lại app, thuật toán **tự động kiểm tra lại tính khả thi theo thời gian thực tế** (tịnh tiến các ô lịch đã trôi qua) rồi mới hiển thị cho người dùng duyệt. |
+| **9. Tích hợp Google Calendar qua MCP & Strict Guardrails** | • **Đọc ngữ cảnh (UF1):** Google Calendar MCP chỉ cung cấp các khoảng thời gian bận ($T_{\text{busy}}$) làm tham số đầu vào cho thuật toán Python tính quỹ giờ rảnh ($T_{\text{free}}$). CẤM để LLM tự ý ước lượng hay gán đè lịch.<br>• **Ghi sự kiện (UF2/UF6):** Chỉ đồng bộ sự kiện Focus Sessions lên Google Calendar **SAU KHI** người dùng bấm **Xác nhận/Duyệt** (Human-in-the-loop). Tuyệt đối KHÔNG tự động ghi lên Google Calendar khi kế hoạch còn ở dạng nháp (`draft`) hay phương án chờ (`pending_approval`). |
 
 ---
 
@@ -420,6 +458,7 @@ adhd-assistant/
 │   │   ├── schemas/          # Pydantic v2 schemas (Request/Response & Structured LLM Output)
 │   │   ├── services/
 │   │   │   ├── ai_service.py         # Gemini Flash + Groq Fallback + Prompt templates
+│   │   │   ├── calendar_mcp_service.py # Tích hợp Google Calendar API & giao thức MCP
 │   │   │   ├── scheduler_engine.py   # Thuật toán Python: Rolling Horizon, Buffer, Reschedule
 │   │   │   └── voice_service.py      # Groq Whisper STT & edge-tts stream
 │   │   └── main.py           # Entrypoint FastAPI + Uvicorn
@@ -446,7 +485,7 @@ adhd-assistant/
 | **Git Manager & Business Analyst (BA)** | Minh Trung (`mt`) | Quản lý nhánh Git/PR, chuẩn hóa nghiệp vụ UF1–UF7, đảm bảo tính nhất quán với tài liệu đặc tả. |
 | **Backend Lead** | Quốc Hưng (`vqh`) | Kiến trúc FastAPI, chuẩn hóa REST API contracts, chính sách Focus/DND state machine và tích hợp hệ thống. |
 | **Backend & Database** | `kc`, Trang Tín (`tn`), Quốc Hưng (`vqh`) | Thiết kế schema SQLAlchemy 2.0 (SQLite $\rightarrow$ PostgreSQL), CRUD APIs, lưu trữ Phương án chờ (UF6) & Hộp nháp (UF4). |
-| **Prompt & AI Engineer** | Minh Trung (`mt`), Quang Khải (`kai`) | Thiết kế System Prompts, Structured JSON Outputs cho Gemini Flash, cơ chế Fallback Groq LLM và xử lý mâu thuẫn ngữ cảnh. |
+| **Prompt & AI Engineer** | Minh Trung (`mt`), Quang Khải (`kai`) | Thiết kế System Prompts, Structured JSON Outputs cho Gemini Flash, kết nối Google Calendar qua giao thức MCP, cơ chế Fallback Groq LLM và xử lý mâu thuẫn ngữ cảnh. |
 | **Algorithm & Business Logic Designer** | Quốc Hưng (`vqh`), Quốc Thịnh (`qt`), Doãn Thành (`thành`) | Xây dựng thuật toán xếp/dời lịch Rolling Horizon, công thức Buffer Time, kiểm tra thiếu hụt giờ rảnh trước Deadline và xử lý nhánh UF4/UF5/UF6/UF7 tiết kiệm token. |
 | **Mobile Developer Lead & Frontend UI** | Thanh An (`tan`), `kc` | Xây dựng giao diện Flutter chuẩn W3C COGA (màn hình Prompt UF1, Review Task/Calendar UF2/UF6, 1-Step UI UF3). |
 | **Voice Design, Focus Mode & System** | Quang Khải (`kai`) | Tích hợp STT/TTS (Groq Whisper + `edge-tts` + On-device fallback), nút Push-to-Talk UF4, DND (`flutter_dnd`), `wakelock_plus`, báo thức nền chính xác. |
@@ -456,7 +495,7 @@ adhd-assistant/
 
 ## 10. Quy tắc Bắt buộc Dành riêng cho AI Coding Agents (Agent Guidelines)
 
-Khi bất kỳ AI Agent nào được gọi để viết code, sửa lỗi, thiết kế API hay tạo giao diện cho dự án **ProPlan VA**, Agent **PHẢI** tuân thủ 7 nguyên tắc bất di bất dịch sau:
+Khi bất kỳ AI Agent nào được gọi để viết code, sửa lỗi, thiết kế API hay tạo giao diện cho dự án **ProPlan VA**, Agent **PHẢI** tuân thủ 8 nguyên tắc bất di bất dịch sau:
 
 1. **Tuân thủ tuyệt đối chuẩn W3C COGA trên Giao diện Flutter:**
    - Không bao giờ đặt quá 3–5 thành phần tương tác chính trên 1 màn hình.
@@ -477,3 +516,6 @@ Khi bất kỳ AI Agent nào được gọi để viết code, sửa lỗi, thi�
    - Mọi tính năng cốt lõi trên Mobile (Timer, báo thức, xem lịch trong ngày, ghi âm UF4) phải chạy được khi **Offline**.
 7. **Tương thích Cơ sở dữ liệu Kép (SQLite & PostgreSQL):**
    - Toàn bộ truy vấn ở Backend phải viết qua **SQLAlchemy 2.0 ORM** chuẩn, tránh dùng cú pháp SQL đặc thù chỉ chạy được trên SQLite hoặc chỉ chạy được trên PostgreSQL.
+8. **Tuân thủ Cơ chế Tích hợp Google Calendar qua Giao thức MCP:**
+   - Dữ liệu sự kiện bận từ Google Calendar (qua MCP) chỉ đóng vai trò tham số đầu vào để xác định quỹ giờ rảnh ($T_{\text{free}}$). CẤM để LLM/MCP tự ý dịch chuyển hoặc ghi đè lịch mà không qua thuật toán Python (`scheduler_engine.py`).
+   - Chỉ đồng bộ các phiên Focus Sessions lên Google Calendar **SAU KHI** người dùng bấm xác nhận lịch chính thức (UF2) hoặc duyệt phương án dời lịch (UF6). Tuyệt đối không tự ý ghi sự kiện khi kế hoạch còn ở trạng thái `draft` hoặc `pending_approval`.
