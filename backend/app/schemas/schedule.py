@@ -1,1 +1,188 @@
-# Pydantic v2 schemas cho Session, ScheduleProposal và tính toán thời gian khả thi
+"""Pydantic v2 schemas cho Session, FeasibilityReport và ScheduleProposal (UF2, UF6)."""
+
+from __future__ import annotations
+
+import math
+from datetime import datetime
+from typing import Literal
+from uuid import UUID
+
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+from app.schemas.task import GenerationTier
+
+RescheduleTriggerReason = Literal[
+    "incomplete",
+    "busy",
+    "setting_changed",
+    "deadline_risk",
+    "skipped",
+    "manual",
+]
+FeasibilityStatus = Literal[
+    "valid",
+    "deficit",
+    "conflict",
+    "unsolvable",
+    "insufficient_data",
+]
+VerificationScope = Literal["horizon_part", "full_task"]
+SegmentKind = Literal["micro_task", "work", "rest"]
+
+
+class SessionSegmentSchema(BaseModel):
+    """Một quãng thời gian bên trong Session (O09.segments: micro_task -> work -> rest)."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    order_index: int = Field(..., ge=1, description="Vị trí thứ tự của quãng trong phiên.")
+    kind: SegmentKind = Field(..., description="Loại quãng: micro_task, work hoặc rest.")
+    duration_seconds: int = Field(..., gt=0, description="Thời lượng của quãng tính bằng giây.")
+
+
+class ProposedSessionSchema(BaseModel):
+    """Phiên tập trung dự kiến sinh bởi scheduler_engine ở UF2/UF6 (trước khi chốt lịch)."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    client_session_key: str = Field(
+        ..., min_length=1, description="Khóa định danh tạm cho phiên dự kiến."
+    )
+    client_step_key: str = Field(..., min_length=1, description="Khóa tham chiếu tới bước dự kiến.")
+    scheduled_start: datetime = Field(..., description="Giờ bắt đầu dự kiến (ISO 8601 UTC).")
+    scheduled_end: datetime = Field(..., description="Giờ kết thúc dự kiến (ISO 8601 UTC).")
+    micro_task_seconds: int = Field(
+        default=120,
+        ge=0,
+        description="Thời lượng khởi động duy nhất ở đầu phiên (mặc định 120s).",
+    )
+    work_seconds: int = Field(..., gt=0, description="Tổng thời gian làm chính (đã gồm buffer).")
+    rest_seconds: int = Field(default=0, ge=0, description="Tổng thời gian nghỉ bên trong phiên.")
+    duration_seconds: int = Field(
+        ...,
+        gt=0,
+        description="Tổng thời lượng giữ chỗ của phiên (= micro_task + work + rest).",
+    )
+    micro_task_text: str | None = Field(
+        default=None,
+        description="Nội dung hành động khởi động 2 phút ở đầu phiên.",
+    )
+    segments: list[SessionSegmentSchema] = Field(
+        default_factory=list,
+        description="Danh sách các quãng làm/nghỉ tuần tự trong phiên.",
+    )
+
+    @model_validator(mode="after")
+    def validate_session_durations(self) -> ProposedSessionSchema:
+        """Kiểm chứng tính nhất quán thời gian của Session theo quy tắc bất biến O09."""
+        if self.scheduled_end <= self.scheduled_start:
+            raise ValueError("scheduled_end phải lớn hơn scheduled_start.")
+        expected_total = self.micro_task_seconds + self.work_seconds + self.rest_seconds
+        if self.duration_seconds != expected_total:
+            raise ValueError(
+                f"duration_seconds ({self.duration_seconds}) phải bằng "
+                f"micro_task + work + rest ({expected_total})."
+            )
+        return self
+
+
+class FeasibilityReportSchema(BaseModel):
+    """Báo cáo kiểm tra tính khả thi thời gian trước Deadline của thuật toán Python (O10)."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    status: FeasibilityStatus = Field(
+        ...,
+        description="Trạng thái khả thi: valid, deficit, conflict, unsolvable, insufficient_data.",
+    )
+    required_seconds: int = Field(
+        ...,
+        ge=0,
+        description="Tổng thời gian yêu cầu T_req tính bằng giây.",
+    )
+    available_seconds: int = Field(
+        ...,
+        ge=0,
+        description="Quỹ giờ rảnh khả dụng T_free trước Deadline tính bằng giây.",
+    )
+    unscheduled_seconds: int = Field(
+        default=0,
+        ge=0,
+        description="Thời lượng đã ước lượng nhưng chưa xếp được vào ô trống.",
+    )
+    deficit_seconds: int = Field(
+        default=0,
+        ge=0,
+        description="Số giây thiếu hụt tối thiểu Delta_T = max(0, T_req - T_free).",
+    )
+    verification_scope: VerificationScope = Field(
+        default="horizon_part",
+        description="Phạm vi kiểm chứng: horizon_part (2-3 tuần) hoặc full_task.",
+    )
+    fully_scheduled: bool = Field(
+        default=True,
+        description="True khi toàn bộ phạm vi trong report đã được xếp đủ Session hợp lệ.",
+    )
+    blocking_reasons: list[str] = Field(
+        default_factory=list,
+        description="Danh sách nguyên nhân cụ thể gây thiếu giờ hoặc không xếp được phiên.",
+    )
+    unestimated_part_ids: list[UUID] = Field(
+        default_factory=list,
+        description="Danh sách các phần công việc chưa có ước lượng (không gán 0 phút).",
+    )
+    unplanned_part_ids: list[UUID] = Field(
+        default_factory=list,
+        description="Danh sách các phần công việc chưa chia hoặc chưa xếp lịch đầy đủ.",
+    )
+    extension_candidate_at: datetime | None = Field(
+        default=None,
+        description="Mốc gia hạn Deadline gợi ý (nếu người dùng muốn lùi hạn chót).",
+    )
+
+    @model_validator(mode="after")
+    def enforce_deficit_formula(self) -> FeasibilityReportSchema:
+        """Đảm bảo công thức bất biến Delta_T = max(0, T_req - T_free)."""
+        computed_deficit = max(0, self.required_seconds - self.available_seconds)
+        self.deficit_seconds = computed_deficit
+        if computed_deficit > 0 and self.status == "valid":
+            self.status = "deficit"
+            self.fully_scheduled = False
+        return self
+
+    @property
+    def deficit_minutes(self) -> int:
+        """Số phút thiếu hụt làm tròn lên để hiển thị rõ ràng trên cảnh báo UI UF2."""
+        if self.deficit_seconds <= 0:
+            return 0
+        return math.ceil(self.deficit_seconds / 60)
+
+
+class LLMRescheduleEmpathyPayload(BaseModel):
+    """Schema JSON ép kiểu trực tiếp cho LLM khi sinh lời động viên dời lịch ở UF6."""
+
+    empathetic_note: str = Field(
+        ...,
+        min_length=5,
+        max_length=400,
+        description=(
+            "1 câu giải thích ngắn gọn lý do dời lịch kèm lời động viên không gây áp lực "
+            "(Guilt-free Adaptive Rescheduling), xóa bỏ cảm giác tự trách của người ADHD."
+        ),
+    )
+    encouragement_tip: str | None = Field(
+        default=None,
+        max_length=250,
+        description="Gợi ý nhẹ nhàng chăm sóc bản thân (ví dụ: uống ngụm nước, hít thở sâu).",
+    )
+
+
+class RescheduleEmpatheticResult(LLMRescheduleEmpathyPayload):
+    """Kết quả sinh lời giải thích & động viên khi tái lập lịch thích ứng ở UF6 (O15)."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    generation_tier: GenerationTier = Field(
+        default="tier_1_gemini",
+        description="Tầng AI hoặc Rule-based đã sinh lời khích lệ (O15.generation_tier).",
+    )
