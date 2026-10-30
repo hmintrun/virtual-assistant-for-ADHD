@@ -1,0 +1,20 @@
+# <type>(<scope>): <subject under 50 chars, imperative mood, lowercase, no period>
+# Ví dụ: feat(uf1): add single-round task clarification prompt
+#
+# --- DANH MỤC TYPE ---
+# feat     : Thêm tính năng mới
+# fix      : Sửa lỗi
+# prompt   : Tinh chỉnh System Prompt / JSON Schema cho AI
+# refactor : Tái cấu trúc code (không đổi tính năng)
+# test     : Thêm hoặc sửa test
+# docs     : Cập nhật tài liệu
+#
+# --- DANH MỤC SCOPE ---
+# uf1, uf2, uf3, uf4, uf5, uf6, uf7, backend, mobile, db, scheduler
+#
+# --- BODY (Tùy chọn: Tại sao làm & Tác động ra sao - ngắt dòng ở 72 ký tự) ---
+# - Lý do:
+# - Giải pháp:
+#
+# --- FOOTER (Tùy chọn) ---
+# Closes #issue_number
