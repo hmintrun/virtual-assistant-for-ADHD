@@ -95,9 +95,9 @@ Tài liệu này được nạp tự động vào mọi phiên làm việc của
 1. **Phân tách Trách nhiệm (Hybrid Architecture):**
    - **LLM (`Gemini Flash`):** Chỉ xử lý ngôn ngữ tự nhiên & ngữ nghĩa: Trích xuất thực thể & đặt câu hỏi gộp (UF1), sinh sẵn phương án chia `Task -> Steps` & gợi ý Micro-task 2 phút (UF2), phân tích yêu cầu đổi lịch tự nhiên và sinh lời động viên (UF2, UF6).
    - **Thuật toán Python (`scheduler_engine.py`):** Đảm nhận **100%** phép toán thời gian và lịch biểu: Chia `Steps -> Sessions`, nhân hệ số $k_{\text{buffer}}$ cá nhân hóa, kiểm tra trùng giờ, tính phút thiếu hụt $\Delta T$ so với Deadline (UF2) và tịnh tiến ô lịch (UF6, UF7). **CẤM** để LLM tự tính toán cộng/trừ ngày giờ mà không qua thuật toán Python kiểm chứng.
-2. **Dự phòng AI 3 Tầng (3-Tier Graceful Degradation — Độ trễ $\le 2.5\text{s}$):**
-   - **Tầng 1:** `Gemini Flash API` (timeout $\le 2.5\text{s}$).
-   - **Tầng 2:** Tự động chuyển sang LLM dự phòng (**Llama-3 trên Groq Cloud** hoặc model Gemini dự phòng) nếu Tầng 1 lỗi/timeout/rate-limit.
+2. **Dự phòng AI Đa Tầng có Hedged Warm Backup (Quality-First 3-Tier Graceful Degradation — Mục tiêu phản hồi $\le 2.5\text{s}$):**
+   - **Tầng 1 (Google Gemini):** `gemini-3.8-flash` (Primary) kết hợp **Warm Backup** `gemini-3.5-flash-lite` chạy ngầm giữ sẵn trong RAM (Khung A tương tác trực tiếp UF1/UF2-Adjust/UF6 ngắt cứng `4.5s`; Khung B phân rã UF2 có *Breathing Circle* ngắt cứng `6.0s`; hỗ trợ chứng thực kép qua `credentials.json` hoặc `GEMINI_API_KEY`).
+   - **Tầng 2 (Groq Cross-Provider):** Tự động chuyển chéo hãng sang **`qwen/qwen3.8-27b`** (và model phụ **`openai/gpt-oss-20b`** nếu chạm 429 TPM) trên Groq Cloud khi nhánh Google lỗi nhanh hoặc chạm mốc Hedge.
    - **Tầng 3:** Nếu mất kết nối cả 2 tầng AI, tự động chạy thuật toán Python chia công việc thành các phiên cố định (20–25 phút theo cấu hình user) để không bao giờ trả về màn hình lỗi trắng.
 3. **Luồng Giọng nói Kép (Dual-Tier Voice Pipeline):**
    - Ở UF1/UF2/UF5/UF6: Ưu tiên dùng **Groq Whisper (`whisper-large-v3-turbo`)** cho STT và **`edge-tts`** cho TTS qua Backend; tự động fallback về `speech_to_text` và `flutter_tts` trên thiết bị Android khi mạng yếu hoặc Offline.

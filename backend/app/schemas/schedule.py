@@ -27,16 +27,16 @@ FeasibilityStatus = Literal[
     "insufficient_data",
 ]
 VerificationScope = Literal["horizon_part", "full_task"]
-SegmentKind = Literal["micro_task", "work", "rest"]
+SegmentKind = Literal["work", "rest"]
 
 
 class SessionSegmentSchema(BaseModel):
-    """Một quãng thời gian bên trong Session (O09.segments: micro_task -> work -> rest)."""
+    """Một quãng thời gian bên trong Session chính (O09.segments: chỉ gồm work và rest)."""
 
     model_config = ConfigDict(from_attributes=True)
 
     order_index: int = Field(..., ge=1, description="Vị trí thứ tự của quãng trong phiên.")
-    kind: SegmentKind = Field(..., description="Loại quãng: micro_task, work hoặc rest.")
+    kind: SegmentKind = Field(..., description="Loại quãng: work hoặc rest (không gồm micro_task).")
     duration_seconds: int = Field(..., gt=0, description="Thời lượng của quãng tính bằng giây.")
 
 
@@ -51,21 +51,24 @@ class ProposedSessionSchema(BaseModel):
     client_step_key: str = Field(..., min_length=1, description="Khóa tham chiếu tới bước dự kiến.")
     scheduled_start: datetime = Field(..., description="Giờ bắt đầu dự kiến (ISO 8601 UTC).")
     scheduled_end: datetime = Field(..., description="Giờ kết thúc dự kiến (ISO 8601 UTC).")
-    micro_task_seconds: int = Field(
+    micro_task_seconds: int | None = Field(
         default=120,
         ge=0,
-        description="Thời lượng khởi động duy nhất ở đầu phiên (mặc định 120s).",
+        description=(
+            "Thời lượng ước lượng cho gợi ý khởi động 2 phút trước phiên (O09: hiển thị trước "
+            "phiên, KHÔNG cộng vào duration_seconds của phiên chính)."
+        ),
     )
     work_seconds: int = Field(..., gt=0, description="Tổng thời gian làm chính (đã gồm buffer).")
     rest_seconds: int = Field(default=0, ge=0, description="Tổng thời gian nghỉ bên trong phiên.")
     duration_seconds: int = Field(
         ...,
         gt=0,
-        description="Tổng thời lượng giữ chỗ của phiên (= micro_task + work + rest).",
+        description="Tổng thời lượng phiên chính (= work_seconds + rest_seconds, không cộng micro_task).",
     )
     micro_task_text: str | None = Field(
         default=None,
-        description="Nội dung hành động khởi động 2 phút ở đầu phiên.",
+        description="Nội dung hành động khởi động 2 phút hiển thị trước phiên.",
     )
     segments: list[SessionSegmentSchema] = Field(
         default_factory=list,
@@ -77,12 +80,33 @@ class ProposedSessionSchema(BaseModel):
         """Kiểm chứng tính nhất quán thời gian của Session theo quy tắc bất biến O09."""
         if self.scheduled_end <= self.scheduled_start:
             raise ValueError("scheduled_end phải lớn hơn scheduled_start.")
-        expected_total = self.micro_task_seconds + self.work_seconds + self.rest_seconds
+        expected_total = self.work_seconds + self.rest_seconds
         if self.duration_seconds != expected_total:
             raise ValueError(
                 f"duration_seconds ({self.duration_seconds}) phải bằng "
-                f"micro_task + work + rest ({expected_total})."
+                f"work_seconds + rest_seconds ({expected_total}), không cộng micro_task_seconds."
             )
+        if self.segments:
+            sorted_segments = sorted(
+                enumerate(self.segments),
+                key=lambda item: (item[1].order_index, item[0]),
+            )
+            normalized: list[SessionSegmentSchema] = []
+            seg_work = 0
+            seg_rest = 0
+            for new_idx, (_, seg) in enumerate(sorted_segments, start=1):
+                seg.order_index = new_idx
+                normalized.append(seg)
+                if seg.kind == "work":
+                    seg_work += seg.duration_seconds
+                else:
+                    seg_rest += seg.duration_seconds
+            self.segments = normalized
+            if seg_work != self.work_seconds or seg_rest != self.rest_seconds:
+                raise ValueError(
+                    f"Tổng các segments (work={seg_work}, rest={seg_rest}) phải khớp với "
+                    f"work_seconds ({self.work_seconds}) và rest_seconds ({self.rest_seconds})."
+                )
         return self
 
 

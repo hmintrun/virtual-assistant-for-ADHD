@@ -9,8 +9,15 @@ from typing import Any
 from unittest.mock import patch
 
 from app.core.config import Settings
-from app.schemas.schedule import FeasibilityReportSchema, RescheduleEmpatheticResult
+from app.schemas.schedule import (
+    FeasibilityReportSchema,
+    ProposedSessionSchema,
+    RescheduleEmpatheticResult,
+    SessionSegmentSchema,
+)
 from app.schemas.task import (
+    ExtractedFreeWindowSchema,
+    LLMPlanAdjustmentPayload,
     LLMTaskDecompositionPayload,
     LLMTaskExtractionPayload,
     StepPromptItem,
@@ -359,6 +366,218 @@ class TestAIService(unittest.TestCase):
         self.assertEqual(called_models, ["qwen/qwen3.8-27b", "openai/gpt-oss-20b"])
         self.assertEqual(res.generation_tier, "tier_2_groq")
         self.assertIn("thong thả", res.empathetic_note)
+
+    def test_proposed_session_excludes_micro_task_from_duration(self) -> None:
+        """O09 Guardrail: Micro-task 2 phút hiển thị trước phiên, KHÔNG cộng vào duration_seconds."""
+        session = ProposedSessionSchema(
+            client_session_key="sess-1",
+            client_step_key="step-1",
+            scheduled_start=datetime(2026, 11, 2, 12, 0),
+            scheduled_end=datetime(2026, 11, 2, 12, 30),
+            micro_task_seconds=120,
+            work_seconds=1500,
+            rest_seconds=300,
+            duration_seconds=1800,
+            micro_task_text="Mở file báo cáo và gõ tiêu đề chương 1.",
+            segments=[
+                SessionSegmentSchema(order_index=5, kind="work", duration_seconds=1500),
+                SessionSegmentSchema(order_index=9, kind="rest", duration_seconds=300),
+            ],
+        )
+        self.assertEqual(session.duration_seconds, 1800)
+        self.assertEqual([s.order_index for s in session.segments], [1, 2])
+
+        with self.assertRaises(ValueError):
+            ProposedSessionSchema(
+                client_session_key="sess-bad",
+                client_step_key="step-1",
+                scheduled_start=datetime(2026, 11, 2, 12, 0),
+                scheduled_end=datetime(2026, 11, 2, 12, 32),
+                micro_task_seconds=120,
+                work_seconds=1500,
+                rest_seconds=300,
+                duration_seconds=1920,  # Sai: cộng nhầm 120s micro-task vào phiên chính
+            )
+
+    def test_uf1_ambiguous_free_window_blocks_completion(self) -> None:
+        """Zero Hallucination: Khung giờ rảnh mơ hồ ('Tối thứ 6' chưa rõ giờ) phải chặn is_complete."""
+        result = TaskExtractionResult(
+            title="Làm báo cáo KTPM",
+            content="Viết báo cáo môn Kỹ thuật phần mềm",
+            scope="10 trang Word",
+            free_time_slots=["Tối thứ 6"],
+            structured_free_windows=[
+                ExtractedFreeWindowSchema(
+                    kind="weekly_rule",
+                    weekday=5,
+                    start_local=None,
+                    end_local=None,
+                    raw_phrase="Tối thứ 6",
+                )
+            ],
+            deadline=datetime(2026, 11, 8, 17, 0),
+            is_complete=True,  # LLM cố tình trả True khi chưa rõ giờ
+            has_conflict=False,
+            summary="Báo cáo KTPM 10 trang vào tối thứ 6.",
+            clarification_questions=[],
+        )
+        self.assertTrue(result.structured_free_windows[0].is_ambiguous)
+        self.assertFalse(result.is_complete)
+        self.assertTrue(any("Tối thứ 6" in q for q in result.clarification_questions))
+
+    def test_uf1_python_catches_past_deadline_and_merges_previous_draft(self) -> None:
+        """Kiểm tra hợp nhất previous_draft ở UF1 và lớp Python tự bắt lỗi deadline trong quá khứ."""
+        cfg = Settings(
+            GEMINI_API_KEY="AIzaSyTestKey",
+            GROQ_API_KEY="",
+            GOOGLE_CREDENTIALS_PATH="",
+        )
+        service = AIService(app_settings=cfg)
+
+        prev_draft = LLMTaskExtractionPayload(
+            title="Báo cáo Phân tích dữ liệu",
+            content="Làm báo cáo môn Phân tích dữ liệu",
+            scope="8 trang PDF",
+            free_time_slots=[],
+            deadline=None,
+            summary="Đang thiếu giờ rảnh và hạn chót.",
+        )
+
+        captured_prompts: list[str] = []
+
+        async def _fake_gemini_past_deadline(
+            *,
+            user_prompt: str,
+            **_: Any,
+        ) -> LLMTaskExtractionPayload:
+            captured_prompts.append(user_prompt)
+            return LLMTaskExtractionPayload(
+                title="Báo cáo Phân tích dữ liệu",
+                content="Làm báo cáo môn Phân tích dữ liệu",
+                scope="8 trang PDF",
+                free_time_slots=["Thứ Bảy 09:00-11:00"],
+                structured_free_windows=[
+                    ExtractedFreeWindowSchema(
+                        kind="weekly_rule",
+                        weekday=6,
+                        start_local="09:00",
+                        end_local="11:00",
+                        raw_phrase="Thứ Bảy 09:00-11:00",
+                    )
+                ],
+                deadline=datetime(2026, 10, 30, 17, 0),  # Đã qua so với 2026-10-31!
+                is_complete=True,  # LLM quên đánh dấu conflict
+                has_conflict=False,
+                summary="Đã gộp thông tin từ bản nháp.",
+                clarification_questions=[],
+            )
+
+        ref_now = datetime(2026, 10, 31, 21, 0)
+        with (
+            patch.object(service, "_get_gemini_client", return_value=object()),
+            patch.object(
+                service,
+                "_call_gemini_structured",
+                side_effect=_fake_gemini_past_deadline,
+            ),
+        ):
+            res = asyncio.run(
+                service.extract_task_intent(
+                    "Mình rảnh sáng thứ 7 từ 9h đến 11h, nộp hôm qua 30/10 lúc 17h",
+                    previous_draft=prev_draft,
+                    reference_now=ref_now,
+                )
+            )
+
+        self.assertIn("8 trang PDF", captured_prompts[0])
+        self.assertTrue(res.has_conflict)
+        self.assertFalse(res.is_complete)
+        self.assertTrue(any("đã qua" in q for q in res.clarification_questions))
+
+        # Kiểm tra Tier 3 Fallback cũng bảo toàn nguyên vẹn previous_draft
+        tier3 = service._fallback_extract_task("Mình rảnh tối mai", previous_draft=prev_draft)
+        self.assertEqual(tier3.content, "Làm báo cáo môn Phân tích dữ liệu")
+        self.assertEqual(tier3.scope, "8 trang PDF")
+        self.assertEqual(len(tier3.clarification_questions), 2)  # Chỉ còn hỏi giờ rảnh & deadline
+
+    def test_uf2_step_order_normalization_and_nl_plan_adjustment(self) -> None:
+        """Kiểm tra chuẩn hóa order_index 1..N và hàm điều chỉnh kế hoạch tự nhiên ở UF2 Bước 4."""
+        decomp = TaskDecompositionResult(
+            task_title="Ôn tập Xác suất thống kê",
+            steps=[
+                StepPromptItem(
+                    order_index=5,
+                    title="Giải đề mẫu",
+                    estimated_minutes=30,
+                    micro_task_prompt="In đề thi mẫu ra bàn học.",
+                ),
+                StepPromptItem(
+                    order_index=2,
+                    title="Tóm tắt công thức chương 1-3",
+                    estimated_minutes=25,
+                    micro_task_prompt="Mở vở ghi và lấy tờ giấy A4 trắng.",
+                ),
+            ],
+            reasoning="Chuẩn hóa thứ tự tuần tự.",
+        )
+        self.assertEqual([s.order_index for s in decomp.steps], [1, 2])
+        self.assertEqual(decomp.steps[0].title, "Tóm tắt công thức chương 1-3")
+
+        cfg = Settings(
+            GEMINI_API_KEY="AIzaSyTestKey",
+            GROQ_API_KEY="",
+            GOOGLE_CREDENTIALS_PATH="",
+        )
+        service = AIService(app_settings=cfg)
+
+        async def _fake_adjust(**_: Any) -> LLMPlanAdjustmentPayload:
+            return LLMPlanAdjustmentPayload(
+                updated_steps=[
+                    StepPromptItem(
+                        order_index=10,
+                        title="Tóm tắt công thức và giải 5 bài tập cơ bản",
+                        estimated_minutes=40,
+                        micro_task_prompt="Mở vở ghi chương 1 và đặt bút lên trang giấy nháp.",
+                        cognitive_load="medium",
+                    )
+                ],
+                added_free_windows=[
+                    ExtractedFreeWindowSchema(
+                        kind="weekly_rule",
+                        weekday=7,
+                        start_local="19:00",
+                        end_local="21:00",
+                        raw_phrase="Tối Chủ Nhật 19:00-21:00",
+                    )
+                ],
+                removed_free_phrases=["Sáng thứ Bảy"],
+                updated_deadline=None,
+                requires_clarification=False,
+                assistant_note="Mình đã gộp hai bước lại và mở thêm khung tối Chủ Nhật cho bạn.",
+            )
+
+        with (
+            patch.object(service, "_get_gemini_client", return_value=object()),
+            patch.object(service, "_call_gemini_structured", side_effect=_fake_adjust),
+        ):
+            adj = asyncio.run(
+                service.adjust_plan_by_nl(
+                    "Gộp 2 bước lại thành 40 phút, bỏ sáng thứ 7 và thêm tối Chủ Nhật 19h-21h",
+                    current_steps=decomp.steps,
+                )
+            )
+
+        self.assertEqual(adj.generation_tier, "tier_1_gemini")
+        self.assertFalse(adj.requires_clarification)
+        self.assertEqual(adj.updated_steps[0].order_index, 1)
+        self.assertEqual(adj.added_free_windows[0].start_local, "19:00")
+        self.assertEqual(adj.removed_free_phrases, ["Sáng thứ Bảy"])
+
+        # Kiểm tra Tier 3 Fallback của UF2 Bước 4 không làm mất danh sách bước hiện có
+        fallback_adj = service._fallback_adjust_plan(decomp.steps)
+        self.assertEqual(fallback_adj.generation_tier, "tier_3_rule_based")
+        self.assertEqual(len(fallback_adj.updated_steps), 2)
+        self.assertTrue(fallback_adj.requires_clarification)
 
 
 if __name__ == "__main__":
