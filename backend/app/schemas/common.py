@@ -1,19 +1,23 @@
-# Các Schema/DTO dùng chung: Vỏ bọc phản hồi (Envelope), Lỗi, Khoảng thời gian và Tham chiếu (Ref)
+"""Shared API values for planning; timestamps always include an offset."""
+
 from datetime import datetime, timedelta, timezone
+from typing import Literal
 from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 VN_TZ = timezone(timedelta(hours=7))
 
 
-class StrictSchema(BaseModel):
-    """Schema cơ sở: từ chối các trường lạ không có trong hợp đồng."""
-
+class ApiModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
-class ResponseMeta(StrictSchema):
+# Giữ bí danh tương thích nếu có module nội bộ tham chiếu StrictSchema
+StrictSchema = ApiModel
+
+
+class ResponseMeta(ApiModel):
     request_id: str
     server_time: datetime
 
@@ -26,13 +30,13 @@ def build_response_meta(request_id: str | None = None) -> ResponseMeta:
     )
 
 
-class FieldError(StrictSchema):
+class FieldError(ApiModel):
     field_path: str
     message: str
     code: str | None = None
 
 
-class ErrorDetail(StrictSchema):
+class ErrorDetail(ApiModel):
     code: str
     message: str
     field_errors: list[FieldError] = Field(default_factory=list)
@@ -41,44 +45,96 @@ class ErrorDetail(StrictSchema):
     next_action: str
 
 
-class SuccessEnvelope[DataT](StrictSchema):
+class SuccessEnvelope[DataT](ApiModel):
     data: DataT
     meta: ResponseMeta
 
 
-class ErrorEnvelope(StrictSchema):
+class ErrorEnvelope(ApiModel):
     error: ErrorDetail
     meta: ResponseMeta
 
 
-class AvailabilityRef(StrictSchema):
-    availability_id: str = Field(min_length=1)
-    revision: int = Field(ge=1)
-
-
-class CalendarContextRef(StrictSchema):
-    context_id: str = Field(min_length=1)
-    revision: int = Field(ge=1)
-
-
-class CandidateRef(StrictSchema):
-    candidate_id: str = Field(min_length=1)
-    review_revision: int = Field(ge=1)
-
-
-class TimeInterval(StrictSchema):
+class TimeInterval(ApiModel):
     start_at: datetime
     end_at: datetime
 
+    @model_validator(mode="after")
+    def valid_interval(self):
+        if self.start_at.utcoffset() is None or self.end_at.utcoffset() is None:
+            raise ValueError("Mốc thời gian phải có múi giờ")
+        if self.start_at >= self.end_at:
+            raise ValueError("Thời điểm bắt đầu phải trước kết thúc")
+        return self
 
-class SourceRevisions(StrictSchema):
+
+class AvailabilityRef(ApiModel):
+    availability_id: str = Field(min_length=1)
+    revision: int = Field(ge=0)
+
+
+class CalendarContextRef(ApiModel):
+    context_id: str = Field(min_length=1)
+    revision: int = Field(ge=0)
+
+
+class CandidateRef(ApiModel):
+    candidate_id: str = Field(min_length=1)
+    review_revision: int = Field(ge=0)
+
+
+class SourceRevisions(ApiModel):
     availability: int = Field(ge=0)
     preferences: int = Field(ge=0)
     schedule: int = Field(ge=0)
     calendar_context: CalendarContextRef | None = None
 
 
-class ConfiguredParameters(StrictSchema):
+class FieldSource(ApiModel):
+    source: str = Field(min_length=1)
+    source_ref: str = Field(min_length=1)
+
+
+class ClarificationIssue(ApiModel):
+    code: str
+    field_path: str
+    message: str
+    question: str
+    blocking: bool
+
+
+class BlockingReason(ApiModel):
+    code: str
+    message: str
+
+
+class SessionSegment(ApiModel):
+    order_index: int = Field(ge=0)
+    kind: Literal["work", "rest"]
+    duration_seconds: int = Field(gt=0)
+
+
+class TimeConstraint(ApiModel):
+    kind: Literal["deadline", "window"]
+    start_at: datetime
+    finish_by_at: datetime | None = None
+    deadline_at: datetime | None = None
+    input_timezone: str = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def valid_branch(self):
+        end = self.deadline_at if self.kind == "deadline" else self.finish_by_at
+        other = self.finish_by_at if self.kind == "deadline" else self.deadline_at
+        if end is None or other is not None:
+            raise ValueError("Chỉ điền mốc kết thúc của nhánh đã chọn")
+        if self.start_at.utcoffset() is None or end.utcoffset() is None:
+            raise ValueError("Mốc thời gian phải có múi giờ")
+        if self.start_at >= end:
+            raise ValueError("Thời điểm bắt đầu phải trước hạn cuối")
+        return self
+
+
+class ConfiguredParameters(ApiModel):
     """Các tham số cấu hình và ngưỡng vận hành của hệ thống (Dòng 60)."""
 
     buffer_multiplier_range: list[float] | None = None
@@ -92,7 +148,7 @@ class ConfiguredParameters(StrictSchema):
     checkin_timeout_seconds: int = Field(ge=0)
 
 
-class CapabilitiesData(StrictSchema):
+class CapabilitiesData(ApiModel):
     """Phản hồi khả năng hệ thống và phiên bản hợp đồng (Dòng 60 - GET /api/v1/capabilities)."""
 
     contract_version: str = Field(min_length=1)
@@ -102,7 +158,7 @@ class CapabilitiesData(StrictSchema):
     policy_state: str = Field(min_length=1)
 
 
-class CommandResult(StrictSchema):
+class CommandResult(ApiModel):
     """Biên lai kết quả xử lý lệnh ghi để phục hồi khi mất phản hồi mạng (Dòng 63 - GET /api/v1/commands/{command_id})."""
 
     command_id: str = Field(min_length=1)

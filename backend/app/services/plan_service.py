@@ -8,25 +8,26 @@ from app.schemas.common import (
     CalendarContextRef,
     CandidateRef,
     FieldError,
+    SessionSegment,
     SourceRevisions,
     TimeInterval,
 )
 from app.schemas.planning import (
-    CandidateCreateRequest,
     CandidatePart,
-    CandidatePatchRequest,
     CandidateSession,
     CandidateStep,
+    CandidateVerificationScope,
     ConfirmCandidateRequest,
     ConfirmCandidateResult,
     FeasibilityReport,
+    GenerateCandidateRequest,
     KeyMapping,
     PlanCandidate,
-    SessionSegment,
-    VerificationScope,
+    ScheduleVersion,
+    UpdateCandidateRequest,
 )
-from app.schemas.schedule import ScheduleData, ScheduleVersion, Session
-from app.schemas.task import PlanningPart, Step, Task, TaskListData
+from app.schemas.schedule import ScheduleData
+from app.schemas.task import PlanningPart, Session, Step, Task, TaskListData
 from app.services import draft_service
 
 
@@ -126,7 +127,7 @@ def _build_seed_candidate(
             available_seconds=7200,
             unscheduled_seconds=0,
             deficit_seconds=0,
-            verification_scope=VerificationScope(
+            verification_scope=CandidateVerificationScope(
                 client_part_keys=["part-research"],
                 planning_horizon=effective_horizon,
                 scope_type="candidate_parts",
@@ -208,7 +209,7 @@ async def create_candidate(
     user_id: str,
     draft_id: str,
     idempotency_key: str,
-    payload: CandidateCreateRequest,
+    payload: GenerateCandidateRequest,
 ) -> PlanCandidate:
     """Dòng 9 (POST /api/v1/drafts/{draft_id}/candidates): Tạo phương án chia bước và xếp lịch UF2 (T06, T07, T08, T10)."""
     fingerprint = json.dumps(
@@ -345,7 +346,7 @@ async def patch_candidate(
     user_id: str,
     candidate_id: str,
     idempotency_key: str,
-    payload: CandidatePatchRequest,
+    payload: UpdateCandidateRequest,
 ) -> PlanCandidate:
     """Dòng 11 (PATCH /api/v1/candidates/{candidate_id}): Sửa phương án nháp theo Allowlist và tăng review_revision (T11)."""
     fingerprint = json.dumps(

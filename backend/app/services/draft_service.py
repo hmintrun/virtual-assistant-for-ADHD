@@ -3,20 +3,23 @@ import json
 from datetime import datetime
 
 from app.core.errors import AppError
-from app.schemas.common import AvailabilityRef, FieldError
-from app.schemas.draft import (
+from app.schemas.common import (
+    AvailabilityRef,
     ClarificationIssue,
+    FieldError,
+    FieldSource,
+    TimeConstraint,
+)
+from app.schemas.draft import (
     ConfirmSummaryRequest,
     ConfirmSummaryResult,
+    CreateDraftRequest,
     DraftAnalyzeRequest,
-    DraftCreateRequest,
     DraftListData,
-    DraftPatchRequest,
-    FieldSource,
     PlanningDraft,
     SummaryInput,
     TaskSummary,
-    TimeConstraint,
+    UpdateDraftRequest,
 )
 
 
@@ -229,7 +232,7 @@ async def create_draft(
     *,
     user_id: str,
     idempotency_key: str,
-    payload: DraftCreateRequest,
+    payload: CreateDraftRequest,
 ) -> PlanningDraft:
     """Dòng 2 (POST /api/v1/drafts): Tạo bản nháp mới, chống nhân bản qua Idempotency-Key và client_draft_id."""
     fingerprint = json.dumps(payload.model_dump(mode="json"), sort_keys=True)
@@ -332,7 +335,7 @@ async def patch_draft(
     user_id: str,
     draft_id: str,
     idempotency_key: str,
-    payload: DraftPatchRequest,
+    payload: UpdateDraftRequest,
 ) -> PlanningDraft:
     """Dòng 6 (PATCH /api/v1/drafts/{draft_id}): Sửa đúng trường gửi lên, kiểm revision và cập nhật trạng thái."""
     fingerprint = json.dumps(

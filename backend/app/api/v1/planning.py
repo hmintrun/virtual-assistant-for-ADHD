@@ -6,11 +6,11 @@ from fastapi import APIRouter, Header, Path
 from app.api.deps import CurrentUserDep
 from app.schemas.common import SuccessEnvelope, build_response_meta
 from app.schemas.planning import (
-    CandidateCreateRequest,
-    CandidatePatchRequest,
     ConfirmCandidateRequest,
     ConfirmCandidateResult,
+    GenerateCandidateRequest,
     PlanCandidate,
+    UpdateCandidateRequest,
 )
 from app.services import plan_service
 
@@ -30,7 +30,7 @@ async def create_candidate(
             description="Mã bản nháp đã xác nhận UF1 để tạo phương án lịch UF2 (ví dụ: draft_025)",
         ),
     ],
-    payload: CandidateCreateRequest,
+    payload: GenerateCandidateRequest,
     idempotency_key: Annotated[
         str,
         Header(
@@ -91,7 +91,7 @@ async def patch_candidate(
             description="Mã phương án lịch cần chỉnh sửa (ví dụ: candidate_1)",
         ),
     ],
-    payload: CandidatePatchRequest,
+    payload: UpdateCandidateRequest,
     idempotency_key: Annotated[
         str,
         Header(

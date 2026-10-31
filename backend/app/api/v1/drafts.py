@@ -8,11 +8,11 @@ from app.schemas.common import SuccessEnvelope, build_response_meta
 from app.schemas.draft import (
     ConfirmSummaryRequest,
     ConfirmSummaryResult,
+    CreateDraftRequest,
     DraftAnalyzeRequest,
-    DraftCreateRequest,
     DraftListData,
-    DraftPatchRequest,
     PlanningDraft,
+    UpdateDraftRequest,
 )
 from app.services import draft_service
 
@@ -21,7 +21,7 @@ router = APIRouter(prefix="/drafts", tags=["drafts"])
 
 @router.post("", status_code=201, response_model=SuccessEnvelope[PlanningDraft])
 async def create_draft(
-    payload: DraftCreateRequest,
+    payload: CreateDraftRequest,
     idempotency_key: Annotated[
         str,
         Header(
@@ -91,7 +91,7 @@ async def patch_draft(
     draft_id: Annotated[
         str, Path(min_length=1, description="Mã bản nháp cần chỉnh sửa (ví dụ: draft_1)")
     ],
-    payload: DraftPatchRequest,
+    payload: UpdateDraftRequest,
     idempotency_key: Annotated[
         str,
         Header(

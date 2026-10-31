@@ -1,41 +1,17 @@
-# Schema/DTO cho cài đặt trợ lý (UserPreference - Dòng 39) và giờ rảnh đã xác nhận (Availability - Dòng 40)
-from datetime import datetime
-
+# Schema/DTO cho cài đặt trợ lý (UserPreference - Dòng 39) và tái xuất Availability từ availability.py (Dòng 40)
 from pydantic import Field
 
-from app.schemas.common import CalendarContextRef, StrictSchema, TimeInterval
+from app.schemas.availability import (
+    Availability,
+    DateOverride,
+    LocalInterval,
+    TaskAvailabilityLimit,
+    WeeklyRule,
+)
+from app.schemas.common import ApiModel
 
 
-class WeeklyRule(StrictSchema):
-    """Quy tắc giờ rảnh lặp lại hàng tuần (weekday: 1=Thứ Hai .. 7=Chủ Nhật)."""
-
-    weekday: int = Field(ge=1, le=7)
-    start_local: str = Field(min_length=5, max_length=5)
-    end_local: str = Field(min_length=5, max_length=5)
-
-
-class LocalTimeInterval(StrictSchema):
-    """Khoảng giờ địa phương HH:mm trong cùng một ngày."""
-
-    start_local: str = Field(min_length=5, max_length=5)
-    end_local: str = Field(min_length=5, max_length=5)
-
-
-class DateOverride(StrictSchema):
-    """Ngoại lệ giờ rảnh cho một ngày cụ thể (YYYY-MM-DD); intervals=[] nghĩa là ngày đó không rảnh."""
-
-    date: str = Field(min_length=10, max_length=10)
-    intervals: list[LocalTimeInterval] = Field(default_factory=list)
-
-
-class TaskAvailabilityLimit(StrictSchema):
-    """Giới hạn bổ sung trên giờ rảnh chung cho một Task đã lưu."""
-
-    task_id: str = Field(min_length=1)
-    intervals: list[TimeInterval] = Field(default_factory=list)
-
-
-class PreferenceChanges(StrictSchema):
+class PreferenceChanges(ApiModel):
     """Các thay đổi cài đặt đang chờ duyệt (nếu ảnh hưởng lịch tương lai)."""
 
     work_interval_seconds: int | None = Field(default=None, ge=0)
@@ -45,7 +21,7 @@ class PreferenceChanges(StrictSchema):
     reminder_style: str | None = None
 
 
-class UserPreference(StrictSchema):
+class UserPreference(ApiModel):
     """Cấu hình trợ lý có hiệu lực và yêu cầu đang chờ duyệt (Dòng 39 - GET /api/v1/preferences)."""
 
     revision: int = Field(ge=0)
@@ -61,17 +37,16 @@ class UserPreference(StrictSchema):
     pending_proposal_id: str | None = None
 
 
-class Availability(StrictSchema):
-    """Bộ giờ rảnh đã được người dùng xác nhận (Dòng 40 - GET /api/v1/availability)."""
+# Giữ bí danh tương thích với tên cũ
+LocalTimeInterval = LocalInterval
 
-    availability_id: str = Field(min_length=1)
-    revision: int = Field(ge=0)
-    timezone: str = Field(min_length=1)
-    weekly_rules: list[WeeklyRule] = Field(default_factory=list)
-    date_overrides: list[DateOverride] = Field(default_factory=list)
-    task_limits: list[TaskAvailabilityLimit] = Field(default_factory=list)
-    source: str = Field(min_length=1)
-    confirmed_at: datetime | None = None
-    effective_intervals: list[TimeInterval] | None = None
-    calendar_context: CalendarContextRef | None = None
-
+__all__ = [
+    "Availability",
+    "DateOverride",
+    "LocalInterval",
+    "LocalTimeInterval",
+    "PreferenceChanges",
+    "TaskAvailabilityLimit",
+    "UserPreference",
+    "WeeklyRule",
+]

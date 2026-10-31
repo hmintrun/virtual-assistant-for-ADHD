@@ -1,137 +1,188 @@
-# Schema/DTO cho phương án chia bước và xếp lịch UF2 (PlanCandidate - O06, FeasibilityReport - O10)
+"""UF2 candidate, feasibility and confirmation DTOs."""
+
 from datetime import datetime
 from typing import Literal, Self
 
 from pydantic import Field, model_validator
 
-from app.schemas.common import SourceRevisions, StrictSchema, TimeInterval
+from app.schemas.common import (
+    ApiModel,
+    BlockingReason,
+    SessionSegment,
+    SourceRevisions,
+    TimeInterval,
+)
+from app.schemas.task import Task
 
 
-class SessionSegment(StrictSchema):
-    """Đoạn làm việc (work) hoặc nghỉ ngắn (rest) bên trong một phiên tập trung."""
-
-    order_index: int = Field(ge=0)
-    kind: Literal["work", "rest"]
-    duration_seconds: int = Field(gt=0)
-
-
-class CandidatePart(StrictSchema):
-    """Phần việc (PlanningPart) ở giai đoạn dự thảo Candidate dùng client_part_key."""
-
+class CandidatePart(ApiModel):
     client_part_key: str = Field(min_length=1)
     scope_description: str = Field(min_length=1)
     order_index: int = Field(ge=0)
     decomposition_state: Literal["not_started", "partial", "complete"]
     scheduling_state: Literal["not_scheduled", "partial", "complete"]
     unexpanded_scope: str | None = None
-    rough_estimate_seconds: int | None = Field(default=None, ge=0)
+    rough_estimate_seconds: int | None = Field(default=None, gt=0)
     estimate_source: str | None = None
 
 
-class CandidateStep(StrictSchema):
-    """Bước công việc (Step) ở giai đoạn dự thảo Candidate dùng client_step_key."""
-
+class CandidateStep(ApiModel):
+    client_step_key: str = Field(min_length=1)
+    client_part_key: str = Field(min_length=1)
     title: str = Field(min_length=1)
     expected_output: str = Field(min_length=1)
     order_index: int = Field(ge=0)
-    estimated_base_seconds: int = Field(ge=0)
+    estimated_base_seconds: int = Field(gt=0)
     remaining_base_seconds: int = Field(ge=0)
-    buffer_multiplier: float = Field(gt=0)
+    buffer_multiplier: float = Field(ge=1)
     estimate_source: str = Field(min_length=1)
     status: str = Field(min_length=1)
+
+
+class CandidateSession(ApiModel):
+    client_session_key: str = Field(min_length=1)
     client_step_key: str = Field(min_length=1)
-    client_part_key: str = Field(min_length=1)
-
-
-class CandidateSession(StrictSchema):
-    """Phiên làm việc dự kiến (Session) ở giai đoạn dự thảo Candidate dùng client_session_key."""
-
     scheduled_start: datetime
     scheduled_end: datetime
     micro_task_text: str = Field(min_length=1)
     micro_task_seconds: int | None = Field(default=None, ge=0)
-    work_seconds: int = Field(ge=0)
+    work_seconds: int = Field(gt=0)
     rest_seconds: int = Field(ge=0)
     segments: list[SessionSegment] = Field(min_length=1)
-    duration_seconds: int = Field(ge=0)
-    client_session_key: str = Field(min_length=1)
-    client_step_key: str = Field(min_length=1)
+    duration_seconds: int = Field(gt=0)
     start_state: Literal["waiting", "not_started", "started"]
     start_decision_due_at: datetime
 
     @model_validator(mode="after")
-    def validate_session_durations(self) -> Self:
-        # duration_seconds chỉ bằng work_seconds + rest_seconds, không cộng micro_task_seconds (T07)
-        if self.duration_seconds != (self.work_seconds + self.rest_seconds):
-            raise ValueError("duration_seconds phải bằng đúng work_seconds + rest_seconds.")
+    def valid_duration(self):
+        if (
+            self.scheduled_start.utcoffset() is None
+            or self.scheduled_end.utcoffset() is None
+        ):
+            raise ValueError("Giờ phiên phải có múi giờ")
+        if self.duration_seconds != self.work_seconds + self.rest_seconds:
+            raise ValueError("Thời lượng phiên không khớp")
+        if (
+            sum(x.duration_seconds for x in self.segments if x.kind == "work")
+            != self.work_seconds
+        ):
+            raise ValueError("Quãng làm chính không khớp")
+        if (
+            sum(x.duration_seconds for x in self.segments if x.kind == "rest")
+            != self.rest_seconds
+        ):
+            raise ValueError("Quãng nghỉ không khớp")
+        if (
+            self.scheduled_end - self.scheduled_start
+        ).total_seconds() != self.duration_seconds:
+            raise ValueError("Giờ kết thúc không khớp")
         return self
 
 
-class VerificationScope(StrictSchema):
-    """Phạm vi được kiểm tra tính khả thi trên Candidate (scope_type='candidate_parts')."""
-
+class CandidateVerificationScope(ApiModel):
+    scope_type: Literal["candidate_parts"] = "candidate_parts"
     client_part_keys: list[str] = Field(min_length=1)
     planning_horizon: TimeInterval
-    scope_type: Literal["candidate_parts"] = "candidate_parts"
 
 
-class BlockingReason(StrictSchema):
-    """Nguyên nhân chặn khiến phương án lịch chưa thể xác nhận."""
+class PersistedVerificationScope(ApiModel):
+    scope_type: Literal["persisted_schedule"] = "persisted_schedule"
+    task_ids: list[str]
+    session_ids: list[str]
+    planning_part_ids: list[str]
+    planning_horizon: TimeInterval
 
-    code: str = Field(min_length=1)
-    message: str = Field(min_length=1)
+
+# Giữ bí danh tương thích cho CandidateVerificationScope
+VerificationScope = CandidateVerificationScope
 
 
-class FeasibilityReport(StrictSchema):
-    """O10 FeasibilityReport: Kết quả kiểm tra tính khả thi trước Deadline của phương án lịch."""
-
+class FeasibilityReport(ApiModel):
     status: str = Field(min_length=1)
     required_seconds: int | None = Field(default=None, ge=0)
     available_seconds: int | None = Field(default=None, ge=0)
     unscheduled_seconds: int | None = Field(default=None, ge=0)
-    deficit_seconds: int | None = Field(default=None, ge=0)
-    verification_scope: VerificationScope
+    verification_scope: CandidateVerificationScope | PersistedVerificationScope = Field(
+        discriminator="scope_type"
+    )
     fully_scheduled: bool
     blocking_reasons: list[BlockingReason] = Field(default_factory=list)
+    deficit_seconds: int | None = Field(default=None, ge=0)
     unestimated_part_ids: list[str] = Field(default_factory=list)
     unplanned_part_ids: list[str] = Field(default_factory=list)
     extension_candidate_at: datetime | None = None
 
 
-class PlanCandidate(StrictSchema):
-    """O06 PlanCandidate: Phương án chia bước và xếp lịch dự thảo ở UF2 (Dòng 9, 10, 11)."""
-
+class PlanCandidate(ApiModel):
     candidate_id: str = Field(min_length=1)
     draft_id: str = Field(min_length=1)
-    source_summary_revision: int = Field(ge=1)
-    review_revision: int = Field(ge=1)
+    source_summary_revision: int = Field(ge=0)
+    source_planning_input_revision: int = Field(ge=0)
+    review_revision: int = Field(ge=0)
     planning_parts: list[CandidatePart]
     steps: list[CandidateStep]
     sessions: list[CandidateSession]
     planning_horizon: TimeInterval
     source_revisions: SourceRevisions
-    min_inter_session_gap_seconds: int = Field(ge=0)
+    min_inter_session_gap_seconds: int = Field(ge=900)
     feasibility: FeasibilityReport
     stale: bool
     user_step_proposal: str | None = None
-    source_planning_input_revision: int = Field(ge=1)
+
+    @model_validator(mode="after")
+    def valid_client_keys(self):
+        parts = {x.client_part_key for x in self.planning_parts}
+        steps = {x.client_step_key for x in self.steps}
+        sessions = {x.client_session_key for x in self.sessions}
+        if len(parts) != len(self.planning_parts) or len(steps) != len(self.steps):
+            raise ValueError("Client key phần hoặc bước bị trùng")
+        if len(sessions) != len(self.sessions):
+            raise ValueError("Client key phiên bị trùng")
+        if any(x.client_part_key not in parts for x in self.steps):
+            raise ValueError("Bước tham chiếu phần không có trong phương án")
+        if any(x.client_step_key not in steps for x in self.sessions):
+            raise ValueError("Phiên tham chiếu bước không có trong phương án")
+        return self
 
 
-class CandidateCreateRequest(StrictSchema):
-    """Dòng 9 trên API Sheet (POST /api/v1/drafts/{draft_id}/candidates): Đầu vào tạo phương án lịch UF2."""
+class ScheduleVersion(ApiModel):
+    version_number: int = Field(ge=1)
+    base_version: int | None = Field(default=None, ge=1)
+    approved_at: datetime
+    affected_task_ids: list[str]
+    min_inter_session_gap_seconds: int = Field(ge=900)
+    alarm_sync_state: str = Field(min_length=1)
+    calendar_sync_summary: str = Field(min_length=1)
 
-    source_summary_revision: int = Field(ge=1)
-    source_planning_input_revision: int = Field(ge=1)
+
+class KeyMapping(ApiModel):
+    planning_parts: dict[str, str]
+    steps: dict[str, str]
+    sessions: dict[str, str]
+
+
+class ConfirmCandidateResult(ApiModel):
+    app_save_state: str = Field(min_length=1)
+    task: Task
+    key_mapping: KeyMapping
+    schedule_version: ScheduleVersion
+    alarm_sync_state: str = Field(min_length=1)
+    calendar_sync_summary: str = Field(min_length=1)
+
+
+class GenerateCandidateRequest(ApiModel):
+    source_summary_revision: int = Field(ge=0)
+    source_planning_input_revision: int = Field(ge=0)
     selected_part_keys: list[str] | None = Field(default=None, min_length=1)
     planning_horizon: TimeInterval | None = None
 
 
-class CandidatePartEdit(StrictSchema):
+class CandidatePartEdit(ApiModel):
     """Allowlist các trường được phép sửa trên một CandidatePart theo client_part_key."""
 
     client_part_key: str = Field(min_length=1)
     scope_description: str | None = Field(default=None, min_length=1)
-    rough_estimate_seconds: int | None = Field(default=None, ge=0)
+    rough_estimate_seconds: int | None = Field(default=None, gt=0)
 
     @model_validator(mode="after")
     def validate_has_editable_field(self) -> Self:
@@ -142,13 +193,13 @@ class CandidatePartEdit(StrictSchema):
         return self
 
 
-class CandidateStepEdit(StrictSchema):
+class CandidateStepEdit(ApiModel):
     """Allowlist các trường được phép sửa trên một CandidateStep theo client_step_key (Dòng 11)."""
 
     client_step_key: str = Field(min_length=1)
     title: str | None = Field(default=None, min_length=1)
     expected_output: str | None = Field(default=None, min_length=1)
-    estimated_base_seconds: int | None = Field(default=None, ge=0)
+    estimated_base_seconds: int | None = Field(default=None, gt=0)
     order_index: int | None = Field(default=None, ge=0)
 
     @model_validator(mode="after")
@@ -160,7 +211,7 @@ class CandidateStepEdit(StrictSchema):
         return self
 
 
-class CandidateSessionEdit(StrictSchema):
+class CandidateSessionEdit(ApiModel):
     """Allowlist các trường được phép sửa trên một CandidateSession theo client_session_key."""
 
     client_session_key: str = Field(min_length=1)
@@ -177,9 +228,7 @@ class CandidateSessionEdit(StrictSchema):
         return self
 
 
-class CandidateEdits(StrictSchema):
-    """Danh sách chỉnh sửa theo Allowlist trên Candidate (chặn client tự gửi feasibility/stale/revisions)."""
-
+class CandidateEdits(ApiModel):
     planning_parts: list[CandidatePartEdit] | None = Field(default=None, min_length=1)
     steps: list[CandidateStepEdit] | None = Field(default=None, min_length=1)
     sessions: list[CandidateSessionEdit] | None = Field(default=None, min_length=1)
@@ -193,43 +242,18 @@ class CandidateEdits(StrictSchema):
         return self
 
 
-class CandidatePatchRequest(StrictSchema):
-    """Dòng 11 trên API Sheet (PATCH /api/v1/candidates/{candidate_id}): Sửa phương án nháp UF2."""
-
-    expected_review_revision: int = Field(ge=1)
+class UpdateCandidateRequest(ApiModel):
+    expected_review_revision: int = Field(ge=0)
     edits: CandidateEdits
 
 
-from app.schemas.schedule import ScheduleVersion  # noqa: E402
-from app.schemas.task import Task  # noqa: E402
-
-
-class ConfirmCandidateRequest(StrictSchema):
-    """Dòng 12 trên API Sheet (POST /api/v1/candidates/{candidate_id}/confirm): Đầu vào duyệt và lưu kế hoạch UF2."""
-
-    expected_review_revision: int = Field(ge=1)
-    expected_summary_revision: int = Field(ge=1)
-    expected_planning_input_revision: int = Field(ge=1)
+class ConfirmCandidateRequest(ApiModel):
+    expected_review_revision: int = Field(ge=0)
+    expected_summary_revision: int = Field(ge=0)
+    expected_planning_input_revision: int = Field(ge=0)
     expected_source_revisions: SourceRevisions
 
 
-class KeyMapping(StrictSchema):
-    """Bảng ánh xạ từ client_*_key lúc xem Candidate sang ID thật trên Server sau khi lưu."""
-
-    planning_parts: dict[str, str]
-    steps: dict[str, str]
-    sessions: dict[str, str]
-
-
-class ConfirmCandidateResult(StrictSchema):
-    """Dòng 12 trên API Sheet: Kết quả trả về (201 Created) sau khi chốt kế hoạch UF2 nguyên tử."""
-
-    app_save_state: str = Field(min_length=1)
-    task: Task
-    key_mapping: KeyMapping
-    schedule_version: ScheduleVersion
-    alarm_sync_state: str = Field(min_length=1)
-    calendar_sync_summary: str = Field(min_length=1)
-
-
-
+# Giữ bí danh tương thích
+CandidateCreateRequest = GenerateCandidateRequest
+CandidatePatchRequest = UpdateCandidateRequest
