@@ -3,7 +3,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Header, Path, Query
 
-from app.api.deps import CurrentUserDep
+from app.api.deps import CurrentUserDep, DbSessionDep
 from app.schemas.common import SuccessEnvelope, build_response_meta
 from app.schemas.draft import (
     ConfirmSummaryRequest,
@@ -31,12 +31,14 @@ async def create_draft(
         ),
     ],
     current_user: CurrentUserDep,
+    db: DbSessionDep,
 ) -> SuccessEnvelope[PlanningDraft]:
     """Dòng 2 trên API Sheet: Tạo bản nháp yêu cầu mới (UF1)."""
     draft = await draft_service.create_draft(
         user_id=current_user.user_id,
         idempotency_key=idempotency_key,
         payload=payload,
+        db=db,
     )
     return SuccessEnvelope(
         data=draft,
@@ -47,6 +49,7 @@ async def create_draft(
 @router.get("", response_model=SuccessEnvelope[DraftListData])
 async def list_drafts(
     current_user: CurrentUserDep,
+    db: DbSessionDep,
     limit: Annotated[
         int,
         Query(gt=0, description="Số bản nháp tối đa trả về trong một trang (ví dụ: 20)"),
@@ -61,6 +64,7 @@ async def list_drafts(
         user_id=current_user.user_id,
         limit=limit,
         cursor=cursor,
+        db=db,
     )
     return SuccessEnvelope(
         data=data,
@@ -74,11 +78,13 @@ async def get_draft(
         str, Path(min_length=1, description="Mã bản nháp cần mở lại (ví dụ: draft_1)")
     ],
     current_user: CurrentUserDep,
+    db: DbSessionDep,
 ) -> SuccessEnvelope[PlanningDraft]:
     """Dòng 4 trên API Sheet: Mở lại một bản nháp theo draft_id."""
     draft = await draft_service.get_draft_by_id(
         user_id=current_user.user_id,
         draft_id=draft_id,
+        db=db,
     )
     return SuccessEnvelope(
         data=draft,
@@ -101,6 +107,7 @@ async def patch_draft(
         ),
     ],
     current_user: CurrentUserDep,
+    db: DbSessionDep,
 ) -> SuccessEnvelope[PlanningDraft]:
     """Dòng 6 trên API Sheet: Sửa một phần bản nháp (UF1 hoặc Bước 0 của UF2)."""
     draft = await draft_service.patch_draft(
@@ -108,6 +115,7 @@ async def patch_draft(
         draft_id=draft_id,
         idempotency_key=idempotency_key,
         payload=payload,
+        db=db,
     )
     return SuccessEnvelope(
         data=draft,
@@ -137,6 +145,7 @@ async def confirm_summary(
         ),
     ],
     current_user: CurrentUserDep,
+    db: DbSessionDep,
 ) -> SuccessEnvelope[ConfirmSummaryResult]:
     """Dòng 7 trên API Sheet: Xác nhận thông tin UF1 (chỉ đóng dấu summary_confirmed_revision, chưa tạo Task)."""
     result = await draft_service.confirm_draft_summary(
@@ -144,6 +153,7 @@ async def confirm_summary(
         draft_id=draft_id,
         idempotency_key=idempotency_key,
         payload=payload,
+        db=db,
     )
     return SuccessEnvelope(
         data=result,
@@ -173,6 +183,7 @@ async def analyze_draft(
         ),
     ],
     current_user: CurrentUserDep,
+    db: DbSessionDep,
 ) -> SuccessEnvelope[PlanningDraft]:
     """Dòng 5 trên API Sheet: Hiểu nội dung người dùng mới nhập hoặc bổ sung và merge vào bản nháp (UF1)."""
     draft = await draft_service.analyze_draft(
@@ -180,9 +191,9 @@ async def analyze_draft(
         draft_id=draft_id,
         idempotency_key=idempotency_key,
         payload=payload,
+        db=db,
     )
     return SuccessEnvelope(
         data=draft,
         meta=build_response_meta(),
     )
-

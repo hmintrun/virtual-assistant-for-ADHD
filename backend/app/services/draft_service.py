@@ -1,10 +1,19 @@
 # Tầng Service điều phối nghiệp vụ cho bản nháp công việc UF1 (PlanningDraft)
 import json
 from datetime import datetime
+from typing import Any, Literal, cast
+from uuid import NAMESPACE_DNS, UUID, uuid5
+
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import AppError
+from app.models.base import Base
+from app.models.planning import PlanningDraft as PlanningDraftModel
+from app.models.user import User as UserModel
 from app.schemas.common import (
     AvailabilityRef,
+    CandidateRef,
     ClarificationIssue,
     FieldError,
     FieldSource,
@@ -114,6 +123,178 @@ _CURRENT_AVAILABILITY_REVISIONS: dict[tuple[str, str], int] = {
     ("user_a", "availability_1"): 2,
     ("user_b", "availability_b_1"): 1,
 }
+
+_INITIALIZED_ENGINES: set[int] = set()
+
+
+def resolve_user_uuid(user_id: str) -> UUID:
+    """Ánh xạ nhất quán mã user_id chuỗi (ví dụ 'user_a') sang UUID khóa chính của bảng users."""
+    try:
+        return UUID(user_id)
+    except ValueError:
+        return uuid5(NAMESPACE_DNS, f"proplan.user:{user_id}")
+
+
+def resolve_draft_uuid(draft_id: str) -> UUID:
+    """Ánh xạ nhất quán mã draft_id chuỗi (ví dụ 'draft_025') sang UUID khóa chính của bảng planning_drafts."""
+    try:
+        return UUID(draft_id)
+    except ValueError:
+        return uuid5(NAMESPACE_DNS, f"proplan.draft:{draft_id}")
+
+
+def _serialize_summary_payload(draft: PlanningDraft) -> dict[str, Any]:
+    """Đóng gói TaskSummary kèm metadata API vào cột JSON summary của bảng planning_drafts."""
+    summary_dict = draft.summary.model_dump(mode="json")
+    summary_dict["_api_meta"] = {
+        "draft_id": draft.draft_id,
+        "candidate_ref": (
+            draft.candidate_ref.model_dump(mode="json")
+            if draft.candidate_ref is not None
+            else None
+        ),
+        "confirmed_task_id": draft.confirmed_task_id,
+        "source_thought_id": draft.source_thought_id,
+    }
+    return summary_dict
+
+
+def _row_to_schema(row: PlanningDraftModel, fallback_draft_id: str | None = None) -> PlanningDraft:
+    """Chuyển dòng SQLAlchemy PlanningDraftModel thành DTO PlanningDraft chuẩn hợp đồng."""
+    raw_summary = dict(row.summary or {})
+    api_meta = raw_summary.pop("_api_meta", {})
+    if not isinstance(api_meta, dict):
+        api_meta = {}
+    draft_id_str = str(api_meta.get("draft_id") or fallback_draft_id or row.id)
+    cand_ref_raw = api_meta.get("candidate_ref")
+    cand_ref = (
+        CandidateRef.model_validate(cand_ref_raw)
+        if isinstance(cand_ref_raw, dict)
+        else None
+    )
+    confirmed_task_id = api_meta.get("confirmed_task_id")
+    source_thought_id = api_meta.get("source_thought_id") or (
+        str(row.source_thought_id) if row.source_thought_id else None
+    )
+    return PlanningDraft(
+        draft_id=draft_id_str,
+        client_draft_id=row.client_draft_id,
+        stage=row.stage,
+        raw_input=row.raw_input,
+        input_source=cast(Literal["text", "voice", "thought"], row.input_source),
+        summary=TaskSummary.model_validate(raw_summary),
+        summary_revision=row.summary_revision,
+        summary_confirmed_revision=row.summary_confirmed_revision,
+        candidate_ref=cand_ref,
+        source_thought_id=source_thought_id,
+        confirmed_task_id=confirmed_task_id,
+        user_step_proposal=row.user_step_proposal,
+        planning_input_revision=row.planning_input_revision,
+    )
+
+
+async def ensure_dev_seed_in_db(db: AsyncSession) -> None:
+    """Bước 5.1 (F07, T23): Khởi tạo bảng và seed idempotent cho User A, User B cùng các Draft mẫu."""
+    bind = db.get_bind()
+    engine_key = id(bind)
+    if engine_key not in _INITIALIZED_ENGINES:
+        conn = await db.connection()
+        await conn.run_sync(Base.metadata.create_all)
+        _INITIALIZED_ENGINES.add(engine_key)
+
+    seed_users = (
+        ("user_a", "user_a@proplan.local", "User A (Dev)"),
+        ("user_b", "user_b@proplan.local", "User B (Dev)"),
+    )
+    changed = False
+    for raw_uid, email, display_name in seed_users:
+        uid = resolve_user_uuid(raw_uid)
+        existing_user = await db.get(UserModel, uid)
+        if existing_user is None:
+            db.add(
+                UserModel(
+                    id=uid,
+                    email=email,
+                    display_name=display_name,
+                    is_active=True,
+                )
+            )
+            changed = True
+
+    if changed:
+        await db.flush()
+
+    seed_drafts = (
+        ("user_a", "draft_1", "draft_may_1"),
+        ("user_a", "draft_025", "draft_may_025"),
+        ("user_b", "draft_b_1", "draft_may_b_1"),
+    )
+    for raw_uid, raw_did, client_did in seed_drafts:
+        did = resolve_draft_uuid(raw_did)
+        existing_draft = await db.get(PlanningDraftModel, did)
+        if existing_draft is None:
+            seed_dto = _FAKE_DRAFTS_BY_OWNER.get(
+                (raw_uid, raw_did), _build_seed_draft(raw_did, client_did)
+            )
+            db.add(
+                PlanningDraftModel(
+                    id=did,
+                    user_id=resolve_user_uuid(raw_uid),
+                    client_draft_id=seed_dto.client_draft_id,
+                    stage=seed_dto.stage,
+                    raw_input=seed_dto.raw_input,
+                    input_source=seed_dto.input_source,
+                    summary=_serialize_summary_payload(seed_dto),
+                    summary_revision=seed_dto.summary_revision,
+                    summary_confirmed_revision=seed_dto.summary_confirmed_revision,
+                    planning_input_revision=seed_dto.planning_input_revision,
+                    user_step_proposal=seed_dto.user_step_proposal,
+                )
+            )
+            changed = True
+
+    if changed:
+        await db.commit()
+
+
+async def _persist_draft_to_db(
+    db: AsyncSession | None, user_id: str, draft: PlanningDraft
+) -> None:
+    """Lưu hoặc cập nhật PlanningDraft xuống bảng planning_drafts qua AsyncSession."""
+    _FAKE_DRAFTS_BY_OWNER[(user_id, draft.draft_id)] = draft
+    _CLIENT_DRAFT_INDEX[(user_id, draft.client_draft_id)] = draft.draft_id
+    if db is None:
+        return
+    await ensure_dev_seed_in_db(db)
+    did = resolve_draft_uuid(draft.draft_id)
+    uid = resolve_user_uuid(user_id)
+    row = await db.get(PlanningDraftModel, did)
+    if row is None:
+        row = PlanningDraftModel(
+            id=did,
+            user_id=uid,
+            client_draft_id=draft.client_draft_id,
+            stage=draft.stage,
+            raw_input=draft.raw_input,
+            input_source=draft.input_source,
+            summary=_serialize_summary_payload(draft),
+            summary_revision=draft.summary_revision,
+            summary_confirmed_revision=draft.summary_confirmed_revision,
+            planning_input_revision=draft.planning_input_revision,
+            user_step_proposal=draft.user_step_proposal,
+        )
+        db.add(row)
+    else:
+        row.stage = draft.stage
+        row.raw_input = draft.raw_input
+        row.input_source = draft.input_source
+        row.summary = _serialize_summary_payload(draft)
+        row.summary_revision = draft.summary_revision
+        row.summary_confirmed_revision = draft.summary_confirmed_revision
+        row.planning_input_revision = draft.planning_input_revision
+        row.user_step_proposal = draft.user_step_proposal
+    await db.commit()
+
 
 
 
@@ -233,8 +414,11 @@ async def create_draft(
     user_id: str,
     idempotency_key: str,
     payload: CreateDraftRequest,
+    db: AsyncSession | None = None,
 ) -> PlanningDraft:
     """Dòng 2 (POST /api/v1/drafts): Tạo bản nháp mới, chống nhân bản qua Idempotency-Key và client_draft_id."""
+    if db is not None:
+        await ensure_dev_seed_in_db(db)
     fingerprint = json.dumps(payload.model_dump(mode="json"), sort_keys=True)
     idem_record = _CREATE_IDEMPOTENCY_STORE.get((user_id, idempotency_key))
     if idem_record is not None:
@@ -249,7 +433,26 @@ async def create_draft(
                 ),
                 next_action="use_original_payload_or_new_command",
             )
-        return _FAKE_DRAFTS_BY_OWNER[(user_id, saved_draft_id)]
+        return await get_draft_by_id(user_id=user_id, draft_id=saved_draft_id, db=db)
+
+    if db is not None:
+        uid = resolve_user_uuid(user_id)
+        stmt = select(PlanningDraftModel).where(
+            PlanningDraftModel.user_id == uid,
+            PlanningDraftModel.client_draft_id == payload.client_draft_id,
+        )
+        existing_row = (await db.execute(stmt)).scalar_one_or_none()
+        if existing_row is not None:
+            existing_dto = _row_to_schema(existing_row)
+            _FAKE_DRAFTS_BY_OWNER[(user_id, existing_dto.draft_id)] = existing_dto
+            _CLIENT_DRAFT_INDEX[(user_id, payload.client_draft_id)] = (
+                existing_dto.draft_id
+            )
+            _CREATE_IDEMPOTENCY_STORE[(user_id, idempotency_key)] = (
+                fingerprint,
+                existing_dto.draft_id,
+            )
+            return existing_dto
 
     existing_draft_id = _CLIENT_DRAFT_INDEX.get((user_id, payload.client_draft_id))
     if existing_draft_id is not None:
@@ -278,8 +481,7 @@ async def create_draft(
         user_step_proposal=None,
         planning_input_revision=1,
     )
-    _FAKE_DRAFTS_BY_OWNER[(user_id, new_draft_id)] = new_draft
-    _CLIENT_DRAFT_INDEX[(user_id, payload.client_draft_id)] = new_draft_id
+    await _persist_draft_to_db(db, user_id, new_draft)
     _CREATE_IDEMPOTENCY_STORE[(user_id, idempotency_key)] = (fingerprint, new_draft_id)
     return new_draft
 
@@ -289,8 +491,24 @@ async def list_drafts(
     user_id: str,
     limit: int = 20,
     cursor: str | None = None,
+    db: AsyncSession | None = None,
 ) -> DraftListData:
     """Dòng 3 (GET /api/v1/drafts): Liệt kê các bản nháp thuộc về user_id có phân trang."""
+    if db is not None:
+        await ensure_dev_seed_in_db(db)
+        uid = resolve_user_uuid(user_id)
+        rows = (
+            await db.execute(
+                select(PlanningDraftModel)
+                .where(PlanningDraftModel.user_id == uid)
+                .order_by(PlanningDraftModel.created_at)
+            )
+        ).scalars().all()
+        for row in rows:
+            dto = _row_to_schema(row)
+            if (user_id, dto.draft_id) not in _FAKE_DRAFTS_BY_OWNER:
+                _FAKE_DRAFTS_BY_OWNER[(user_id, dto.draft_id)] = dto
+
     user_drafts = [
         draft
         for (owner_id, _), draft in _FAKE_DRAFTS_BY_OWNER.items()
@@ -317,17 +535,43 @@ async def list_drafts(
     return DraftListData(items=sliced, next_cursor=next_cursor)
 
 
-async def get_draft_by_id(*, user_id: str, draft_id: str) -> PlanningDraft:
-    """Tìm bản nháp trong phạm vi của user_id. Không tồn tại hoặc khác chủ sở hữu đều trả 404."""
-    draft = _FAKE_DRAFTS_BY_OWNER.get((user_id, draft_id))
-    if draft is None:
+async def get_draft_by_id(
+    *,
+    user_id: str,
+    draft_id: str,
+    db: AsyncSession | None = None,
+) -> PlanningDraft:
+    """Tìm bản nháp trong phạm vi của user_id (qua AsyncSession và bộ nhớ đồng bộ). Không tồn tại hoặc khác chủ sở hữu đều trả 404."""
+    in_mem = _FAKE_DRAFTS_BY_OWNER.get((user_id, draft_id))
+    if db is not None:
+        await ensure_dev_seed_in_db(db)
+        did = resolve_draft_uuid(draft_id)
+        uid = resolve_user_uuid(user_id)
+        row = (
+            await db.execute(
+                select(PlanningDraftModel).where(
+                    PlanningDraftModel.id == did,
+                    PlanningDraftModel.user_id == uid,
+                )
+            )
+        ).scalar_one_or_none()
+        if row is not None:
+            db_dto = _row_to_schema(row, fallback_draft_id=draft_id)
+            if in_mem is not None and in_mem != db_dto:
+                # Đồng bộ cập nhật mới từ bộ nhớ (ví dụ từ plan_service) xuống DB
+                await _persist_draft_to_db(db, user_id, in_mem)
+                return in_mem
+            _FAKE_DRAFTS_BY_OWNER[(user_id, draft_id)] = db_dto
+            return db_dto
+
+    if in_mem is None:
         raise AppError(
             status_code=404,
             code="RESOURCE_NOT_FOUND",
             message="Không tìm thấy tài nguyên trong phạm vi bạn được phép truy cập.",
             next_action="reload",
         )
-    return draft
+    return in_mem
 
 
 async def patch_draft(
@@ -336,6 +580,7 @@ async def patch_draft(
     draft_id: str,
     idempotency_key: str,
     payload: UpdateDraftRequest,
+    db: AsyncSession | None = None,
 ) -> PlanningDraft:
     """Dòng 6 (PATCH /api/v1/drafts/{draft_id}): Sửa đúng trường gửi lên, kiểm revision và cập nhật trạng thái."""
     fingerprint = json.dumps(
@@ -360,7 +605,7 @@ async def patch_draft(
             )
         return saved_result
 
-    draft = await get_draft_by_id(user_id=user_id, draft_id=draft_id)
+    draft = await get_draft_by_id(user_id=user_id, draft_id=draft_id, db=db)
 
     # Kiểm tra xung đột revision (409 REVISION_CONFLICT)
     summary_rev_mismatch = (
@@ -473,7 +718,7 @@ async def patch_draft(
             "stage": new_stage,
         }
     )
-    _FAKE_DRAFTS_BY_OWNER[(user_id, draft_id)] = updated_draft
+    await _persist_draft_to_db(db, user_id, updated_draft)
     _PATCH_IDEMPOTENCY_STORE[(user_id, idempotency_key)] = (fingerprint, updated_draft)
     return updated_draft
 
@@ -484,6 +729,7 @@ async def confirm_draft_summary(
     draft_id: str,
     idempotency_key: str,
     payload: ConfirmSummaryRequest,
+    db: AsyncSession | None = None,
 ) -> ConfirmSummaryResult:
     """Dòng 7 (POST /api/v1/drafts/{draft_id}/confirm-summary): Xác nhận bảng tóm tắt UF1 (A02.2, T04)."""
     fingerprint = json.dumps(
@@ -508,7 +754,7 @@ async def confirm_draft_summary(
             )
         return saved_result
 
-    draft = await get_draft_by_id(user_id=user_id, draft_id=draft_id)
+    draft = await get_draft_by_id(user_id=user_id, draft_id=draft_id, db=db)
 
     # 1. Kiểm tra phiên bản bảng tóm tắt người dùng đang xem (409 REVISION_CONFLICT)
     if payload.expected_summary_revision != draft.summary_revision:
@@ -560,7 +806,7 @@ async def confirm_draft_summary(
             "summary_confirmed_revision": draft.summary_revision,
         }
     )
-    _FAKE_DRAFTS_BY_OWNER[(user_id, draft_id)] = confirmed_draft
+    await _persist_draft_to_db(db, user_id, confirmed_draft)
 
     result = ConfirmSummaryResult(
         draft_id=confirmed_draft.draft_id,
@@ -582,6 +828,7 @@ async def analyze_draft(
     draft_id: str,
     idempotency_key: str,
     payload: DraftAnalyzeRequest,
+    db: AsyncSession | None = None,
 ) -> PlanningDraft:
     """Dòng 5 (POST /api/v1/drafts/{draft_id}/analyze): Gọi AI trích xuất & làm rõ 1 vòng (I01, A01/A02.1, T03, T18)."""
     fingerprint = json.dumps(
@@ -607,7 +854,7 @@ async def analyze_draft(
         return saved_draft
 
     # Pha 1: Đọc snapshot hiện tại và kiểm tra cả 2 revision trước khi gọi AI
-    snapshot_draft = await get_draft_by_id(user_id=user_id, draft_id=draft_id)
+    snapshot_draft = await get_draft_by_id(user_id=user_id, draft_id=draft_id, db=db)
     if (
         payload.expected_summary_revision != snapshot_draft.summary_revision
         or payload.expected_planning_input_revision
@@ -634,7 +881,7 @@ async def analyze_draft(
     proposed_scope = payload.message or snapshot_draft.summary.scope
 
     # Pha 3: Kiểm tra lại revision hiện tại của Draft trước khi merge (T03: Chống kết quả AI cũ đè dữ liệu mới)
-    current_draft = await get_draft_by_id(user_id=user_id, draft_id=draft_id)
+    current_draft = await get_draft_by_id(user_id=user_id, draft_id=draft_id, db=db)
     if (
         current_draft.summary_revision != snapshot_draft.summary_revision
         or current_draft.planning_input_revision
@@ -702,7 +949,7 @@ async def analyze_draft(
             "stage": "summary_review" if can_plan else "collecting",
         }
     )
-    _FAKE_DRAFTS_BY_OWNER[(user_id, draft_id)] = updated_draft
+    await _persist_draft_to_db(db, user_id, updated_draft)
     _ANALYZE_IDEMPOTENCY_STORE[(user_id, idempotency_key)] = (
         fingerprint,
         updated_draft,
