@@ -1,4 +1,6 @@
-"""Dịch vụ tích hợp LLM 3 tầng: Gemini 3.8 Flash (Tier 1) -> Groq Llama-3 (Tier 2) -> Rule-based (Tier 3)."""
+"""Dịch vụ tích hợp LLM đa tầng có Hedged Warm Backup:
+Gemini 3.8 Flash (Primary) -> Gemini 3.5 Flash-Lite (Warm Backup) -> Groq Qwen 3.8 / GPT-OSS (Tier 2) -> Rule-based (Tier 3).
+"""
 
 from __future__ import annotations
 
@@ -6,10 +8,12 @@ import asyncio
 import json
 import logging
 from datetime import UTC, datetime
-from typing import Any, TypeVar
+from typing import Any, NamedTuple, TypeVar
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from google import genai
+from google.genai import types
+from google.oauth2 import service_account
 from groq import AsyncGroq
 from pydantic import BaseModel
 
@@ -19,6 +23,7 @@ from app.schemas.schedule import (
     RescheduleEmpatheticResult,
 )
 from app.schemas.task import (
+    GenerationTier,
     LLMTaskDecompositionPayload,
     LLMTaskExtractionPayload,
     StepPromptItem,
@@ -29,6 +34,18 @@ from app.schemas.task import (
 logger = logging.getLogger(__name__)
 
 SchemaT = TypeVar("SchemaT", bound=BaseModel)
+
+_CLOUD_PLATFORM_SCOPES = ["https://www.googleapis.com/auth/cloud-platform"]
+
+
+class ExecutionTimingProfile(NamedTuple):
+    """Cấu hình các mốc thời gian (giây) cho bộ điều phối Quality-First Hedged Execution."""
+
+    hard_timeout: float
+    primary_priority_until: float
+    warm_backup_at: float
+    groq_hedge_at: float
+
 
 # ==============================================================================
 # SYSTEM PROMPTS TIẾNG VIỆT CHUẨN NGHIỆP VỤ ADHD-I (UF1, UF2, UF6)
@@ -64,7 +81,7 @@ Khi lịch làm việc cần điều chỉnh lại (do làm chưa xong, bận đ
 
 
 class AIService:
-    """Điều phối gọi LLM theo kiến trúc dự phòng 3 tầng với giới hạn độ trễ <= 2.5s."""
+    """Điều phối gọi LLM theo kiến trúc Quality-First Warm Backup + Cross-Provider Fallback."""
 
     def __init__(self, app_settings: Settings | None = None) -> None:
         self._settings = app_settings or settings
@@ -72,20 +89,84 @@ class AIService:
         self._groq_client: AsyncGroq | None = None
 
     def _get_gemini_client(self) -> genai.Client | None:
-        """Khởi tạo lười (lazy-init) Gemini Client khi có GEMINI_API_KEY hợp lệ."""
-        if not self._settings.has_gemini_key:
-            return None
-        if self._gemini_client is None:
-            self._gemini_client = genai.Client(api_key=self._settings.GEMINI_API_KEY)
-        return self._gemini_client
+        """
+        Khởi tạo lười (lazy-init) Gemini Client với retry=1 để lỗi là nhảy tầng tức thì:
+        - Ưu tiên 1: File JSON Service Account (`credentials.json`) trên cổng Agent Platform / Vertex Postpay.
+        - Ưu tiên 2: Chuỗi `GEMINI_API_KEY` trên cổng Gemini Developer API.
+        """
+        if self._gemini_client is not None:
+            return self._gemini_client
+
+        http_opts = types.HttpOptions(
+            retry_options=types.HttpRetryOptions(attempts=1),
+        )
+
+        cred_file = self._settings.resolved_google_credentials_file
+        if cred_file is not None:
+            try:
+                raw_meta = json.loads(cred_file.read_text(encoding="utf-8"))
+                project_id = (
+                    self._settings.GOOGLE_CLOUD_PROJECT.strip()
+                    or str(raw_meta.get("project_id", "")).strip()
+                )
+                if project_id:
+                    sa_creds = service_account.Credentials.from_service_account_file(
+                        str(cred_file),
+                        scopes=_CLOUD_PLATFORM_SCOPES,
+                    )
+                    self._gemini_client = genai.Client(
+                        enterprise=True,
+                        credentials=sa_creds,
+                        project=project_id,
+                        location=self._settings.GOOGLE_CLOUD_LOCATION,
+                        http_options=http_opts,
+                    )
+                    return self._gemini_client
+            except Exception as exc:
+                logger.warning(
+                    "Không thể nạp credentials.json (%s), chuyển sang kiểm tra GEMINI_API_KEY.",
+                    type(exc).__name__,
+                )
+
+        if self._settings.has_gemini_key:
+            self._gemini_client = genai.Client(
+                api_key=self._settings.GEMINI_API_KEY,
+                http_options=http_opts,
+            )
+            return self._gemini_client
+
+        return None
 
     def _get_groq_client(self) -> AsyncGroq | None:
-        """Khởi tạo lười (lazy-init) AsyncGroq Client cho Tầng 2 khi có GROQ_API_KEY hợp lệ."""
+        """Khởi tạo lười (lazy-init) AsyncGroq Client với max_retries=0 để không ngâm lỗi ngầm."""
         if not self._settings.has_groq_key:
             return None
         if self._groq_client is None:
-            self._groq_client = AsyncGroq(api_key=self._settings.GROQ_API_KEY)
+            self._groq_client = AsyncGroq(
+                api_key=self._settings.GROQ_API_KEY,
+                max_retries=0,
+            )
         return self._groq_client
+
+    def _interactive_profile(self) -> ExecutionTimingProfile:
+        """Khung thời gian A cho các luồng hội thoại trực tiếp (UF1 & UF6)."""
+        hard = self._settings.AI_TIMEOUT_SECONDS
+        return ExecutionTimingProfile(
+            hard_timeout=hard,
+            primary_priority_until=min(hard, self._settings.AI_PRIMARY_PRIORITY_SECONDS),
+            warm_backup_at=min(hard, self._settings.AI_WARM_BACKUP_DELAY_SECONDS),
+            groq_hedge_at=min(hard, self._settings.AI_GROQ_HEDGE_DELAY_SECONDS),
+        )
+
+    def _decomposition_profile(self) -> ExecutionTimingProfile:
+        """Khung thời gian B cho luồng bẻ nhỏ công việc có màn hình Breathing Circle (UF2)."""
+        hard = self._settings.AI_UF2_TIMEOUT_SECONDS
+        return ExecutionTimingProfile(
+            hard_timeout=hard,
+            primary_priority_until=min(hard, self._settings.AI_UF2_PRIMARY_PRIORITY_SECONDS),
+            warm_backup_at=min(hard, self._settings.AI_UF2_WARM_BACKUP_DELAY_SECONDS),
+            groq_hedge_at=min(hard, self._settings.AI_UF2_GROQ_HEDGE_DELAY_SECONDS),
+        )
 
     async def _call_gemini_structured(
         self,
@@ -93,30 +174,31 @@ class AIService:
         system_prompt: str,
         user_prompt: str,
         schema_cls: type[SchemaT],
+        model_name: str | None = None,
+        thinking_level: types.ThinkingLevel = types.ThinkingLevel.LOW,
     ) -> SchemaT:
-        """Tầng 1: Gọi Gemini 3.8 Flash qua Interactions API với JSON Schema chặt chẽ."""
+        """Gọi Gemini đơn lượt (generate_content) với JSON Schema nghiêm ngặt và không lưu trữ trạng thái."""
         client = self._get_gemini_client()
         if client is None:
-            raise RuntimeError("GEMINI_API_KEY chưa được cấu hình.")
-
-        async def _invoke() -> SchemaT:
-            interaction = await client.aio.interactions.create(
-                model=self._settings.GEMINI_FLASH_MODEL,
-                system_instruction=system_prompt,
-                input=user_prompt,
-                store=False,  # Bảo mật quyền riêng tư: không lưu trữ nội dung của người dùng trên cloud
-                response_format={
-                    "type": "text",
-                    "mime_type": "application/json",
-                    "schema": schema_cls.model_json_schema(),
-                },
+            raise RuntimeError(
+                "Chưa cấu hình chứng thực Gemini (credentials.json hoặc GEMINI_API_KEY)."
             )
-            raw_text = getattr(interaction, "output_text", None)
-            if not isinstance(raw_text, str) or not raw_text.strip():
-                raise ValueError("Gemini trả về output_text rỗng.")
-            return schema_cls.model_validate_json(raw_text)
 
-        return await asyncio.wait_for(_invoke(), timeout=self._settings.AI_TIMEOUT_SECONDS)
+        target_model = model_name or self._settings.GEMINI_FLASH_MODEL
+        response = await client.aio.models.generate_content(
+            model=target_model,
+            contents=user_prompt,
+            config=types.GenerateContentConfig(
+                system_instruction=system_prompt,
+                response_mime_type="application/json",
+                response_schema=schema_cls,
+                thinking_config=types.ThinkingConfig(thinking_level=thinking_level),
+            ),
+        )
+        raw_text = getattr(response, "text", None)
+        if not isinstance(raw_text, str) or not raw_text.strip():
+            raise ValueError(f"Gemini ({target_model}) trả về nội dung rỗng.")
+        return schema_cls.model_validate_json(raw_text)
 
     async def _call_groq_structured(
         self,
@@ -125,7 +207,10 @@ class AIService:
         user_prompt: str,
         schema_cls: type[SchemaT],
     ) -> SchemaT:
-        """Tầng 2: Dự phòng qua Groq Cloud (Llama-3) khi Gemini timeout hoặc lỗi."""
+        """
+        Tầng 2: Dự phòng qua Groq Cloud (`qwen/qwen3.8-27b`).
+        Nếu model chính trên Groq chạm trần TPM (HTTP 429), tự động chuyển sang model phụ (`openai/gpt-oss-20b`).
+        """
         client = self._get_groq_client()
         if client is None:
             raise RuntimeError("GROQ_API_KEY chưa được cấu hình.")
@@ -137,22 +222,249 @@ class AIService:
             f"(không bọc markdown): {schema_json}"
         )
 
-        async def _invoke() -> SchemaT:
-            completion = await client.chat.completions.create(
-                model=self._settings.GROQ_FALLBACK_MODEL,
-                messages=[
-                    {"role": "system", "content": strict_system_prompt},
-                    {"role": "user", "content": user_prompt},
-                ],
-                response_format={"type": "json_object"},
-                temperature=0.2,
-            )
-            content = completion.choices[0].message.content
-            if not content:
-                raise ValueError("Groq trả về message content rỗng.")
-            return schema_cls.model_validate_json(content)
+        candidate_models = [self._settings.GROQ_FALLBACK_MODEL.strip()]
+        secondary = self._settings.GROQ_SECONDARY_FALLBACK_MODEL.strip()
+        if secondary and secondary not in candidate_models:
+            candidate_models.append(secondary)
 
-        return await asyncio.wait_for(_invoke(), timeout=self._settings.AI_TIMEOUT_SECONDS)
+        last_exc: Exception | None = None
+        for groq_model in candidate_models:
+            if not groq_model:
+                continue
+            try:
+                completion = await client.chat.completions.create(
+                    model=groq_model,
+                    messages=[
+                        {"role": "system", "content": strict_system_prompt},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                    response_format={"type": "json_object"},
+                    temperature=0.2,
+                )
+                content = completion.choices[0].message.content
+                if not content:
+                    raise ValueError(f"Groq ({groq_model}) trả về message content rỗng.")
+                return schema_cls.model_validate_json(content)
+            except Exception as exc:
+                last_exc = exc
+                logger.warning(
+                    "Groq model '%s' thất bại (%s).",
+                    groq_model,
+                    type(exc).__name__,
+                )
+
+        raise last_exc or RuntimeError("Không có model Groq khả dụng.")
+
+    async def _execute_hedged_structured(
+        self,
+        *,
+        flow_name: str,
+        system_prompt: str,
+        user_prompt: str,
+        schema_cls: type[SchemaT],
+        profile: ExecutionTimingProfile,
+    ) -> tuple[SchemaT, GenerationTier]:
+        """
+        Điều phối thực thi đa tầng ưu tiên chất lượng (Quality-First Hedged Execution):
+        1. `0.0s`: Chạy `GEMINI_FLASH_MODEL` (`gemini-3.8-flash`). Nếu xong trước `primary_priority_until` -> nhận ngay.
+        2. `warm_backup_at`: Khởi chạy ngầm `GEMINI_BACKUP_MODEL` (`gemini-3.5-flash-lite`) lưu sẵn vào RAM.
+           Vẫn kiên nhẫn đợi `3.8-flash` tới mốc `primary_priority_until`, quá mốc này mới bung bản nháp RAM ra trả.
+        3. `groq_hedge_at` (hoặc nhảy ngay khi Google lỗi nhanh): Gọi chéo hãng sang Groq nếu chưa có bản dự phòng nào xong.
+        4. `hard_timeout`: Ngắt cứng toàn bộ để trả về Tầng 3 (Python Rule-based Fallback).
+        """
+        loop = asyncio.get_running_loop()
+        t0 = loop.time()
+        deadline = t0 + profile.hard_timeout
+        priority_deadline = min(deadline, t0 + profile.primary_priority_until)
+
+        has_gemini = self._get_gemini_client() is not None
+        has_groq = self._get_groq_client() is not None
+
+        # Trường hợp không có chứng thực Gemini -> gọi thẳng sang Groq dưới trần hard_timeout
+        if not has_gemini:
+            if not has_groq:
+                raise RuntimeError(f"{flow_name}: Không có chứng thực Gemini lẫn Groq.")
+            groq_only = await asyncio.wait_for(
+                self._call_groq_structured(
+                    system_prompt=system_prompt,
+                    user_prompt=user_prompt,
+                    schema_cls=schema_cls,
+                ),
+                timeout=profile.hard_timeout,
+            )
+            return groq_only, "tier_2_groq"
+
+        primary_model = self._settings.GEMINI_FLASH_MODEL.strip()
+        backup_model = self._settings.GEMINI_BACKUP_MODEL.strip()
+        can_use_backup = bool(backup_model and backup_model != primary_model)
+
+        primary_task: asyncio.Task[SchemaT] = asyncio.create_task(
+            self._call_gemini_structured(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                schema_cls=schema_cls,
+                model_name=primary_model,
+                thinking_level=types.ThinkingLevel.LOW,
+            )
+        )
+        backup_task: asyncio.Task[SchemaT] | None = None
+        groq_task: asyncio.Task[SchemaT] | None = None
+
+        primary_failed = False
+        backup_harvested = False
+        groq_harvested = False
+        warm_result: tuple[SchemaT, GenerationTier] | None = None
+
+        def _start_backup() -> None:
+            nonlocal backup_task
+            if backup_task is None and can_use_backup:
+                backup_task = asyncio.create_task(
+                    self._call_gemini_structured(
+                        system_prompt=system_prompt,
+                        user_prompt=user_prompt,
+                        schema_cls=schema_cls,
+                        model_name=backup_model,
+                        thinking_level=types.ThinkingLevel.MINIMAL,
+                    )
+                )
+
+        def _start_groq() -> None:
+            nonlocal groq_task
+            if groq_task is None and has_groq:
+                groq_task = asyncio.create_task(
+                    self._call_groq_structured(
+                        system_prompt=system_prompt,
+                        user_prompt=user_prompt,
+                        schema_cls=schema_cls,
+                    )
+                )
+
+        try:
+            while True:
+                now = loop.time()
+
+                # 1. Luôn kiểm tra nhánh Primary (3.8-flash) trước tiên để đảm bảo chất lượng cao nhất
+                if primary_task.done() and not primary_failed:
+                    exc = primary_task.exception()
+                    if exc is None:
+                        return primary_task.result(), "tier_1_gemini"
+                    primary_failed = True
+                    logger.warning(
+                        "%s Primary (%s) lỗi nhanh (%s), kích hoạt nhánh dự phòng tức thì.",
+                        flow_name,
+                        primary_model,
+                        type(exc).__name__,
+                    )
+                    if warm_result is not None:
+                        return warm_result
+                    if can_use_backup:
+                        _start_backup()
+                    else:
+                        _start_groq()
+
+                # 2. Thu hoạch kết quả Warm Backup Gemini (3.5-flash-lite) nếu đã chạy xong
+                if backup_task is not None and backup_task.done() and not backup_harvested:
+                    backup_harvested = True
+                    exc_b = backup_task.exception()
+                    if exc_b is None:
+                        warm_result = (backup_task.result(), "tier_1_gemini")
+                        if primary_failed or now >= priority_deadline:
+                            return warm_result
+                    else:
+                        logger.warning(
+                            "%s Warm Backup (%s) thất bại (%s).",
+                            flow_name,
+                            backup_model,
+                            type(exc_b).__name__,
+                        )
+                        if primary_failed:
+                            _start_groq()
+
+                # 3. Thu hoạch kết quả Groq (Tier 2) nếu đã chạy xong
+                if groq_task is not None and groq_task.done() and not groq_harvested:
+                    groq_harvested = True
+                    exc_g = groq_task.exception()
+                    if exc_g is None:
+                        groq_pair: tuple[SchemaT, GenerationTier] = (
+                            groq_task.result(),
+                            "tier_2_groq",
+                        )
+                        all_gemini_failed = primary_failed and (
+                            not can_use_backup or backup_harvested
+                        )
+                        if all_gemini_failed or now >= priority_deadline:
+                            return warm_result or groq_pair
+                        if warm_result is None:
+                            warm_result = groq_pair
+                    else:
+                        logger.warning(
+                            "%s Tier 2 (Groq) thất bại (%s).",
+                            flow_name,
+                            type(exc_g).__name__,
+                        )
+
+                # 4. Nếu đã chạm mốc kết thúc cửa sổ ưu tiên Primary mà trong RAM có sẵn Warm Backup -> trả ngay
+                if now >= priority_deadline and warm_result is not None:
+                    return warm_result
+
+                # 5. Ngắt cứng tại trần hard_timeout
+                if now >= deadline:
+                    if warm_result is not None:
+                        return warm_result
+                    raise TimeoutError(
+                        f"{flow_name} vượt trần thời gian xử lý ({profile.hard_timeout}s)."
+                    )
+
+                # 6. Kích hoạt theo mốc thời gian cho Warm Backup & Groq Hedge (chỉ gọi Groq nếu chưa có bản RAM)
+                if backup_task is None and can_use_backup and now >= t0 + profile.warm_backup_at:
+                    _start_backup()
+                if (
+                    groq_task is None
+                    and has_groq
+                    and warm_result is None
+                    and now >= t0 + profile.groq_hedge_at
+                ):
+                    _start_groq()
+
+                # 7. Nếu toàn bộ các nhánh có thể chạy đều đã thất bại -> thoát sớm về Tier 3 Rule-based
+                backup_exhausted = not can_use_backup or (
+                    backup_task is not None and backup_harvested
+                )
+                groq_exhausted = not has_groq or (groq_task is not None and groq_harvested)
+                if primary_failed and backup_exhausted and groq_exhausted and warm_result is None:
+                    raise RuntimeError(f"{flow_name}: Toàn bộ các tầng AI đều thất bại.")
+
+                # 8. Tính mốc đánh thức gần nhất để không dùng vòng lặp bận (no busy-polling)
+                next_wake = deadline
+                if not primary_failed and warm_result is not None and now < priority_deadline:
+                    next_wake = min(next_wake, priority_deadline)
+                if backup_task is None and can_use_backup:
+                    next_wake = min(next_wake, t0 + profile.warm_backup_at)
+                if groq_task is None and has_groq and warm_result is None:
+                    next_wake = min(next_wake, t0 + profile.groq_hedge_at)
+
+                active_tasks = [
+                    t
+                    for t in (primary_task, backup_task, groq_task)
+                    if t is not None and not t.done()
+                ]
+                sleep_budget = max(0.0, next_wake - now)
+                if active_tasks:
+                    await asyncio.wait(
+                        active_tasks,
+                        timeout=sleep_budget,
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                else:
+                    await asyncio.sleep(sleep_budget)
+        finally:
+            pending = [
+                t for t in (primary_task, backup_task, groq_task) if t is not None and not t.done()
+            ]
+            for t in pending:
+                t.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
 
     @staticmethod
     def _resolve_current_iso(timezone_name: str, reference_now: datetime | None = None) -> str:
@@ -179,7 +491,7 @@ class AIService:
         reference_now: datetime | None = None,
     ) -> TaskExtractionResult:
         """
-        Trích xuất 4 trường bắt buộc ở UF1 theo cơ chế 3-Tier Graceful Degradation.
+        Trích xuất 4 trường bắt buộc ở UF1 theo cơ chế Quality-First Hedged Execution.
         Lưu ý bảo mật: Tuyệt đối không đưa nội dung `user_input` vào log kỹ thuật.
         """
         cleaned_input = user_input.strip()
@@ -195,42 +507,24 @@ class AIService:
         }
         user_prompt = json.dumps(context_payload, ensure_ascii=False)
 
-        # Tầng 1: Gemini 3.8 Flash
         try:
-            llm_payload = await self._call_gemini_structured(
+            llm_payload, winner_tier = await self._execute_hedged_structured(
+                flow_name="UF1",
                 system_prompt=UF1_EXTRACTION_SYSTEM_PROMPT,
                 user_prompt=user_prompt,
                 schema_cls=LLMTaskExtractionPayload,
+                profile=self._interactive_profile(),
             )
             return TaskExtractionResult(
                 **llm_payload.model_dump(),
-                generation_tier="tier_1_gemini",
+                generation_tier=winner_tier,
             )
         except Exception as exc:
             logger.warning(
-                "UF1 Tier 1 (Gemini) chuyển sang Tier 2 do lỗi: %s",
+                "UF1 chuyển sang Tier 3 Rule-based do lỗi: %s",
                 type(exc).__name__,
             )
-
-        # Tầng 2: Groq Llama-3 Fallback
-        try:
-            llm_payload = await self._call_groq_structured(
-                system_prompt=UF1_EXTRACTION_SYSTEM_PROMPT,
-                user_prompt=user_prompt,
-                schema_cls=LLMTaskExtractionPayload,
-            )
-            return TaskExtractionResult(
-                **llm_payload.model_dump(),
-                generation_tier="tier_2_groq",
-            )
-        except Exception as exc:
-            logger.warning(
-                "UF1 Tier 2 (Groq) chuyển sang Tier 3 Rule-based do lỗi: %s",
-                type(exc).__name__,
-            )
-
-        # Tầng 3: Deterministic Rule-based Fallback
-        return self._fallback_extract_task(cleaned_input)
+            return self._fallback_extract_task(cleaned_input)
 
     def _fallback_extract_task(self, user_input: str) -> TaskExtractionResult:
         """
@@ -287,7 +581,7 @@ class AIService:
     ) -> TaskDecompositionResult:
         """
         Sinh Default Decomposition Proposal (2–5 bước + Micro-task 2 phút) ở UF2
-        theo cơ chế dự phòng 3 tầng.
+        theo khung thời gian B (trần 6.0s, ưu tiên 3.8-flash tới 5.4s, Warm Backup 3.5-flash-lite từ 3.1s).
         """
         cleaned_title = task_title.strip() or "Công việc cần thực hiện"
         context_payload: dict[str, Any] = {
@@ -298,46 +592,28 @@ class AIService:
         }
         user_prompt = json.dumps(context_payload, ensure_ascii=False)
 
-        # Tầng 1: Gemini 3.8 Flash
         try:
-            llm_payload = await self._call_gemini_structured(
+            llm_payload, winner_tier = await self._execute_hedged_structured(
+                flow_name="UF2",
                 system_prompt=UF2_DECOMPOSITION_SYSTEM_PROMPT,
                 user_prompt=user_prompt,
                 schema_cls=LLMTaskDecompositionPayload,
+                profile=self._decomposition_profile(),
             )
             return TaskDecompositionResult(
                 **llm_payload.model_dump(),
-                generation_tier="tier_1_gemini",
+                generation_tier=winner_tier,
             )
         except Exception as exc:
             logger.warning(
-                "UF2 Tier 1 (Gemini) chuyển sang Tier 2 do lỗi: %s",
+                "UF2 chuyển sang Tier 3 Rule-based do lỗi: %s",
                 type(exc).__name__,
             )
-
-        # Tầng 2: Groq Llama-3 Fallback
-        try:
-            llm_payload = await self._call_groq_structured(
-                system_prompt=UF2_DECOMPOSITION_SYSTEM_PROMPT,
-                user_prompt=user_prompt,
-                schema_cls=LLMTaskDecompositionPayload,
+            return self._fallback_decompose_task(
+                cleaned_title,
+                user_focus_duration=user_focus_duration,
+                scope=scope,
             )
-            return TaskDecompositionResult(
-                **llm_payload.model_dump(),
-                generation_tier="tier_2_groq",
-            )
-        except Exception as exc:
-            logger.warning(
-                "UF2 Tier 2 (Groq) chuyển sang Tier 3 Rule-based do lỗi: %s",
-                type(exc).__name__,
-            )
-
-        # Tầng 3: Deterministic Rule-based Fallback
-        return self._fallback_decompose_task(
-            cleaned_title,
-            user_focus_duration=user_focus_duration,
-            scope=scope,
-        )
 
     def _fallback_decompose_task(
         self,
@@ -407,49 +683,31 @@ class AIService:
         *,
         task_title: str | None = None,
     ) -> RescheduleEmpatheticResult:
-        """Sinh câu giải thích dời lịch ấm áp, không phán xét ở UF6 theo 3 tầng dự phòng."""
+        """Sinh câu giải thích dời lịch ấm áp, không phán xét ở UF6 theo cơ chế Hedged Execution."""
         context_payload: dict[str, Any] = {
             "trigger_reason": trigger_reason,
             "task_title": task_title,
         }
         user_prompt = json.dumps(context_payload, ensure_ascii=False)
 
-        # Tầng 1: Gemini 3.8 Flash
         try:
-            llm_payload = await self._call_gemini_structured(
+            llm_payload, winner_tier = await self._execute_hedged_structured(
+                flow_name="UF6",
                 system_prompt=UF6_EMPATHETIC_SYSTEM_PROMPT,
                 user_prompt=user_prompt,
                 schema_cls=LLMRescheduleEmpathyPayload,
+                profile=self._interactive_profile(),
             )
             return RescheduleEmpatheticResult(
                 **llm_payload.model_dump(),
-                generation_tier="tier_1_gemini",
+                generation_tier=winner_tier,
             )
         except Exception as exc:
             logger.warning(
-                "UF6 Tier 1 (Gemini) chuyển sang Tier 2 do lỗi: %s",
+                "UF6 chuyển sang Tier 3 Rule-based do lỗi: %s",
                 type(exc).__name__,
             )
-
-        # Tầng 2: Groq Llama-3 Fallback
-        try:
-            llm_payload = await self._call_groq_structured(
-                system_prompt=UF6_EMPATHETIC_SYSTEM_PROMPT,
-                user_prompt=user_prompt,
-                schema_cls=LLMRescheduleEmpathyPayload,
-            )
-            return RescheduleEmpatheticResult(
-                **llm_payload.model_dump(),
-                generation_tier="tier_2_groq",
-            )
-        except Exception as exc:
-            logger.warning(
-                "UF6 Tier 2 (Groq) chuyển sang Tier 3 Rule-based do lỗi: %s",
-                type(exc).__name__,
-            )
-
-        # Tầng 3: Deterministic Rule-based Fallback
-        return self._fallback_reschedule_empathy(trigger_reason)
+            return self._fallback_reschedule_empathy(trigger_reason)
 
     def _fallback_reschedule_empathy(self, trigger_reason: str) -> RescheduleEmpatheticResult:
         """Tầng 3 (Rule-based Fallback cho UF6): Bộ thông điệp khích lệ Guilt-free chuẩn hóa."""
