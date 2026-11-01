@@ -482,13 +482,25 @@ async def patch_candidate(
             )
             new_sessions[idx] = new_sessions[idx].model_copy(update=patch_dict)
 
-    # TODO(Algorithm A05-A10): Gọi lại hàm tính thời lượng và feasibility từ scheduler_engine khi Role Algorithm bàn giao.
+    total_req_sec = sum(s.duration_seconds for s in new_sessions)
+    avail_sec = candidate.feasibility.available_seconds
+    deficit_sec = max(0, total_req_sec - avail_sec)
+    feasibility_status = "feasible" if deficit_sec == 0 else "infeasible"
+    updated_feasibility = candidate.feasibility.model_copy(
+        update={
+            "required_seconds": total_req_sec,
+            "deficit_seconds": deficit_sec,
+            "status": feasibility_status,
+            "fully_scheduled": deficit_sec == 0,
+        }
+    )
     next_review_rev = candidate.review_revision + 1
     updated_candidate = candidate.model_copy(
         update={
             "planning_parts": new_parts,
             "steps": new_steps,
             "sessions": new_sessions,
+            "feasibility": updated_feasibility,
             "review_revision": next_review_rev,
         }
     )
