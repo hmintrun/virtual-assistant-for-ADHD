@@ -67,6 +67,18 @@ class Settings(BaseSettings):
     VOICE_STT_TIMEOUT_SECONDS: float = Field(default=20.0, gt=0.0, le=120.0)
     VOICE_MAX_AUDIO_BYTES: int = Field(default=10 * 1024 * 1024, gt=0)
 
+    # Voice TTS (check-in UF5, nhắc UF3, động viên UF6) — Gemini TTS, dự phòng flutter_tts ở Mobile.
+    # Free tier chỉ ~10 lượt/ngày/model nên có cache in-memory cho câu lặp lại.
+    VOICE_TTS_PROVIDER: Literal["gemini", "fake"] = "gemini"
+    GEMINI_TTS_MODEL: str = "gemini-3.8-flash-lite-tts"
+    GEMINI_TTS_VOICE: str = "Sulafat"  # Giọng "Warm" của Gemini
+    GEMINI_TTS_STYLE: str = (
+        "Ấm áp, nhẹ nhàng, chậm rãi, như một người bạn đồng hành đang động viên."
+    )
+    VOICE_TTS_TIMEOUT_SECONDS: float = Field(default=15.0, gt=0.0, le=120.0)
+    VOICE_TTS_MAX_CHARS: int = Field(default=500, gt=0)
+    VOICE_TTS_CACHE_SIZE: int = Field(default=128, ge=0)
+
     # Khung thời gian A — Luồng tương tác trực tiếp (UF1 & UF6):
     # 0.0s chạy 3.8-flash -> 2.6s Warm Backup 3.5-flash-lite -> 3.5s Groq -> ưu tiên 3.8-flash tới 4.0s -> cắt cứng 4.5s
     AI_TIMEOUT_SECONDS: float = Field(default=4.5, gt=0.0, le=20.0)

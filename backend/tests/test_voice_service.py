@@ -224,3 +224,187 @@ async def test_gemini_without_key_is_unavailable():
     with pytest.raises(SttError) as info:
         await provider.transcribe(AUDIO, "audio/m4a")
     assert info.value.code is SttErrorCode.PROVIDER_UNAVAILABLE
+
+
+# =============================================================================
+# TTS
+# =============================================================================
+
+from app.services.voice_service import (  # noqa: E402
+    FakeTtsProvider,
+    GeminiTtsProvider,
+    TtsError,
+    TtsErrorCode,
+    TtsService,
+    map_tts_exception,
+)
+
+
+class _CountingTtsProvider:
+    name = "counting"
+    cache_key = "counting|v1"
+
+    def __init__(self, audio: bytes = b"RIFFfake", error: Exception | None = None, delay=0.0):
+        self.calls = 0
+        self._audio = audio
+        self._error = error
+        self._delay = delay
+
+    async def synthesize(self, text: str) -> bytes:
+        self.calls += 1
+        if self._delay:
+            await asyncio.sleep(self._delay)
+        if self._error is not None:
+            raise self._error
+        return self._audio
+
+
+def _tts(provider, *, timeout=1.0, max_chars=50, cache_size=4) -> TtsService:
+    return TtsService(provider, timeout_seconds=timeout, max_chars=max_chars, cache_size=cache_size)
+
+
+async def test_tts_success_returns_wav():
+    result = await _tts(FakeTtsProvider()).synthesize("Phiên làm việc đã kết thúc.")
+    assert result.audio.startswith(b"RIFF")
+    assert result.mime_type == "audio/wav"
+    assert result.provider == "fake"
+    assert result.cached is False
+
+
+async def test_tts_cache_saves_quota_for_repeated_sentence():
+    """Free tier ~10 lượt/ngày: câu check-in lặp lại không được gọi Gemini lần nữa."""
+    provider = _CountingTtsProvider()
+    service = _tts(provider)
+    first = await service.synthesize("Bạn làm được đến đâu rồi?")
+    second = await service.synthesize("  Bạn  làm được đến đâu rồi?  ")
+    assert provider.calls == 1
+    assert first.cached is False
+    assert second.cached is True
+    assert second.audio == first.audio
+
+
+async def test_tts_cache_evicts_oldest():
+    provider = _CountingTtsProvider()
+    service = _tts(provider, cache_size=2)
+    for text in ["a", "b", "c"]:
+        await service.synthesize(text)
+    await service.synthesize("a")  # "a" đã bị đẩy ra -> gọi lại
+    assert provider.calls == 4
+
+
+async def test_tts_cache_disabled():
+    provider = _CountingTtsProvider()
+    service = _tts(provider, cache_size=0)
+    await service.synthesize("x")
+    await service.synthesize("x")
+    assert provider.calls == 2
+
+
+@pytest.mark.parametrize(
+    ("text", "code"),
+    [
+        ("", TtsErrorCode.EMPTY_TEXT),
+        ("   ", TtsErrorCode.EMPTY_TEXT),
+        ("x" * 51, TtsErrorCode.TEXT_TOO_LONG),
+    ],
+)
+async def test_tts_rejects_bad_text_without_calling_provider(text, code):
+    provider = _CountingTtsProvider()
+    with pytest.raises(TtsError) as info:
+        await _tts(provider).synthesize(text)
+    assert info.value.code is code
+    assert provider.calls == 0
+
+
+async def test_tts_timeout_is_retryable():
+    with pytest.raises(TtsError) as info:
+        await _tts(_CountingTtsProvider(delay=0.5), timeout=0.05).synthesize("xin chào")
+    assert info.value.code is TtsErrorCode.TIMEOUT
+    assert info.value.retryable is True
+
+
+async def test_tts_rate_limit_mapped_and_not_cached():
+    provider = _CountingTtsProvider(error=_HttpLikeError(429))
+    service = _tts(provider)
+    for _ in range(2):
+        with pytest.raises(TtsError) as info:
+            await service.synthesize("xin chào")
+        assert info.value.code is TtsErrorCode.RATE_LIMITED
+    assert provider.calls == 2
+
+
+async def test_tts_empty_audio_is_error():
+    with pytest.raises(TtsError) as info:
+        await _tts(_CountingTtsProvider(audio=b"")).synthesize("xin chào")
+    assert info.value.code is TtsErrorCode.EMPTY_AUDIO
+
+
+@pytest.mark.parametrize(
+    ("exc", "expected"),
+    [
+        (_HttpLikeError(429), TtsErrorCode.RATE_LIMITED),
+        (_HttpLikeError(403), TtsErrorCode.PROVIDER_UNAVAILABLE),
+        (_HttpLikeError(400), TtsErrorCode.INVALID_REQUEST),
+        (_HttpLikeError(503), TtsErrorCode.PROVIDER_ERROR),
+        (TimeoutError(), TtsErrorCode.TIMEOUT),
+    ],
+)
+def test_map_tts_exception(exc, expected):
+    assert map_tts_exception(exc).code is expected
+
+
+class _FakeGeminiTtsClient:
+    def __init__(self, data: str | None = "UklGRmZha2U=", fail=None):  # base64("RIFFfake")
+        self.kwargs: dict = {}
+        self._data = data
+        self._fail = fail
+        self.aio = SimpleNamespace(interactions=SimpleNamespace(create=self._create))
+
+    async def _create(self, **kwargs):
+        self.kwargs = kwargs
+        if self._fail is not None:
+            raise self._fail
+        return SimpleNamespace(output_audio=SimpleNamespace(data=self._data))
+
+
+def _gemini_tts(client, style="Ấm áp") -> GeminiTtsProvider:
+    provider = GeminiTtsProvider(
+        api_key="k", model="gemini-3.8-flash-lite-tts", voice="Sulafat", style=style
+    )
+    provider._client = client  # type: ignore[assignment]
+    return provider
+
+
+async def test_gemini_tts_request_shape_and_decode():
+    client = _FakeGeminiTtsClient()
+    audio = await _gemini_tts(client).synthesize("Xin chào")
+    assert audio == b"RIFFfake"
+    content = client.kwargs["input"][0]["content"][0]
+    assert content["text"] == "Xin chào"
+    assert content["annotations"] == [{"type": "speech_metadata", "style": "Ấm áp"}]
+    assert client.kwargs["generation_config"] == {"speech_config": [{"voice": "Sulafat"}]}
+
+
+async def test_gemini_tts_without_style_omits_annotations():
+    client = _FakeGeminiTtsClient()
+    await _gemini_tts(client, style="  ").synthesize("Xin chào")
+    assert "annotations" not in client.kwargs["input"][0]["content"][0]
+
+
+async def test_gemini_tts_no_audio_is_empty_audio_error():
+    with pytest.raises(TtsError) as info:
+        await _gemini_tts(_FakeGeminiTtsClient(data=None)).synthesize("Xin chào")
+    assert info.value.code is TtsErrorCode.EMPTY_AUDIO
+
+
+async def test_gemini_tts_without_key_is_unavailable():
+    provider = GeminiTtsProvider(api_key="", model="m", voice="Sulafat", style="")
+    with pytest.raises(TtsError) as info:
+        await provider.synthesize("Xin chào")
+    assert info.value.code is TtsErrorCode.PROVIDER_UNAVAILABLE
+
+
+def test_cache_key_changes_with_voice():
+    a = GeminiTtsProvider(api_key="k", model="m", voice="Sulafat", style="s")
+    b = GeminiTtsProvider(api_key="k", model="m", voice="Achernar", style="s")
+    assert a.cache_key != b.cache_key

@@ -1,22 +1,32 @@
-"""Dịch vụ giọng nói Backend (Role Voice — V01 & A21): chuyển audio người dùng chủ động gửi thành chữ.
+"""Dịch vụ giọng nói Backend (Role Voice).
 
+STT (V01 & A21): chuyển audio người dùng chủ động gửi thành chữ.
 Nhà cung cấp chính: Gemini 3.5 Transcribe (chế độ ``smart``) — chọn sau khảo sát STT tiếng Việt
 ngày 01/11/2026 (đúng ngày/giờ/thực thể tốt nhất, không bịa câu khi audio im lặng). Dự phòng khi
 Backend lỗi/mất mạng nằm ở Mobile (``speech_to_text`` on-device), không nằm trong file này.
 
+TTS (check-in UF5, lời nhắc UF3, động viên UF6): đọc câu của trợ lý thành audio WAV.
+Nhà cung cấp chính: Gemini 3.8 Flash(-Lite) TTS; dự phòng ở Mobile (``flutter_tts`` on-device).
+Free tier chỉ ~10 lượt/ngày -> có bộ nhớ đệm (cache) để câu lặp lại không tốn lượt gọi.
+Chưa có endpoint: API Sheet chưa có dòng cho TTS, chờ Backend Lead chốt hợp đồng.
+
 Quy tắc bắt buộc (AGENTS.md §2 UF4, doc Backend UF4/A21):
 - Chỉ xử lý audio do người dùng CHỦ ĐỘNG gửi. Không gọi STT cho bản ghi UF4 trong phiên.
-- KHÔNG log nội dung audio hoặc transcript — log chỉ có mã lỗi, nhà cung cấp, thời gian xử lý.
+- KHÔNG log nội dung audio, transcript hay câu TTS — log chỉ có mã lỗi, nhà cung cấp, thời gian.
 - File upload lên Google Files API phải được xóa ngay sau khi chép (kể cả khi lỗi).
-- Nhà cung cấp, model, chế độ, ngôn ngữ, timeout là tham số cấu hình (``app.core.config``).
+- Nhà cung cấp, model, chế độ, ngôn ngữ, giọng, timeout là tham số cấu hình (``app.core.config``).
 """
 
 from __future__ import annotations
 
 import asyncio
+import base64
+import hashlib
 import io
 import logging
 import time
+import wave
+from collections import OrderedDict
 from dataclasses import dataclass
 from enum import StrEnum
 from functools import lru_cache
@@ -317,3 +327,264 @@ def build_voice_service(app_settings: Settings | None = None) -> VoiceService:
 def get_voice_service() -> VoiceService:
     """Singleton VoiceService dùng chung cho Router (giữ một Gemini client duy nhất)."""
     return build_voice_service()
+
+
+# =============================================================================
+# TTS — đọc câu của trợ lý thành audio
+# =============================================================================
+
+
+class TtsErrorCode(StrEnum):
+    """Mã lỗi chuẩn của TTS — Mobile dựa vào đây để chuyển sang ``flutter_tts`` hoặc chỉ hiện chữ."""
+
+    EMPTY_TEXT = "EMPTY_TEXT"
+    TEXT_TOO_LONG = "TEXT_TOO_LONG"
+    INVALID_REQUEST = "INVALID_REQUEST"  # Nhà cung cấp từ chối nội dung/tham số (HTTP 400/422)
+    EMPTY_AUDIO = "EMPTY_AUDIO"  # Gọi thành công nhưng không có audio trả về
+    PROVIDER_UNAVAILABLE = "PROVIDER_UNAVAILABLE"
+    RATE_LIMITED = "RATE_LIMITED"
+    TIMEOUT = "TIMEOUT"
+    PROVIDER_ERROR = "PROVIDER_ERROR"
+
+
+_TTS_RETRYABLE = frozenset(
+    {TtsErrorCode.RATE_LIMITED, TtsErrorCode.TIMEOUT, TtsErrorCode.PROVIDER_ERROR}
+)
+
+_STT_TO_TTS_CODE: dict[SttErrorCode, TtsErrorCode] = {
+    SttErrorCode.RATE_LIMITED: TtsErrorCode.RATE_LIMITED,
+    SttErrorCode.TIMEOUT: TtsErrorCode.TIMEOUT,
+    SttErrorCode.PROVIDER_UNAVAILABLE: TtsErrorCode.PROVIDER_UNAVAILABLE,
+    SttErrorCode.UNSUPPORTED_AUDIO: TtsErrorCode.INVALID_REQUEST,
+}
+
+
+class TtsError(Exception):
+    """Lỗi đọc câu thành audio. Không chứa nội dung câu."""
+
+    def __init__(self, code: TtsErrorCode, detail: str = "") -> None:
+        super().__init__(f"{code}: {detail}" if detail else str(code))
+        self.code = code
+        self.detail = detail
+
+    @property
+    def retryable(self) -> bool:
+        return self.code in _TTS_RETRYABLE
+
+
+def map_tts_exception(exc: Exception) -> TtsError:
+    """Đổi lỗi SDK sang ``TtsError`` (dùng chung cách phân loại HTTP status với STT)."""
+    if isinstance(exc, TtsError):
+        return exc
+    stt_error = map_provider_exception(exc)
+    return TtsError(
+        _STT_TO_TTS_CODE.get(stt_error.code, TtsErrorCode.PROVIDER_ERROR), stt_error.detail
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class TtsResult:
+    """Audio đã tổng hợp. ``cached=True`` nghĩa là lấy từ bộ nhớ đệm, không tốn lượt gọi."""
+
+    audio: bytes
+    mime_type: str
+    provider: str
+    latency_ms: int
+    cached: bool
+
+
+class TtsProvider(Protocol):
+    """Giao diện chung cho mọi nhà cung cấp TTS."""
+
+    name: str
+
+    @property
+    def cache_key(self) -> str:
+        """Định danh cấu hình (model/giọng/phong cách) — đổi cấu hình thì cache cũ không dùng lại."""
+        ...
+
+    async def synthesize(self, text: str) -> bytes: ...
+
+
+class GeminiTtsProvider:
+    """Gemini 3.8 Flash(-Lite) TTS qua Gemini Developer API. Trả WAV 24 kHz mono 16-bit."""
+
+    name = "gemini"
+
+    def __init__(self, *, api_key: str, model: str, voice: str, style: str) -> None:
+        self._api_key = api_key
+        self._model = model
+        self._voice = voice
+        self._style = style.strip()
+        self._client: genai.Client | None = None
+
+    @property
+    def cache_key(self) -> str:
+        return f"{self.name}|{self._model}|{self._voice}|{self._style}"
+
+    def _get_client(self) -> genai.Client:
+        if not self._api_key:
+            raise TtsError(TtsErrorCode.PROVIDER_UNAVAILABLE, "missing_gemini_api_key")
+        if self._client is None:
+            self._client = genai.Client(api_key=self._api_key)
+        return self._client
+
+    def _text_content(self, text: str) -> dict[str, Any]:
+        content: dict[str, Any] = {"type": "text", "text": text}
+        if self._style:
+            # Docs: phong cách đọc đặt ở annotation speech_metadata, KHÔNG viết chỉ dẫn vào text.
+            content["annotations"] = [{"type": "speech_metadata", "style": self._style}]
+        return content
+
+    async def synthesize(self, text: str) -> bytes:
+        client = self._get_client()
+        try:
+            interaction = await client.aio.interactions.create(
+                model=self._model,
+                input=[{"type": "user_input", "content": [self._text_content(text)]}],
+                response_format={"type": "audio"},
+                generation_config={"speech_config": [{"voice": self._voice}]},
+            )
+        except Exception as exc:
+            raise map_tts_exception(exc) from exc
+
+        data = getattr(getattr(interaction, "output_audio", None), "data", None)
+        if not data:
+            raise TtsError(TtsErrorCode.EMPTY_AUDIO, "no_output_audio")
+        return base64.b64decode(data)
+
+
+def _silent_wav(duration_ms: int = 200, sample_rate: int = 24_000) -> bytes:
+    """WAV im lặng hợp lệ (mono 16-bit) cho FakeTtsProvider."""
+    buffer = io.BytesIO()
+    with wave.open(buffer, "wb") as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(sample_rate)
+        wav.writeframes(b"\x00\x00" * (sample_rate * duration_ms // 1000))
+    return buffer.getvalue()
+
+
+class FakeTtsProvider:
+    """Nhà cung cấp giả lập cho test/dev: trả WAV im lặng, không gọi mạng, không tốn quota."""
+
+    name = "fake"
+    cache_key = "fake"
+
+    async def synthesize(self, text: str) -> bytes:
+        return _silent_wav()
+
+
+class TtsService:
+    """Điều phối TTS: kiểm câu, tra bộ nhớ đệm, áp timeout, chuẩn hóa lỗi."""
+
+    MIME_TYPE = "audio/wav"
+
+    def __init__(
+        self,
+        provider: TtsProvider,
+        *,
+        timeout_seconds: float,
+        max_chars: int,
+        cache_size: int,
+    ) -> None:
+        self._provider = provider
+        self._timeout_seconds = timeout_seconds
+        self._max_chars = max_chars
+        self._cache_size = cache_size
+        self._cache: OrderedDict[str, bytes] = OrderedDict()
+
+    @property
+    def provider_name(self) -> str:
+        return self._provider.name
+
+    def _cache_key(self, text: str) -> str:
+        raw = f"{self._provider.cache_key}\n{text}".encode()
+        return hashlib.sha256(raw).hexdigest()
+
+    def _remember(self, key: str, audio: bytes) -> None:
+        if self._cache_size <= 0:
+            return
+        self._cache[key] = audio
+        self._cache.move_to_end(key)
+        while len(self._cache) > self._cache_size:
+            self._cache.popitem(last=False)
+
+    async def synthesize(self, text: str) -> TtsResult:
+        """Đọc câu thành WAV. Ném ``TtsError`` để Mobile chuyển sang ``flutter_tts``/chỉ hiện chữ."""
+        cleaned = " ".join((text or "").split())
+        if not cleaned:
+            raise TtsError(TtsErrorCode.EMPTY_TEXT)
+        if len(cleaned) > self._max_chars:
+            raise TtsError(TtsErrorCode.TEXT_TOO_LONG, f"chars={len(cleaned)}")
+
+        key = self._cache_key(cleaned)
+        cached = self._cache.get(key)
+        if cached is not None:
+            self._cache.move_to_end(key)
+            return TtsResult(cached, self.MIME_TYPE, self._provider.name, 0, cached=True)
+
+        started = time.perf_counter()
+        try:
+            # Lưu ý: khi hết quota, google-genai có thể tự thử lại trong im lặng -> chỉ thấy TIMEOUT.
+            audio = await asyncio.wait_for(
+                self._provider.synthesize(cleaned), timeout=self._timeout_seconds
+            )
+        except TtsError as exc:
+            self._log_failure(exc, started)
+            raise
+        except Exception as exc:
+            mapped = map_tts_exception(exc)
+            self._log_failure(mapped, started)
+            raise mapped from exc
+
+        if not audio:
+            empty = TtsError(TtsErrorCode.EMPTY_AUDIO, "empty_bytes")
+            self._log_failure(empty, started)
+            raise empty
+
+        latency_ms = int((time.perf_counter() - started) * 1000)
+        self._remember(key, audio)
+        logger.info(
+            "TTS thành công: provider=%s latency_ms=%d bytes=%d",
+            self._provider.name,
+            latency_ms,
+            len(audio),
+        )
+        return TtsResult(audio, self.MIME_TYPE, self._provider.name, latency_ms, cached=False)
+
+    def _log_failure(self, exc: TtsError, started: float) -> None:
+        logger.warning(
+            "TTS thất bại: provider=%s code=%s detail=%s elapsed_ms=%d",
+            self._provider.name,
+            exc.code,
+            exc.detail,
+            int((time.perf_counter() - started) * 1000),
+        )
+
+
+def build_tts_service(app_settings: Settings | None = None) -> TtsService:
+    """Tạo TtsService theo cấu hình ``VOICE_TTS_PROVIDER``."""
+    cfg = app_settings or settings
+    provider: TtsProvider
+    if cfg.VOICE_TTS_PROVIDER == "fake":
+        provider = FakeTtsProvider()
+    else:
+        provider = GeminiTtsProvider(
+            api_key=cfg.GEMINI_API_KEY.strip() if cfg.has_gemini_key else "",
+            model=cfg.GEMINI_TTS_MODEL,
+            voice=cfg.GEMINI_TTS_VOICE,
+            style=cfg.GEMINI_TTS_STYLE,
+        )
+    return TtsService(
+        provider,
+        timeout_seconds=cfg.VOICE_TTS_TIMEOUT_SECONDS,
+        max_chars=cfg.VOICE_TTS_MAX_CHARS,
+        cache_size=cfg.VOICE_TTS_CACHE_SIZE,
+    )
+
+
+@lru_cache(maxsize=1)
+def get_tts_service() -> TtsService:
+    """Singleton TtsService (giữ cache và một Gemini client dùng chung)."""
+    return build_tts_service()
