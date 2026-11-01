@@ -1,4 +1,4 @@
-"""Pydantic v2 schemas cho Session, FeasibilityReport và ScheduleProposal (UF2, UF6)."""
+"""Pydantic v2 schemas cho ScheduleData (Dòng 15), Session, FeasibilityReport và ScheduleProposal (UF2, UF6)."""
 
 from __future__ import annotations
 
@@ -9,7 +9,9 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from app.schemas.task import GenerationTier
+from app.schemas.common import ApiModel
+from app.schemas.planning import ScheduleVersion
+from app.schemas.task import GenerationTier, Session
 
 RescheduleTriggerReason = Literal[
     "incomplete",
@@ -28,6 +30,16 @@ FeasibilityStatus = Literal[
 ]
 VerificationScope = Literal["horizon_part", "full_task"]
 SegmentKind = Literal["work", "rest"]
+
+
+class ScheduleData(ApiModel):
+    """Dòng 15 trên API Sheet (GET /api/v1/schedule): Dữ liệu lịch các phiên đã xác nhận trong khoảng truy vấn."""
+
+    schedule_revision: int = Field(ge=1)
+    items: list[Session]
+    next_cursor: str | None = None
+    alarm_sync_state: str = Field(min_length=1)
+    calendar_sync_summary: str = Field(min_length=1)
 
 
 class SessionSegmentSchema(BaseModel):
@@ -210,3 +222,19 @@ class RescheduleEmpatheticResult(LLMRescheduleEmpathyPayload):
         default="tier_1_gemini",
         description="Tầng AI hoặc Rule-based đã sinh lời khích lệ (O15.generation_tier).",
     )
+
+
+__all__ = [
+    "FeasibilityReportSchema",
+    "FeasibilityStatus",
+    "LLMRescheduleEmpathyPayload",
+    "ProposedSessionSchema",
+    "RescheduleEmpatheticResult",
+    "RescheduleTriggerReason",
+    "ScheduleData",
+    "ScheduleVersion",
+    "SegmentKind",
+    "Session",
+    "SessionSegmentSchema",
+    "VerificationScope",
+]
