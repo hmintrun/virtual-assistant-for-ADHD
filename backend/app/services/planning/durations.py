@@ -116,13 +116,43 @@ def prepare_step_durations(
     Returns:
         tuple (buffered_work_seconds, segments, total_work, total_rest, duration_seconds)
     """
+    if step.remaining_base_seconds == 0:
+        return 0, [], 0, 0, 0
     buffered_work = calculate_buffered_work(
-        step.estimated_base_seconds,
+        step.remaining_base_seconds,
         step.buffer_multiplier if step.buffer_multiplier > 0 else pref.buffer_multiplier,
     )
     segments, total_work, total_rest, duration = build_session_segments(
         buffered_work_seconds=buffered_work,
-        work_interval_seconds=pref.work_interval_seconds if pref.work_interval_seconds > 0 else 1500,
-        rest_interval_seconds=pref.rest_interval_seconds if pref.rest_interval_seconds >= 0 else 300,
+        work_interval_seconds=pref.work_interval_seconds,
+        rest_interval_seconds=pref.rest_interval_seconds,
     )
     return buffered_work, segments, total_work, total_rest, duration
+
+
+def fit_session_to_slot(
+    remaining_work_seconds: int,
+    slot_seconds: int,
+    work_interval_seconds: int,
+    rest_interval_seconds: int,
+) -> tuple[list[SessionSegment], int, int, int]:
+    """Tìm lượng work lớn nhất vừa khe; nghỉ chỉ chèn giữa hai quãng work.
+
+    Binary search trên số giây work, không nhân buffer lần nữa và không
+    cộng gap giữa Sessions vào duration của Session.
+    """
+    if work_interval_seconds <= 0 or rest_interval_seconds < 0:
+        raise ValueError("Cấu hình work/rest không hợp lệ.")
+    if remaining_work_seconds < 0 or slot_seconds < 0:
+        raise ValueError("Khối lượng và sức chứa không được âm.")
+    lower, upper = 0, min(remaining_work_seconds, slot_seconds)
+    while lower < upper:
+        work = (lower + upper + 1) // 2
+        rest = ((work - 1) // work_interval_seconds) * rest_interval_seconds
+        if work + rest <= slot_seconds:
+            lower = work
+        else:
+            upper = work - 1
+    if lower == 0:
+        return [], 0, 0, 0
+    return build_session_segments(lower, work_interval_seconds, rest_interval_seconds)
