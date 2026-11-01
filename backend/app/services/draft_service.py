@@ -649,7 +649,10 @@ async def patch_draft(
     new_summary = draft.summary
     summary_changed = False
     if "summary" in changes_fields and payload.changes.summary is not None:
-        summary_patch = payload.changes.summary.model_dump(exclude_unset=True)
+        summary_patch = {
+            k: getattr(payload.changes.summary, k)
+            for k in payload.changes.summary.model_fields_set
+        }
         current_summary_dict = draft.summary.model_dump()
         updated_fields: list[str] = []
         for field_name, new_val in summary_patch.items():
@@ -788,9 +791,19 @@ async def confirm_draft_summary(
     avail_ref = draft.summary.availability_ref
     if avail_ref is not None:
         current_avail_rev = _CURRENT_AVAILABILITY_REVISIONS.get(
-            (user_id, avail_ref.availability_id)
+            (
+                user_id,
+                avail_ref.availability_id
+                if hasattr(avail_ref, "availability_id")
+                else avail_ref["availability_id"],
+            )
         )
-        if current_avail_rev is not None and avail_ref.revision != current_avail_rev:
+        ref_rev = (
+            avail_ref.revision
+            if hasattr(avail_ref, "revision")
+            else avail_ref["revision"]
+        )
+        if current_avail_rev is not None and ref_rev != current_avail_rev:
             raise AppError(
                 status_code=409,
                 code="SOURCE_CHANGED",
