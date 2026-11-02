@@ -6,7 +6,7 @@ phiên cố định, không chứng minh vô nghiệm chỉ từ việc greedy c
 
 from __future__ import annotations
 
-from datetime import UTC, timedelta
+from datetime import UTC, datetime, timedelta
 
 from app.schemas.common import BlockingReason, TimeConstraint, TimeInterval
 from app.schemas.planning import (
@@ -22,6 +22,80 @@ from app.services.planning.availability import _merge_intervals, _subtract_inter
 from app.services.planning.durations import calculate_buffered_work, fit_session_to_slot
 
 
+def compute_task_priority_key(
+    time_constraint: TimeConstraint,
+    importance: int | None = None,
+    created_at: datetime | None = None,
+    task_id: str = "",
+) -> tuple[datetime, int, datetime, tuple[datetime, str]]:
+    """Tính khóa ưu tiên PriorityKey(T) của một Task theo đặc tả [A07].
+
+    Quy tắc từ điển tăng dần:
+    1. finish_by_at / deadline_at (UTC): Hạn sớm hơn đứng trước (EDF).
+    2. -importance: Độ quan trọng cao hơn đứng trước (null -> 0).
+    3. start_at (UTC): Mốc cho phép bắt đầu sớm hơn đứng trước.
+    4. stable_tie_breaker: (created_at_utc, task_id) đảm bảo tính tất định.
+    """
+    task_end = (
+        time_constraint.deadline_at
+        if time_constraint.kind == "deadline"
+        else time_constraint.finish_by_at
+    )
+    if time_constraint.start_at is None or task_end is None:
+        raise ValueError("time_constraint cần đủ mốc bắt đầu và kết thúc.")
+    if time_constraint.start_at.utcoffset() is None or task_end.utcoffset() is None:
+        raise ValueError("Mốc thời gian phải có offset.")
+
+    end_utc = task_end.astimezone(UTC)
+    start_utc = time_constraint.start_at.astimezone(UTC)
+    imp_score = -(importance if importance is not None else 0)
+    created_utc = (
+        created_at.astimezone(UTC)
+        if created_at is not None
+        else datetime.min.replace(tzinfo=UTC)
+    )
+
+    return (end_utc, imp_score, start_utc, (created_utc, task_id))
+
+
+def order_steps_by_priority(
+    steps: list[CandidateStep],
+    planning_parts: list[CandidatePart],
+    task_priority_map: dict[str, tuple] | None = None,
+    step_to_task_map: dict[str, str] | None = None,
+) -> list[CandidateStep]:
+    """Sắp xếp chuỗi Steps cần lên lịch tuân thủ 2 tầng phân cấp của [A07]:
+
+    1. Cấp Task: Thứ tự ưu tiên giữa các Task theo PriorityKey(T) (Deadline -> Importance -> StartAt -> TieBreaker).
+    2. Cấp Step: Phụ thuộc nội bộ trong từng Task theo (PlanningPart.order_index, Step.order_index).
+    """
+    part_order_map = {p.client_part_key: p.order_index for p in planning_parts}
+    if len({s.client_step_key for s in steps}) != len(steps):
+        raise ValueError("Client Step key bị trùng.")
+
+    default_task_key = (
+        datetime.max.replace(tzinfo=UTC),
+        0,
+        datetime.max.replace(tzinfo=UTC),
+        (datetime.max.replace(tzinfo=UTC), ""),
+    )
+
+    def sort_key(step: CandidateStep) -> tuple:
+        task_id = (
+            step_to_task_map.get(step.client_step_key, "")
+            if step_to_task_map
+            else ""
+        )
+        task_prio = (
+            task_priority_map.get(task_id, default_task_key)
+            if task_priority_map
+            else (0,)
+        )
+        return (task_prio, part_order_map.get(step.client_part_key, 0), step.order_index)
+
+    return sorted(steps, key=sort_key)
+
+
 def schedule_candidate_sessions(
     steps: list[CandidateStep],
     effective_intervals: list[TimeInterval],
@@ -31,6 +105,11 @@ def schedule_candidate_sessions(
     planning_parts: list[CandidatePart],
     horizon_days: int = 14,
     min_gap_seconds: int = 900,
+    importance: int | None = None,
+    task_id: str = "",
+    created_at: datetime | None = None,
+    task_priority_map: dict[str, tuple] | None = None,
+    step_to_task_map: dict[str, str] | None = None,
 ) -> tuple[list[CandidateSession], FeasibilityReport]:
     """Trả lịch cụ thể và report cho các phần có Steps được đưa vào lần tính.
 
@@ -74,10 +153,24 @@ def schedule_candidate_sessions(
     ]
     free = _subtract_intervals(_merge_intervals(free), _merge_intervals(protected))
     available = int(sum((b - a).total_seconds() for a, b in free))
-    part_order = {p.client_part_key: p.order_index for p in planning_parts}
-    if len({s.client_step_key for s in steps}) != len(steps):
-        raise ValueError("Client Step key bị trùng.")
-    ordered = sorted(steps, key=lambda s: (part_order.get(s.client_part_key, 0), s.order_index))
+
+    if task_priority_map is None and task_id:
+        task_prio_map = {
+            task_id: compute_task_priority_key(
+                time_constraint, importance, created_at, task_id
+            )
+        }
+        s_to_t_map = step_to_task_map or {s.client_step_key: task_id for s in steps}
+    else:
+        task_prio_map = task_priority_map
+        s_to_t_map = step_to_task_map
+
+    ordered = order_steps_by_priority(
+        steps=steps,
+        planning_parts=planning_parts,
+        task_priority_map=task_prio_map,
+        step_to_task_map=s_to_t_map,
+    )
     remaining = {
         s.client_step_key: calculate_buffered_work(s.remaining_base_seconds, s.buffer_multiplier)
         if s.remaining_base_seconds
