@@ -176,6 +176,8 @@ typing-inspection==0.4.4
     #   fastapi
     #   pydantic
     #   pydantic-settings
+tzdata==2026.6 ; sys_platform == 'win32'
+    # via proactive-backend
 urllib3==2.8.0
     # via requests
 uvicorn==0.54.0
