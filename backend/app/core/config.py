@@ -57,6 +57,16 @@ class Settings(BaseSettings):
     GROQ_SECONDARY_FALLBACK_MODEL: str = "openai/gpt-oss-20b"
     GROQ_STT_MODEL: str = "whisper-large-v3-turbo"
 
+    # Voice STT (V01 & A21) — chọn sau khảo sát STT tiếng Việt 01/11/2026: Gemini Transcribe smart.
+    # Dự phòng khi Backend lỗi/mất mạng nằm ở Mobile (speech_to_text on-device).
+    VOICE_STT_PROVIDER: Literal["gemini", "fake"] = "gemini"
+    GEMINI_STT_MODEL: str = "gemini-3.5-transcribe"
+    GEMINI_STT_MODE: Literal["smart", "verbatim"] = "smart"
+    VOICE_STT_LANGUAGE: str = "vi-VN"
+    # Đo thực tế ~8-9s/clip ngắn (gồm ~2,5s upload) nên timeout rộng hơn luồng LLM.
+    VOICE_STT_TIMEOUT_SECONDS: float = Field(default=20.0, gt=0.0, le=120.0)
+    VOICE_MAX_AUDIO_BYTES: int = Field(default=10 * 1024 * 1024, gt=0)
+
     # Khung thời gian A — Luồng tương tác trực tiếp (UF1 & UF6):
     # 0.0s chạy 3.8-flash -> 2.6s Warm Backup 3.5-flash-lite -> 3.5s Groq -> ưu tiên 3.8-flash tới 4.0s -> cắt cứng 4.5s
     AI_TIMEOUT_SECONDS: float = Field(default=4.5, gt=0.0, le=20.0)

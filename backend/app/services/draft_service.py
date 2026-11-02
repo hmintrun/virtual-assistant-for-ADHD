@@ -2,15 +2,19 @@
 import json
 from datetime import datetime
 from typing import Any, Literal, cast
-from uuid import NAMESPACE_DNS, UUID, uuid5
+from uuid import NAMESPACE_DNS, UUID, uuid4, uuid5
 
-from sqlalchemy import select
+from pydantic import ValidationError
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import AppError
 from app.models.base import Base
 from app.models.planning import PlanningDraft as PlanningDraftModel
+from app.models.settings import Availability as AvailabilityModel
 from app.models.user import User as UserModel
+from app.models.user import UserPreference as UserPreferenceModel
+from app.schemas.availability import Availability
 from app.schemas.common import (
     AvailabilityRef,
     CandidateRef,
@@ -30,6 +34,9 @@ from app.schemas.draft import (
     TaskSummary,
     UpdateDraftRequest,
 )
+from app.schemas.task import LLMTaskExtractionPayload, TaskExtractionResult
+from app.services.ai_service import ai_service
+from app.services.scheduler_engine import validate_planning_prerequisites
 
 
 def _build_seed_draft(draft_id: str, client_draft_id: str) -> PlanningDraft:
@@ -110,9 +117,7 @@ _CREATE_IDEMPOTENCY_STORE: dict[tuple[str, str], tuple[str, str]] = {}
 _PATCH_IDEMPOTENCY_STORE: dict[tuple[str, str], tuple[str, PlanningDraft]] = {}
 
 # Lưu biên nhận Idempotency-Key cho thao tác xác nhận UF1: (user_id, idempotency_key) -> (payload_fingerprint, ConfirmSummaryResult)
-_CONFIRM_SUMMARY_IDEMPOTENCY_STORE: dict[
-    tuple[str, str], tuple[str, ConfirmSummaryResult]
-] = {}
+_CONFIRM_SUMMARY_IDEMPOTENCY_STORE: dict[tuple[str, str], tuple[str, ConfirmSummaryResult]] = {}
 
 # Lưu biên nhận Idempotency-Key cho thao tác phân tích AI UF1: (user_id, idempotency_key) -> (payload_fingerprint, PlanningDraft)
 _ANALYZE_IDEMPOTENCY_STORE: dict[tuple[str, str], tuple[str, PlanningDraft]] = {}
@@ -149,9 +154,7 @@ def _serialize_summary_payload(draft: PlanningDraft) -> dict[str, Any]:
     summary_dict["_api_meta"] = {
         "draft_id": draft.draft_id,
         "candidate_ref": (
-            draft.candidate_ref.model_dump(mode="json")
-            if draft.candidate_ref is not None
-            else None
+            draft.candidate_ref.model_dump(mode="json") if draft.candidate_ref is not None else None
         ),
         "confirmed_task_id": draft.confirmed_task_id,
         "source_thought_id": draft.source_thought_id,
@@ -167,11 +170,7 @@ def _row_to_schema(row: PlanningDraftModel, fallback_draft_id: str | None = None
         api_meta = {}
     draft_id_str = str(api_meta.get("draft_id") or fallback_draft_id or row.id)
     cand_ref_raw = api_meta.get("candidate_ref")
-    cand_ref = (
-        CandidateRef.model_validate(cand_ref_raw)
-        if isinstance(cand_ref_raw, dict)
-        else None
-    )
+    cand_ref = CandidateRef.model_validate(cand_ref_raw) if isinstance(cand_ref_raw, dict) else None
     confirmed_task_id = api_meta.get("confirmed_task_id")
     source_thought_id = api_meta.get("source_thought_id") or (
         str(row.source_thought_id) if row.source_thought_id else None
@@ -221,6 +220,23 @@ async def ensure_dev_seed_in_db(db: AsyncSession) -> None:
             )
             changed = True
 
+        existing_pref = await db.scalar(
+            select(UserPreferenceModel).where(UserPreferenceModel.user_id == uid)
+        )
+        if existing_pref is None:
+            db.add(
+                UserPreferenceModel(
+                    user_id=uid,
+                    work_interval_seconds=1500,
+                    rest_interval_seconds=300,
+                    effective_revision=1,
+                    buffer_multiplier=1.2,
+                    reminder_style="gentle",
+                    reminder_offsets=[900],
+                )
+            )
+            changed = True
+
     if changed:
         await db.flush()
 
@@ -258,44 +274,142 @@ async def ensure_dev_seed_in_db(db: AsyncSession) -> None:
 
 
 async def _persist_draft_to_db(
-    db: AsyncSession | None, user_id: str, draft: PlanningDraft
+    db: AsyncSession | None,
+    user_id: str,
+    draft: PlanningDraft,
+    *,
+    expected: PlanningDraft | None = None,
 ) -> None:
-    """Lưu hoặc cập nhật PlanningDraft xuống bảng planning_drafts qua AsyncSession."""
+    """Ghi DB trước khi cập nhật cache; kiểm phiên bản ngay trong câu UPDATE."""
+    if db is not None:
+        await ensure_dev_seed_in_db(db)
+        did = resolve_draft_uuid(draft.draft_id)
+        uid = resolve_user_uuid(user_id)
+        values = {
+            "stage": draft.stage,
+            "raw_input": draft.raw_input,
+            "input_source": draft.input_source,
+            "summary": _serialize_summary_payload(draft),
+            "summary_revision": draft.summary_revision,
+            "summary_confirmed_revision": draft.summary_confirmed_revision,
+            "planning_input_revision": draft.planning_input_revision,
+            "user_step_proposal": draft.user_step_proposal,
+        }
+        if expected is not None:
+            written_id = await db.scalar(
+                update(PlanningDraftModel)
+                .where(
+                    PlanningDraftModel.id == did,
+                    PlanningDraftModel.user_id == uid,
+                    PlanningDraftModel.summary_revision == expected.summary_revision,
+                    PlanningDraftModel.planning_input_revision == expected.planning_input_revision,
+                    PlanningDraftModel.summary_confirmed_revision.is_(None)
+                    if expected.summary_confirmed_revision is None
+                    else PlanningDraftModel.summary_confirmed_revision
+                    == expected.summary_confirmed_revision,
+                    PlanningDraftModel.stage == expected.stage,
+                )
+                .values(**values, revision=PlanningDraftModel.revision + 1)
+                .returning(PlanningDraftModel.id)
+                .execution_options(synchronize_session=False)
+            )
+            if written_id is None:
+                await db.rollback()
+                raise AppError(
+                    status_code=409,
+                    code="REVISION_CONFLICT",
+                    message="Bản nháp đã thay đổi. Hãy tải lại trước khi thực hiện tiếp.",
+                    next_action="reload_and_review",
+                )
+        else:
+            row = await db.get(PlanningDraftModel, did)
+            if row is None:
+                db.add(
+                    PlanningDraftModel(
+                        id=did, user_id=uid, client_draft_id=draft.client_draft_id, **values
+                    )
+                )
+            else:
+                if row.user_id != uid:
+                    raise AppError(
+                        status_code=404,
+                        code="RESOURCE_NOT_FOUND",
+                        message="Không tìm thấy bản nháp.",
+                        next_action="reload",
+                    )
+                for name, value in values.items():
+                    setattr(row, name, value)
+        await db.commit()
     _FAKE_DRAFTS_BY_OWNER[(user_id, draft.draft_id)] = draft
     _CLIENT_DRAFT_INDEX[(user_id, draft.client_draft_id)] = draft.draft_id
-    if db is None:
-        return
+
+
+async def get_user_availability(user_id: str, db: AsyncSession) -> Availability | None:
+    """Đọc nguồn giờ rảnh thật dùng chung cho GET /availability và phép kiểm UF1."""
     await ensure_dev_seed_in_db(db)
-    did = resolve_draft_uuid(draft.draft_id)
-    uid = resolve_user_uuid(user_id)
-    row = await db.get(PlanningDraftModel, did)
+    row = await db.scalar(
+        select(AvailabilityModel)
+        .where(AvailabilityModel.user_id == resolve_user_uuid(user_id))
+        .execution_options(populate_existing=True)
+    )
     if row is None:
-        row = PlanningDraftModel(
-            id=did,
-            user_id=uid,
-            client_draft_id=draft.client_draft_id,
-            stage=draft.stage,
-            raw_input=draft.raw_input,
-            input_source=draft.input_source,
-            summary=_serialize_summary_payload(draft),
-            summary_revision=draft.summary_revision,
-            summary_confirmed_revision=draft.summary_confirmed_revision,
-            planning_input_revision=draft.planning_input_revision,
-            user_step_proposal=draft.user_step_proposal,
+        return None
+    return Availability(
+        availability_id=str(row.id),
+        revision=row.revision,
+        timezone=row.timezone,
+        weekly_rules=row.weekly_rules,
+        date_overrides=row.date_overrides,
+        task_limits=row.task_limits,
+        source=row.source,
+        confirmed_at=row.confirmed_at,
+        effective_intervals=None,
+        calendar_context=None,
+    )
+
+
+async def _summary_availability(
+    summary: TaskSummary,
+    user_id: str,
+    db: AsyncSession | None,
+) -> Availability | None:
+    """Không tự nhận giờ rảnh do AI suy ra là nguồn đã được user xác nhận."""
+    ref = summary.availability_ref
+    if db is None or ref is None:
+        return None
+    availability = await get_user_availability(user_id, db)
+    if availability is None or availability.availability_id != ref.availability_id:
+        return None
+    return availability
+
+
+async def _evaluate_summary_for_user(
+    summary: TaskSummary,
+    user_id: str,
+    db: AsyncSession | None,
+) -> tuple[list[ClarificationIssue], bool]:
+    if db is None:
+        return _evaluate_summary_issues(summary)
+    availability = await _summary_availability(summary, user_id, db)
+    can_plan, issues = validate_planning_prerequisites(
+        summary.model_copy(update={"clarification_issues": []}),
+        availability,
+    )
+    if (
+        availability is not None
+        and summary.availability_ref is not None
+        and summary.availability_ref.revision != availability.revision
+    ):
+        issues.append(
+            ClarificationIssue(
+                code="SOURCE_CHANGED",
+                field_path="availability_ref.revision",
+                message="Bộ giờ rảnh đã thay đổi so với bản đang chọn.",
+                question="Bạn kiểm tra và chọn lại phiên bản giờ rảnh hiện tại nhé?",
+                blocking=True,
+            )
         )
-        db.add(row)
-    else:
-        row.stage = draft.stage
-        row.raw_input = draft.raw_input
-        row.input_source = draft.input_source
-        row.summary = _serialize_summary_payload(draft)
-        row.summary_revision = draft.summary_revision
-        row.summary_confirmed_revision = draft.summary_confirmed_revision
-        row.planning_input_revision = draft.planning_input_revision
-        row.user_step_proposal = draft.user_step_proposal
-    await db.commit()
-
-
+    return issues, can_plan and not any(issue.blocking for issue in issues)
 
 
 def _evaluate_summary_issues(summary: TaskSummary) -> tuple[list[ClarificationIssue], bool]:
@@ -345,9 +459,7 @@ def _evaluate_summary_issues(summary: TaskSummary) -> tuple[list[ClarificationIs
     return issues, can_plan
 
 
-def _build_initial_summary(
-    raw_input: str | None, summary_in: SummaryInput | None
-) -> TaskSummary:
+def _build_initial_summary(raw_input: str | None, summary_in: SummaryInput | None) -> TaskSummary:
     """Khởi tạo TaskSummary từ dữ liệu người dùng nhập khi gọi POST /drafts."""
     field_sources: dict[str, FieldSource] = {}
     if summary_in is not None:
@@ -383,9 +495,7 @@ def _build_initial_summary(
         )
     else:
         if raw_input is not None:
-            field_sources["description"] = FieldSource(
-                source="user_input", source_ref="raw_input"
-            )
+            field_sources["description"] = FieldSource(source="user_input", source_ref="raw_input")
         base_summary = TaskSummary(
             title=None,
             description=raw_input,
@@ -445,9 +555,7 @@ async def create_draft(
         if existing_row is not None:
             existing_dto = _row_to_schema(existing_row)
             _FAKE_DRAFTS_BY_OWNER[(user_id, existing_dto.draft_id)] = existing_dto
-            _CLIENT_DRAFT_INDEX[(user_id, payload.client_draft_id)] = (
-                existing_dto.draft_id
-            )
+            _CLIENT_DRAFT_INDEX[(user_id, payload.client_draft_id)] = existing_dto.draft_id
             _CREATE_IDEMPOTENCY_STORE[(user_id, idempotency_key)] = (
                 fingerprint,
                 existing_dto.draft_id,
@@ -455,7 +563,7 @@ async def create_draft(
             return existing_dto
 
     existing_draft_id = _CLIENT_DRAFT_INDEX.get((user_id, payload.client_draft_id))
-    if existing_draft_id is not None:
+    if db is None and existing_draft_id is not None:
         existing_draft = _FAKE_DRAFTS_BY_OWNER[(user_id, existing_draft_id)]
         _CREATE_IDEMPOTENCY_STORE[(user_id, idempotency_key)] = (
             fingerprint,
@@ -463,8 +571,10 @@ async def create_draft(
         )
         return existing_draft
 
-    new_draft_id = f"draft_{len(_FAKE_DRAFTS_BY_OWNER) + 1}"
+    new_draft_id = f"draft_{uuid4().hex}"
     summary = _build_initial_summary(payload.raw_input, payload.summary)
+    issues, can_plan = await _evaluate_summary_for_user(summary, user_id, db)
+    summary = summary.model_copy(update={"clarification_issues": issues, "can_plan": can_plan})
     stage = "summary_review" if summary.can_plan else "collecting"
     new_draft = PlanningDraft(
         draft_id=new_draft_id,
@@ -498,22 +608,28 @@ async def list_drafts(
         await ensure_dev_seed_in_db(db)
         uid = resolve_user_uuid(user_id)
         rows = (
-            await db.execute(
-                select(PlanningDraftModel)
-                .where(PlanningDraftModel.user_id == uid)
-                .order_by(PlanningDraftModel.created_at)
+            (
+                await db.execute(
+                    select(PlanningDraftModel)
+                    .where(PlanningDraftModel.user_id == uid)
+                    .order_by(PlanningDraftModel.created_at)
+                )
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
         for row in rows:
             dto = _row_to_schema(row)
             if (user_id, dto.draft_id) not in _FAKE_DRAFTS_BY_OWNER:
                 _FAKE_DRAFTS_BY_OWNER[(user_id, dto.draft_id)] = dto
 
-    user_drafts = [
-        draft
-        for (owner_id, _), draft in _FAKE_DRAFTS_BY_OWNER.items()
-        if owner_id == user_id
-    ]
+    user_drafts = (
+        [_row_to_schema(row) for row in rows]
+        if db is not None
+        else [
+            draft for (owner_id, _), draft in _FAKE_DRAFTS_BY_OWNER.items() if owner_id == user_id
+        ]
+    )
     start_index = 0
     if cursor is not None:
         for idx, draft in enumerate(user_drafts):
@@ -549,22 +665,20 @@ async def get_draft_by_id(
         uid = resolve_user_uuid(user_id)
         row = (
             await db.execute(
-                select(PlanningDraftModel).where(
+                select(PlanningDraftModel)
+                .where(
                     PlanningDraftModel.id == did,
                     PlanningDraftModel.user_id == uid,
                 )
+                .execution_options(populate_existing=True)
             )
         ).scalar_one_or_none()
         if row is not None:
             db_dto = _row_to_schema(row, fallback_draft_id=draft_id)
-            if in_mem is not None and in_mem != db_dto:
-                # Đồng bộ cập nhật mới từ bộ nhớ (ví dụ từ plan_service) xuống DB
-                await _persist_draft_to_db(db, user_id, in_mem)
-                return in_mem
             _FAKE_DRAFTS_BY_OWNER[(user_id, draft_id)] = db_dto
             return db_dto
 
-    if in_mem is None:
+    if db is not None or in_mem is None:
         raise AppError(
             status_code=404,
             code="RESOURCE_NOT_FOUND",
@@ -612,9 +726,7 @@ async def patch_draft(
         payload.expected_summary_revision is not None
         and payload.expected_summary_revision != draft.summary_revision
     )
-    input_rev_mismatch = (
-        payload.expected_planning_input_revision != draft.planning_input_revision
-    )
+    input_rev_mismatch = payload.expected_planning_input_revision != draft.planning_input_revision
     if summary_rev_mismatch or input_rev_mismatch:
         raise AppError(
             status_code=409,
@@ -662,6 +774,16 @@ async def patch_draft(
                 updated_fields.append(field_name)
                 summary_changed = True
 
+        # User có thể chọn giữ giá trị cũ khi trả lời câu hỏi review của AI.
+        reviewed_fields = {
+            issue.field_path
+            for issue in draft.summary.clarification_issues
+            if issue.code.startswith("AI_") and issue.field_path in summary_patch
+        }
+        if reviewed_fields:
+            summary_changed = True
+            updated_fields.extend(reviewed_fields - set(updated_fields))
+
         if summary_changed:
             next_summary_rev = draft.summary_revision + 1
             new_field_sources = dict(draft.summary.field_sources)
@@ -670,8 +792,9 @@ async def patch_draft(
                     source="user_confirmed",
                     source_ref=f"summary_revision:{next_summary_rev}",
                 )
-            merged_summary = draft.summary.model_copy(
-                update={
+            merged_summary = TaskSummary.model_validate(
+                {
+                    **draft.summary.model_dump(),
                     **{
                         k: ([] if k == "extra_requirements" and v is None else v)
                         for k, v in summary_patch.items()
@@ -679,7 +802,7 @@ async def patch_draft(
                     "field_sources": new_field_sources,
                 }
             )
-            issues, can_plan = _evaluate_summary_issues(merged_summary)
+            issues, can_plan = await _evaluate_summary_for_user(merged_summary, user_id, db)
             new_summary = merged_summary.model_copy(
                 update={
                     "clarification_issues": issues,
@@ -690,9 +813,7 @@ async def patch_draft(
     # Quy tắc tăng revision đúng một lần cho mỗi lần ghi thực sự thay đổi đầu vào
     any_input_changed = raw_input_changed or summary_changed or proposal_changed
     new_planning_input_revision = (
-        draft.planning_input_revision + 1
-        if any_input_changed
-        else draft.planning_input_revision
+        draft.planning_input_revision + 1 if any_input_changed else draft.planning_input_revision
     )
 
     if summary_changed:
@@ -721,7 +842,7 @@ async def patch_draft(
             "stage": new_stage,
         }
     )
-    await _persist_draft_to_db(db, user_id, updated_draft)
+    await _persist_draft_to_db(db, user_id, updated_draft, expected=draft)
     _PATCH_IDEMPOTENCY_STORE[(user_id, idempotency_key)] = (fingerprint, updated_draft)
     return updated_draft
 
@@ -770,8 +891,18 @@ async def confirm_draft_summary(
         )
 
     # 2. Kiểm tra điều kiện đủ 4 thông tin bắt buộc của UF1 (A02.2)
-    issues, can_plan = _evaluate_summary_issues(draft.summary)
-    if not can_plan or issues:
+    issues, can_plan = await _evaluate_summary_for_user(draft.summary, user_id, db)
+    issues.extend(
+        issue for issue in draft.summary.clarification_issues if issue.code.startswith("AI_")
+    )
+    if any(issue.code == "SOURCE_CHANGED" for issue in issues):
+        raise AppError(
+            status_code=409,
+            code="SOURCE_CHANGED",
+            message="Bộ giờ rảnh đã thay đổi. Hãy chọn lại trước khi xác nhận.",
+            next_action="rebuild_and_review",
+        )
+    if not can_plan or any(issue.blocking for issue in issues):
         raise AppError(
             status_code=422,
             code="VALIDATION_ERROR",
@@ -789,7 +920,7 @@ async def confirm_draft_summary(
 
     # 3. Kiểm tra nguồn giờ rảnh (availability_ref) có bị lệch revision hiện tại không (409 SOURCE_CHANGED)
     avail_ref = draft.summary.availability_ref
-    if avail_ref is not None:
+    if db is None and avail_ref is not None:
         current_avail_rev = _CURRENT_AVAILABILITY_REVISIONS.get(
             (
                 user_id,
@@ -819,7 +950,7 @@ async def confirm_draft_summary(
             "summary_confirmed_revision": draft.summary_revision,
         }
     )
-    await _persist_draft_to_db(db, user_id, confirmed_draft)
+    await _persist_draft_to_db(db, user_id, confirmed_draft, expected=draft)
 
     result = ConfirmSummaryResult(
         draft_id=confirmed_draft.draft_id,
@@ -870,8 +1001,7 @@ async def analyze_draft(
     snapshot_draft = await get_draft_by_id(user_id=user_id, draft_id=draft_id, db=db)
     if (
         payload.expected_summary_revision != snapshot_draft.summary_revision
-        or payload.expected_planning_input_revision
-        != snapshot_draft.planning_input_revision
+        or payload.expected_planning_input_revision != snapshot_draft.planning_input_revision
     ):
         raise AppError(
             status_code=409,
@@ -887,18 +1017,73 @@ async def analyze_draft(
             next_action="reload_and_review",
         )
 
-    # Pha 2: Chỗ chờ ghép hàm của Role AI (A01/A02.1).
-    # Hiện tại chưa đụng vào file ai_service.py của Role AI; tạm dùng kết quả mẫu để Router chạy được trên /docs.
-    proposed_title = snapshot_draft.summary.title or "Viết báo cáo môn học"
-    proposed_description = payload.raw_input or snapshot_draft.summary.description
-    proposed_scope = payload.message or snapshot_draft.summary.scope
+    # Pha 2: Gọi AI ngoài transaction; giữ snapshot làm ngữ cảnh, không tạo Task.
+    availability = await _summary_availability(snapshot_draft.summary, user_id, db)
+    summary = snapshot_draft.summary
+    tc = summary.time_constraint
+    timezone_name = (
+        tc.input_timezone
+        if tc is not None
+        else (availability.timezone if availability is not None else "Asia/Ho_Chi_Minh")
+    )
+    windows = []
+    if availability is not None:
+        for rule in availability.weekly_rules:
+            windows.append(
+                {
+                    "kind": "weekly_rule",
+                    "weekday": rule.weekday,
+                    "start_local": rule.start_local.strftime("%H:%M"),
+                    "end_local": rule.end_local.strftime("%H:%M"),
+                    "raw_phrase": f"Thứ {rule.weekday}: {rule.start_local:%H:%M}–{rule.end_local:%H:%M}",
+                }
+            )
+        for override in availability.date_overrides:
+            for interval in override.intervals:
+                windows.append(
+                    {
+                        "kind": "specific_date",
+                        "date": override.date.isoformat(),
+                        "start_local": interval.start_local.strftime("%H:%M"),
+                        "end_local": interval.end_local.strftime("%H:%M"),
+                        "raw_phrase": f"{override.date}: {interval.start_local:%H:%M}–{interval.end_local:%H:%M}",
+                    }
+                )
+    previous = LLMTaskExtractionPayload(
+        title=summary.title,
+        content=summary.description,
+        scope=summary.scope,
+        deadline=(tc.deadline_at if tc.kind == "deadline" else tc.finish_by_at) if tc else None,
+        extra_requirements=list(summary.extra_requirements),
+        structured_free_windows=windows,
+        summary=summary.description or "Bản nháp công việc",
+    )
+    if db is not None and db.in_transaction():
+        await db.rollback()
+    input_text = "\n".join(value for value in (payload.raw_input, payload.message) if value)
+    try:
+        extracted = TaskExtractionResult.model_validate(
+            await ai_service.extract_task_intent(
+                input_text,
+                timezone=timezone_name,
+                previous_draft=previous,
+                default_free_windows=windows,
+            )
+        )
+    except (TimeoutError, ValidationError) as exc:
+        raise AppError(
+            status_code=503,
+            code="AI_UNAVAILABLE",
+            message="Chưa phân tích được nội dung. Bản nháp được giữ nguyên để bạn sửa hoặc thử lại.",
+            retryable=True,
+            next_action="retry_or_edit_manually",
+        ) from exc
 
     # Pha 3: Kiểm tra lại revision hiện tại của Draft trước khi merge (T03: Chống kết quả AI cũ đè dữ liệu mới)
     current_draft = await get_draft_by_id(user_id=user_id, draft_id=draft_id, db=db)
     if (
         current_draft.summary_revision != snapshot_draft.summary_revision
-        or current_draft.planning_input_revision
-        != snapshot_draft.planning_input_revision
+        or current_draft.planning_input_revision != snapshot_draft.planning_input_revision
     ):
         raise AppError(
             status_code=409,
@@ -919,42 +1104,113 @@ async def analyze_draft(
     new_field_sources = dict(current_draft.summary.field_sources)
 
     merged_updates: dict[str, object] = {}
+    ai_issues: list[ClarificationIssue] = []
     for field_name, proposed_val in (
-        ("title", proposed_title),
-        ("description", proposed_description),
-        ("scope", proposed_scope),
+        ("title", extracted.title),
+        ("description", extracted.content),
+        ("scope", extracted.scope),
     ):
+        current_value = getattr(current_draft.summary, field_name)
+        if proposed_val is None or proposed_val == current_value:
+            continue
+        source = current_draft.summary.field_sources.get(field_name)
         if (
-            proposed_val is not None
-            and proposed_val != getattr(current_draft.summary, field_name)
+            source is not None
+            and source.source in {"user_confirmed", "user_input"}
+            and source.source_ref != "raw_input"
         ):
-            merged_updates[field_name] = proposed_val
-            new_field_sources[field_name] = FieldSource(
-                source="user_confirmed" if payload.message else "ai_suggested",
-                source_ref=f"summary_revision:{next_summary_rev}",
+            ai_issues.append(
+                ClarificationIssue(
+                    code="AI_FIELD_REVIEW_REQUIRED",
+                    field_path=field_name,
+                    message="Kết quả AI khác trường bạn đã chỉnh/xác nhận; giá trị cũ được giữ nguyên.",
+                    question=f"Bạn có muốn đổi trường {field_name} thành: {proposed_val}? Hãy sửa trực tiếp nếu đồng ý.",
+                    blocking=True,
+                )
             )
-
-    merged_summary = current_draft.summary.model_copy(
-        update={
+            continue
+        merged_updates[field_name] = proposed_val
+        new_field_sources[field_name] = FieldSource(
+            source="ai_suggested",
+            source_ref=f"summary_revision:{next_summary_rev}",
+        )
+    requirements = list(
+        dict.fromkeys(
+            [
+                *current_draft.summary.extra_requirements,
+                *extracted.extra_requirements,
+            ]
+        )
+    )
+    if requirements != current_draft.summary.extra_requirements:
+        merged_updates["extra_requirements"] = requirements
+        new_field_sources["extra_requirements"] = FieldSource(
+            source="ai_suggested",
+            source_ref=f"summary_revision:{next_summary_rev}",
+        )
+    current_tc = current_draft.summary.time_constraint
+    if extracted.deadline is not None:
+        end = extracted.deadline
+        old_end = (
+            (current_tc.deadline_at if current_tc.kind == "deadline" else current_tc.finish_by_at)
+            if current_tc
+            else None
+        )
+        if old_end != end:
+            # DTO AI hiện chưa có start_at/kind: không đoán ngày bắt đầu hay đổi window thành deadline.
+            ai_issues.append(
+                ClarificationIssue(
+                    code="AI_TIME_REVIEW_REQUIRED",
+                    field_path="time_constraint",
+                    message=f"AI nhận được mốc hoàn tất {end.isoformat()}, cần kiểm tra trên biểu mẫu thời gian.",
+                    question="Bạn xác nhận mốc bắt đầu, mốc hoàn tất và kiểu deadline/khoảng thời gian giúp mình nhé?",
+                    blocking=True,
+                )
+            )
+    for index, question in enumerate(dict.fromkeys(extracted.clarification_questions)):
+        ai_issues.append(
+            ClarificationIssue(
+                code="AI_CLARIFICATION",
+                field_path=f"clarification_questions[{index}]",
+                message=question,
+                question=question,
+                blocking=True,
+            )
+        )
+    if extracted.has_conflict and not extracted.clarification_questions:
+        ai_issues.append(
+            ClarificationIssue(
+                code="AI_CONFLICT",
+                field_path="summary",
+                message="AI phát hiện thông tin còn mâu thuẫn.",
+                question="Bạn kiểm tra lại thông tin tóm tắt trước khi xác nhận nhé?",
+                blocking=True,
+            )
+        )
+    merged_summary = TaskSummary.model_validate(
+        {
+            **current_draft.summary.model_dump(),
             **merged_updates,
             "field_sources": new_field_sources,
         }
     )
-    issues, can_plan = _evaluate_summary_issues(merged_summary)
-
+    issues, can_plan = await _evaluate_summary_for_user(merged_summary, user_id, db)
+    issues.extend(ai_issues)
+    can_plan = can_plan and not any(issue.blocking for issue in ai_issues)
     final_summary = merged_summary.model_copy(
         update={
             "clarification_issues": issues,
             "can_plan": can_plan,
         }
     )
+    new_raw_input = payload.raw_input if payload.raw_input is not None else current_draft.raw_input
+    if payload.message is not None:
+        new_raw_input = "\n".join(value for value in (new_raw_input, payload.message) if value)
 
     updated_draft = current_draft.model_copy(
         update={
-            "raw_input": payload.raw_input or current_draft.raw_input,
-            "source_thought_id": (
-                payload.source_thought_id or current_draft.source_thought_id
-            ),
+            "raw_input": new_raw_input,
+            "source_thought_id": (payload.source_thought_id or current_draft.source_thought_id),
             "summary": final_summary,
             "summary_revision": next_summary_rev,
             "summary_confirmed_revision": None,
@@ -962,12 +1218,9 @@ async def analyze_draft(
             "stage": "summary_review" if can_plan else "collecting",
         }
     )
-    await _persist_draft_to_db(db, user_id, updated_draft)
+    await _persist_draft_to_db(db, user_id, updated_draft, expected=snapshot_draft)
     _ANALYZE_IDEMPOTENCY_STORE[(user_id, idempotency_key)] = (
         fingerprint,
         updated_draft,
     )
     return updated_draft
-
-
-

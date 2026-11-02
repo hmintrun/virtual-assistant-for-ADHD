@@ -4,7 +4,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Query
 
-from app.api.deps import CurrentUserDep
+from app.api.deps import CurrentUserDep, DbSessionDep
 from app.schemas.common import SuccessEnvelope, build_response_meta
 from app.schemas.schedule import ScheduleData
 from app.services import plan_service
@@ -29,6 +29,7 @@ async def get_schedule(
         ),
     ],
     current_user: CurrentUserDep,
+    db: DbSessionDep,
     limit: Annotated[
         int,
         Query(gt=0, description="Số phiên tối đa trả về trong một trang (ví dụ: 50)"),
@@ -41,6 +42,7 @@ async def get_schedule(
     """Dòng 15 trên API Sheet: Đọc các phiên tập trung chính thức trong khoảng [from, to) (không gộp Candidate chưa duyệt)."""
     data = await plan_service.get_schedule(
         user_id=current_user.user_id,
+        db=db,
         from_at=from_at,
         to_at=to_at,
         limit=limit,

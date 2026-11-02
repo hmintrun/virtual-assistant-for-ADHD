@@ -10,10 +10,7 @@ import 'screens/home_screen.dart';
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
   final taskProvider = TaskProvider();
-  unawaited(() async {
-    await taskProvider.restoreDraft();
-    await taskProvider.restoreBackendState();
-  }());
+  unawaited(taskProvider.restoreCurrentDraft());
   runApp(
     ChangeNotifierProvider.value(
       value: taskProvider,

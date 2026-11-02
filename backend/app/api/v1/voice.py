@@ -1,15 +1,83 @@
 # Router cho API chuyển giọng nói thành chữ (Dòng 8 trên API Sheet: POST /api/v1/voice/transcriptions)
+import hashlib
 import json
 from typing import Annotated, Literal
+from uuid import UUID
 
 from fastapi import APIRouter, File, Form, Header, UploadFile
+from sqlalchemy import select
 
-from app.api.deps import CurrentUserDep
+from app.api.deps import CurrentUserDep, DbSessionDep
+from app.core.config import settings
 from app.core.errors import AppError
+from app.models.execution import SessionRun
+from app.models.thought import Thought
 from app.schemas.common import FieldError, SuccessEnvelope, build_response_meta
 from app.schemas.voice import TranscriptionData
+from app.services.draft_service import resolve_user_uuid
+from app.services.voice_service import SttError, SttErrorCode, get_voice_service
 
 router = APIRouter(prefix="/voice", tags=["voice"])
+
+# Bảng đổi mã lỗi STT -> (HTTP status, code, message, next_action) theo Error Envelope của Sheet.
+# next_action gợi ý cho Mobile: ghi âm lại / gõ tay / chuyển sang STT on-device (speech_to_text).
+_STT_ERROR_MAP: dict[SttErrorCode, tuple[int, str, str, str]] = {
+    SttErrorCode.NO_SPEECH: (
+        422,
+        "NO_SPEECH_DETECTED",
+        "Chưa nghe rõ lời nói trong bản ghi. Bạn thử nói lại gần micro hơn hoặc gõ chữ nhé.",
+        "record_again_or_type",
+    ),
+    SttErrorCode.UNSUPPORTED_AUDIO: (
+        422,
+        "UNSUPPORTED_AUDIO",
+        "File âm thanh không đọc được. Bạn thử ghi âm lại hoặc gõ chữ nhé.",
+        "record_again_or_type",
+    ),
+    SttErrorCode.AUDIO_TOO_LARGE: (
+        413,
+        "AUDIO_TOO_LARGE",
+        "Bản ghi quá dài. Bạn thử nói ngắn gọn hơn hoặc gõ chữ nhé.",
+        "record_again_or_type",
+    ),
+    SttErrorCode.PROVIDER_UNAVAILABLE: (
+        503,
+        "STT_UNAVAILABLE",
+        "Dịch vụ nhận giọng nói tạm thời chưa sẵn sàng. Bạn có thể nói lại hoặc gõ chữ.",
+        "use_on_device_stt_or_type",
+    ),
+    SttErrorCode.RATE_LIMITED: (
+        503,
+        "STT_RATE_LIMITED",
+        "Dịch vụ nhận giọng nói đang bận. Bạn có thể nói lại hoặc gõ chữ.",
+        "use_on_device_stt_or_type",
+    ),
+    SttErrorCode.TIMEOUT: (
+        504,
+        "STT_TIMEOUT",
+        "Nhận giọng nói mất nhiều thời gian hơn dự kiến. Bạn có thể nói lại hoặc gõ chữ.",
+        "use_on_device_stt_or_type",
+    ),
+    SttErrorCode.PROVIDER_ERROR: (
+        503,
+        "STT_PROVIDER_ERROR",
+        "Dịch vụ nhận giọng nói gặp sự cố. Bạn có thể nói lại hoặc gõ chữ.",
+        "use_on_device_stt_or_type",
+    ),
+}
+
+
+def _stt_error_to_app_error(exc: SttError) -> AppError:
+    """Đổi lỗi STT sang AppError (không đưa nội dung audio/transcript vào thông báo)."""
+    status_code, code, message, next_action = _STT_ERROR_MAP[exc.code]
+    return AppError(
+        status_code=status_code,
+        code=code,
+        message=message,
+        next_action=next_action,
+        retryable=exc.retryable,
+    )
+
 
 # Lưu biên nhận Idempotency-Key tạm thời cho lệnh chuyển âm: (user_id, idempotency_key) -> (fingerprint, TranscriptionData)
 _VOICE_IDEMPOTENCY_STORE: dict[tuple[str, str], tuple[str, TranscriptionData]] = {}
@@ -38,6 +106,7 @@ async def create_transcription(
         ),
     ],
     current_user: CurrentUserDep,
+    db: DbSessionDep,
     thought_id: Annotated[
         str | None,
         Form(
@@ -62,7 +131,57 @@ async def create_transcription(
             next_action="fix_fields",
         )
 
-    audio_bytes = await file.read()
+    async def check_thought():
+        if purpose != "thought_to_draft":
+            return
+        try:
+            thought_uuid = UUID(thought_id)
+        except (TypeError, ValueError):
+            raise AppError(
+                status_code=404,
+                code="RESOURCE_NOT_FOUND",
+                message="Không tìm thấy Thought.",
+                next_action="reload",
+            ) from None
+        owner = resolve_user_uuid(current_user.user_id)
+        thought = await db.scalar(
+            select(Thought).where(Thought.id == thought_uuid, Thought.user_id == owner)
+        )
+        if thought is None:
+            raise AppError(
+                status_code=404,
+                code="RESOURCE_NOT_FOUND",
+                message="Không tìm thấy Thought.",
+                next_action="reload",
+            )
+        if thought.source_run_id is not None:
+            run = await db.scalar(
+                select(SessionRun).where(
+                    SessionRun.id == thought.source_run_id, SessionRun.user_id == owner
+                )
+            )
+            if run is None:
+                raise AppError(
+                    status_code=404,
+                    code="RESOURCE_NOT_FOUND",
+                    message="Không tìm thấy phiên nguồn.",
+                    next_action="reload",
+                )
+            if run.ended_at is None:
+                raise AppError(
+                    status_code=409,
+                    code="SESSION_STILL_RUNNING",
+                    message="Chỉ chuyển chữ sau khi phiên dừng.",
+                    next_action="wait_for_session_end",
+                )
+
+    await check_thought()
+    # Đóng transaction đọc trước khi chờ provider.
+    if db.in_transaction():
+        await db.rollback()
+    audio_bytes = await file.read(settings.VOICE_MAX_AUDIO_BYTES + 1)
+    if len(audio_bytes) > settings.VOICE_MAX_AUDIO_BYTES:
+        raise _stt_error_to_app_error(SttError(SttErrorCode.AUDIO_TOO_LARGE))
     if not audio_bytes:
         raise AppError(
             status_code=422,
@@ -84,7 +203,8 @@ async def create_transcription(
             "device_id": device_id,
             "thought_id": thought_id,
             "filename": file.filename or "",
-            "size": len(audio_bytes),
+            "content_type": file.content_type,
+            "audio_sha256": hashlib.sha256(audio_bytes).hexdigest(),
         },
         sort_keys=True,
     )
@@ -106,10 +226,19 @@ async def create_transcription(
             meta=build_response_meta(),
         )
 
-    # TODO(Voice - V01): Khi Role Voice bàn giao voice_service.py, gọi hàm STT tại đây.
-    # Hiện giữ nguyên voice_service.py của Role Voice để tránh xung đột Git.
+    # V01/A21 (Role Voice): chuyển audio thành chữ qua voice_service; lỗi đổi sang Error Envelope.
+    try:
+        stt_result = await get_voice_service().transcribe(
+            audio_bytes,
+            content_type=file.content_type,
+            filename=file.filename,
+        )
+    except SttError as exc:
+        raise _stt_error_to_app_error(exc) from exc
+
+    await check_thought()
     data = TranscriptionData(
-        text="Viết bản nháp báo cáo môn học",
+        text=stt_result.text,
         input_source="thought" if purpose == "thought_to_draft" else "voice",
         thought_id=thought_id if purpose == "thought_to_draft" else None,
     )
@@ -121,4 +250,3 @@ async def create_transcription(
         data=data,
         meta=build_response_meta(),
     )
-

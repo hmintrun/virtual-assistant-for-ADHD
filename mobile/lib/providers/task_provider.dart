@@ -54,6 +54,7 @@ class TaskProvider extends ChangeNotifier {
   final PlanningApi _planningApi;
 
   String _title = '';
+  String _rawInputText = '';
   String _scope = '';
   DateTime? _deadline;
   AvailabilitySlot? _availability;
@@ -71,8 +72,14 @@ class TaskProvider extends ChangeNotifier {
   String? _apiError;
   String? _clientDraftId;
   String? _clientDraftFingerprint;
+  int _editRevision = 0;
+  int _operationSerial = 0;
+  int? _activeOperation;
+  bool _disposed = false;
+  Future<void> _storageTail = Future.value();
 
   String get title => _title;
+  String get inputText => _rawInputText.isEmpty ? _title : _rawInputText;
   String get scope => _scope;
   DateTime? get deadline => _deadline;
   AvailabilitySlot? get availability => _availability;
@@ -110,16 +117,33 @@ class TaskProvider extends ChangeNotifier {
     return '${labels.join(' · ')} (${availability.timezone})';
   }
 
+  Future<void> restoreCurrentDraft() async {
+    final revision = _editRevision;
+    try {
+      await restoreDraft();
+      if (!_disposed && revision == _editRevision) await restoreBackendState();
+    } on ApiException catch (error) {
+      if (!_disposed && revision == _editRevision) {
+        _apiError = error.message;
+        notifyListeners();
+      }
+    }
+  }
+
   Future<void> restoreBackendState() async {
-    final stored = await _storage.read(key: _storageKey);
+    final revision = _editRevision;
+    final stored = await _accept(_storage.read(key: _storageKey), revision);
     if (stored == null) return;
     try {
       final data = jsonDecode(stored) as Map<String, dynamic>;
       final draftId = data['backend_draft_id'] as String? ?? _draft?.draftId;
       final candidateId = data['backend_candidate_id'] as String?;
       if (draftId == null) return;
-      _serverAvailability = await _planningApi.getAvailability();
-      _draft = await _planningApi.getDraft(draftId);
+      _serverAvailability = await _accept(
+        _planningApi.getAvailability(),
+        revision,
+      );
+      _draft = await _accept(_planningApi.getDraft(draftId), revision);
       _applyDraftSummary();
       // Local storage is only a cache. Re-read any confirmed Task from the API
       // so a backend restart cannot leave a stale "confirmed" screen behind.
@@ -129,8 +153,12 @@ class TaskProvider extends ChangeNotifier {
       _planLocked = false;
       if (candidateId != null) {
         try {
-          _candidate = await _planningApi.getCandidate(candidateId);
-        } on ApiException {
+          _candidate = await _accept(
+            _planningApi.getCandidate(candidateId),
+            revision,
+          );
+        } on ApiException catch (error) {
+          if (error.code == 'REQUEST_SUPERSEDED') rethrow;
           // Candidate service is currently in-memory on backend; keep the draft usable.
         }
       }
@@ -138,118 +166,126 @@ class TaskProvider extends ChangeNotifier {
       final savedTaskId = savedTask?['task_id'] as String?;
       if (savedTaskId != null) {
         try {
-          _confirmedTask = await _planningApi.getTask(savedTaskId);
+          _confirmedTask = await _accept(
+            _planningApi.getTask(savedTaskId),
+            revision,
+          );
           _confirmed = true;
           _planLocked = true;
-        } on ApiException {
+        } on ApiException catch (error) {
+          if (error.code == 'REQUEST_SUPERSEDED') rethrow;
           // Do not show a cached task as confirmed if the server no longer has it.
         }
       }
       await _persist();
       notifyListeners();
     } on ApiException catch (error) {
+      if (_disposed || revision != _editRevision) return;
       _apiError = error.message;
       notifyListeners();
     }
   }
 
-  Future<void> prepareDraftAndAnalyze() async {
-    if (_title.trim().isEmpty) {
-      throw const ApiException('Hãy nhập nội dung công việc trước.');
+  Future<T> _accept<T>(Future<T> request, int revision) async {
+    final result = await request;
+    if (_disposed || revision != _editRevision) {
+      throw const ApiException(
+        'Nội dung đã thay đổi. Kết quả cũ được bỏ qua.',
+        code: 'REQUEST_SUPERSEDED',
+      );
     }
-    await _runApi(() async {
-      if (_deadline != null && !_deadline!.isAfter(DateTime.now())) {
-        throw const ApiException(
-            'Hạn chót đã qua. Hãy chọn một thời điểm trong tương lai.');
-      }
-      _serverAvailability = await _planningApi.getAvailability();
-      if (_draft == null || _draft!.rawInput != _title.trim()) {
-        if (_draft != null) {
-          _clientDraftId = ApiClient.newIdempotencyKey('draft');
-          _candidate = null;
-          _confirmedTask = null;
-          _planLocked = false;
-        }
-        _ensureClientDraftId();
-        await _persist();
-        _draft = await _planningApi.createDraft(
-          clientDraftId: _clientDraftId!,
-          rawInput: _title.trim(),
-          title: _title.trim(),
-          scope: _scope,
-          deadline: _deadline,
-          availability: _serverAvailability!,
-        );
-        await _persist();
-      } else {
-        _draft = await _planningApi.updateSummary(
-          draft: _draft!,
-          title: _title.trim(),
-          scope: _scope.trim(),
-          deadline: _deadline,
-          timezone: _serverAvailability!.timezone,
-        );
-      }
-      _draft = await _planningApi.analyzeDraft(_draft!);
+    return result;
+  }
+
+  Future<void> prepareDraftAndAnalyze() async {
+    if (_title.trim().isEmpty)
+      throw const ApiException('Hãy nhập nội dung công việc trước.');
+    await _runApi((revision) async {
+      var current = await _saveInput(revision);
+      current = await _accept(_planningApi.analyzeDraft(current), revision);
+      _draft = current;
       _applyDraftSummary();
       await _persist();
     });
   }
 
-  Future<void> saveDraftToBackend() async {
-    if (_title.trim().isEmpty) {
-      throw const ApiException('Nhập nội dung công việc để lưu nháp.');
-    }
-    await _runApi(() async {
-      if (_deadline != null && !_deadline!.isAfter(DateTime.now())) {
-        throw const ApiException(
-            'Hạn chót đã qua. Hãy chọn một thời điểm trong tương lai.');
+  Future<PlanningDraftModel> _saveInput(int revision) async {
+    final title = _title.trim(), scope = _scope.trim();
+    final input = inputText.trim();
+    final deadline = _deadline;
+    final existing = _draft;
+    final availability = await _accept(
+      _planningApi.getAvailability(),
+      revision,
+    );
+    _serverAvailability = availability;
+    PlanningDraftModel current;
+    if (existing == null || existing.rawInput != input) {
+      if (existing != null) {
+        _clientDraftId = null;
+        _clientDraftFingerprint = null;
       }
-      _serverAvailability ??= await _planningApi.getAvailability();
-      if (_draft == null || _draft!.rawInput != _title.trim()) {
-        if (_draft != null) {
-          _clientDraftId = ApiClient.newIdempotencyKey('draft');
-          _candidate = null;
-          _confirmedTask = null;
-          _planLocked = false;
-        }
-        _ensureClientDraftId();
-        await _persist();
-        _draft = await _planningApi.createDraft(
-          clientDraftId: _clientDraftId!,
-          rawInput: _title.trim(),
-          title: _title.trim(),
-          scope: _scope,
-          deadline: _deadline,
-          availability: _serverAvailability!,
-        );
-      } else {
-        _draft = await _planningApi.updateSummary(
-          draft: _draft!,
-          title: _title.trim(),
-          scope: _scope.trim(),
-          deadline: _deadline,
-          timezone: _serverAvailability!.timezone,
-        );
-      }
+      _ensureClientDraftId();
       await _persist();
+      if (revision != _editRevision)
+        throw const ApiException(
+          'Nội dung đã thay đổi.',
+          code: 'REQUEST_SUPERSEDED',
+        );
+      current = await _accept(
+        _planningApi.createDraft(
+          clientDraftId: _clientDraftId!,
+          rawInput: input,
+          title: title,
+          scope: scope,
+          deadline: deadline,
+          availability: availability,
+        ),
+        revision,
+      );
+    } else {
+      current = await _accept(
+        _planningApi.updateSummary(
+          draft: existing,
+          title: title,
+          scope: scope,
+          deadline: deadline,
+          timezone: availability.timezone,
+        ),
+        revision,
+      );
+    }
+    _draft = current;
+    _candidate = null;
+    await _persist();
+    return current;
+  }
+
+  Future<void> saveDraftToBackend() async {
+    if (_title.trim().isEmpty)
+      throw const ApiException('Nhập nội dung công việc để lưu nháp.');
+    await _runApi((revision) async {
+      await _saveInput(revision);
     });
   }
 
   Future<void> updateDraftOnBackend() async {
     final draft = _draft;
     final availability = _serverAvailability;
-    if (draft == null || availability == null) {
+    if (draft == null || availability == null)
       throw const ApiException('Chưa có bản nháp trên máy chủ.');
-    }
-    await _runApi(() async {
-      _draft = await _planningApi.updateSummary(
-        draft: draft,
-        title: _title.trim(),
-        scope: _scope.trim(),
-        deadline: _deadline,
-        timezone: availability.timezone,
+    await _runApi((revision) async {
+      final current = await _accept(
+        _planningApi.updateSummary(
+          draft: draft,
+          title: _title.trim(),
+          scope: _scope.trim(),
+          deadline: _deadline,
+          timezone: availability.timezone,
+        ),
+        revision,
       );
+      _draft = current;
       _applyDraftSummary();
       _candidate = null;
       await _persist();
@@ -259,16 +295,21 @@ class TaskProvider extends ChangeNotifier {
   Future<void> confirmDraftSummaryOnBackend() async {
     final draft = _draft;
     if (draft == null)
-      throw const ApiException('Chưa tạo bản nháp trên máy chủ.');
+      throw const ApiException(
+        'Cần lưu và kiểm tra bản nháp trên máy chủ trước.',
+      );
     if (!draft.canPlan) {
-      final issues = draft.clarificationIssues;
-      final issue = issues.isEmpty ? null : issues.first;
-      throw ApiException(issue?['question'] as String? ??
-          'Bổ sung các thông tin còn thiếu trước khi lập kế hoạch.');
+      final questions = draft.clarificationIssues
+          .map((i) => i['question'] ?? i['message'])
+          .whereType<String>();
+      throw ApiException(
+        questions.isEmpty
+            ? 'Bổ sung các thông tin còn thiếu trước khi lập kế hoạch.'
+            : questions.join('\n'),
+      );
     }
-    await _runApi(() async {
-      await _planningApi.confirmSummary(draft);
-      // API confirm-summary chỉ trả receipt. Giữ summary revision nguồn.
+    await _runApi((revision) async {
+      await _accept(_planningApi.confirmSummary(draft), revision);
       _draft = PlanningDraftModel(
         draftId: draft.draftId,
         clientDraftId: draft.clientDraftId,
@@ -286,41 +327,38 @@ class TaskProvider extends ChangeNotifier {
   }
 
   Future<void> generateCandidateOnBackend({String? stepProposal}) async {
-    var draft = _draft;
-    if (draft == null ||
-        draft.summaryConfirmedRevision != draft.summaryRevision) {
+    final source = _draft;
+    if (source == null ||
+        source.summaryConfirmedRevision != source.summaryRevision) {
       throw const ApiException('Hãy xác nhận thông tin công việc trước.');
     }
-    await _runApi(() async {
+    await _runApi((revision) async {
+      var current = source;
       final proposal = stepProposal?.trim();
       if (proposal != null && proposal.isNotEmpty) {
-        draft = await _planningApi.updateStepProposal(
-          draft: draft!,
-          proposal: proposal,
+        current = await _accept(
+          _planningApi.updateStepProposal(draft: current, proposal: proposal),
+          revision,
         );
-        _draft = PlanningDraftModel(
-          draftId: draft!.draftId,
-          clientDraftId: draft!.clientDraftId,
-          stage: draft!.stage,
-          summary: draft!.summary,
-          summaryRevision: draft!.summaryRevision,
-          planningInputRevision: draft!.planningInputRevision,
-          inputSource: draft!.inputSource,
-          rawInput: draft!.rawInput,
-          summaryConfirmedRevision: draft!.summaryConfirmedRevision,
-          userStepProposal: proposal,
-        );
+        _draft = current;
       }
-      _candidate = await _planningApi.createCandidate(_draft!);
+      final generated = await _accept(
+        _planningApi.createCandidate(current),
+        revision,
+      );
+      _candidate = generated;
       await _persist();
     });
   }
 
   Future<void> refreshCandidateFromBackend() async {
-    final candidate = _candidate;
-    if (candidate == null) return;
-    await _runApi(() async {
-      _candidate = await _planningApi.getCandidate(candidate.candidateId);
+    final current = _candidate;
+    if (current == null) return;
+    await _runApi((revision) async {
+      _candidate = await _accept(
+        _planningApi.getCandidate(current.candidateId),
+        revision,
+      );
       await _persist();
     });
   }
@@ -331,39 +369,40 @@ class TaskProvider extends ChangeNotifier {
     required String expectedOutput,
     required int estimatedBaseSeconds,
   }) async {
-    final candidate = _candidate;
-    if (candidate == null)
-      throw const ApiException('Chưa có phương án để sửa.');
-    await _runApi(() async {
-      _candidate = await _planningApi.updateCandidateStep(
-        candidate: candidate,
-        clientStepKey: clientStepKey,
-        title: title,
-        expectedOutput: expectedOutput,
-        estimatedBaseSeconds: estimatedBaseSeconds,
+    final current = _candidate;
+    if (current == null) throw const ApiException('Chưa có phương án để sửa.');
+    await _runApi((revision) async {
+      _candidate = await _accept(
+        _planningApi.updateCandidateStep(
+          candidate: current,
+          clientStepKey: clientStepKey,
+          title: title,
+          expectedOutput: expectedOutput,
+          estimatedBaseSeconds: estimatedBaseSeconds,
+        ),
+        revision,
       );
       await _persist();
     });
   }
 
   Future<void> confirmCandidateOnBackend() async {
-    final candidate = _candidate;
-    final draft = _draft;
-    if (candidate == null || draft == null) {
+    final candidate = _candidate, draft = _draft;
+    if (candidate == null || draft == null)
       throw const ApiException('Chưa có phương án từ máy chủ để xác nhận.');
-    }
-    if (!candidate.isFeasible) {
+    if (!candidate.isFeasible)
       throw const ApiException(
-          'Phương án chưa khả thi hoặc đã cũ. Hãy tính lại.');
-    }
-    await _runApi(() async {
-      final receipt = await _planningApi.confirmCandidate(
-        candidate: candidate,
-        draft: draft,
+        'Phương án chưa khả thi hoặc đã cũ. Hãy tính lại.',
       );
-      _confirmedTask = TaskModel.fromJson(
-        receipt['task'] as Map<String, dynamic>,
+    await _runApi((revision) async {
+      final receipt = await _accept(
+        _planningApi.confirmCandidate(candidate: candidate, draft: draft),
+        revision,
       );
+      final saved = TaskModel.fromJson(receipt['task'] as Map<String, dynamic>);
+      if (saved.taskId.isEmpty)
+        throw const ApiException('Máy chủ chưa trả công việc đã lưu.');
+      _confirmedTask = saved;
       _planLocked = true;
       _planSavedForLater = false;
       _confirmed = true;
@@ -378,19 +417,38 @@ class TaskProvider extends ChangeNotifier {
     await generateCandidateOnBackend();
   }
 
-  Future<void> _runApi(Future<void> Function() action) async {
+  Future<void> _runApi(Future<void> Function(int revision) action) async {
+    if (_isApiBusy)
+      throw const ApiException(
+        'Đang xử lý yêu cầu trước. Vui lòng chờ.',
+        code: 'REQUEST_IN_PROGRESS',
+      );
+    final operation = ++_operationSerial, revision = _editRevision;
+    _activeOperation = operation;
     _isApiBusy = true;
     _apiError = null;
     notifyListeners();
     try {
-      await action();
+      await action(revision);
     } on ApiException catch (error) {
-      _apiError = error.message;
+      if (!_disposed &&
+          revision == _editRevision &&
+          _activeOperation == operation) _apiError = error.message;
       rethrow;
     } finally {
-      _isApiBusy = false;
-      notifyListeners();
+      if (!_disposed && _activeOperation == operation) {
+        _activeOperation = null;
+        _isApiBusy = false;
+        notifyListeners();
+      }
     }
+  }
+
+  Future<void> startNewDraft() async {
+    if (_isApiBusy)
+      throw const ApiException('Đang xử lý công việc hiện tại. Vui lòng chờ.');
+    if (_title.trim().isNotEmpty && !_planLocked) await saveDraftToBackend();
+    clearDraft();
   }
 
   void _ensureClientDraftId() {
@@ -405,6 +463,7 @@ class TaskProvider extends ChangeNotifier {
   void _applyDraftSummary() {
     final summary = _draft?.summary;
     if (summary == null) return;
+    _rawInputText = _draft?.rawInput ?? _rawInputText;
     _title = summary['title'] as String? ?? _title;
     _scope = summary['scope'] as String? ?? _scope;
     final timeConstraint = summary['time_constraint'] as Map<String, dynamic>?;
@@ -425,6 +484,11 @@ class TaskProvider extends ChangeNotifier {
   }
 
   void lockPlan() {
+    if (_confirmedTask == null || _confirmedTask!.taskId.isEmpty) {
+      throw const ApiException(
+        'Chỉ chốt kế hoạch sau khi máy chủ xác nhận đã lưu.',
+      );
+    }
     _planLocked = true;
     _planSavedForLater = false;
     _confirmed = true;
@@ -521,17 +585,20 @@ class TaskProvider extends ChangeNotifier {
   }
 
   void setTitle(String value) {
+    if (_title == value) return;
     if (_title != value) {
       _candidate = null;
       _confirmedTask = null;
       _planLocked = false;
     }
     _title = value;
+    _rawInputText = value;
     _confirmed = false;
     _changed();
   }
 
   void setScope(String value) {
+    if (_scope == value) return;
     if (_scope != value) _candidate = null;
     _scope = value;
     _confirmed = false;
@@ -539,6 +606,7 @@ class TaskProvider extends ChangeNotifier {
   }
 
   void setDeadline(DateTime value) {
+    if (_deadline == value) return;
     if (_deadline != value) _candidate = null;
     _deadline = value;
     _confirmed = false;
@@ -578,11 +646,13 @@ class TaskProvider extends ChangeNotifier {
   }
 
   Future<void> restoreDraft() async {
+    final revision = _editRevision;
     try {
-      final value = await _storage.read(key: _storageKey);
+      final value = await _accept(_storage.read(key: _storageKey), revision);
       if (value == null) return;
       final data = jsonDecode(value) as Map<String, dynamic>;
       _title = data['title'] as String? ?? '';
+      _rawInputText = data['raw_input_text'] as String? ?? _title;
       _scope = data['scope'] as String? ?? '';
       final deadline = data['deadline'] as String?;
       _deadline = deadline == null ? null : DateTime.tryParse(deadline);
@@ -610,9 +680,10 @@ class TaskProvider extends ChangeNotifier {
       _clientDraftId = data['client_draft_id'] as String?;
       _clientDraftFingerprint = data['client_draft_fingerprint'] as String?;
       if (draftId == null && _clientDraftId != null) {
-        final drafts = await _planningApi.listDrafts();
-        final match =
-            drafts.where((item) => item.clientDraftId == _clientDraftId);
+        final drafts = await _accept(_planningApi.listDrafts(), revision);
+        final match = drafts.where(
+          (item) => item.clientDraftId == _clientDraftId,
+        );
         if (match.isNotEmpty) {
           _draft = match.first;
           draftId = _draft!.draftId;
@@ -640,7 +711,16 @@ class TaskProvider extends ChangeNotifier {
   }
 
   void clearDraft() {
+    _editRevision++;
+    _activeOperation = null;
+    _isApiBusy = false;
+    _apiError = null;
+    _clientDraftId = null;
+    _clientDraftFingerprint = null;
+    _voiceQuestion = '';
+    _decompositionChoice = null;
     _title = '';
+    _rawInputText = '';
     _scope = '';
     _deadline = null;
     _availability = null;
@@ -657,6 +737,7 @@ class TaskProvider extends ChangeNotifier {
   }
 
   void _changed() {
+    _editRevision++;
     _draftSaved = _title.trim().isNotEmpty;
     unawaited(_persist());
     notifyListeners();
@@ -669,6 +750,7 @@ class TaskProvider extends ChangeNotifier {
     }
     final data = <String, Object?>{
       'title': _title,
+      'raw_input_text': _rawInputText,
       'scope': _scope,
       'deadline': _deadline?.toIso8601String(),
       'availability_start': _availability?.start.toIso8601String(),
@@ -688,15 +770,29 @@ class TaskProvider extends ChangeNotifier {
       'planning_input_revision': _draft?.planningInputRevision,
     };
     try {
-      await _storage.write(key: _storageKey, value: jsonEncode(data));
+      final encoded = jsonEncode(data);
+      final write = _storageTail.then(
+        (_) => _storage.write(key: _storageKey, value: encoded),
+      );
+      _storageTail = write.catchError((Object _) {});
+      await write;
     } catch (_) {
       // Local storage may be unavailable in an unsupported browser context.
     }
   }
 
+  @override
+  void dispose() {
+    _disposed = true;
+    _editRevision++;
+    super.dispose();
+  }
+
   Future<void> _deleteDraft() async {
     try {
-      await _storage.delete(key: _storageKey);
+      final write = _storageTail.then((_) => _storage.delete(key: _storageKey));
+      _storageTail = write.catchError((Object _) {});
+      await write;
     } catch (_) {
       // The in-memory flow remains usable if local storage is unavailable.
     }

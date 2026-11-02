@@ -6,7 +6,6 @@ import '../providers/task_provider.dart';
 import '../widgets/melbel_ui.dart';
 import 'calendar_screen.dart';
 import 'task_entry_screen.dart';
-import 'uf2_screens.dart';
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -25,6 +24,21 @@ class _HomeScreenState extends State<HomeScreen> {
     return 'Chào buổi tối';
   }
 
+  Future<void> _openNewTask() async {
+    try {
+      await context.read<TaskProvider>().startNewDraft();
+      if (!mounted) return;
+      await Navigator.push(
+        context,
+        MaterialPageRoute<void>(builder: (_) => const TaskEntryScreen()),
+      );
+    } catch (error) {
+      if (mounted)
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('Chưa mở việc mới: $error')));
+    }
+  }
+
   void _onTabSelected(int index) {
     if (index == _selectedTab) return;
     if (index == 1) {
@@ -33,15 +47,13 @@ class _HomeScreenState extends State<HomeScreen> {
         MaterialPageRoute<void>(builder: (_) => const CalendarScreen()),
       );
     } else if (index == 2) {
-      Navigator.push(
-        context,
-        MaterialPageRoute<void>(builder: (_) => const TaskEntryScreen()),
-      );
+      _openNewTask();
     } else if (index == 3) {
       showMelbelInfo(
         context,
         title: 'Cài đặt trợ lý',
-        message: 'Các tùy chọn thời lượng phiên và phong cách nhắc sẽ có ở luồng tiếp theo.',
+        message:
+            'Các tùy chọn thời lượng phiên và phong cách nhắc sẽ có ở luồng tiếp theo.',
         icon: Icons.settings_outlined,
       );
     } else {
@@ -129,15 +141,13 @@ class _HomeScreenState extends State<HomeScreen> {
 
             // Quick Add Task Button
             InkWell(
-              onTap: () => Navigator.push(
-                context,
-                MaterialPageRoute<void>(
-                  builder: (_) => const TaskEntryScreen(),
-                ),
-              ),
+              onTap: _openNewTask,
               borderRadius: BorderRadius.circular(12),
               child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 16,
+                  vertical: 12,
+                ),
                 decoration: BoxDecoration(
                   color: MelbelColors.kSurfaceContainer,
                   borderRadius: BorderRadius.circular(12),
@@ -175,11 +185,23 @@ class _HomeScreenState extends State<HomeScreen> {
             // Section: Next Session (Hero Card)
             Consumer<TaskProvider>(
               builder: (context, task, _) {
-                final displayTitle =
-                    task.title.isEmpty ? 'Soạn báo cáo đánh giá quý 3' : task.title;
-                final displayScope = task.scope.isEmpty
-                    ? 'Bước 1: Soạn dàn ý sơ bộ'
-                    : task.scope;
+                final saved = task.confirmedTask;
+                if (saved == null || saved.sessions.isEmpty) {
+                  return const MelbelCard(
+                      child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                        Text('Chưa có phiên được tải cho công việc hiện tại.'),
+                        SizedBox(height: 8),
+                        Text(
+                            'Mở Lịch để xem các phiên đã xác nhận, hoặc thêm công việc mới.'),
+                      ]));
+                }
+
+                final displayTitle = saved.title;
+                final displayScope = saved.steps.isEmpty
+                    ? 'Phiên làm việc đã xác nhận'
+                    : saved.steps.first.title;
                 final displayDeadline = task.deadline == null
                     ? '18:00 Ngày mai'
                     : task.formatDeadline(task.deadline);
@@ -236,7 +258,7 @@ class _HomeScreenState extends State<HomeScreen> {
                       // Progress Bar with Moon Marker
                       Row(
                         mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                        children: const [
+                        children: [
                           Text(
                             'Tiến độ công việc',
                             style: TextStyle(
@@ -246,7 +268,7 @@ class _HomeScreenState extends State<HomeScreen> {
                             ),
                           ),
                           Text(
-                            'Phiên 2/5',
+                            '${saved.sessions.where((s) => s.status == 'completed').length}/${saved.sessions.length} phiên hoàn thành',
                             style: TextStyle(
                               fontFamily: 'Be Vietnam Pro',
                               fontSize: 12,
@@ -259,7 +281,10 @@ class _HomeScreenState extends State<HomeScreen> {
                       const SizedBox(height: 8),
                       LayoutBuilder(
                         builder: (context, constraints) {
-                          const factor = 0.4;
+                          final factor = saved.sessions
+                                  .where((s) => s.status == 'completed')
+                                  .length /
+                              saved.sessions.length;
                           final barWidth = constraints.maxWidth;
                           return Stack(
                             clipBehavior: Clip.none,
@@ -304,13 +329,13 @@ class _HomeScreenState extends State<HomeScreen> {
                       const SizedBox(height: 20),
 
                       PrimaryCta(
-                        label: 'Bắt đầu 25p',
+                        label: 'Xem lịch phiên',
                         icon: Icons.play_arrow,
                         onPressed: () {
                           Navigator.push(
                             context,
                             MaterialPageRoute<void>(
-                              builder: (_) => const SessionReminderScreen(),
+                              builder: (_) => const CalendarScreen(),
                             ),
                           );
                         },
@@ -558,8 +583,9 @@ class _BottomTab extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final color =
-        isSelected ? MelbelColors.kPrimaryContainer : MelbelColors.kOnSurfaceVariant;
+    final color = isSelected
+        ? MelbelColors.kPrimaryContainer
+        : MelbelColors.kOnSurfaceVariant;
     return InkWell(
       onTap: onTap,
       borderRadius: BorderRadius.circular(12),

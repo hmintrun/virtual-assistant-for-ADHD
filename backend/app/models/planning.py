@@ -67,8 +67,8 @@ class PlanCandidate(OwnedMixin, RecordMixin, Base):
 class PlanningPart(OwnedMixin, RecordMixin, Base):
     __tablename__ = "planning_parts"
     __table_args__ = (
-        UniqueConstraint("task_id", "client_part_key"),
-        UniqueConstraint("task_id", "order_index"),
+        UniqueConstraint("task_id", "client_part_key", name="uq_planning_parts_task_client_key"),
+        UniqueConstraint("task_id", "order_index", name="uq_planning_parts_task_order"),
         CheckConstraint("order_index >= 0", name="order_nonnegative"),
         CheckConstraint(
             "rough_estimate_seconds IS NULL OR rough_estimate_seconds > 0", name="estimate_positive"

@@ -1,11 +1,66 @@
+import 'dart:convert';
+
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+
 import '../core/api_client.dart';
 import '../models/planning_models.dart';
 import '../models/task_model.dart';
 
 class PlanningApi {
-  PlanningApi({ApiClient? client}) : _client = client ?? ApiClient();
+  PlanningApi(
+      {ApiClient? client,
+      FlutterSecureStorage? storage,
+      DateTime Function()? now})
+      : _client = client ?? ApiClient(),
+        _storage = storage ?? const FlutterSecureStorage(),
+        _now = now ?? DateTime.now;
 
   final ApiClient _client;
+  final FlutterSecureStorage _storage;
+  final DateTime Function() _now;
+
+  // Một lệnh chưa biết kết quả giữ nguyên cả body và key, kể cả khi mở lại app.
+  Future<JsonMap> _command({
+    required String operation,
+    required JsonMap intent,
+    required JsonMap Function() buildBody,
+    required Future<JsonMap> Function(JsonMap body, String key) send,
+    String? fixedKey,
+    bool retainCompleted = false,
+  }) async {
+    final slot = 'planning_command_$operation';
+    final signature = jsonEncode(intent);
+    final stored = await _storage.read(key: slot);
+    JsonMap? command;
+    if (stored != null) {
+      final previous = Map<String, dynamic>.from(jsonDecode(stored) as Map);
+      if (previous['intent'] == signature) command = previous;
+    }
+    command ??= {
+      'intent': signature,
+      'key': fixedKey ?? ApiClient.newIdempotencyKey('planning'),
+      'body': buildBody(),
+    };
+    await _storage.write(key: slot, value: jsonEncode(command));
+    try {
+      final result = await send(
+          Map<String, dynamic>.from(command['body'] as Map),
+          command['key'] as String);
+      if (!retainCompleted) await _storage.delete(key: slot);
+      return result;
+    } on ApiException catch (error) {
+      final status = error.statusCode;
+      // Lỗi mạng/timeout/5xx có thể mất response sau commit: giữ lệnh để retry.
+      if (status != null &&
+          status >= 400 &&
+          status < 500 &&
+          status != 408 &&
+          status != 429) {
+        await _storage.delete(key: slot);
+      }
+      rethrow;
+    }
+  }
 
   Future<AvailabilityModel> getAvailability() async =>
       AvailabilityModel.fromJson(
@@ -35,27 +90,46 @@ class PlanningApi {
     required AvailabilityModel availability,
     String inputSource = 'text',
   }) async {
-    final summary = <String, dynamic>{
-      'title': title,
-      'availability_ref': availability.reference,
-      'importance': 3,
-      if (scope.trim().isNotEmpty) 'scope': scope.trim(),
-      if (deadline != null)
-        'time_constraint': {
-          'kind': 'deadline',
-          'start_at': _vnIso(DateTime.now()),
-          'deadline_at': _vnIso(deadline),
-          'finish_by_at': null,
-          'input_timezone': availability.timezone,
-        },
-    };
-    final json =
-        await _client.postData('/drafts', idempotencyKey: clientDraftId, data: {
+    final intent = <String, dynamic>{
       'client_draft_id': clientDraftId,
       'input_source': inputSource,
       'raw_input': rawInput,
-      'summary': summary,
-    });
+      'title': title,
+      'scope': scope,
+      'deadline': deadline?.toUtc().toIso8601String(),
+      'availability_ref': availability.reference,
+      'timezone': availability.timezone,
+    };
+    final json = await _command(
+      operation: 'create_$clientDraftId',
+      intent: intent,
+      fixedKey: clientDraftId,
+      retainCompleted: true,
+      buildBody: () => {
+        'client_draft_id': clientDraftId,
+        'input_source': inputSource,
+        'raw_input': rawInput,
+        'summary': {
+          if (title.trim().isNotEmpty &&
+              title != rawInput &&
+              title.length <= 100)
+            'title': title,
+          'availability_ref': availability.reference,
+          'importance': 3,
+          if (scope.trim().isNotEmpty) 'scope': scope.trim(),
+          if (deadline != null)
+            'time_constraint': {
+              'kind': 'deadline',
+              'start_at': _vnIso(_now()),
+              'deadline_at': _vnIso(deadline),
+              'finish_by_at': null,
+              'input_timezone': availability.timezone,
+            },
+        },
+      },
+      send: (body, key) =>
+          _client.postData('/drafts', idempotencyKey: key, data: body),
+    );
     return PlanningDraftModel.fromJson(json);
   }
 
@@ -82,31 +156,45 @@ class PlanningApi {
     required DateTime? deadline,
     required String timezone,
   }) async {
-    final changes = <String, dynamic>{
-      'summary': <String, dynamic>{
-        'title': title,
-        'scope': scope,
-        if (deadline != null)
-          'time_constraint': {
-            'kind': 'deadline',
-            'start_at': _vnIso(DateTime.now()),
-            'deadline_at': _vnIso(deadline),
-            'finish_by_at': null,
-            'input_timezone': timezone,
-          },
-      },
+    final oldTime = draft.summary['time_constraint'] as Map<String, dynamic>?;
+    final oldEnd = DateTime.tryParse(
+        (oldTime?['deadline_at'] ?? oldTime?['finish_by_at']) as String? ?? '');
+    final deadlineChanged = deadline != null &&
+        (oldEnd == null || !deadline.isAtSameMomentAs(oldEnd));
+    final intent = <String, dynamic>{
+      'summary_revision': draft.summaryRevision,
+      'input_revision': draft.planningInputRevision,
+      'title': title,
+      'scope': scope,
+      'deadline': deadline?.toUtc().toIso8601String(),
+      'timezone': timezone,
+      'previous_time_constraint': oldTime,
     };
-    final json = await _client.patchData(
-      '/drafts/${Uri.encodeComponent(draft.draftId)}',
-      idempotencyKey: ApiClient.stableIdempotencyKey(
-        'patch_draft_${draft.draftId}',
-        '${draft.summaryRevision}_${draft.planningInputRevision}_${title}_${scope}_${deadline?.toIso8601String()}',
-      ),
-      data: {
+    final json = await _command(
+      operation: 'patch_${draft.draftId}',
+      intent: intent,
+      buildBody: () => {
         'expected_summary_revision': draft.summaryRevision,
         'expected_planning_input_revision': draft.planningInputRevision,
-        'changes': changes,
+        'changes': {
+          'summary': {
+            if (title.length <= 100) 'title': title, 'scope': scope,
+            // Chỉ sửa thời gian khi user đổi hạn; không đổi start/window khi sửa chữ.
+            if (deadlineChanged)
+              'time_constraint': {
+                'kind': 'deadline',
+                'start_at': oldTime?['start_at'] ?? _vnIso(_now()),
+                'deadline_at': _vnIso(deadline),
+                'finish_by_at': null,
+                'input_timezone': timezone,
+              },
+          }
+        },
       },
+      send: (body, key) => _client.patchData(
+          '/drafts/${Uri.encodeComponent(draft.draftId)}',
+          idempotencyKey: key,
+          data: body),
     );
     return PlanningDraftModel.fromJson(json);
   }
@@ -139,18 +227,20 @@ class PlanningApi {
       );
 
   Future<PlanCandidateModel> createCandidate(PlanningDraftModel draft) async {
-    final json = await _client.postData(
-      '/drafts/${Uri.encodeComponent(draft.draftId)}/candidates',
-      idempotencyKey: ApiClient.stableIdempotencyKey(
-        'create_candidate_${draft.draftId}',
-        '${draft.summaryRevision}_${draft.planningInputRevision}',
-      ),
-      data: {
-        'source_summary_revision': draft.summaryRevision,
-        'source_planning_input_revision': draft.planningInputRevision,
-        'selected_part_keys': null,
-        'planning_horizon': null,
-      },
+    final body = <String, dynamic>{
+      'source_summary_revision': draft.summaryRevision,
+      'source_planning_input_revision': draft.planningInputRevision,
+      'selected_part_keys': null,
+      'planning_horizon': null,
+    };
+    final json = await _command(
+      operation: 'candidate_${draft.draftId}',
+      intent: body,
+      buildBody: () => body,
+      send: (payload, key) => _client.postData(
+          '/drafts/${Uri.encodeComponent(draft.draftId)}/candidates',
+          idempotencyKey: key,
+          data: payload),
     );
     return PlanCandidateModel.fromJson(json);
   }

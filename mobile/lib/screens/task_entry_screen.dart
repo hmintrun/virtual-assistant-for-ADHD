@@ -17,13 +17,15 @@ class TaskEntryScreen extends StatefulWidget {
 class _TaskEntryScreenState extends State<TaskEntryScreen> {
   late final TextEditingController _titleController;
   bool _isManualOpen = false;
+  bool _isNavigating = false;
   bool _isListening = false;
 
   @override
   void initState() {
     super.initState();
-    _titleController =
-        TextEditingController(text: context.read<TaskProvider>().title);
+    _titleController = TextEditingController(
+      text: context.read<TaskProvider>().inputText,
+    );
   }
 
   @override
@@ -36,8 +38,36 @@ class _TaskEntryScreenState extends State<TaskEntryScreen> {
     context.read<TaskProvider>().setDeadline(deadline);
   }
 
-  void _continue() {
+  Future<void> _pickDeadline() async {
     final task = context.read<TaskProvider>();
+    final now = DateTime.now();
+    final current = task.deadline;
+    final initial = current != null && current.isAfter(now)
+        ? current
+        : now.add(const Duration(days: 1));
+    final day = await showDatePicker(
+        context: context,
+        initialDate: initial,
+        firstDate: DateTime(now.year, now.month, now.day),
+        lastDate: DateTime(9999, 12, 31),
+        helpText: 'Chọn ngày hạn chót');
+    if (day == null || !mounted) return;
+    final time = await showTimePicker(
+        context: context, initialTime: TimeOfDay.fromDateTime(initial));
+    if (time == null || !mounted) return;
+    final deadline =
+        DateTime(day.year, day.month, day.day, time.hour, time.minute);
+    if (!deadline.isAfter(DateTime.now())) {
+      ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Hãy chọn hạn chót trong tương lai.')));
+      return;
+    }
+    task.setDeadline(deadline);
+  }
+
+  Future<void> _continue() async {
+    final task = context.read<TaskProvider>();
+    if (task.isApiBusy || _isNavigating) return;
     if (task.title.trim().isEmpty && _titleController.text.trim().isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Hãy nhập nội dung công việc trước.')),
@@ -50,19 +80,24 @@ class _TaskEntryScreenState extends State<TaskEntryScreen> {
     if (task.deadline == null) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-            content: Text('Chọn hạn chót để tiếp tục lập kế hoạch.')),
+          content: Text('Chọn hạn chót để tiếp tục lập kế hoạch.'),
+        ),
       );
       return;
     }
 
-    Navigator.push(
-      context,
-      MaterialPageRoute<void>(builder: (_) => const AiLoadingScreen()),
-    );
+    setState(() => _isNavigating = true);
+    try {
+      await Navigator.push(context,
+          MaterialPageRoute<void>(builder: (_) => const AiLoadingScreen()));
+    } finally {
+      if (mounted) setState(() => _isNavigating = false);
+    }
   }
 
   Future<void> _saveDraft() async {
     final task = context.read<TaskProvider>();
+    if (_isNavigating || task.isApiBusy) return;
     if (_titleController.text.trim().isNotEmpty) {
       task.setTitle(_titleController.text.trim());
     } else if (task.title.trim().isEmpty) {
@@ -91,7 +126,14 @@ class _TaskEntryScreenState extends State<TaskEntryScreen> {
   }
 
   void _toggleHoldListening(bool active) {
-    setState(() => _isListening = active);
+    if (active)
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            'Nhập giọng nói chưa sẵn sàng. Hãy dùng ô nhập văn bản.',
+          ),
+        ),
+      );
   }
 
   @override
@@ -104,10 +146,7 @@ class _TaskEntryScreenState extends State<TaskEntryScreen> {
     final weekend18 = DateTime(weekend.year, weekend.month, weekend.day, 18);
 
     return Scaffold(
-      appBar: const MelbelAppBar(
-        title: 'Thêm việc mới',
-        showBack: true,
-      ),
+      appBar: const MelbelAppBar(title: 'Thêm việc mới', showBack: true),
       body: SafeArea(
         top: false,
         child: ListView(
@@ -153,13 +192,16 @@ class _TaskEntryScreenState extends State<TaskEntryScreen> {
                       ),
                       Container(
                         padding: const EdgeInsets.symmetric(
-                            horizontal: 10, vertical: 2),
+                          horizontal: 10,
+                          vertical: 2,
+                        ),
                         decoration: BoxDecoration(
                           color: MelbelColors.kSurfaceContainerHigh,
                           borderRadius: BorderRadius.circular(999),
                           border: Border.all(
-                            color: MelbelColors.kOutlineVariant
-                                .withValues(alpha: 0.4),
+                            color: MelbelColors.kOutlineVariant.withValues(
+                              alpha: 0.4,
+                            ),
                           ),
                         ),
                         child: Row(
@@ -241,24 +283,25 @@ class _TaskEntryScreenState extends State<TaskEntryScreen> {
                     children: [
                       _QuickChip(
                         label: '18:00 hôm nay',
-                        isSelected: task.deadline?.day == today18.day &&
-                            task.deadline?.hour == 18,
+                        isSelected: task.deadline == today18,
                         onTap: () => _onQuickDeadline(today18),
                       ),
                       _QuickChip(
                         label: '18:00 ngày mai',
-                        isSelected: task.deadline?.day == tomorrow18.day &&
-                            task.deadline?.hour == 18,
+                        isSelected: task.deadline == tomorrow18,
                         onTap: () => _onQuickDeadline(tomorrow18),
                       ),
                       _QuickChip(
                         label: 'Cuối tuần',
-                        isSelected: task.deadline?.day == weekend18.day &&
-                            task.deadline?.hour == 18,
+                        isSelected: task.deadline == weekend18,
                         onTap: () => _onQuickDeadline(weekend18),
                       ),
                     ],
                   ),
+                  TextButton.icon(
+                      onPressed: task.isApiBusy ? null : _pickDeadline,
+                      icon: const Icon(Icons.edit_calendar_outlined),
+                      label: const Text('Chọn ngày và giờ khác')),
                 ],
               ),
             ),
@@ -373,8 +416,9 @@ class _TaskEntryScreenState extends State<TaskEntryScreen> {
                       color: MelbelColors.kSurfaceContainerLow,
                       borderRadius: BorderRadius.circular(12),
                       border: Border.all(
-                        color:
-                            MelbelColors.kOutlineVariant.withValues(alpha: 0.4),
+                        color: MelbelColors.kOutlineVariant.withValues(
+                          alpha: 0.4,
+                        ),
                       ),
                     ),
                     child: Column(
@@ -498,13 +542,16 @@ class _TaskEntryScreenState extends State<TaskEntryScreen> {
                         hintStyle: TextStyle(
                           fontFamily: 'Be Vietnam Pro',
                           fontSize: 14,
-                          color: MelbelColors.kOnSurfaceVariant
-                              .withValues(alpha: 0.5),
+                          color: MelbelColors.kOnSurfaceVariant.withValues(
+                            alpha: 0.5,
+                          ),
                         ),
                         filled: true,
                         fillColor: MelbelColors.kSurfaceContainerLow,
                         contentPadding: const EdgeInsets.symmetric(
-                            horizontal: 14, vertical: 12),
+                          horizontal: 14,
+                          vertical: 12,
+                        ),
                         suffixIcon: const Icon(
                           Icons.edit_note,
                           size: 20,
@@ -554,8 +601,9 @@ class _TaskEntryScreenState extends State<TaskEntryScreen> {
                           color: MelbelColors.kSecondaryContainer,
                           shape: BoxShape.circle,
                           border: Border.all(
-                            color:
-                                MelbelColors.kSecondary.withValues(alpha: 0.4),
+                            color: MelbelColors.kSecondary.withValues(
+                              alpha: 0.4,
+                            ),
                           ),
                         ),
                         child: const Icon(
@@ -583,7 +631,9 @@ class _TaskEntryScreenState extends State<TaskEntryScreen> {
                                 ),
                                 Container(
                                   padding: const EdgeInsets.symmetric(
-                                      horizontal: 8, vertical: 2),
+                                    horizontal: 8,
+                                    vertical: 2,
+                                  ),
                                   decoration: BoxDecoration(
                                     color: MelbelColors.kSurfaceContainerHigh,
                                     borderRadius: BorderRadius.circular(999),
@@ -640,17 +690,22 @@ class _TaskEntryScreenState extends State<TaskEntryScreen> {
                     ],
                   ),
                   const SizedBox(height: 12),
-                  Row(
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 8,
                     children: [
                       Container(
                         padding: const EdgeInsets.symmetric(
-                            horizontal: 10, vertical: 4),
+                          horizontal: 10,
+                          vertical: 4,
+                        ),
                         decoration: BoxDecoration(
                           color: MelbelColors.kSurfaceContainerHigh,
                           borderRadius: BorderRadius.circular(8),
                           border: Border.all(
-                            color: MelbelColors.kOutlineVariant
-                                .withValues(alpha: 0.4),
+                            color: MelbelColors.kOutlineVariant.withValues(
+                              alpha: 0.4,
+                            ),
                           ),
                         ),
                         child: const Row(
@@ -676,14 +731,18 @@ class _TaskEntryScreenState extends State<TaskEntryScreen> {
                       const SizedBox(width: 8),
                       Container(
                         padding: const EdgeInsets.symmetric(
-                            horizontal: 10, vertical: 4),
+                          horizontal: 10,
+                          vertical: 4,
+                        ),
                         decoration: BoxDecoration(
-                          color: MelbelColors.kPrimaryContainer
-                              .withValues(alpha: 0.1),
+                          color: MelbelColors.kPrimaryContainer.withValues(
+                            alpha: 0.1,
+                          ),
                           borderRadius: BorderRadius.circular(8),
                           border: Border.all(
-                            color: MelbelColors.kPrimaryContainer
-                                .withValues(alpha: 0.4),
+                            color: MelbelColors.kPrimaryContainer.withValues(
+                              alpha: 0.4,
+                            ),
                           ),
                         ),
                         child: const Row(
@@ -695,7 +754,7 @@ class _TaskEntryScreenState extends State<TaskEntryScreen> {
                             ),
                             SizedBox(width: 6),
                             Text(
-                              'Nói tiếp hoặc chọn chip',
+                              'Gõ nội dung hoặc chọn hạn',
                               style: TextStyle(
                                 fontFamily: 'Be Vietnam Pro',
                                 fontSize: 12,
@@ -717,14 +776,14 @@ class _TaskEntryScreenState extends State<TaskEntryScreen> {
             PrimaryCta(
               label: 'Tiếp tục',
               icon: Icons.arrow_forward,
-              onPressed: _continue,
+              onPressed: task.isApiBusy || _isNavigating ? null : _continue,
             ),
             const SizedBox(height: 10),
             SecondaryCta(
               label: 'Lưu vào Hộp nháp',
               icon: Icons.drafts_outlined,
               height: 48,
-              onPressed: _saveDraft,
+              onPressed: task.isApiBusy ? null : _saveDraft,
             ),
           ],
         ),
@@ -854,11 +913,16 @@ class _AiLoadingScreenState extends State<AiLoadingScreen> {
             child: Column(
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
-                const Icon(Icons.cloud_off_outlined,
-                    size: 42, color: MelbelColors.kOnSurfaceVariant),
+                const Icon(
+                  Icons.cloud_off_outlined,
+                  size: 42,
+                  color: MelbelColors.kOnSurfaceVariant,
+                ),
                 const SizedBox(height: 16),
-                const Text('Chưa gửi được công việc lên máy chủ.',
-                    textAlign: TextAlign.center),
+                const Text(
+                  'Chưa gửi được công việc lên máy chủ.',
+                  textAlign: TextAlign.center,
+                ),
                 const SizedBox(height: 8),
                 Text(_error!, textAlign: TextAlign.center),
                 const SizedBox(height: 20),
@@ -932,8 +996,9 @@ class _AiLoadingScreenState extends State<AiLoadingScreen> {
                 height: 100,
                 decoration: BoxDecoration(
                   color: const Color(0xFF2A2F42),
-                  borderRadius:
-                      const BorderRadius.all(Radius.elliptical(60, 50)),
+                  borderRadius: const BorderRadius.all(
+                    Radius.elliptical(60, 50),
+                  ),
                   border: Border.all(color: const Color(0xFF3A4160)),
                 ),
                 child: Center(
@@ -1012,8 +1077,10 @@ class _AiLoadingScreenState extends State<AiLoadingScreen> {
 
               // Bottom Sanctuary Reassurance
               Container(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 16,
+                  vertical: 8,
+                ),
                 decoration: BoxDecoration(
                   color: MelbelColors.kSurfaceContainerLow,
                   borderRadius: BorderRadius.circular(999),

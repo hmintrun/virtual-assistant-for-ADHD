@@ -17,11 +17,10 @@ class _TaskReadyScreenState extends State<TaskReadyScreen> {
   bool _isConfirming = false;
 
   Future<void> _onConfirm() async {
+    if (_isConfirming || context.read<TaskProvider>().isApiBusy) return;
     setState(() => _isConfirming = true);
     try {
-      if (context.read<TaskProvider>().draft != null) {
-        await context.read<TaskProvider>().confirmDraftSummaryOnBackend();
-      }
+      await context.read<TaskProvider>().confirmDraftSummaryOnBackend();
       if (!mounted) return;
       await Navigator.push(
         context,
@@ -30,23 +29,10 @@ class _TaskReadyScreenState extends State<TaskReadyScreen> {
         ),
       );
     } catch (error) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('Chưa xác nhận được thông tin trên máy chủ: $error'),
-          action: SnackBarAction(
-            label: 'Tiếp tục',
-            onPressed: () {
-              Navigator.push(
-                context,
-                MaterialPageRoute<void>(
-                  builder: (_) => const DecompositionChoiceScreen(),
-                ),
-              );
-            },
-          ),
-        ),
-      );
+      if (mounted)
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Chưa xác nhận được thông tin: $error')),
+        );
     } finally {
       if (mounted) setState(() => _isConfirming = false);
     }
@@ -60,10 +46,7 @@ class _TaskReadyScreenState extends State<TaskReadyScreen> {
     final availabilityStr = task.serverAvailabilitySummary;
 
     return Scaffold(
-      appBar: const MelbelAppBar(
-        title: 'Ready State',
-        showBack: true,
-      ),
+      appBar: const MelbelAppBar(title: 'Ready State', showBack: true),
       body: SafeArea(
         top: false,
         child: ListView(
@@ -206,10 +189,13 @@ class _TaskReadyScreenState extends State<TaskReadyScreen> {
                         ),
                         Container(
                           padding: const EdgeInsets.symmetric(
-                              horizontal: 10, vertical: 4),
+                            horizontal: 10,
+                            vertical: 4,
+                          ),
                           decoration: BoxDecoration(
-                            color: MelbelColors.kSecondaryContainer
-                                .withValues(alpha: 0.4),
+                            color: MelbelColors.kSecondaryContainer.withValues(
+                              alpha: 0.4,
+                            ),
                             borderRadius: BorderRadius.circular(999),
                           ),
                           child: const Text(

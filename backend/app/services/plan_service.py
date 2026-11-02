@@ -1,17 +1,59 @@
-# Tầng Service điều phối nghiệp vụ cho phương án chia bước và xếp lịch UF2 (PlanCandidate)
+"""UF2 orchestration: persisted sources, AI decomposition and atomic plan confirmation."""
+
+from __future__ import annotations
+
+import hashlib
 import json
-from datetime import UTC, datetime
+import math
+from collections.abc import Sequence
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
+from itertools import pairwise
+from typing import Any
+from uuid import UUID, uuid4
+
+from pydantic import BaseModel, ValidationError
+from sqlalchemy import func, or_, select, update
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import AppError
+from app.models.calendar import (
+    CalendarConnection,
+    CalendarEventLink,
+    CalendarSyncJob,
+    PlanningContext,
+)
+from app.models.planning import PlanCandidate as CandidateRow
+from app.models.planning import PlanningDraft as DraftRow
+from app.models.planning import PlanningPart as PartRow
+from app.models.planning import ScheduleVersion as VersionRow
+from app.models.session import Session as SessionRow
+from app.models.settings import Availability as AvailabilityRow
+from app.models.step import Step as StepRow
+from app.models.system import CommandReceipt, Reminder
+from app.models.task import Task as TaskRow
+from app.models.user import User
+from app.models.user import UserPreference as PreferenceRow
+from app.schemas.availability import Availability
+from app.schemas.calendar import (
+    BusyInterval,
+    BusyIntervalSource,
+    CalendarContext,
+    CalendarError,
+    PlanningContextCreateRequest,
+)
 from app.schemas.common import (
     AvailabilityRef,
+    BlockingReason,
     CalendarContextRef,
     CandidateRef,
+    CommandResult,
     FieldError,
-    SessionSegment,
     SourceRevisions,
+    TimeConstraint,
     TimeInterval,
 )
+from app.schemas.draft import PlanningDraft
 from app.schemas.planning import (
     CandidatePart,
     CandidateSession,
@@ -27,181 +69,749 @@ from app.schemas.planning import (
     UpdateCandidateRequest,
 )
 from app.schemas.schedule import ScheduleData
-from app.schemas.task import PlanningPart, Session, Step, Task, TaskListData
+from app.schemas.settings import UserPreference
+from app.schemas.task import (
+    PlanningPart,
+    Session,
+    Step,
+    Task,
+    TaskDecompositionResult,
+    TaskListData,
+)
 from app.services import draft_service
+from app.services.ai_service import ai_service
+from app.services.scheduler_engine import (
+    calculate_buffered_work,
+    compute_effective_free_intervals,
+    schedule_candidate_sessions,
+    validate_planning_prerequisites,
+)
 
 
-def _build_seed_candidate(
-    *,
-    candidate_id: str,
-    draft_id: str,
-    source_summary_revision: int = 5,
-    source_planning_input_revision: int = 5,
-    review_revision: int = 3,
-    user_step_proposal: str | None = (
-        "Tìm tài liệu tham khảo, sau đó viết bản nháp báo cáo."
-    ),
-    horizon: TimeInterval | None = None,
-) -> PlanCandidate:
-    """Tạo phương án mẫu chuẩn theo Dòng 9 & 10 trên API Sheet (chờ ghép AI A04 và Algorithm A05-A10)."""
-    effective_horizon = horizon or TimeInterval(
-        start_at=datetime.fromisoformat("2026-10-30T07:00:00+07:00"),
-        end_at=datetime.fromisoformat("2026-11-13T07:00:00+07:00"),
-    )
-    return PlanCandidate(
-        candidate_id=candidate_id,
-        draft_id=draft_id,
-        source_summary_revision=source_summary_revision,
-        review_revision=review_revision,
-        planning_parts=[
-            CandidatePart(
-                client_part_key="part-research",
-                scope_description="Tìm tài liệu tham khảo",
-                order_index=0,
-                decomposition_state="complete",
-                scheduling_state="complete",
-                unexpanded_scope=None,
-                rough_estimate_seconds=3000,
-                estimate_source="user_confirmed",
-            ),
-            CandidatePart(
-                client_part_key="part-writing",
-                scope_description="Viết bản nháp báo cáo",
-                order_index=1,
-                decomposition_state="not_started",
-                scheduling_state="not_scheduled",
-                unexpanded_scope="Phần viết bản nháp chưa được chia thành Steps.",
-                rough_estimate_seconds=None,
-                estimate_source=None,
-            ),
-        ],
-        steps=[
-            CandidateStep(
-                title="Tìm tài liệu tham khảo",
-                expected_output="Danh sách tài liệu kèm nguồn trích dẫn",
-                order_index=0,
-                estimated_base_seconds=3000,
-                remaining_base_seconds=3000,
-                buffer_multiplier=1.2,
-                estimate_source="user_confirmed",
-                status="pending",
-                client_step_key="step-research",
-                client_part_key="part-research",
-            )
-        ],
-        sessions=[
-            CandidateSession(
-                scheduled_start=datetime.fromisoformat("2026-10-30T09:00:00+07:00"),
-                scheduled_end=datetime.fromisoformat("2026-10-30T10:10:00+07:00"),
-                micro_task_text="Mở file báo cáo và đọc đề bài",
-                micro_task_seconds=None,
-                work_seconds=3600,
-                rest_seconds=600,
-                segments=[
-                    SessionSegment(order_index=0, kind="work", duration_seconds=1500),
-                    SessionSegment(order_index=1, kind="rest", duration_seconds=300),
-                    SessionSegment(order_index=2, kind="work", duration_seconds=1500),
-                    SessionSegment(order_index=3, kind="rest", duration_seconds=300),
-                    SessionSegment(order_index=4, kind="work", duration_seconds=600),
-                ],
-                duration_seconds=4200,
-                client_session_key="session-research",
-                client_step_key="step-research",
-                start_state="waiting",
-                start_decision_due_at=datetime.fromisoformat(
-                    "2026-10-30T09:15:00+07:00"
-                ),
-            )
-        ],
-        planning_horizon=effective_horizon,
-        source_revisions=SourceRevisions(
-            availability=2,
-            preferences=4,
-            schedule=7,
-            calendar_context=CalendarContextRef(context_id="context_1", revision=2),
-        ),
-        min_inter_session_gap_seconds=900,
-        feasibility=FeasibilityReport(
-            status="feasible",
-            required_seconds=4200,
-            available_seconds=7200,
-            unscheduled_seconds=0,
-            deficit_seconds=0,
-            verification_scope=CandidateVerificationScope(
-                client_part_keys=["part-research"],
-                planning_horizon=effective_horizon,
-                scope_type="candidate_parts",
-            ),
-            fully_scheduled=True,
-            blocking_reasons=[],
-            unestimated_part_ids=["part-writing"],
-            unplanned_part_ids=["part-writing"],
-            extension_candidate_at=None,
-        ),
-        stale=False,
-        user_step_proposal=user_step_proposal,
-        source_planning_input_revision=source_planning_input_revision,
+@dataclass(frozen=True)
+class PlanningSources:
+    availability: Availability
+    preferences: UserPreference
+    context: CalendarContext
+    revisions: SourceRevisions
+    fixed_sessions: list[Session]
+
+
+def _error(
+    code: str, message: str, status: int = 409, action: str = "reload_and_review"
+) -> AppError:
+    return AppError(status_code=status, code=code, message=message, next_action=action)
+
+
+def _invalid(message: str, field: str = "planning") -> AppError:
+    return AppError(
+        status_code=422,
+        code="VALIDATION_ERROR",
+        message=message,
+        field_errors=[FieldError(field_path=field, message=message)],
+        next_action="fix_fields",
     )
 
 
-# Kho dữ liệu giả lập tạm thời theo từng chủ sở hữu (user_id, candidate_id) trước khi ghép DB ở Bước 5.1
-_FAKE_CANDIDATES_BY_OWNER: dict[tuple[str, str], PlanCandidate] = {
-    ("user_a", "candidate_1"): _build_seed_candidate(
-        candidate_id="candidate_1",
-        draft_id="draft_1",
-        source_summary_revision=5,
-        source_planning_input_revision=5,
-    ),
-    ("user_b", "candidate_b_1"): _build_seed_candidate(
-        candidate_id="candidate_b_1",
-        draft_id="draft_b_1",
-        source_summary_revision=5,
-        source_planning_input_revision=5,
-    ),
-}
-
-# Lưu biên nhận Idempotency-Key cho lệnh tạo Candidate: (user_id, idempotency_key) -> (fingerprint, candidate_id)
-_CREATE_CANDIDATE_IDEMPOTENCY_STORE: dict[tuple[str, str], tuple[str, str]] = {}
-
-# Lưu biên nhận Idempotency-Key cho lệnh sửa Candidate: (user_id, idempotency_key) -> (fingerprint, PlanCandidate)
-_PATCH_CANDIDATE_IDEMPOTENCY_STORE: dict[
-    tuple[str, str], tuple[str, PlanCandidate]
-] = {}
-
-# Lưu biên nhận Idempotency-Key cho lệnh chốt Candidate UF2: (user_id, idempotency_key) -> (fingerprint, ConfirmCandidateResult)
-_CONFIRM_CANDIDATE_IDEMPOTENCY_STORE: dict[
-    tuple[str, str], tuple[str, ConfirmCandidateResult]
-] = {}
-
-# Phiên bản lịch chính thức hiện tại theo từng user_id (khởi tạo ở 7 theo mẫu Dòng 9-12 trên Sheet)
-_USER_SCHEDULE_REVISIONS: dict[str, int] = {
-    "user_a": 7,
-    "user_b": 1,
-}
-
-# Kho lưu các Task chính thức sau khi chốt UF2 theo (user_id, task_id)
-_FAKE_TASKS_BY_OWNER: dict[tuple[str, str], Task] = {}
+def _uuid(value: str) -> UUID:
+    try:
+        return UUID(value)
+    except ValueError:
+        raise _error("RESOURCE_NOT_FOUND", "Không tìm thấy tài nguyên.", 404, "reload") from None
 
 
+def _hash(operation: str, resource: str, payload: Any) -> str:
+    encoded = json.dumps(
+        {"operation": operation, "resource": resource, "body": payload},
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    )
+    return hashlib.sha256(encoded.encode()).hexdigest()
 
-_KNOWN_SOURCE_PART_KEYS: set[str] = {"part-research", "part-writing"}
+
+async def _receipt(db: AsyncSession, user_id: str, key: str, digest: str) -> dict[str, Any] | None:
+    row = await db.scalar(
+        select(CommandReceipt).where(
+            CommandReceipt.user_id == draft_service.resolve_user_uuid(user_id),
+            CommandReceipt.command_id == key,
+        )
+    )
+    if row is None:
+        return None
+    if row.payload_hash != digest:
+        raise _error(
+            "IDEMPOTENCY_KEY_REUSED",
+            "Mã lệnh đã được dùng với nội dung khác.",
+            action="use_original_payload_or_new_command",
+        )
+    return (row.result_reference or {}).get("_response")
 
 
-def _compute_candidate_stale(user_id: str, candidate: PlanCandidate) -> bool:
-    """Tính động cờ stale từ revision hiện tại của Draft nguồn (T05, dto_catalog.md mục PlanCandidate)."""
-    draft = draft_service._FAKE_DRAFTS_BY_OWNER.get((user_id, candidate.draft_id))
-    if draft is None:
-        return True
-    if draft.summary_revision != candidate.source_summary_revision:
-        return True
-    if draft.planning_input_revision != candidate.source_planning_input_revision:
-        return True
+def _record(
+    db: AsyncSession,
+    user_id: str,
+    key: str,
+    digest: str,
+    operation: str,
+    response: Any,
+    **refs: str,
+) -> None:
+    db.add(
+        CommandReceipt(
+            user_id=draft_service.resolve_user_uuid(user_id),
+            command_id=key,
+            command_type=operation,
+            payload_hash=digest,
+            expected_revision=None,
+            state="applied",
+            result_reference={**refs, "_response": response.model_dump(mode="json")},
+            applied_at=datetime.now(UTC),
+        )
+    )
+
+
+async def _lock_user(db: AsyncSession, user_id: str) -> None:
+    # Khóa cùng một dòng trước mọi lệnh ghi UF2; không gọi AI/Google trong transaction này.
+    # UPDATE không đổi revision tương thích cả SQLite và PostgreSQL.
+    found = await db.scalar(
+        update(User)
+        .where(User.id == draft_service.resolve_user_uuid(user_id))
+        .values(revision=User.revision)
+        .returning(User.id)
+        .execution_options(synchronize_session=False)
+    )
+    if found is None:
+        raise _error("RESOURCE_NOT_FOUND", "Không tìm thấy người dùng.", 404, "reload")
+
+
+async def _read_draft(
+    db: AsyncSession, user_id: str, draft_id: str
+) -> tuple[DraftRow, PlanningDraft]:
+    row = await db.scalar(
+        select(DraftRow)
+        .where(
+            DraftRow.id == draft_service.resolve_draft_uuid(draft_id),
+            DraftRow.user_id == draft_service.resolve_user_uuid(user_id),
+        )
+        .execution_options(populate_existing=True)
+    )
+    if row is None:
+        raise _error("RESOURCE_NOT_FOUND", "Không tìm thấy bản nháp.", 404, "reload")
+    return row, draft_service._row_to_schema(row, fallback_draft_id=draft_id)
+
+
+def _require_draft(draft: PlanningDraft, summary_revision: int, input_revision: int) -> None:
     if (
-        draft.summary_confirmed_revision is not None
-        and draft.summary_confirmed_revision != candidate.source_summary_revision
+        draft.summary_revision != summary_revision
+        or draft.planning_input_revision != input_revision
     ):
-        return True
-    return candidate.stale
+        raise AppError(
+            status_code=409,
+            code="REVISION_CONFLICT",
+            message="Bản nháp đã thay đổi.",
+            current_revisions={
+                "summary_revision": draft.summary_revision,
+                "planning_input_revision": draft.planning_input_revision,
+            },
+            next_action="reload_and_review",
+        )
+    if draft.summary_confirmed_revision != draft.summary_revision or draft.confirmed_task_id:
+        raise _error(
+            "PLAN_NOT_CONFIRMABLE", "Cần xác nhận UF1 hiện tại và chưa lưu Task từ bản nháp này."
+        )
+    if any(issue.blocking for issue in draft.summary.clarification_issues):
+        raise _error("PLAN_NOT_CONFIRMABLE", "Bản nháp còn thông tin cần làm rõ.")
+
+
+async def get_preferences(*, user_id: str, db: AsyncSession) -> UserPreference:
+    row = await db.scalar(
+        select(PreferenceRow)
+        .where(PreferenceRow.user_id == draft_service.resolve_user_uuid(user_id))
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if row is None:
+        raise _error(
+            "POLICY_NOT_CONFIGURED",
+            "Chưa có cấu hình làm việc/nghỉ đã lưu cho người dùng.",
+            503,
+            "configure_preferences",
+        )
+    return UserPreference(
+        revision=row.revision,
+        effective_revision=row.effective_revision,
+        requested_revision=row.requested_revision,
+        work_interval_seconds=row.work_interval_seconds,
+        rest_interval_seconds=row.rest_interval_seconds,
+        micro_task_seconds=row.micro_task_seconds,
+        reminder_offsets=row.reminder_offsets,
+        buffer_multiplier=row.buffer_multiplier,
+        reminder_style=row.reminder_style,
+        requested_changes=row.requested_changes,
+        pending_proposal_id=str(row.pending_proposal_id) if row.pending_proposal_id else None,
+    )
+
+
+async def _availability(db: AsyncSession, user_id: str) -> Availability:
+    row = await db.scalar(
+        select(AvailabilityRow)
+        .where(AvailabilityRow.user_id == draft_service.resolve_user_uuid(user_id))
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if row is None:
+        raise _error("SOURCE_CHANGED", "Không tìm thấy nguồn giờ rảnh đã chọn.")
+    return Availability(
+        availability_id=str(row.id),
+        revision=row.revision,
+        timezone=row.timezone,
+        weekly_rules=row.weekly_rules,
+        date_overrides=row.date_overrides,
+        task_limits=row.task_limits,
+        source=row.source,
+        confirmed_at=row.confirmed_at,
+        effective_intervals=None,
+        calendar_context=None,
+    )
+
+
+def _context_schema(row: PlanningContext) -> CalendarContext:
+    return CalendarContext(
+        context_id=str(row.id),
+        revision=row.revision,
+        availability_ref=AvailabilityRef(
+            availability_id=str(row.availability_id), revision=row.availability_revision
+        ),
+        selected_calendar_ids=row.selected_calendar_ids,
+        query_start_end=TimeInterval(start_at=row.query_start, end_at=row.query_end),
+        busy_intervals=row.busy_intervals,
+        fetched_at=row.fetched_at,
+        sync_state=row.sync_state,
+        calendar_errors=row.calendar_errors,
+        event_snapshots=row.event_snapshots,
+        coverage_state=row.coverage_state,
+        manual_busy_intervals=row.manual_busy_intervals,
+        excluded_sources=row.excluded_sources,
+        selected_calendar_sources=row.selected_calendar_sources,
+    )
+
+
+async def get_planning_context(
+    *, user_id: str, context_id: str, db: AsyncSession
+) -> CalendarContext:
+    row = await db.scalar(
+        select(PlanningContext)
+        .where(
+            PlanningContext.id == _uuid(context_id),
+            PlanningContext.user_id == draft_service.resolve_user_uuid(user_id),
+        )
+        .execution_options(populate_existing=True)
+    )
+    if row is None:
+        raise _error("RESOURCE_NOT_FOUND", "Không tìm thấy ngữ cảnh xếp lịch.", 404, "reload")
+    return _context_schema(row)
+
+
+async def create_planning_context(
+    *, user_id: str, payload: PlanningContextCreateRequest, idempotency_key: str, db: AsyncSession
+) -> CalendarContext:
+    digest = _hash("create_context", "", payload.model_dump(mode="json", by_alias=True))
+    try:
+        TimeInterval(start_at=payload.from_at, end_at=payload.to_at)
+        for item in payload.manual_busy_intervals:
+            TimeInterval(start_at=item.start_at, end_at=item.end_at)
+    except ValidationError as exc:
+        raise _invalid("Khoảng thời gian phải có múi giờ và bắt đầu trước kết thúc.") from exc
+    if len({item.client_interval_id for item in payload.manual_busy_intervals}) != len(
+        payload.manual_busy_intervals
+    ):
+        raise _invalid("Mã khoảng bận nhập tay bị trùng.", "manual_busy_intervals")
+    await db.rollback()
+    async with db.begin():
+        await _lock_user(db, user_id)
+        saved = await _receipt(db, user_id, idempotency_key, digest)
+        if saved is not None:
+            return CalendarContext.model_validate(saved)
+        availability = await _availability(db, user_id)
+        if (
+            payload.availability_ref.availability_id != availability.availability_id
+            or payload.availability_ref.revision != availability.revision
+            or availability.confirmed_at is None
+        ):
+            raise _error("SOURCE_CHANGED", "Giờ rảnh chưa xác nhận hoặc phiên bản đã thay đổi.")
+        selected = {
+            (item.connection_id, item.google_calendar_id)
+            for item in payload.selected_calendar_sources
+        }
+        excluded = {
+            (item.connection_id, item.google_calendar_id) for item in payload.excluded_sources
+        }
+        if (
+            len(selected) != len(payload.selected_calendar_sources)
+            or len(excluded) != len(payload.excluded_sources)
+            or not excluded.issubset(selected)
+        ):
+            raise _invalid(
+                "Nguồn lịch bị trùng hoặc loại trừ nguồn chưa được chọn.",
+                "selected_calendar_sources",
+            )
+        for connection_id, calendar_id in selected:
+            connection = await db.scalar(
+                select(CalendarConnection).where(
+                    CalendarConnection.id == _uuid(connection_id),
+                    CalendarConnection.user_id == draft_service.resolve_user_uuid(user_id),
+                )
+            )
+            if connection is None or calendar_id not in connection.read_calendar_ids:
+                raise _error(
+                    "RESOURCE_NOT_FOUND", "Không tìm thấy nguồn lịch được phép đọc.", 404, "reload"
+                )
+        now = datetime.now(UTC)
+        if any(
+            item.user_confirmed_at.utcoffset() is None
+            or item.user_confirmed_at > now
+            or not item.reason.strip()
+            for item in payload.excluded_sources
+        ):
+            raise _invalid(
+                "Cần lý do và thời điểm user đã xác nhận loại nguồn lịch.", "excluded_sources"
+            )
+        if selected - excluded:
+            raise _error(
+                "CALENDAR_UNAVAILABLE",
+                "Chưa ghép bộ đọc Google Calendar; không thể coi các lịch đã chọn là trống.",
+                503,
+                "retry_or_review_calendar_sources",
+            )
+        result = CalendarContext(
+            context_id=str(uuid4()),
+            revision=1,
+            availability_ref=payload.availability_ref,
+            query_start_end=TimeInterval(start_at=payload.from_at, end_at=payload.to_at),
+            fetched_at=now,
+            selected_calendar_ids=[
+                item.google_calendar_id for item in payload.selected_calendar_sources
+            ],
+            selected_calendar_sources=payload.selected_calendar_sources,
+            busy_intervals=[
+                BusyInterval(
+                    start_at=item.start_at,
+                    end_at=item.end_at,
+                    source=BusyIntervalSource(
+                        kind="manual", client_interval_id=item.client_interval_id
+                    ),
+                )
+                for item in payload.manual_busy_intervals
+            ],
+            manual_busy_intervals=payload.manual_busy_intervals,
+            excluded_sources=payload.excluded_sources,
+            sync_state="valid",
+            coverage_state="manual_fallback" if excluded else "complete",
+            calendar_errors=[
+                CalendarError(
+                    connection_id=item.connection_id,
+                    google_calendar_id=item.google_calendar_id,
+                    error_code="CALENDAR_READ_NOT_IMPLEMENTED",
+                    retryable=True,
+                    requires_reconnect=False,
+                    observed_at=now,
+                )
+                for item in payload.excluded_sources
+            ],
+        )
+        db.add(_context_row(user_id, result))
+        _record(
+            db,
+            user_id,
+            idempotency_key,
+            digest,
+            "create_context",
+            result,
+            context_id=result.context_id,
+        )
+    return result
+
+
+def _context_row(user_id: str, context: CalendarContext) -> PlanningContext:
+    data = context.model_dump(mode="json")
+    return PlanningContext(
+        id=_uuid(context.context_id),
+        user_id=draft_service.resolve_user_uuid(user_id),
+        availability_id=_uuid(context.availability_ref.availability_id),
+        availability_revision=context.availability_ref.revision,
+        query_start=context.query_start_end.start_at,
+        query_end=context.query_start_end.end_at,
+        fetched_at=context.fetched_at,
+        sync_state=context.sync_state,
+        coverage_state=context.coverage_state,
+        selected_calendar_ids=data["selected_calendar_ids"],
+        selected_calendar_sources=data["selected_calendar_sources"],
+        busy_intervals=data["busy_intervals"],
+        calendar_errors=data["calendar_errors"],
+        event_snapshots=data["event_snapshots"],
+        manual_busy_intervals=data["manual_busy_intervals"],
+        excluded_sources=data["excluded_sources"],
+        expires_at=None,
+    )
+
+
+async def _schedule_revision(db: AsyncSession, owner: UUID) -> int:
+    version = await db.scalar(
+        select(func.max(VersionRow.version_number)).where(VersionRow.user_id == owner)
+    )
+    session_version = await db.scalar(
+        select(func.max(SessionRow.schedule_revision)).where(SessionRow.user_id == owner)
+    )
+    return max(version or 1, session_version or 1)
+
+
+def _session_schema(row: SessionRow, link_id: str | None = None) -> Session:
+    return Session(
+        session_id=str(row.id),
+        step_id=str(row.step_id),
+        scheduled_start=row.scheduled_start,
+        scheduled_end=row.scheduled_end,
+        micro_task_text=row.micro_task_text or "Chuẩn bị cho phiên làm việc",
+        micro_task_seconds=row.micro_task_seconds,
+        work_seconds=row.work_seconds,
+        rest_seconds=row.rest_seconds,
+        segments=row.segments,
+        duration_seconds=row.duration_seconds,
+        schedule_revision=row.schedule_revision,
+        status=row.status,
+        start_state=row.start_state,
+        start_decision_due_at=row.start_decision_due_at
+        or row.scheduled_start + timedelta(seconds=900),
+        calendar_event_link_id=link_id,
+    )
+
+
+async def _sources(
+    db: AsyncSession,
+    user_id: str,
+    draft: PlanningDraft,
+    horizon: TimeInterval,
+    *,
+    create_manual: bool = False,
+) -> PlanningSources:
+    owner = draft_service.resolve_user_uuid(user_id)
+    availability = await _availability(db, user_id)
+    ref = draft.summary.availability_ref
+    if (
+        ref is None
+        or ref.availability_id != availability.availability_id
+        or ref.revision != availability.revision
+    ):
+        raise _error("SOURCE_CHANGED", "Nguồn giờ rảnh đã thay đổi.")
+    valid, issues = validate_planning_prerequisites(draft.summary, availability)
+    if not valid:
+        raise AppError(
+            status_code=409,
+            code="PLAN_NOT_CONFIRMABLE",
+            message="Thông tin UF1 chưa đủ để xếp lịch.",
+            field_errors=[
+                FieldError(field_path=item.field_path, code=item.code, message=item.message)
+                for item in issues
+            ],
+            next_action="fix_fields",
+        )
+    preferences = await get_preferences(user_id=user_id, db=db)
+    row = await db.scalar(
+        select(PlanningContext)
+        .where(
+            PlanningContext.user_id == owner,
+            PlanningContext.availability_id == _uuid(availability.availability_id),
+            PlanningContext.availability_revision == availability.revision,
+            PlanningContext.query_start <= horizon.start_at,
+            PlanningContext.query_end >= horizon.end_at,
+            PlanningContext.sync_state == "valid",
+            or_(
+                PlanningContext.expires_at.is_(None), PlanningContext.expires_at > datetime.now(UTC)
+            ),
+        )
+        .order_by(PlanningContext.created_at.desc(), PlanningContext.id.desc())
+        .limit(1)
+        .with_for_update()
+    )
+    if row is None:
+        configured_calendars = (
+            await db.scalars(select(CalendarConnection).where(CalendarConnection.user_id == owner))
+        ).all()
+        if not create_manual or any(item.read_calendar_ids for item in configured_calendars):
+            raise _error(
+                "CALENDAR_CONTEXT_UNAVAILABLE",
+                "Cần ngữ cảnh lịch bận đủ phạm vi trước khi xếp lịch.",
+                409,
+                "create_planning_context",
+            )
+        context = CalendarContext(
+            context_id=str(uuid4()),
+            revision=1,
+            availability_ref=ref,
+            query_start_end=horizon,
+            fetched_at=datetime.now(UTC),
+            sync_state="valid",
+            coverage_state="complete",
+        )
+        db.add(_context_row(user_id, context))
+        # Snapshot thủ công không có nguồn Google được lưu trước khi chờ AI.
+        await db.commit()
+    else:
+        context = _context_schema(row)
+    if context.coverage_state not in {"complete", "manual_fallback"}:
+        raise _error(
+            "CALENDAR_CONTEXT_UNAVAILABLE",
+            "Ngữ cảnh chưa bao phủ đủ các nguồn đã chọn.",
+            action="create_planning_context",
+        )
+    selected = {
+        (item.connection_id, item.google_calendar_id) for item in context.selected_calendar_sources
+    }
+    excluded = {(item.connection_id, item.google_calendar_id) for item in context.excluded_sources}
+    errors = {(item.connection_id, item.google_calendar_id) for item in context.calendar_errors}
+    if (
+        not excluded.issubset(selected)
+        or errors - excluded
+        or (excluded and context.coverage_state != "manual_fallback")
+    ):
+        raise _error(
+            "CALENDAR_CONTEXT_UNAVAILABLE",
+            "Nguồn lỗi chưa được user xác nhận loại trừ.",
+            action="create_planning_context",
+        )
+    fixed = (
+        await db.scalars(
+            select(SessionRow).where(SessionRow.user_id == owner, SessionRow.status != "cancelled")
+        )
+    ).all()
+    return PlanningSources(
+        availability,
+        preferences,
+        context,
+        SourceRevisions(
+            availability=availability.revision,
+            preferences=preferences.effective_revision,
+            schedule=await _schedule_revision(db, owner),
+            calendar_context=CalendarContextRef(
+                context_id=context.context_id, revision=context.revision
+            ),
+        ),
+        [_session_schema(item) for item in fixed],
+    )
+
+
+def _horizon(draft: PlanningDraft, requested: TimeInterval | None) -> TimeInterval:
+    tc = draft.summary.time_constraint
+    if tc is None:
+        raise _invalid("Thiếu ràng buộc thời gian.")
+    terminal = tc.deadline_at if tc.kind == "deadline" else tc.finish_by_at
+    if terminal is None:
+        raise _invalid("Thiếu mốc kết thúc.")
+    start = max(tc.start_at, datetime.now(UTC))
+    end = min(terminal, start + timedelta(days=14))
+    if requested is not None:
+        start = max(start, requested.start_at)
+        end = min(terminal, requested.end_at, start + timedelta(days=14))
+    if start >= end:
+        raise _invalid("Phạm vi lập lịch không còn thời gian hợp lệ.", "planning_horizon")
+    return TimeInterval(start_at=start, end_at=end)
+
+
+def _candidate_schema(row: CandidateRow, draft_id: str) -> PlanCandidate:
+    return PlanCandidate(
+        candidate_id=str(row.id),
+        draft_id=draft_id,
+        source_summary_revision=row.source_summary_revision,
+        source_planning_input_revision=row.source_planning_input_revision,
+        review_revision=row.review_revision,
+        planning_parts=row.planning_parts,
+        steps=[
+            {key: value for key, value in item.items() if not key.startswith("_")}
+            for item in row.steps
+        ],
+        sessions=row.sessions,
+        planning_horizon=row.planning_horizon,
+        source_revisions=row.source_revisions,
+        min_inter_session_gap_seconds=row.min_inter_session_gap_seconds,
+        feasibility=row.feasibility,
+        stale=False,
+        user_step_proposal=row.user_step_proposal,
+    )
+
+
+async def _read_candidate(
+    db: AsyncSession, user_id: str, candidate_id: str
+) -> tuple[CandidateRow, PlanningDraft, PlanCandidate]:
+    row = await db.scalar(
+        select(CandidateRow)
+        .where(
+            CandidateRow.id == _uuid(candidate_id),
+            CandidateRow.user_id == draft_service.resolve_user_uuid(user_id),
+        )
+        .execution_options(populate_existing=True)
+    )
+    if row is None:
+        raise _error("RESOURCE_NOT_FOUND", "Không tìm thấy phương án.", 404, "reload")
+    _, draft = await _read_draft(db, user_id, str(row.draft_id))
+    return row, draft, _candidate_schema(row, draft.draft_id)
+
+
+async def get_candidate_by_id(
+    *, user_id: str, candidate_id: str, db: AsyncSession
+) -> PlanCandidate:
+    _, draft, candidate = await _read_candidate(db, user_id, candidate_id)
+    try:
+        _require_draft(
+            draft, candidate.source_summary_revision, candidate.source_planning_input_revision
+        )
+        source = await _sources(db, user_id, draft, candidate.planning_horizon)
+        stale = source.revisions != candidate.source_revisions
+    except AppError:
+        stale = True
+    return candidate.model_copy(update={"stale": stale})
+
+
+def _micro_tasks(row: CandidateRow) -> dict[str, str]:
+    return {
+        item["client_step_key"]: item.get("_micro_task_text", f"Chuẩn bị cho bước: {item['title']}")
+        for item in row.steps
+    }
+
+
+def _candidate_values(candidate: PlanCandidate, micro_tasks: dict[str, str]) -> dict[str, Any]:
+    data = candidate.model_dump(mode="json")
+    return {
+        "source_summary_revision": candidate.source_summary_revision,
+        "source_planning_input_revision": candidate.source_planning_input_revision,
+        "review_revision": candidate.review_revision,
+        "planning_parts": data["planning_parts"],
+        "steps": [
+            {
+                **item,
+                "_micro_task_text": micro_tasks.get(
+                    item["client_step_key"], f"Chuẩn bị cho bước: {item['title']}"
+                ),
+            }
+            for item in data["steps"]
+        ],
+        "sessions": data["sessions"],
+        "planning_horizon": data["planning_horizon"],
+        "source_revisions": data["source_revisions"],
+        "feasibility": data["feasibility"],
+        "min_inter_session_gap_seconds": candidate.min_inter_session_gap_seconds,
+        "user_step_proposal": candidate.user_step_proposal,
+    }
+
+
+def _selection(parts: list[CandidatePart], selected: list[str] | None) -> list[str]:
+    ordered = [item.client_part_key for item in sorted(parts, key=lambda item: item.order_index)]
+    if selected is None:
+        return ordered
+    if len(set(selected)) != len(selected) or not set(selected).issubset(ordered):
+        raise _invalid(
+            "Phần được chọn bị trùng hoặc không có trong phương án nguồn.", "selected_part_keys"
+        )
+    result = [key for key in ordered if key in selected]
+    if result != ordered[: len(result)]:
+        raise _invalid(
+            "Các bước đang tuần tự; cần lập lịch từ phần đầu trước.", "selected_part_keys"
+        )
+    return result
+
+
+def _reschedule(
+    candidate: PlanCandidate,
+    source: PlanningSources,
+    micro_tasks: dict[str, str],
+    selected: list[str],
+) -> PlanCandidate:
+    horizon = candidate.planning_horizon
+    steps = [item for item in candidate.steps if item.client_part_key in selected]
+    free = compute_effective_free_intervals(
+        source.availability,
+        horizon.start_at,
+        horizon.end_at,
+        calendar_context=source.context,
+        manual_busy=source.context.manual_busy_intervals,
+    )
+    # Chỉ thu hẹp phạm vi lần tính, không sửa deadline/window gốc trong Draft.
+    tc = TimeConstraint(
+        kind="window",
+        start_at=horizon.start_at,
+        finish_by_at=horizon.end_at,
+        input_timezone=source.availability.timezone,
+    )
+    sessions, report = schedule_candidate_sessions(
+        steps,
+        free,
+        source.fixed_sessions,
+        tc,
+        source.preferences,
+        candidate.planning_parts,
+        horizon_days=max(1, math.ceil((horizon.end_at - horizon.start_at).total_seconds() / 86400)),
+        min_gap_seconds=candidate.min_inter_session_gap_seconds,
+    )
+    sessions = [
+        item.model_copy(
+            update={
+                "micro_task_text": micro_tasks.get(item.client_step_key, item.micro_task_text),
+                "micro_task_seconds": source.preferences.micro_task_seconds,
+            }
+        )
+        for item in sessions
+    ]
+    work = {
+        step.client_step_key: sum(
+            item.work_seconds for item in sessions if item.client_step_key == step.client_step_key
+        )
+        for step in candidate.steps
+    }
+    parts = []
+    for part in candidate.planning_parts:
+        children = [
+            step for step in candidate.steps if step.client_part_key == part.client_part_key
+        ]
+        done = bool(children) and all(
+            work[step.client_step_key]
+            == calculate_buffered_work(step.remaining_base_seconds, step.buffer_multiplier)
+            for step in children
+        )
+        any_work = any(work[step.client_step_key] > 0 for step in children)
+        parts.append(
+            part.model_copy(
+                update={
+                    "scheduling_state": "complete"
+                    if done and part.decomposition_state == "complete"
+                    else "partial"
+                    if any_work
+                    else "not_scheduled"
+                }
+            )
+        )
+    return candidate.model_copy(
+        update={"sessions": sessions, "planning_parts": parts, "feasibility": report}
+    )
+
+
+async def _update_draft(db: AsyncSession, row: DraftRow, draft: PlanningDraft) -> None:
+    changed = await db.scalar(
+        update(DraftRow)
+        .where(
+            DraftRow.id == row.id,
+            DraftRow.user_id == row.user_id,
+            DraftRow.revision == row.revision,
+        )
+        .values(
+            summary=draft_service._serialize_summary_payload(draft),
+            stage=draft.stage,
+            revision=DraftRow.revision + 1,
+        )
+        .returning(DraftRow.id)
+        .execution_options(synchronize_session=False)
+    )
+    if changed is None:
+        raise _error("REVISION_CONFLICT", "Bản nháp đã thay đổi trong lúc xử lý.")
 
 
 async def create_candidate(
@@ -210,135 +820,351 @@ async def create_candidate(
     draft_id: str,
     idempotency_key: str,
     payload: GenerateCandidateRequest,
+    db: AsyncSession,
 ) -> PlanCandidate:
-    """Dòng 9 (POST /api/v1/drafts/{draft_id}/candidates): Tạo phương án chia bước và xếp lịch UF2 (T06, T07, T08, T10)."""
-    fingerprint = json.dumps(
-        {
-            "draft_id": draft_id,
-            "body": payload.model_dump(mode="json", exclude_unset=True),
-        },
-        sort_keys=True,
+    digest = _hash(
+        "create_candidate", draft_id, payload.model_dump(mode="json", exclude_unset=True)
     )
-    idem_record = _CREATE_CANDIDATE_IDEMPOTENCY_STORE.get((user_id, idempotency_key))
-    if idem_record is not None:
-        saved_fingerprint, saved_candidate_id = idem_record
-        if saved_fingerprint != fingerprint:
-            raise AppError(
-                status_code=409,
-                code="IDEMPOTENCY_KEY_REUSED",
-                message=(
-                    "Mã lệnh đã được dùng với nội dung khác. "
-                    "Giữ mã cũ khi retry đúng nội dung; tạo mã mới cho ý định mới."
-                ),
-                next_action="use_original_payload_or_new_command",
-            )
-        return await get_candidate_by_id(
-            user_id=user_id, candidate_id=saved_candidate_id
-        )
-
-    draft = await draft_service.get_draft_by_id(user_id=user_id, draft_id=draft_id)
-
-    # 1. Kiểm tra source_summary_revision và source_planning_input_revision khớp với Draft hiện tại
-    if (
-        payload.source_summary_revision != draft.summary_revision
-        or payload.source_planning_input_revision != draft.planning_input_revision
-    ):
-        raise AppError(
-            status_code=409,
-            code="REVISION_CONFLICT",
-            message="Phiên bản nguồn đã đổi. Tải bản hiện tại trước khi sửa.",
-            current_revisions={
-                "summary_revision": draft.summary_revision,
-                "planning_input_revision": draft.planning_input_revision,
-            },
-            next_action="reload_and_review",
-        )
-
-    # 2. Kiểm tra Draft đã xác nhận UF1 chưa (T06: chỉ tạo Candidate sau khi đã confirm-summary)
-    if (
-        draft.summary_confirmed_revision is None
-        or draft.summary_confirmed_revision != draft.summary_revision
-    ):
-        raise AppError(
-            status_code=409,
-            code="REVISION_CONFLICT",
-            message="Bản nháp chưa xác nhận thông tin UF1 ở phiên bản hiện tại.",
-            current_revisions={
-                "summary_revision": draft.summary_revision,
-                "planning_input_revision": draft.planning_input_revision,
-            },
-            next_action="reload_and_review",
-        )
-
-    # 3. Nếu gửi selected_part_keys, chỉ chấp nhận các client_part_key đã tồn tại trong nguồn
+    saved = await _receipt(db, user_id, idempotency_key, digest)
+    if saved is not None:
+        return PlanCandidate.model_validate(saved)
+    _, draft = await _read_draft(db, user_id, draft_id)
+    _require_draft(draft, payload.source_summary_revision, payload.source_planning_input_revision)
+    horizon = _horizon(draft, payload.planning_horizon)
+    source = await _sources(db, user_id, draft, horizon, create_manual=True)
+    previous = None
     if payload.selected_part_keys is not None:
-        unknown_keys = [
-            key
-            for key in payload.selected_part_keys
-            if key not in _KNOWN_SOURCE_PART_KEYS
-        ]
-        if unknown_keys:
-            raise AppError(
-                status_code=422,
-                code="VALIDATION_ERROR",
-                message="Thông tin đầu vào để chia việc và xếp lịch chưa hợp lệ.",
-                field_errors=[
-                    FieldError(
-                        field_path="selected_part_keys",
-                        code="UNKNOWN_PART_KEY",
-                        message=f"Không nhận diện được client_part_key: {', '.join(unknown_keys)}.",
-                    )
-                ],
-                next_action="fix_fields",
+        previous = await db.scalar(
+            select(CandidateRow)
+            .where(
+                CandidateRow.user_id == draft_service.resolve_user_uuid(user_id),
+                CandidateRow.draft_id == draft_service.resolve_draft_uuid(draft_id),
+                CandidateRow.source_summary_revision == draft.summary_revision,
+                CandidateRow.source_planning_input_revision == draft.planning_input_revision,
             )
-
-    # TODO(AI A04/A12.0 & Algorithm A05-A10): Ghép hàm chia bước và xếp lịch tại đây khi 2 role bàn giao.
-    new_candidate_id = f"candidate_{len(_FAKE_CANDIDATES_BY_OWNER) + 1}"
-    candidate = _build_seed_candidate(
-        candidate_id=new_candidate_id,
-        draft_id=draft.draft_id,
-        source_summary_revision=draft.summary_revision,
-        source_planning_input_revision=draft.planning_input_revision,
-        review_revision=1,
-        user_step_proposal=draft.user_step_proposal
-        or "Tìm tài liệu tham khảo, sau đó viết bản nháp báo cáo.",
-        horizon=payload.planning_horizon,
-    )
-    _FAKE_CANDIDATES_BY_OWNER[(user_id, new_candidate_id)] = candidate
-
-    # Cập nhật tham chiếu candidate_ref trên Draft (không làm tăng planning_input_revision hay summary_revision)
-    updated_draft = draft.model_copy(
-        update={
-            "candidate_ref": CandidateRef(
-                candidate_id=new_candidate_id,
-                review_revision=candidate.review_revision,
+            .order_by(CandidateRow.created_at.desc(), CandidateRow.id.desc())
+            .limit(1)
+        )
+        if previous is None:
+            raise _invalid(
+                "Chưa có phương án nguồn để chọn phần; hãy tạo phương án ban đầu trước.",
+                "selected_part_keys",
+            )
+        old = _candidate_schema(previous, draft_id)
+        parts, steps, micro_tasks, tier = (
+            old.planning_parts,
+            old.steps,
+            _micro_tasks(previous),
+            previous.generation_tier,
+        )
+        # Ước lượng gốc được giữ; cấu hình effective phải lấy lại cho lần tính mới.
+        steps = [
+            step.model_copy(update={"buffer_multiplier": source.preferences.buffer_multiplier})
+            for step in steps
+        ]
+        selected = _selection(parts, payload.selected_part_keys)
+    await db.rollback()
+    if previous is None:
+        try:
+            decomposition = TaskDecompositionResult.model_validate(
+                await ai_service.decompose_task(
+                    task_title=draft.summary.title or draft.summary.description or "",
+                    scope="\n".join(
+                        value
+                        for value in (
+                            draft.summary.description,
+                            draft.summary.scope,
+                            draft.summary.goal,
+                        )
+                        if value
+                    ),
+                    extra_requirements=draft.summary.extra_requirements,
+                    user_step_proposal=draft.user_step_proposal,
+                    user_focus_duration=max(1, source.preferences.work_interval_seconds // 60),
+                )
+            )
+            if any(
+                not item.expected_output or not item.expected_output.strip()
+                for item in decomposition.steps
+            ):
+                raise ValueError("Missing expected output")
+        except (ValidationError, ValueError, TimeoutError) as exc:
+            raise _error(
+                "AI_UNAVAILABLE",
+                "Chưa có kết quả chia bước hợp lệ; bản nháp UF1 được giữ nguyên.",
+                503,
+                "retry_or_edit_manually",
+            ) from exc
+        tier = decomposition.generation_tier
+        parts, steps, micro_tasks = [], [], {}
+        for index, item in enumerate(decomposition.steps):
+            output = item.expected_output
+            if output is None or not output.strip():
+                raise _error(
+                    "AI_UNAVAILABLE", "Bước chưa có đầu ra cụ thể.", 503, "retry_or_edit_manually"
+                )
+            part_key, step_key = f"part-{index + 1}", f"step-{index + 1}"
+            parts.append(
+                CandidatePart(
+                    client_part_key=part_key,
+                    scope_description=output,
+                    order_index=index,
+                    decomposition_state="complete",
+                    scheduling_state="not_scheduled",
+                    rough_estimate_seconds=item.estimated_base_seconds,
+                    estimate_source="ai_suggested",
+                )
+            )
+            steps.append(
+                CandidateStep(
+                    client_step_key=step_key,
+                    client_part_key=part_key,
+                    title=item.title,
+                    expected_output=output,
+                    order_index=index,
+                    estimated_base_seconds=item.estimated_base_seconds,
+                    remaining_base_seconds=item.estimated_base_seconds,
+                    buffer_multiplier=source.preferences.buffer_multiplier,
+                    estimate_source="ai_suggested",
+                    status="pending",
+                )
+            )
+            micro_tasks[step_key] = item.micro_task_prompt
+        selected = _selection(parts, None)
+    async with db.begin():
+        await _lock_user(db, user_id)
+        saved = await _receipt(db, user_id, idempotency_key, digest)
+        if saved is not None:
+            return PlanCandidate.model_validate(saved)
+        draft_row, current = await _read_draft(db, user_id, draft_id)
+        _require_draft(
+            current, payload.source_summary_revision, payload.source_planning_input_revision
+        )
+        current_source = await _sources(db, user_id, current, horizon)
+        if current_source.revisions != source.revisions:
+            raise _error(
+                "SOURCE_CHANGED", "Nguồn lập lịch đã đổi khi AI đang xử lý; cần tạo phương án mới."
+            )
+        candidate = PlanCandidate(
+            candidate_id=str(uuid4()),
+            draft_id=current.draft_id,
+            source_summary_revision=current.summary_revision,
+            source_planning_input_revision=current.planning_input_revision,
+            review_revision=1,
+            planning_parts=parts,
+            steps=steps,
+            sessions=[],
+            planning_horizon=horizon,
+            source_revisions=current_source.revisions,
+            min_inter_session_gap_seconds=900,
+            feasibility=FeasibilityReport(
+                status="not_checked",
+                fully_scheduled=False,
+                verification_scope=CandidateVerificationScope(
+                    client_part_keys=selected, planning_horizon=horizon
+                ),
             ),
-            "stage": "candidate_review",
+            stale=False,
+            user_step_proposal=current.user_step_proposal,
+        )
+        candidate = _reschedule(candidate, current_source, micro_tasks, selected)
+        db.add(
+            CandidateRow(
+                id=_uuid(candidate.candidate_id),
+                user_id=draft_service.resolve_user_uuid(user_id),
+                draft_id=draft_row.id,
+                generation_tier=tier,
+                **_candidate_values(candidate, micro_tasks),
+            )
+        )
+        await db.flush()
+        await _update_draft(
+            db,
+            draft_row,
+            current.model_copy(
+                update={
+                    "candidate_ref": CandidateRef(
+                        candidate_id=candidate.candidate_id, review_revision=1
+                    ),
+                    "stage": "candidate_review",
+                }
+            ),
+        )
+        _record(
+            db,
+            user_id,
+            idempotency_key,
+            digest,
+            "create_candidate",
+            candidate,
+            candidate_id=candidate.candidate_id,
+        )
+    return candidate
+
+
+def _concrete_issues(candidate: PlanCandidate, source: PlanningSources) -> list[BlockingReason]:
+    reasons: list[BlockingReason] = []
+
+    def issue(code: str, message: str) -> None:
+        if not any(item.code == code for item in reasons):
+            reasons.append(BlockingReason(code=code, message=message))
+
+    horizon = candidate.planning_horizon
+    free = compute_effective_free_intervals(
+        source.availability,
+        horizon.start_at,
+        horizon.end_at,
+        calendar_context=source.context,
+        manual_busy=source.context.manual_busy_intervals,
+    )
+    sessions = sorted(candidate.sessions, key=lambda item: item.scheduled_start)
+    scope = candidate.feasibility.verification_scope
+    if not isinstance(scope, CandidateVerificationScope):
+        raise _invalid("Phạm vi Candidate không hợp lệ.")
+    selected = set(scope.client_part_keys)
+    part_order = {part.client_part_key: part.order_index for part in candidate.planning_parts}
+    ordered_steps = sorted(
+        [step for step in candidate.steps if step.client_part_key in selected],
+        key=lambda step: (part_order[step.client_part_key], step.order_index),
+    )
+    if not sessions or not ordered_steps:
+        issue("NO_SCHEDULE", "Chưa có lịch cụ thể trong phạm vi được duyệt.")
+    previous_end = None
+    for step in ordered_steps:
+        if step.buffer_multiplier != source.preferences.buffer_multiplier:
+            issue(
+                "BUFFER_CONFIG_MISMATCH",
+                "Buffer của bước không khớp cấu hình có hiệu lực; cần tính lại phương án.",
+            )
+        children = [item for item in sessions if item.client_step_key == step.client_step_key]
+        if sum(item.work_seconds for item in children) != calculate_buffered_work(
+            step.remaining_base_seconds, step.buffer_multiplier
+        ):
+            issue(
+                "UNSCHEDULED_WORK",
+                "Chưa xếp đủ thời gian làm việc của các bước trong phạm vi duyệt.",
+            )
+        if children and previous_end is not None and children[0].scheduled_start < previous_end:
+            issue(
+                "STEP_ORDER", "Bước sau không được bắt đầu trước khi bước trước có lịch hoàn tất."
+            )
+        if children:
+            previous_end = children[-1].scheduled_end
+    step_keys = {step.client_step_key for step in ordered_steps}
+    for item in sessions:
+        if item.client_step_key not in step_keys:
+            issue("UNEXPECTED_SESSION", "Phiên không thuộc phạm vi được kiểm chứng.")
+        if item.scheduled_start < datetime.now(UTC):
+            issue(
+                "PAST_SESSION", "Giờ bắt đầu đã trôi qua; cần tính lại phương án trước khi duyệt."
+            )
+        if not any(
+            interval.start_at <= item.scheduled_start and item.scheduled_end <= interval.end_at
+            for interval in free
+        ):
+            issue(
+                "OUTSIDE_AVAILABILITY", "Phiên phải nằm trọn trong giờ rảnh và không đè lịch bận."
+            )
+        if [segment.order_index for segment in item.segments] != list(range(len(item.segments))):
+            issue("INVALID_SEGMENTS", "Thứ tự các quãng làm/nghỉ không hợp lệ.")
+        work_segments = [
+            segment.duration_seconds for segment in item.segments if segment.kind == "work"
+        ]
+        rest_segments = [
+            segment.duration_seconds for segment in item.segments if segment.kind == "rest"
+        ]
+        if (
+            any(value > source.preferences.work_interval_seconds for value in work_segments)
+            or any(value != source.preferences.rest_interval_seconds for value in rest_segments)
+            or [segment.kind for segment in item.segments]
+            != ["work" if index % 2 == 0 else "rest" for index in range(len(item.segments))]
+            or item.segments[-1].kind != "work"
+        ):
+            issue(
+                "INVALID_SEGMENTS", "Các quãng phải tuân theo cấu hình làm việc/nghỉ có hiệu lực."
+            )
+        for fixed in source.fixed_sessions:
+            if not (
+                item.scheduled_end + timedelta(seconds=900) <= fixed.scheduled_start
+                or fixed.scheduled_end + timedelta(seconds=900) <= item.scheduled_start
+            ):
+                issue(
+                    "SESSION_COLLISION",
+                    "Phiên bị trùng hoặc chưa cách phiên đã chốt ít nhất 15 phút.",
+                )
+    for first, second in pairwise(sessions):
+        if (second.scheduled_start - first.scheduled_end).total_seconds() < 900:
+            issue("SESSION_COLLISION", "Hai phiên phải cách nhau ít nhất 15 phút, kể cả khác Task.")
+    return reasons
+
+
+def _review_feasibility(candidate: PlanCandidate, source: PlanningSources) -> PlanCandidate:
+    reasons = _concrete_issues(candidate, source)
+    if not reasons:
+        return candidate.model_copy(
+            update={
+                "feasibility": candidate.feasibility.model_copy(
+                    update={
+                        "status": "feasible",
+                        "fully_scheduled": True,
+                        "blocking_reasons": [],
+                        "required_seconds": sum(
+                            item.duration_seconds for item in candidate.sessions
+                        ),
+                        "unscheduled_seconds": 0,
+                        "deficit_seconds": 0,
+                    }
+                )
+            }
+        )
+    existing = list(candidate.feasibility.blocking_reasons)
+    existing.extend(
+        item for item in reasons if item.code not in {reason.code for reason in existing}
+    )
+    report = candidate.feasibility.model_copy(
+        update={
+            "status": "infeasible"
+            if any(
+                item.code
+                in {
+                    "SESSION_COLLISION",
+                    "OUTSIDE_AVAILABILITY",
+                    "STEP_ORDER",
+                    "PAST_SESSION",
+                    "INVALID_SEGMENTS",
+                }
+                for item in reasons
+            )
+            else candidate.feasibility.status,
+            "fully_scheduled": False,
+            "blocking_reasons": existing,
         }
     )
-    draft_service._FAKE_DRAFTS_BY_OWNER[(user_id, draft.draft_id)] = updated_draft
-    _CREATE_CANDIDATE_IDEMPOTENCY_STORE[(user_id, idempotency_key)] = (
-        fingerprint,
-        new_candidate_id,
-    )
-    return candidate
+    return candidate.model_copy(update={"feasibility": report})
 
 
-async def get_candidate_by_id(*, user_id: str, candidate_id: str) -> PlanCandidate:
-    """Dòng 10 (GET /api/v1/candidates/{candidate_id}): Đọc lại phương án lịch và tính động cờ stale."""
-    candidate = _FAKE_CANDIDATES_BY_OWNER.get((user_id, candidate_id))
-    if candidate is None:
-        raise AppError(
-            status_code=404,
-            code="RESOURCE_NOT_FOUND",
-            message="Không tìm thấy tài nguyên trong phạm vi bạn được phép truy cập.",
-            next_action="reload",
-        )
-    is_stale = _compute_candidate_stale(user_id, candidate)
-    if is_stale != candidate.stale:
-        candidate = candidate.model_copy(update={"stale": is_stale})
-        _FAKE_CANDIDATES_BY_OWNER[(user_id, candidate_id)] = candidate
-    return candidate
+def _apply_edits[ModelT: BaseModel](
+    items: list[ModelT],
+    edits: Sequence[BaseModel] | None,
+    key_name: str,
+    model: type[ModelT],
+) -> list[ModelT]:
+    result = list(items)
+    seen = set()
+    for edit in edits or []:
+        key = getattr(edit, key_name)
+        indexes = [index for index, item in enumerate(result) if getattr(item, key_name) == key]
+        if not indexes or key in seen:
+            raise _invalid("Client key không tồn tại hoặc bị gửi trùng.", f"edits.{key_name}")
+        seen.add(key)
+        changes = edit.model_dump(exclude_unset=True, exclude={key_name})
+        if "estimated_base_seconds" in changes:
+            changes["remaining_base_seconds"] = changes["estimated_base_seconds"]
+            changes["estimate_source"] = "user_confirmed"
+        if "rough_estimate_seconds" in changes:
+            changes["estimate_source"] = "user_confirmed"
+        result[indexes[0]] = model.model_validate({**result[indexes[0]].model_dump(), **changes})
+    return result
 
 
 async def patch_candidate(
@@ -347,173 +1173,207 @@ async def patch_candidate(
     candidate_id: str,
     idempotency_key: str,
     payload: UpdateCandidateRequest,
+    db: AsyncSession,
 ) -> PlanCandidate:
-    """Dòng 11 (PATCH /api/v1/candidates/{candidate_id}): Sửa phương án nháp theo Allowlist và tăng review_revision (T11)."""
-    fingerprint = json.dumps(
-        {
-            "candidate_id": candidate_id,
-            "body": payload.model_dump(mode="json", exclude_unset=True),
-        },
-        sort_keys=True,
+    digest = _hash(
+        "patch_candidate", candidate_id, payload.model_dump(mode="json", exclude_unset=True)
     )
-    idem_record = _PATCH_CANDIDATE_IDEMPOTENCY_STORE.get((user_id, idempotency_key))
-    if idem_record is not None:
-        saved_fingerprint, saved_candidate = idem_record
-        if saved_fingerprint != fingerprint:
-            raise AppError(
-                status_code=409,
-                code="IDEMPOTENCY_KEY_REUSED",
-                message=(
-                    "Mã lệnh đã được dùng với nội dung khác. "
-                    "Giữ mã cũ khi retry đúng nội dung; tạo mã mới cho ý định mới."
-                ),
-                next_action="use_original_payload_or_new_command",
-            )
-        return saved_candidate
-
-    candidate = await get_candidate_by_id(user_id=user_id, candidate_id=candidate_id)
-
-    # 1. Nếu Candidate đã stale do Draft nguồn bị sửa -> chặn 409 SOURCE_CHANGED
-    if candidate.stale:
-        raise AppError(
-            status_code=409,
-            code="SOURCE_CHANGED",
-            message="Đầu vào hoặc nguồn lập kế hoạch đã đổi. Tải lại và xem phương án mới.",
-            next_action="reload_and_review",
+    await db.rollback()
+    async with db.begin():
+        await _lock_user(db, user_id)
+        saved = await _receipt(db, user_id, idempotency_key, digest)
+        if saved is not None:
+            return PlanCandidate.model_validate(saved)
+        row, draft, candidate = await _read_candidate(db, user_id, candidate_id)
+        _require_draft(
+            draft, candidate.source_summary_revision, candidate.source_planning_input_revision
         )
-
-    # 2. Kiểm tra expected_review_revision khớp với review_revision hiện tại (409 REVISION_CONFLICT)
-    if payload.expected_review_revision != candidate.review_revision:
-        raise AppError(
-            status_code=409,
-            code="REVISION_CONFLICT",
-            message=(
-                "Dữ liệu đã thay đổi so với phiên bản gửi lên. "
-                "Tải bản hiện tại và xem lại trước khi gửi yêu cầu mới."
-            ),
-            current_revisions={"review_revision": candidate.review_revision},
-            next_action="reload_and_review",
+        if payload.expected_review_revision != candidate.review_revision:
+            raise _error("REVISION_CONFLICT", "Phiên bản phương án đã thay đổi.")
+        source = await _sources(db, user_id, draft, candidate.planning_horizon)
+        if source.revisions != candidate.source_revisions:
+            raise _error("SOURCE_CHANGED", "Nguồn lập lịch đã đổi; cần tạo phương án mới.")
+        parts, steps, sessions = (
+            list(candidate.planning_parts),
+            list(candidate.steps),
+            list(candidate.sessions),
         )
-
-    # 3. Áp dụng chỉnh sửa theo client_part_key
-    new_parts = list(candidate.planning_parts)
-    if payload.edits.planning_parts:
-        parts_by_key = {p.client_part_key: idx for idx, p in enumerate(new_parts)}
-        for part_edit in payload.edits.planning_parts:
-            if part_edit.client_part_key not in parts_by_key:
-                raise AppError(
-                    status_code=422,
-                    code="VALIDATION_ERROR",
-                    message="Thông tin đầu vào để chia việc và xếp lịch chưa hợp lệ.",
-                    field_errors=[
-                        FieldError(
-                            field_path="edits.planning_parts",
-                            code="UNKNOWN_PART_KEY",
-                            message=f"Không tìm thấy client_part_key '{part_edit.client_part_key}'.",
-                        )
-                    ],
-                    next_action="fix_fields",
-                )
-            idx = parts_by_key[part_edit.client_part_key]
-            patch_dict = part_edit.model_dump(
-                exclude_unset=True, exclude={"client_part_key"}
+        micro_tasks = _micro_tasks(row)
+        try:
+            parts = _apply_edits(
+                parts, payload.edits.planning_parts, "client_part_key", CandidatePart
             )
-            if "rough_estimate_seconds" in patch_dict:
-                patch_dict["estimate_source"] = "user_confirmed"
-            new_parts[idx] = new_parts[idx].model_copy(update=patch_dict)
-
-    # 4. Áp dụng chỉnh sửa theo client_step_key
-    new_steps = list(candidate.steps)
-    if payload.edits.steps:
-        steps_by_key = {s.client_step_key: idx for idx, s in enumerate(new_steps)}
-        for step_edit in payload.edits.steps:
-            if step_edit.client_step_key not in steps_by_key:
-                raise AppError(
-                    status_code=422,
-                    code="VALIDATION_ERROR",
-                    message="Thông tin đầu vào để chia việc và xếp lịch chưa hợp lệ.",
-                    field_errors=[
-                        FieldError(
-                            field_path="edits.steps",
-                            code="UNKNOWN_STEP_KEY",
-                            message=f"Không tìm thấy client_step_key '{step_edit.client_step_key}'.",
-                        )
-                    ],
-                    next_action="fix_fields",
-                )
-            idx = steps_by_key[step_edit.client_step_key]
-            patch_dict = step_edit.model_dump(
-                exclude_unset=True, exclude={"client_step_key"}
-            )
-            if (
-                "estimated_base_seconds" in patch_dict
-                and patch_dict["estimated_base_seconds"] is not None
-            ):
-                patch_dict["remaining_base_seconds"] = patch_dict[
-                    "estimated_base_seconds"
+            steps = _apply_edits(steps, payload.edits.steps, "client_step_key", CandidateStep)
+            if len({step.order_index for step in steps}) != len(steps):
+                raise _invalid("Thứ tự các bước không được trùng nhau.", "edits.steps")
+            if any("order_index" in edit.model_fields_set for edit in payload.edits.steps or []):
+                steps = sorted(steps, key=lambda step: step.order_index)
+                part_keys = [step.client_part_key for step in steps]
+                groups = [
+                    key
+                    for index, key in enumerate(part_keys)
+                    if index == 0 or key != part_keys[index - 1]
                 ]
-                patch_dict["estimate_source"] = "user_confirmed"
-            new_steps[idx] = new_steps[idx].model_copy(update=patch_dict)
-
-    # 5. Áp dụng chỉnh sửa theo client_session_key
-    new_sessions = list(candidate.sessions)
-    if payload.edits.sessions:
-        sessions_by_key = {
-            s.client_session_key: idx for idx, s in enumerate(new_sessions)
-        }
-        for sess_edit in payload.edits.sessions:
-            if sess_edit.client_session_key not in sessions_by_key:
-                raise AppError(
-                    status_code=422,
-                    code="VALIDATION_ERROR",
-                    message="Thông tin đầu vào để chia việc và xếp lịch chưa hợp lệ.",
-                    field_errors=[
-                        FieldError(
-                            field_path="edits.sessions",
-                            code="UNKNOWN_SESSION_KEY",
-                            message=f"Không tìm thấy client_session_key '{sess_edit.client_session_key}'.",
+                if len(groups) != len(set(groups)):
+                    raise _invalid("Các bước của cùng một phần phải nằm liền nhau.", "edits.steps")
+                order = {key: index for index, key in enumerate(groups)}
+                parts = sorted(
+                    [
+                        part.model_copy(
+                            update={
+                                "order_index": order.get(
+                                    part.client_part_key, len(order) + part.order_index
+                                )
+                            }
                         )
+                        for part in parts
                     ],
-                    next_action="fix_fields",
+                    key=lambda part: part.order_index,
                 )
-            idx = sessions_by_key[sess_edit.client_session_key]
-            patch_dict = sess_edit.model_dump(
-                exclude_unset=True, exclude={"client_session_key"}
+            changed_timing = any(
+                {"estimated_base_seconds", "order_index"} & edit.model_fields_set
+                for edit in payload.edits.steps or []
             )
-            new_sessions[idx] = new_sessions[idx].model_copy(update=patch_dict)
-
-    # TODO(Algorithm A05-A10): Gọi lại hàm tính thời lượng và feasibility từ scheduler_engine khi Role Algorithm bàn giao.
-    next_review_rev = candidate.review_revision + 1
-    updated_candidate = candidate.model_copy(
-        update={
-            "planning_parts": new_parts,
-            "steps": new_steps,
-            "sessions": new_sessions,
-            "review_revision": next_review_rev,
-        }
-    )
-    _FAKE_CANDIDATES_BY_OWNER[(user_id, candidate_id)] = updated_candidate
-
-    # Đồng bộ lại candidate_ref.review_revision trên Draft nguồn
-    draft = draft_service._FAKE_DRAFTS_BY_OWNER.get((user_id, candidate.draft_id))
-    if draft is not None and draft.candidate_ref is not None:
-        if draft.candidate_ref.candidate_id == candidate_id:
-            draft_service._FAKE_DRAFTS_BY_OWNER[(user_id, candidate.draft_id)] = (
-                draft.model_copy(
+            updated = PlanCandidate.model_validate(
+                {
+                    **candidate.model_dump(),
+                    "planning_parts": parts,
+                    "steps": steps,
+                    "review_revision": candidate.review_revision + 1,
+                }
+            )
+            scope = candidate.feasibility.verification_scope
+            if not isinstance(scope, CandidateVerificationScope):
+                raise _invalid("Phạm vi Candidate không hợp lệ.")
+            selected = _selection(parts, list(scope.client_part_keys))
+            if changed_timing:
+                updated = _reschedule(updated, source, micro_tasks, selected)
+                sessions = list(updated.sessions)
+            seen = set()
+            for edit in payload.edits.sessions or []:
+                indexes = [
+                    index
+                    for index, item in enumerate(sessions)
+                    if item.client_session_key == edit.client_session_key
+                ]
+                if not indexes or edit.client_session_key in seen:
+                    raise _invalid(
+                        "Không tìm thấy phiên hoặc client_session_key bị trùng.", "edits.sessions"
+                    )
+                seen.add(edit.client_session_key)
+                index = indexes[0]
+                changes = edit.model_dump(exclude_unset=True, exclude={"client_session_key"})
+                if (
+                    "scheduled_start" in changes
+                    and "scheduled_end" not in changes
+                    and changes["scheduled_start"] is not None
+                ):
+                    changes["scheduled_end"] = changes["scheduled_start"] + timedelta(
+                        seconds=sessions[index].duration_seconds
+                    )
+                elif (
+                    "scheduled_end" in changes
+                    and "scheduled_start" not in changes
+                    and changes["scheduled_end"] is not None
+                ):
+                    changes["scheduled_start"] = changes["scheduled_end"] - timedelta(
+                        seconds=sessions[index].duration_seconds
+                    )
+                if "scheduled_start" in changes and changes["scheduled_start"] is not None:
+                    changes["start_decision_due_at"] = changes["scheduled_start"] + timedelta(
+                        seconds=900
+                    )
+                sessions[index] = CandidateSession.model_validate(
+                    {**sessions[index].model_dump(), **changes}
+                )
+                if edit.micro_task_text is not None:
+                    micro_tasks[sessions[index].client_step_key] = edit.micro_task_text
+            updated = updated.model_copy(update={"sessions": sessions})
+        except ValidationError as exc:
+            raise _invalid(
+                "Giá trị sửa không hợp lệ hoặc thời lượng phiên không khớp.", "edits"
+            ) from exc
+        # Kiểm lại lịch cụ thể, không suy khả thi chỉ từ tổng phút.
+        updated = _review_feasibility(updated, source)
+        for name, value in _candidate_values(updated, micro_tasks).items():
+            setattr(row, name, value)
+        await db.flush()
+        draft_row, current = await _read_draft(db, user_id, draft.draft_id)
+        if current.candidate_ref is not None and current.candidate_ref.candidate_id == candidate_id:
+            await _update_draft(
+                db,
+                draft_row,
+                current.model_copy(
                     update={
                         "candidate_ref": CandidateRef(
-                            candidate_id=candidate_id,
-                            review_revision=next_review_rev,
+                            candidate_id=candidate_id, review_revision=updated.review_revision
                         )
                     }
+                ),
+            )
+        _record(
+            db,
+            user_id,
+            idempotency_key,
+            digest,
+            "patch_candidate",
+            updated,
+            candidate_id=candidate_id,
+        )
+    return updated
+
+
+async def _enqueue_calendar(
+    db: AsyncSession, owner: UUID, sessions: list[SessionRow], version: int
+) -> str:
+    connections = (
+        await db.scalars(
+            select(CalendarConnection).where(
+                CalendarConnection.user_id == owner,
+                CalendarConnection.connection_state == "connected",
+                CalendarConnection.write_calendar_id.is_not(None),
+            )
+        )
+    ).all()
+    for connection in connections:
+        for session in sessions:
+            link = CalendarEventLink(
+                id=uuid4(),
+                user_id=owner,
+                session_id=session.id,
+                connection_id=connection.id,
+                google_calendar_id=connection.write_calendar_id,
+                google_event_id=None,
+                google_etag=None,
+                desired_schedule_revision=version,
+                synced_schedule_revision=None,
+                sync_state="pending",
+                is_current=True,
+            )
+            db.add(link)
+            await db.flush()
+            db.add(
+                CalendarSyncJob(
+                    user_id=owner,
+                    connection_id=connection.id,
+                    event_link_id=link.id,
+                    target_kind="session",
+                    target_ref=str(session.id),
+                    operation="create",
+                    target_schedule_revision=version,
+                    expected_google_etag=None,
+                    payload_snapshot={
+                        "session_id": str(session.id),
+                        "google_calendar_id": connection.write_calendar_id,
+                        "start_at": session.scheduled_start.isoformat(),
+                        "end_at": session.scheduled_end.isoformat(),
+                    },
+                    idempotency_key=f"session:{session.id}:version:{version}:create",
+                    job_state="queued",
+                    attempt_count=0,
                 )
             )
-
-    _PATCH_CANDIDATE_IDEMPOTENCY_STORE[(user_id, idempotency_key)] = (
-        fingerprint,
-        updated_candidate,
-    )
-    return updated_candidate
+    return "pending" if connections else "not_connected"
 
 
 async def confirm_candidate(
@@ -522,298 +1382,331 @@ async def confirm_candidate(
     candidate_id: str,
     idempotency_key: str,
     payload: ConfirmCandidateRequest,
+    db: AsyncSession,
 ) -> ConfirmCandidateResult:
-    """Dòng 12 (POST /api/v1/candidates/{candidate_id}/confirm): Duyệt và lưu kế hoạch chính thức nguyên tử (A18, T12-T16)."""
-    fingerprint = json.dumps(
-        {
-            "candidate_id": candidate_id,
-            "body": payload.model_dump(mode="json"),
-        },
-        sort_keys=True,
-    )
-    idem_record = _CONFIRM_CANDIDATE_IDEMPOTENCY_STORE.get((user_id, idempotency_key))
-    if idem_record is not None:
-        saved_fingerprint, saved_result = idem_record
-        if saved_fingerprint != fingerprint:
-            raise AppError(
-                status_code=409,
-                code="IDEMPOTENCY_KEY_REUSED",
-                message=(
-                    "Mã lệnh đã được dùng với nội dung khác. "
-                    "Giữ mã cũ khi retry đúng nội dung; tạo mã mới cho ý định mới."
-                ),
-                next_action="use_original_payload_or_new_command",
+    digest = _hash("confirm_candidate", candidate_id, payload.model_dump(mode="json"))
+    await db.rollback()
+    async with db.begin():
+        await _lock_user(db, user_id)
+        saved = await _receipt(db, user_id, idempotency_key, digest)
+        if saved is not None:
+            return ConfirmCandidateResult.model_validate(saved)
+        _, draft, candidate = await _read_candidate(db, user_id, candidate_id)
+        _require_draft(
+            draft, payload.expected_summary_revision, payload.expected_planning_input_revision
+        )
+        if candidate.review_revision != payload.expected_review_revision:
+            raise _error("REVISION_CONFLICT", "Phương án đã đổi phiên bản.")
+        if (
+            candidate.source_summary_revision != draft.summary_revision
+            or candidate.source_planning_input_revision != draft.planning_input_revision
+        ):
+            raise _error("SOURCE_CHANGED", "Phương án không còn khớp bản nháp nguồn.")
+        source = await _sources(db, user_id, draft, candidate.planning_horizon)
+        if (
+            candidate.source_revisions != source.revisions
+            or payload.expected_source_revisions != source.revisions
+        ):
+            raise _error(
+                "SOURCE_CHANGED",
+                "Nguồn lịch, giờ rảnh hoặc cấu hình đã đổi; cần tạo phương án mới.",
             )
-        return saved_result
-
-    candidate = await get_candidate_by_id(user_id=user_id, candidate_id=candidate_id)
-    draft = await draft_service.get_draft_by_id(
-        user_id=user_id, draft_id=candidate.draft_id
-    )
-
-    # 1. Kiểm tra đồng bộ review_revision, summary_revision và planning_input_revision (409 REVISION_CONFLICT)
-    if (
-        payload.expected_review_revision != candidate.review_revision
-        or payload.expected_summary_revision != draft.summary_revision
-        or payload.expected_planning_input_revision != draft.planning_input_revision
-    ):
-        raise AppError(
-            status_code=409,
-            code="REVISION_CONFLICT",
-            message="Phiên bản nguồn đã đổi. Tải bản hiện tại trước khi sửa.",
-            current_revisions={
-                "review_revision": candidate.review_revision,
-                "summary_revision": draft.summary_revision,
-                "planning_input_revision": draft.planning_input_revision,
-            },
-            next_action="reload_and_review",
-        )
-
-    # 2. Kiểm tra Candidate chưa bị stale và expected_source_revisions khớp với nguồn hiện tại (T12, T14 -> 409 SOURCE_CHANGED)
-    current_schedule_rev = _USER_SCHEDULE_REVISIONS.get(user_id, 1)
-    if (
-        candidate.stale
-        or payload.expected_source_revisions != candidate.source_revisions
-        or payload.expected_source_revisions.schedule != current_schedule_rev
-    ):
-        raise AppError(
-            status_code=409,
-            code="SOURCE_CHANGED",
-            message=(
-                "Dữ liệu dùng tạo phương án đã thay đổi. "
-                "Hãy tải lại và xem lại trước khi xác nhận."
-            ),
-            current_revisions={"schedule": current_schedule_rev},
-            next_action="rebuild_and_review",
-        )
-
-    # 3. Kiểm tra phương án phải ở trạng thái khả thi và Draft đủ điều kiện (409 PLAN_NOT_CONFIRMABLE)
-    if (
-        candidate.feasibility.status != "feasible"
-        or draft.summary.time_constraint is None
-        or draft.summary.availability_ref is None
-    ):
-        raise AppError(
-            status_code=409,
-            code="PLAN_NOT_CONFIRMABLE",
-            message=(
-                "Chưa có lịch hợp lệ để xác nhận. "
-                "Hãy bổ sung dữ liệu và tính lại phương án."
-            ),
-            next_action="review_feasibility",
-        )
-
-    # 4. Kiểm tra khoảng cách tối thiểu 900 giây giữa các phiên (T08, T14)
-    existing_sessions = [
-        sess
-        for (owner_id, _), existing_task in _FAKE_TASKS_BY_OWNER.items()
-        if owner_id == user_id
-        for sess in existing_task.sessions
-    ]
-    all_sessions_sorted = sorted(
-        [*existing_sessions, *candidate.sessions],
-        key=lambda s: s.scheduled_start,
-    )
-    for idx in range(len(all_sessions_sorted) - 1):
-        curr_s = all_sessions_sorted[idx]
-        next_s = all_sessions_sorted[idx + 1]
-        gap_seconds = (
-            next_s.scheduled_start - curr_s.scheduled_end
-        ).total_seconds()
-        if gap_seconds < candidate.min_inter_session_gap_seconds:
-            raise AppError(
-                status_code=409,
-                code="PLAN_NOT_CONFIRMABLE",
-                message="Phiên làm việc bị trùng hoặc chưa đủ khoảng cách nghỉ 900 giây với lịch hiện tại.",
-                next_action="review_feasibility",
+        issues = _concrete_issues(candidate, source)
+        if (
+            candidate.feasibility.status != "feasible"
+            or not candidate.feasibility.fully_scheduled
+            or issues
+        ):
+            raise _error(
+                "PLAN_NOT_CONFIRMABLE",
+                "Chưa có lịch cụ thể thỏa giờ rảnh, thứ tự bước, thời hạn và khoảng nghỉ 15 phút.",
+                action="review_feasibility",
             )
-
-    # 5. Sinh ID chính thức trên Server và bảng ánh xạ key_mapping (nguyên tử trong 1 bước ghi)
-    next_task_num = len(_FAKE_TASKS_BY_OWNER) + 1
-    task_id = f"task_{next_task_num}"
-    next_schedule_rev = current_schedule_rev + 1
-
-    part_mapping: dict[str, str] = {}
-    persisted_parts: list[PlanningPart] = []
-    for p_idx, c_part in enumerate(candidate.planning_parts, start=1):
-        part_id = f"part_{p_idx}" if next_task_num == 1 else f"part_{next_task_num}_{p_idx}"
-        part_mapping[c_part.client_part_key] = part_id
-        persisted_parts.append(
-            PlanningPart(
-                planning_part_id=part_id,
-                task_id=task_id,
-                client_part_key=c_part.client_part_key,
-                scope_description=c_part.scope_description,
-                order_index=c_part.order_index,
-                decomposition_state=c_part.decomposition_state,
-                scheduling_state=c_part.scheduling_state,
-                unexpanded_scope=c_part.unexpanded_scope,
-                rough_estimate_seconds=c_part.rough_estimate_seconds,
-                estimate_source=c_part.estimate_source,
+        existing = await db.scalar(
+            select(TaskRow.id).where(
+                TaskRow.source_draft_id == draft_service.resolve_draft_uuid(draft.draft_id)
             )
         )
-
-    step_mapping: dict[str, str] = {}
-    persisted_steps: list[Step] = []
-    for s_idx, c_step in enumerate(candidate.steps, start=1):
-        step_id = f"step_{s_idx}" if next_task_num == 1 else f"step_{next_task_num}_{s_idx}"
-        step_mapping[c_step.client_step_key] = step_id
-        persisted_steps.append(
-            Step(
-                step_id=step_id,
-                task_id=task_id,
-                planning_part_id=part_mapping[c_step.client_part_key],
-                title=c_step.title,
-                expected_output=c_step.expected_output,
-                order_index=c_step.order_index,
-                estimated_base_seconds=c_step.estimated_base_seconds,
-                remaining_base_seconds=c_step.remaining_base_seconds,
-                buffer_multiplier=c_step.buffer_multiplier,
-                estimate_source=c_step.estimate_source,
-                status=c_step.status,
+        if existing is not None:
+            raise _error("PLAN_NOT_CONFIRMABLE", "Bản nháp đã được lưu thành công việc.")
+        tc, availability_ref = draft.summary.time_constraint, draft.summary.availability_ref
+        if tc is None or availability_ref is None:
+            raise _error("PLAN_NOT_CONFIRMABLE", "Thiếu ràng buộc thời gian hoặc nguồn giờ rảnh.")
+        owner, task_id = draft_service.resolve_user_uuid(user_id), uuid4()
+        next_version = source.revisions.schedule + 1
+        db.add(
+            TaskRow(
+                id=task_id,
+                user_id=owner,
+                title=draft.summary.title,
+                description=draft.summary.description or draft.summary.goal,
+                scope=draft.summary.scope,
+                extra_requirements=draft.summary.extra_requirements,
+                time_constraint=tc.model_dump(mode="json"),
+                importance=draft.summary.importance,
+                status="pending",
+                source_draft_id=draft_service.resolve_draft_uuid(draft.draft_id),
+                availability_ref=availability_ref.model_dump(mode="json"),
+                source_summary=draft.summary.model_dump(mode="json"),
             )
         )
-
-    session_mapping: dict[str, str] = {}
-    persisted_sessions: list[Session] = []
-    for sess_idx, c_sess in enumerate(candidate.sessions, start=1):
-        session_id = (
-            f"session_{sess_idx}"
-            if next_task_num == 1
-            else f"session_{next_task_num}_{sess_idx}"
-        )
-        session_mapping[c_sess.client_session_key] = session_id
-        persisted_sessions.append(
-            Session(
-                session_id=session_id,
-                step_id=step_mapping[c_sess.client_step_key],
-                scheduled_start=c_sess.scheduled_start,
-                scheduled_end=c_sess.scheduled_end,
-                micro_task_text=c_sess.micro_task_text,
-                micro_task_seconds=c_sess.micro_task_seconds,
-                work_seconds=c_sess.work_seconds,
-                rest_seconds=c_sess.rest_seconds,
-                segments=c_sess.segments,
-                duration_seconds=c_sess.duration_seconds,
-                schedule_revision=next_schedule_rev,
+        await db.flush()
+        part_ids = {part.client_part_key: uuid4() for part in candidate.planning_parts}
+        for part in candidate.planning_parts:
+            db.add(
+                PartRow(
+                    id=part_ids[part.client_part_key],
+                    user_id=owner,
+                    task_id=task_id,
+                    **part.model_dump(),
+                )
+            )
+        await db.flush()
+        step_ids = {step.client_step_key: uuid4() for step in candidate.steps}
+        for step in candidate.steps:
+            db.add(
+                StepRow(
+                    id=step_ids[step.client_step_key],
+                    user_id=owner,
+                    task_id=task_id,
+                    planning_part_id=part_ids[step.client_part_key],
+                    **step.model_dump(exclude={"client_step_key", "client_part_key"}),
+                )
+            )
+        await db.flush()
+        session_ids = {item.client_session_key: uuid4() for item in candidate.sessions}
+        persisted_sessions = []
+        for item in candidate.sessions:
+            data = item.model_dump(exclude={"client_session_key", "client_step_key", "segments"})
+            session = SessionRow(
+                id=session_ids[item.client_session_key],
+                user_id=owner,
+                step_id=step_ids[item.client_step_key],
+                schedule_revision=next_version,
+                segments=[segment.model_dump() for segment in item.segments],
                 status="scheduled",
-                calendar_event_link_id=None,
-                start_state=c_sess.start_state,
-                start_decision_due_at=c_sess.start_decision_due_at,
+                **data,
+            )
+            db.add(session)
+            persisted_sessions.append(session)
+        await db.flush()
+        for session in persisted_sessions:
+            for offset in source.preferences.reminder_offsets:
+                db.add(
+                    Reminder(
+                        user_id=owner,
+                        session_id=session.id,
+                        schedule_revision=next_version,
+                        kind="pre_session",
+                        fire_at=session.scheduled_start - timedelta(seconds=offset),
+                        dedupe_key=f"session:{session.id}:version:{next_version}:reminder:{offset}",
+                        delivery_state="scheduled",
+                    )
+                )
+        calendar_state = await _enqueue_calendar(db, owner, persisted_sessions, next_version)
+        approved_at = datetime.now(UTC)
+        db.add(
+            VersionRow(
+                user_id=owner,
+                version_number=next_version,
+                base_version=source.revisions.schedule,
+                approved_at=approved_at,
+                affected_task_ids=[str(task_id)],
+                min_inter_session_gap_seconds=900,
+                alarm_sync_state="pending",
             )
         )
-
-    all_parts_complete = all(
-        p.decomposition_state == "complete" for p in persisted_parts
-    )
-    all_parts_scheduled = all(
-        p.scheduling_state == "complete" for p in persisted_parts
-    )
-    persisted_task = Task(
-        task_id=task_id,
-        title=draft.summary.title or "Công việc mới",
-        description=draft.summary.description or draft.raw_input or "Công việc mới",
-        scope=draft.summary.scope or "",
-        extra_requirements=list(draft.summary.extra_requirements),
-        time_constraint=draft.summary.time_constraint,
-        importance=draft.summary.importance,
-        status="pending",
-        source_draft_id=draft.draft_id,
-        decomposition_state="complete" if all_parts_complete else "partial",
-        scheduling_state="complete" if all_parts_scheduled else "partial",
-        availability_ref=AvailabilityRef(
-            availability_id=draft.summary.availability_ref.availability_id,
-            revision=draft.summary.availability_ref.revision,
-        ),
-        planning_parts=persisted_parts,
-        steps=persisted_steps,
-        sessions=persisted_sessions,
-        source_summary=draft.summary,
-    )
-
-    result = ConfirmCandidateResult(
-        app_save_state="saved",
-        task=persisted_task,
-        key_mapping=KeyMapping(
-            planning_parts=part_mapping,
-            steps=step_mapping,
-            sessions=session_mapping,
-        ),
-        schedule_version=ScheduleVersion(
-            version_number=next_schedule_rev,
-            base_version=current_schedule_rev,
-            approved_at=datetime.now(UTC),
-            affected_task_ids=[task_id],
-            min_inter_session_gap_seconds=candidate.min_inter_session_gap_seconds,
+        draft_row, current = await _read_draft(db, user_id, draft.draft_id)
+        _require_draft(current, draft.summary_revision, draft.planning_input_revision)
+        await _update_draft(
+            db,
+            draft_row,
+            current.model_copy(update={"confirmed_task_id": str(task_id), "stage": "confirmed"}),
+        )
+        await db.flush()
+        task = await get_task_by_id(user_id=user_id, task_id=str(task_id), db=db)
+        result = ConfirmCandidateResult(
+            app_save_state="saved",
+            task=task,
+            key_mapping=KeyMapping(
+                planning_parts={key: str(value) for key, value in part_ids.items()},
+                steps={key: str(value) for key, value in step_ids.items()},
+                sessions={key: str(value) for key, value in session_ids.items()},
+            ),
+            schedule_version=ScheduleVersion(
+                version_number=next_version,
+                base_version=source.revisions.schedule,
+                approved_at=approved_at,
+                affected_task_ids=[str(task_id)],
+                min_inter_session_gap_seconds=900,
+                alarm_sync_state="pending",
+                calendar_sync_summary=calendar_state,
+            ),
             alarm_sync_state="pending",
-            calendar_sync_summary="pending",
-        ),
-        alarm_sync_state="pending",
-        calendar_sync_summary="pending",
-    )
-
-    # Cập nhật nguyên tử vào kho dữ liệu của User
-    _FAKE_TASKS_BY_OWNER[(user_id, task_id)] = persisted_task
-    _USER_SCHEDULE_REVISIONS[user_id] = next_schedule_rev
-    draft_service._FAKE_DRAFTS_BY_OWNER[(user_id, draft.draft_id)] = draft.model_copy(
-        update={
-            "confirmed_task_id": task_id,
-            "stage": "confirmed",
-        }
-    )
-    _CONFIRM_CANDIDATE_IDEMPOTENCY_STORE[(user_id, idempotency_key)] = (
-        fingerprint,
-        result,
-    )
+            calendar_sync_summary=calendar_state,
+        )
+        _record(
+            db,
+            user_id,
+            idempotency_key,
+            digest,
+            "confirm_candidate",
+            result,
+            task_id=str(task_id),
+            candidate_id=candidate_id,
+        )
     return result
 
 
-async def list_tasks(
-    *,
-    user_id: str,
-    limit: int = 20,
-    cursor: str | None = None,
-) -> TaskListData:
-    """Dòng 13 (GET /api/v1/tasks): Liệt kê các công việc chính thức thuộc về user_id có phân trang."""
-    user_tasks = [
-        task
-        for (owner_id, _), task in _FAKE_TASKS_BY_OWNER.items()
-        if owner_id == user_id
-    ]
-    start_index = 0
-    if cursor is not None:
-        for idx, task in enumerate(user_tasks):
-            if task.task_id == cursor:
-                start_index = idx + 1
-                break
-        else:
-            raise AppError(
-                status_code=422,
-                code="VALIDATION_ERROR",
-                message="Tham số lọc không hợp lệ.",
-                next_action="fix_request",
-            )
+def _aggregate(states: list[str], *, scheduling: bool = False) -> str:
+    initial = "not_scheduled" if scheduling else "not_started"
+    if not states or all(state == initial for state in states):
+        return initial
+    return "complete" if all(state == "complete" for state in states) else "partial"
 
-    sliced = user_tasks[start_index : start_index + limit]
-    next_cursor = (
-        sliced[-1].task_id
-        if (start_index + limit) < len(user_tasks) and sliced
-        else None
+
+async def get_task_by_id(*, user_id: str, task_id: str, db: AsyncSession) -> Task:
+    owner = draft_service.resolve_user_uuid(user_id)
+    row = await db.scalar(
+        select(TaskRow)
+        .where(TaskRow.id == _uuid(task_id), TaskRow.user_id == owner)
+        .execution_options(populate_existing=True)
     )
-    return TaskListData(items=sliced, next_cursor=next_cursor)
-
-
-async def get_task_by_id(*, user_id: str, task_id: str) -> Task:
-    """Dòng 14 (GET /api/v1/tasks/{task_id}): Đọc chi tiết 1 công việc chính thức của đúng chủ sở hữu."""
-    task = _FAKE_TASKS_BY_OWNER.get((user_id, task_id))
-    if task is None:
-        raise AppError(
-            status_code=404,
-            code="RESOURCE_NOT_FOUND",
-            message="Không tìm thấy tài nguyên trong phạm vi bạn được phép truy cập.",
-            next_action="reload",
+    if row is None:
+        raise _error("RESOURCE_NOT_FOUND", "Không tìm thấy công việc.", 404, "reload")
+    if row.source_draft_id is None or row.source_summary is None or row.availability_ref is None:
+        raise _error("SOURCE_CHANGED", "Công việc thiếu snapshot nguồn theo hợp đồng hiện hành.")
+    _, draft = await _read_draft(db, user_id, str(row.source_draft_id))
+    part_rows = (
+        await db.scalars(
+            select(PartRow)
+            .where(PartRow.task_id == row.id, PartRow.user_id == owner)
+            .order_by(PartRow.order_index)
         )
-    return task
+    ).all()
+    step_rows = (
+        await db.scalars(
+            select(StepRow)
+            .where(StepRow.task_id == row.id, StepRow.user_id == owner)
+            .order_by(StepRow.order_index)
+        )
+    ).all()
+    session_rows = (
+        await db.scalars(
+            select(SessionRow)
+            .join(StepRow, StepRow.id == SessionRow.step_id)
+            .where(StepRow.task_id == row.id, SessionRow.user_id == owner)
+            .order_by(SessionRow.scheduled_start)
+        )
+    ).all()
+    links = (
+        (
+            await db.scalars(
+                select(CalendarEventLink)
+                .where(
+                    CalendarEventLink.user_id == owner,
+                    CalendarEventLink.session_id.in_([item.id for item in session_rows]),
+                    CalendarEventLink.is_current.is_(True),
+                )
+                .order_by(CalendarEventLink.id)
+            )
+        ).all()
+        if session_rows
+        else []
+    )
+    link_ids = {item.session_id: str(item.id) for item in links}
+    parts = [
+        PlanningPart(
+            planning_part_id=str(part.id),
+            task_id=task_id,
+            **{name: getattr(part, name) for name in CandidatePart.model_fields},
+        )
+        for part in part_rows
+    ]
+    steps = [
+        Step.model_validate(
+            dict(
+                step_id=str(step.id),
+                task_id=task_id,
+                planning_part_id=str(step.planning_part_id),
+                title=step.title,
+                expected_output=step.expected_output,
+                order_index=step.order_index,
+                estimated_base_seconds=step.estimated_base_seconds,
+                remaining_base_seconds=step.remaining_base_seconds,
+                buffer_multiplier=step.buffer_multiplier,
+                estimate_source=step.estimate_source,
+                status=step.status,
+            )
+        )
+        for step in step_rows
+    ]
+    return Task.model_validate(
+        dict(
+            task_id=str(row.id),
+            title=row.title,
+            description=row.description,
+            scope=row.scope,
+            extra_requirements=row.extra_requirements or [],
+            time_constraint=row.time_constraint,
+            importance=row.importance,
+            status=row.status,
+            source_draft_id=draft.draft_id,
+            decomposition_state=_aggregate([part.decomposition_state for part in parts]),
+            scheduling_state=_aggregate([part.scheduling_state for part in parts], scheduling=True),
+            availability_ref=row.availability_ref,
+            planning_parts=parts,
+            steps=steps,
+            sessions=[_session_schema(item, link_ids.get(item.id)) for item in session_rows],
+            source_summary=row.source_summary,
+        )
+    )
+
+
+def _page(
+    items: list[Any], limit: int, cursor: str | None, key: str
+) -> tuple[list[Any], str | None]:
+    start = 0
+    if cursor is not None:
+        positions = [index for index, item in enumerate(items) if str(getattr(item, key)) == cursor]
+        if not positions:
+            raise _invalid("Con trỏ phân trang không hợp lệ.", "cursor")
+        start = positions[0] + 1
+    result = items[start : start + limit]
+    return result, str(getattr(result[-1], key)) if result and start + limit < len(items) else None
+
+
+async def list_tasks(
+    *, user_id: str, db: AsyncSession, limit: int = 20, cursor: str | None = None
+) -> TaskListData:
+    rows = (
+        await db.scalars(
+            select(TaskRow)
+            .where(TaskRow.user_id == draft_service.resolve_user_uuid(user_id))
+            .order_by(TaskRow.created_at, TaskRow.id)
+        )
+    ).all()
+    page, next_cursor = _page(list(rows), limit, cursor, "id")
+    return TaskListData(
+        items=[await get_task_by_id(user_id=user_id, task_id=str(item.id), db=db) for item in page],
+        next_cursor=next_cursor,
+    )
+
+
+async def _calendar_state(db: AsyncSession, owner: UUID, version: int) -> str:
+    states = (
+        await db.scalars(
+            select(CalendarSyncJob.job_state).where(
+                CalendarSyncJob.user_id == owner,
+                CalendarSyncJob.target_schedule_revision == version,
+            )
+        )
+    ).all()
+    if not states:
+        return "not_connected"
+    if any(state == "failed" for state in states):
+        return "failed"
+    return "synced" if all(state == "completed" for state in states) else "pending"
 
 
 async def get_schedule(
@@ -821,64 +1714,59 @@ async def get_schedule(
     user_id: str,
     from_at: datetime,
     to_at: datetime,
+    db: AsyncSession,
     limit: int = 50,
     cursor: str | None = None,
 ) -> ScheduleData:
-    """Dòng 15 (GET /api/v1/schedule): Đọc lịch các phiên chính thức trong khoảng [from_at, to_at) (T19)."""
-    if from_at.tzinfo is None or to_at.tzinfo is None or from_at >= to_at:
-        raise AppError(
-            status_code=422,
-            code="VALIDATION_ERROR",
-            message="Tham số lọc không hợp lệ.",
-            field_errors=[
-                FieldError(
-                    field_path="from",
-                    code="INVALID_TIME_RANGE",
-                    message="Mốc 'from' và 'to' phải có múi giờ và 'from' phải đứng trước 'to'.",
-                )
-            ],
-            next_action="fix_request",
-        )
-
-    # Chỉ lấy các Session thuộc Task ĐÃ XÁC NHẬN của user_id (tuyệt đối không gộp Candidate chưa duyệt - T19)
-    matching_sessions = [
-        sess
-        for (owner_id, _), task in _FAKE_TASKS_BY_OWNER.items()
-        if owner_id == user_id
-        for sess in task.sessions
-        if sess.scheduled_start < to_at and sess.scheduled_end > from_at
-    ]
-    matching_sessions.sort(key=lambda s: s.scheduled_start)
-
-    start_index = 0
-    if cursor is not None:
-        for idx, sess in enumerate(matching_sessions):
-            if sess.session_id == cursor:
-                start_index = idx + 1
-                break
-        else:
-            raise AppError(
-                status_code=422,
-                code="VALIDATION_ERROR",
-                message="Tham số lọc không hợp lệ.",
-                next_action="fix_request",
+    try:
+        TimeInterval(start_at=from_at, end_at=to_at)
+    except ValidationError as exc:
+        raise _invalid("Cần cặp from/to có múi giờ và bắt đầu trước kết thúc.", "from") from exc
+    owner = draft_service.resolve_user_uuid(user_id)
+    rows = (
+        await db.scalars(
+            select(SessionRow)
+            .where(
+                SessionRow.user_id == owner,
+                SessionRow.scheduled_start < to_at,
+                SessionRow.scheduled_end > from_at,
+                SessionRow.status != "cancelled",
             )
-
-    sliced = matching_sessions[start_index : start_index + limit]
-    next_cursor = (
-        sliced[-1].session_id
-        if (start_index + limit) < len(matching_sessions) and sliced
-        else None
+            .order_by(SessionRow.scheduled_start, SessionRow.id)
+        )
+    ).all()
+    page, next_cursor = _page(list(rows), limit, cursor, "id")
+    version = await _schedule_revision(db, owner)
+    latest = await db.scalar(
+        select(VersionRow).where(VersionRow.user_id == owner, VersionRow.version_number == version)
     )
-    current_schedule_rev = _USER_SCHEDULE_REVISIONS.get(user_id, 1)
     return ScheduleData(
-        schedule_revision=current_schedule_rev,
-        items=sliced,
+        schedule_revision=version,
+        items=[_session_schema(item) for item in page],
         next_cursor=next_cursor,
-        alarm_sync_state="pending",
-        calendar_sync_summary="pending",
+        alarm_sync_state=latest.alarm_sync_state if latest else "not_required",
+        calendar_sync_summary=await _calendar_state(db, owner, version),
     )
 
 
-
-
+async def get_command_result(*, user_id: str, command_id: str, db: AsyncSession) -> CommandResult:
+    row = await db.scalar(
+        select(CommandReceipt).where(
+            CommandReceipt.user_id == draft_service.resolve_user_uuid(user_id),
+            CommandReceipt.command_id == command_id,
+        )
+    )
+    if row is None:
+        raise _error("RESOURCE_NOT_FOUND", "Không tìm thấy biên nhận lệnh.", 404, "reload")
+    refs = {
+        key: value
+        for key, value in (row.result_reference or {}).items()
+        if not key.startswith("_") and isinstance(value, str)
+    }
+    return CommandResult(
+        command_id=row.command_id,
+        command_type=row.command_type,
+        state=row.state,
+        result_reference=refs,
+        applied_at=row.applied_at,
+    )

@@ -16,6 +16,7 @@ class TaskSummaryScreen extends StatefulWidget {
 
 class _TaskSummaryScreenState extends State<TaskSummaryScreen> {
   late final TextEditingController _scopeController;
+  bool _isSubmitting = false;
 
   @override
   void initState() {
@@ -31,80 +32,65 @@ class _TaskSummaryScreenState extends State<TaskSummaryScreen> {
   }
 
   Future<void> _continue() async {
+    if (_isSubmitting) return;
     final task = context.read<TaskProvider>();
-    if (_scopeController.text.trim().isNotEmpty) {
-      task.setScope(_scopeController.text.trim());
-    }
+    if (task.isApiBusy) return;
+    task.setScope(_scopeController.text.trim());
     if (task.scope.trim().isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-            content: Text('Bổ sung phạm vi công việc trước khi xác nhận.')),
-      );
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+          content: Text('Bổ sung phạm vi công việc trước khi xác nhận.')));
       return;
     }
-
+    setState(() => _isSubmitting = true);
     try {
-      if (task.draft != null) {
+      if (task.draft == null) {
+        await task.prepareDraftAndAnalyze();
+      } else {
         await task.updateDraftOnBackend();
-        if (!task.canPlan) {
-          final issues = task.draft?.clarificationIssues ?? const [];
-          final question = issues.isNotEmpty
-              ? issues.map((issue) => issue['question']).join('\n')
-              : 'Thông tin chưa đủ để lập kế hoạch.';
-          if (!mounted) return;
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text(question.toString())),
-          );
-          return;
-        }
       }
       if (!mounted) return;
-      Navigator.push(
-        context,
-        MaterialPageRoute<void>(builder: (_) => const TaskReadyScreen()),
-      );
+      if (!task.canPlan) {
+        final questions = task.draft?.clarificationIssues
+            .map((i) => i['question'] ?? i['message'])
+            .whereType<String>()
+            .join('\n');
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+            content: Text(questions == null || questions.isEmpty
+                ? 'Bổ sung thông tin trước khi lập kế hoạch.'
+                : questions)));
+        return;
+      }
+      await Navigator.push(context,
+          MaterialPageRoute<void>(builder: (_) => const TaskReadyScreen()));
     } catch (error) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('Chưa cập nhật được bản nháp trên máy chủ: $error'),
-          action: SnackBarAction(
-            label: 'Tiếp tục',
-            onPressed: () {
-              Navigator.push(
-                context,
-                MaterialPageRoute<void>(
-                    builder: (_) => const TaskReadyScreen()),
-              );
-            },
-          ),
-        ),
-      );
+      if (mounted)
+        ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Chưa cập nhật được bản nháp: $error')));
+    } finally {
+      if (mounted) setState(() => _isSubmitting = false);
     }
   }
 
   Future<void> _saveDraft() async {
     final task = context.read<TaskProvider>();
-    if (_scopeController.text.trim().isNotEmpty) {
-      task.setScope(_scopeController.text.trim());
-    }
+    if (_isSubmitting || task.isApiBusy) return;
+    setState(() => _isSubmitting = true);
+    task.setScope(_scopeController.text.trim());
     task.saveDraft();
     try {
-      await task.saveDraftToBackend();
-    } catch (_) {
+      try {
+        await task.saveDraftToBackend();
+      } catch (error) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Bản nháp chưa đồng bộ máy chủ: $error')));
+      }
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Đã lưu nháp an toàn trên thiết bị.'),
-          duration: Duration(seconds: 2),
-        ),
-      );
+      await Navigator.push(context,
+          MaterialPageRoute<void>(builder: (_) => const DraftSavedScreen()));
+    } finally {
+      if (mounted) setState(() => _isSubmitting = false);
     }
-    if (!mounted) return;
-    Navigator.push(
-      context,
-      MaterialPageRoute<void>(builder: (_) => const DraftSavedScreen()),
-    );
   }
 
   @override
@@ -310,14 +296,15 @@ class _TaskSummaryScreenState extends State<TaskSummaryScreen> {
                           color: MelbelColors.kTertiaryFixedDim,
                         ),
                         const SizedBox(width: 8),
-                        Text(
+                        Expanded(
+                            child: Text(
                           'Giờ rảnh theo cài đặt: ${task.serverAvailabilitySummary}',
                           style: const TextStyle(
                             fontFamily: 'Be Vietnam Pro',
                             fontSize: 13,
                             color: MelbelColors.kTertiaryFixedDim,
                           ),
-                        ),
+                        )),
                       ],
                     ),
                   ),
@@ -447,14 +434,14 @@ class _TaskSummaryScreenState extends State<TaskSummaryScreen> {
             PrimaryCta(
               label: 'Tiếp tục',
               icon: Icons.arrow_forward,
-              onPressed: _continue,
+              onPressed: _isSubmitting || task.isApiBusy ? null : _continue,
             ),
             const SizedBox(height: 10),
             SecondaryCta(
               label: 'Lưu vào Hộp nháp',
               icon: Icons.drafts_outlined,
               height: 48,
-              onPressed: _saveDraft,
+              onPressed: _isSubmitting || task.isApiBusy ? null : _saveDraft,
             ),
           ],
         ),
