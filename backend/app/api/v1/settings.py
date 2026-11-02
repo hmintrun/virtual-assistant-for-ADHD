@@ -1,17 +1,31 @@
 # API endpoints cho UF7 hỗ trợ UF1-UF2: Đọc cài đặt trợ lý (Dòng 39) và giờ rảnh đã xác nhận (Dòng 40)
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Annotated
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from fastapi import APIRouter, Query, Request
+from fastapi import APIRouter, Header, Query, Request
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import CurrentUserDep, DbSessionDep
 from app.core.errors import AppError
+from app.models.settings import Availability as AvailabilityRow
+from app.models.settings import SettingChangeRequest
+from app.models.task import Task as TaskRow
+from app.models.user import UserPreference as PreferenceRow
 from app.schemas.common import (
     ErrorEnvelope,
     SuccessEnvelope,
     build_response_meta,
 )
-from app.schemas.settings import Availability, UserPreference
+from app.schemas.settings import (
+    Availability,
+    AvailabilityChanges,
+    SettingsChangeRequest,
+    SettingsChangeResult,
+    UserPreference,
+)
+from app.services.command_service import durable_command, lock_owner, owner_uuid
 from app.services.draft_service import get_user_availability
 from app.services.plan_service import get_preferences as load_preferences
 from app.services.scheduler_engine import compute_effective_free_intervals
@@ -118,3 +132,181 @@ async def get_availability(
         data=result_avail,
         meta=build_response_meta(request_id),
     )
+
+
+@durable_command("settings_change", SettingsChangeResult)
+async def apply_settings_change(
+    *, user_id: str, idempotency_key: str, payload: SettingsChangeRequest, db: AsyncSession
+):
+    await lock_owner(db, user_id)
+    owner = owner_uuid(user_id)
+    availability = await db.scalar(select(AvailabilityRow).where(AvailabilityRow.user_id == owner))
+    preferences = await db.scalar(select(PreferenceRow).where(PreferenceRow.user_id == owner))
+    av_revision = availability.revision if availability else 0
+    pref_revision = preferences.effective_revision if preferences else 0
+    for expected, actual in (
+        (payload.expected_availability_revision, av_revision),
+        (payload.expected_preferences_revision, pref_revision),
+    ):
+        if expected is not None and expected != actual:
+            raise AppError(
+                status_code=409,
+                code="REVISION_CONFLICT",
+                message="Nguồn cài đặt hoặc giờ rảnh đã thay đổi.",
+                current_revisions={"availability": av_revision, "preferences": pref_revision},
+                next_action="reload_and_review",
+            )
+    if await db.scalar(select(TaskRow.id).where(TaskRow.user_id == owner).limit(1)) is not None:
+        raise AppError(
+            status_code=503,
+            code="POLICY_NOT_CONFIGURED",
+            message="Đã có kế hoạch. Chưa thể áp thay đổi khi luồng xem tác động/UF6 chưa sẵn sàng.",
+            next_action="wait_for_configuration",
+        )
+    changes = payload.changes
+    if changes.availability is not None:
+        values = {
+            "timezone": availability.timezone if availability else None,
+            "weekly_rules": availability.weekly_rules if availability else [],
+            "date_overrides": availability.date_overrides if availability else [],
+            "task_limits": availability.task_limits if availability else [],
+        }
+        existing_values = (
+            AvailabilityChanges.model_validate(values).model_dump(mode="json", exclude_unset=True)
+            if availability is not None
+            else {}
+        )
+        values.update(changes.availability.model_dump(mode="json", exclude_unset=True))
+        try:
+            if not isinstance(values["timezone"], str):
+                raise ValueError("Lần đầu cần timezone")
+            ZoneInfo(values["timezone"])
+            checked = Availability(
+                availability_id=str(availability.id) if availability else "initial",
+                revision=av_revision,
+                source="user_confirmed",
+                confirmed_at=datetime.now(UTC),
+                effective_intervals=None,
+                calendar_context=None,
+                **values,
+            )
+        except (ValueError, TypeError, ZoneInfoNotFoundError) as exc:
+            raise AppError(
+                status_code=422,
+                code="VALIDATION_ERROR",
+                message="Múi giờ hoặc quy tắc giờ rảnh không hợp lệ.",
+                next_action="fix_fields",
+            ) from exc
+        if not checked.weekly_rules and not checked.date_overrides:
+            raise AppError(
+                status_code=422,
+                code="VALIDATION_ERROR",
+                message="Cần ít nhất một khung giờ rảnh.",
+                next_action="fix_fields",
+            )
+        values = checked.model_dump(
+            mode="json", include={"timezone", "weekly_rules", "date_overrides", "task_limits"}
+        )
+        if availability is None:
+            availability = AvailabilityRow(
+                user_id=owner, source="user_confirmed", confirmed_at=checked.confirmed_at, **values
+            )
+            db.add(availability)
+        elif (
+            any(existing_values.get(k) != v for k, v in values.items())
+            or availability.confirmed_at is None
+        ):
+            for name, value in values.items():
+                setattr(availability, name, value)
+            availability.confirmed_at = checked.confirmed_at
+            availability.source = "user_confirmed"
+    if changes.preferences is not None:
+        values = changes.preferences.model_dump(exclude_unset=True)
+        required = {
+            "work_interval_seconds",
+            "rest_interval_seconds",
+            "buffer_multiplier",
+            "reminder_offsets",
+            "reminder_style",
+        }
+        if preferences is None and not required.issubset(values):
+            raise AppError(
+                status_code=422,
+                code="VALIDATION_ERROR",
+                message="Lần đầu cần đủ cài đặt làm/nghỉ, hệ số dự phòng, mốc và kiểu nhắc.",
+                next_action="fix_fields",
+            )
+        work = values.get(
+            "work_interval_seconds", preferences.work_interval_seconds if preferences else 0
+        )
+        rest = values.get(
+            "rest_interval_seconds", preferences.rest_interval_seconds if preferences else 0
+        )
+        buffer = values.get(
+            "buffer_multiplier", preferences.buffer_multiplier if preferences else 0
+        )
+        offsets = values.get(
+            "reminder_offsets", preferences.reminder_offsets if preferences else []
+        )
+        style = values.get("reminder_style", preferences.reminder_style if preferences else "")
+        if (
+            work <= 0
+            or rest < 0
+            or buffer < 1
+            or len(offsets) != 1
+            or offsets[0] < 0
+            or not style.strip()
+        ):
+            raise AppError(
+                status_code=422,
+                code="VALIDATION_ERROR",
+                message="Cài đặt không hợp lệ.",
+                next_action="fix_fields",
+            )
+        if preferences is None:
+            preferences = PreferenceRow(
+                user_id=owner, effective_revision=1, micro_task_seconds=None, **values
+            )
+            db.add(preferences)
+        elif any(getattr(preferences, k) != v for k, v in values.items()):
+            for name, value in values.items():
+                setattr(preferences, name, value)
+            preferences.effective_revision += 1
+    await db.flush()
+    change = SettingChangeRequest(
+        user_id=owner,
+        application_state="effective_from_next_session",
+        effective_revision=preferences.effective_revision if preferences else 0,
+        effective_availability_revision=availability.revision if availability else 0,
+        requested_changes=changes.model_dump(mode="json", exclude_unset=True),
+    )
+    db.add(change)
+    await db.flush()
+    return SettingsChangeResult(
+        change_request_id=str(change.id),
+        request_revision=change.revision,
+        application_state=change.application_state,
+        requested_revision=None,
+        effective_revision=change.effective_revision,
+        requested_availability_revision=None,
+        effective_availability_revision=change.effective_availability_revision or 0,
+        requested_changes=changes,
+        pending_proposal_id=None,
+    )
+
+
+@router.post(
+    "/settings/change-requests",
+    response_model=SuccessEnvelope[SettingsChangeResult],
+    summary="Khởi tạo giờ rảnh/cài đặt khi chưa có kế hoạch (Dòng 41)",
+)
+async def create_settings_change(
+    payload: SettingsChangeRequest,
+    current_user: CurrentUserDep,
+    db: DbSessionDep,
+    idempotency_key: Annotated[str, Header(alias="Idempotency-Key", min_length=1)],
+):
+    result = await apply_settings_change(
+        user_id=current_user.user_id, idempotency_key=idempotency_key, payload=payload, db=db
+    )
+    return SuccessEnvelope(data=result, meta=build_response_meta())

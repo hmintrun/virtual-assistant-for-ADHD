@@ -1,9 +1,10 @@
 """UF1 draft and single-round summary DTOs."""
 
-from typing import Literal, Self
+from typing import Any, Literal, Self
 
 from pydantic import Field, model_validator
 
+from app.schemas.availability import DraftAvailability
 from app.schemas.common import (
     ApiModel,
     AvailabilityRef,
@@ -21,6 +22,7 @@ class TaskSummary(ApiModel):
     scope: str | None = None
     extra_requirements: list[str] = Field(default_factory=list)
     time_constraint: TimeConstraint | None = None
+    availability: DraftAvailability | None = None
     availability_ref: AvailabilityRef | None = None
     importance: int | None = Field(default=None, ge=1)
     clarification_issues: list[ClarificationIssue] = Field(default_factory=list)
@@ -29,6 +31,7 @@ class TaskSummary(ApiModel):
 
 
 class PlanningDraft(ApiModel):
+    ai_context: dict[str, Any] = Field(default_factory=dict, exclude=True)
     draft_id: str = Field(min_length=1)
     client_draft_id: str = Field(min_length=1)
     stage: str = Field(min_length=1)
@@ -68,6 +71,7 @@ class SummaryInput(ApiModel):
     scope: str | None = None
     extra_requirements: list[str] = Field(default_factory=list)
     time_constraint: TimeConstraint | None = None
+    availability: DraftAvailability | None = None
     availability_ref: AvailabilityRef | None = None
     importance: int | None = Field(default=None, ge=1)
 
@@ -95,15 +99,14 @@ class SummaryChanges(ApiModel):
     scope: str | None = None
     extra_requirements: list[str] | None = None
     time_constraint: TimeConstraint | None = None
+    availability: DraftAvailability | None = None
     availability_ref: AvailabilityRef | None = None
     importance: int | None = Field(default=None, ge=1)
 
     @model_validator(mode="after")
     def validate_non_empty_summary_changes(self) -> Self:
         if not self.model_fields_set:
-            raise ValueError(
-                "Đối tượng summary trong changes phải có ít nhất một trường được gửi."
-            )
+            raise ValueError("Đối tượng summary trong changes phải có ít nhất một trường được gửi.")
         return self
 
 
@@ -132,9 +135,7 @@ class UpdateDraftRequest(ApiModel):
 
     @model_validator(mode="after")
     def validate_expected_summary_revision_when_needed(self) -> Self:
-        touches_raw_or_summary = bool(
-            {"raw_input", "summary"} & self.changes.model_fields_set
-        )
+        touches_raw_or_summary = bool({"raw_input", "summary"} & self.changes.model_fields_set)
         if touches_raw_or_summary and self.expected_summary_revision is None:
             raise ValueError(
                 "expected_summary_revision là bắt buộc khi sửa raw_input hoặc summary."
@@ -158,9 +159,7 @@ class DraftAnalyzeRequest(ApiModel):
     @model_validator(mode="after")
     def validate_raw_input_or_message(self) -> Self:
         if self.raw_input is None and self.message is None:
-            raise ValueError(
-                "Bắt buộc phải cung cấp ít nhất raw_input mới hoặc message bổ sung."
-            )
+            raise ValueError("Bắt buộc phải cung cấp ít nhất raw_input mới hoặc message bổ sung.")
         return self
 
 

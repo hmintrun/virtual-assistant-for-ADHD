@@ -11,6 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from app.schemas.common import (
     ApiModel,
     AvailabilityRef,
+    ClarificationIssue,
     SessionSegment,
     TimeConstraint,
 )
@@ -73,26 +74,15 @@ class Session(ApiModel):
 
     @model_validator(mode="after")
     def valid_durations(self):
-        if (
-            self.scheduled_start.utcoffset() is None
-            or self.scheduled_end.utcoffset() is None
-        ):
+        if self.scheduled_start.utcoffset() is None or self.scheduled_end.utcoffset() is None:
             raise ValueError("Giờ phiên phải có múi giờ")
         if self.duration_seconds != self.work_seconds + self.rest_seconds:
             raise ValueError("Thời lượng phiên không bằng làm chính cộng nghỉ")
-        if (
-            sum(x.duration_seconds for x in self.segments if x.kind == "work")
-            != self.work_seconds
-        ):
+        if sum(x.duration_seconds for x in self.segments if x.kind == "work") != self.work_seconds:
             raise ValueError("Các quãng làm chính không khớp")
-        if (
-            sum(x.duration_seconds for x in self.segments if x.kind == "rest")
-            != self.rest_seconds
-        ):
+        if sum(x.duration_seconds for x in self.segments if x.kind == "rest") != self.rest_seconds:
             raise ValueError("Các quãng nghỉ không khớp")
-        if (
-            self.scheduled_end - self.scheduled_start
-        ).total_seconds() != self.duration_seconds:
+        if (self.scheduled_end - self.scheduled_start).total_seconds() != self.duration_seconds:
             raise ValueError("Giờ kết thúc không khớp thời lượng phiên")
         if [x.order_index for x in self.segments] != list(range(len(self.segments))):
             raise ValueError("Thứ tự các quãng không liên tục")
@@ -312,6 +302,16 @@ class AvailabilitySchema(BaseModel):
     )
 
 
+class ExtractedTimeConstraint(BaseModel):
+    """Incomplete AI proposal; only a complete value becomes public TimeConstraint."""
+
+    kind: Literal["deadline", "window"] | None = None
+    start_at: datetime | None = None
+    deadline_at: datetime | None = None
+    finish_by_at: datetime | None = None
+    input_timezone: str | None = None
+
+
 class LLMTaskExtractionPayload(BaseModel):
     """Schema JSON ép kiểu trực tiếp cho LLM ở UF1 (không lộ trường nội bộ hệ thống)."""
 
@@ -320,6 +320,11 @@ class LLMTaskExtractionPayload(BaseModel):
         max_length=100,
         description="Tên ngắn gọn nhận diện công việc (tối đa 100 ký tự). Null nếu chưa rõ.",
     )
+    goal: str | None = None
+    time_constraint: ExtractedTimeConstraint | None = None
+    clarification_issues: list[ClarificationIssue] = Field(default_factory=list)
+    resolved_issue_keys: list[str] = Field(default_factory=list)
+    field_review_notes: dict[str, str] = Field(default_factory=dict)
     content: str | None = Field(
         default=None,
         description="Nội dung công việc cụ thể người dùng muốn thực hiện (Trường bắt buộc 1/4).",
@@ -337,6 +342,10 @@ class LLMTaskExtractionPayload(BaseModel):
             "Danh sách các khung giờ rảnh người dùng có thể làm việc dạng chữ thân thiện hiển thị UI "
             "(Trường bắt buộc 3/4). Bắt buộc để mảng rỗng [] nếu chưa có thông tin, CẤM tự bịa khung giờ."
         ),
+    )
+    availability_update_mode: Literal["merge", "replace"] = Field(
+        default="merge",
+        description="merge bổ sung/hoàn thiện giờ rảnh; replace chỉ khi user yêu cầu thay/xóa khung cũ.",
     )
     structured_free_windows: list[ExtractedFreeWindowSchema] = Field(
         default_factory=list,
@@ -432,7 +441,7 @@ class TaskExtractionResult(LLMTaskExtractionPayload):
                 f"Khung giờ {joined_phrases} bạn có thể làm từ mấy giờ đến mấy giờ cụ thể để mình xếp lịch chuẩn xác?"
             )
 
-        if self.deadline is None:
+        if self.deadline is None and self.time_constraint is None:
             missing_questions.append("Khi nào bạn cần hoàn thành xong công việc này (hạn chót)?")
 
         if missing_questions or self.has_conflict:

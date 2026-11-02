@@ -1,12 +1,14 @@
 # Cấu trúc Backend ProActive
 
-Cấu trúc mục tiêu ngày 30/10/2026, dựa trên khung repo hiện có và hợp đồng API đã rà soát. Tài liệu dùng để chia việc và xác định nơi đặt code; cây thư mục không có nghĩa các chức năng đã được triển khai.
+Cấu trúc mục tiêu dựa trên khung repo hiện có; trạng thái triển khai được rà soát ngày 03/11/2026 theo thay đổi UF1 mới. Tài liệu dùng để chia việc và xác định nơi đặt code; cây thư mục không có nghĩa các chức năng đã được triển khai.
 
 Cách cài môi trường và chạy kiểm thử **sau khi code xong** xem [Hướng dẫn chạy môi trường kiểm thử](backend_testing_setup.md).
 
 ## 1. Hiện trạng và hướng tổ chức
 
-`app/` hiện có 31 file Python: các module chủ yếu mới chứa comment/docstring; chưa có `FastAPI app`, router, model SQLAlchemy hay hàm nghiệp vụ để chạy. Môi trường Python 3.12.15 đã được thiết lập bằng `pyproject.toml` và `uv.lock`; `scripts/check_environment.py` đã kiểm FastAPI/Pydantic và SQLite async. Các kiểm tra này xác nhận môi trường, không chứng minh chức năng nghiệp vụ đã hoàn thành.
+Backend đã có FastAPI app/router, SQLAlchemy models, migration và xử lý UF1–UF2. UF1 mới lưu giờ riêng trong JSON summary của Draft; không cần bảng/migration mới cho đợt sửa này. Lõi tạo/xác nhận UF2 đã có với nguồn cũ nhưng nguồn giờ riêng từ Draft đang bị chặn cho đến khi I02 nối đúng nguồn. Cấu trúc mục tiêu ở phần 2 còn chứa module dự kiến; không coi mọi file hoặc worker trong cây đã hoạt động.
+
+Môi trường dùng cấu hình `backend/pyproject.toml`, `uv.lock` và Python 3.12.15. Kiểm tra môi trường không thay kiểm chứng nghiệp vụ. Auth đang dùng user phát triển; Google Sign-In production và bộ đọc/đồng bộ Google Calendar thật chưa hoàn thiện.
 
 Giữ monorepo `backend/`, `mobile/`, `docs/`. Backend là một ứng dụng chia module, một database và một worker xử lý công việc nền khi cần; chưa cần tách microservice hoặc đưa Redis/Celery vào khung ban đầu. Điểm bàn giao với Mobile tiếp tục theo API hiện hành.
 
@@ -17,10 +19,10 @@ Mobile → API router → service điều phối → SQLAlchemy/database
                            │
                            ├─ AI/Voice: hiểu và sinh nội dung
                            ├─ Algorithm: kiểm dữ liệu, tính và xếp lịch
-                           └─ DB outbox → worker → Google Calendar
+                           └─ DB outbox → worker → Google Calendar [mục tiêu; chưa ghép thật]
 ```
 
-Router không tự tính lại lịch; Algorithm không tự commit DB; AI không xác nhận thay user. Thao tác Google thực hiện sau transaction lưu kế hoạch và outbox thành công. Khi gọi AI/Google hoặc chạy tìm kiếm lịch lâu, không giữ một transaction DB mở suốt thời gian chờ; tới lúc ghi phải kiểm lại revision/ràng buộc.
+Router không tự tính lại lịch; Algorithm không tự commit DB; AI không xác nhận thay user. Theo kiến trúc đích, thao tác ghi Google thực hiện sau transaction lưu kế hoạch và outbox thành công; hiện có bản ghi/job chờ, chưa có bằng chứng đồng bộ Google thật. Khi gọi AI/Google hoặc chạy tìm kiếm lịch lâu, không giữ một transaction DB mở suốt thời gian chờ; tới lúc ghi phải kiểm lại revision/ràng buộc.
 
 ## 2. Cấu trúc Backend mục tiêu
 
@@ -61,6 +63,7 @@ backend/
 │   │       └── system.py        Capabilities, PlanningContext, CommandReceipt
 │   ├── schemas/                Pydantic v2: request/response và DTO bàn giao
 │   │   ├── common.py           ID, time interval, lỗi, meta và pagination
+│   │   ├── availability.py    Giờ chung và DraftAvailability của yêu cầu UF1
 │   │   ├── draft.py
 │   │   ├── planning.py
 │   │   ├── task.py
@@ -129,7 +132,7 @@ Các package cần `__init__.py` phù hợp. Các file schema không import ORM 
 
 1. **P01 chốt điểm giao:** đồng bộ schema API, revision và nguồn xác thực; phân người sở hữu file. Hợp đồng được review không có nghĩa endpoint đã có code.
 2. **P02/P03 dựng nền:** model/migration và app/settings/DB/router chạy được trên môi trường cài lại từ lockfile. Database và Backend là hai đầu việc có giao diện rõ.
-3. **Làm một luồng UF1–UF2:** Draft → confirm summary → bước 0 → Candidate → confirm. AI và Algorithm dùng DTO mẫu để làm song song; Backend ghép và kiểm revision tại commit.
+3. **Nối UF1–UF2 theo nguồn mới:** Draft có summary.availability → confirm summary → bước 0 → Context đúng nguồn → Candidate → confirm. UF1 đã có; I02 chưa nối nguồn mới. Chỉ bỏ guard sau khi đọc đúng giờ Draft, kiểm revision và lưu được nguồn. Luồng nguồn cũ tiếp tục tương thích; AI và Algorithm làm song song theo DTO đã chốt.
 4. **Có UF6 tối thiểu trước luồng phụ thuộc:** I03 lập phần tiếp và Calendar có tác động lịch cần create/view/approve Proposal; không đợi toàn bộ tuần 6 mới chốt interface của UF6.
 5. **Ghép UF3–UF5 và UF4:** start hợp lệ mới tạo Run; timer/actual dừng đúng ended_at; not_started không có Run giả; check-in và DND theo mốc đã thống nhất.
 6. **Ghép Calendar/cá nhân hóa:** outbox sau commit; job retry/etag và preview; requested/effective; dùng fake adapter trước, kiểm Google thật riêng.
@@ -155,3 +158,21 @@ Tên module có thể được điều chỉnh khi triển khai nhưng ranh gi�
 
 - [FastAPI: Bigger Applications / APIRouter](https://fastapi.tiangolo.com/tutorial/bigger-applications/)
 - [SQLAlchemy 2.0: AsyncIO](https://docs.sqlalchemy.org/en/20/orm/extensions/asyncio.html)
+
+### Phần đã triển khai bổ sung 02/11/2026
+
+`app/services/command_service.py` quản lý hash/replay/ghi CommandReceipt và transaction của lệnh UF1; Voice dùng các helper này. Thuộc vị trí command_service đã có trong khung. `api/v1/settings.py` hiện có nhánh bootstrap Settings theo schema; chưa tách settings_service hoặc triển khai UF7 đầy đủ. Không tạo thêm production module ngoài command_service cho gói sửa này.
+
+
+### Điểm giao giờ rảnh UF1 và giới hạn hiện tại
+
+| Phần | Trách nhiệm và trạng thái |
+|---|---|
+| schemas/availability.py, schemas/draft.py | DraftAvailability chứa timezone, weekly_rules, date_overrides; nguồn riêng của yêu cầu, không tự đổi Settings chung. |
+| services/draft_service.py | Ghép kết quả AI, giữ phần chưa rõ, bảo vệ chỉnh sửa user, lưu JSON Draft và xác nhận giờ cùng summary. |
+| services/planning/validation.py | Kiểm đầu vào UF1 và giao với thời gian còn lại; không kết luận lịch khả thi. |
+| services/plan_service.py | Còn đọc nguồn chung cho UF2. Guard nguồn mới trả 409 PLAN_NOT_CONFIRMABLE/next_action=wait_for_configuration; không tự xếp bằng ref cũ. |
+| AI/Algorithm/Database | AI trả khung giờ/Parts/Steps theo contract; Algorithm nhận nguồn do Backend cấp; Database review liên kết/snapshot khi I02 cần đổi mô hình. Không tạo lớp hoặc bảng mới chỉ để bỏ guard. |
+| Calendar | Nguồn lịch bận riêng có nguồn gốc và thời điểm lấy. Kết nối/đọc thật A22.1 chưa hoàn thiện; lỗi nguồn không được coi là lịch trống. |
+
+Dữ liệu và quy tắc chi tiết theo [schema.md — TaskSummary](schema.md#o04-tasksummary). Nguồn mới đã lưu không có nghĩa UF2 hoặc Mobile đã được ghép. Kiểm tra gần nhất gồm 175 ca với nguồn giả/DB tạm ngày 02/11/2026; các test mới theo yêu cầu đặt ở `_temp`, không tạo thêm test vào thư mục chính trong đợt sửa này.
