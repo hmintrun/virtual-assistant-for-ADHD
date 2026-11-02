@@ -506,8 +506,8 @@ def upgrade():
         sa.PrimaryKeyConstraint("id", name=op.f("pk_planning_parts")),
         sa.UniqueConstraint("id", "task_id", name="uq_planning_parts_id_task"),
         sa.UniqueConstraint("id", "user_id", name="uq_planning_parts_id_user"),
-        sa.UniqueConstraint("task_id", "client_part_key", name=op.f("uq_planning_parts_task_id")),
-        sa.UniqueConstraint("task_id", "order_index", name=op.f("uq_planning_parts_task_id")),
+        sa.UniqueConstraint("task_id", "client_part_key", name="uq_planning_parts_task_client_key"),
+        sa.UniqueConstraint("task_id", "order_index", name="uq_planning_parts_task_order"),
     )
     op.create_index(op.f("ix_planning_parts_task_id"), "planning_parts", ["task_id"], unique=False)
     op.create_index(op.f("ix_planning_parts_user_id"), "planning_parts", ["user_id"], unique=False)
