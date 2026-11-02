@@ -4,89 +4,19 @@ from typing import Annotated
 
 from fastapi import APIRouter, Query, Request
 
-from app.api.deps import CurrentUserDep
+from app.api.deps import CurrentUserDep, DbSessionDep
 from app.core.errors import AppError
 from app.schemas.common import (
-    CalendarContextRef,
     ErrorEnvelope,
     SuccessEnvelope,
-    TimeInterval,
     build_response_meta,
 )
-from app.schemas.settings import Availability, UserPreference, WeeklyRule
+from app.schemas.settings import Availability, UserPreference
+from app.services.draft_service import get_user_availability
+from app.services.plan_service import get_preferences as load_preferences
+from app.services.scheduler_engine import compute_effective_free_intervals
 
 router = APIRouter(tags=["UF7 - Settings & Availability"])
-
-_SEED_EFFECTIVE_INTERVALS: list[TimeInterval] = [
-    TimeInterval(
-        start_at=datetime.fromisoformat("2026-10-30T09:00:00+07:00"),
-        end_at=datetime.fromisoformat("2026-10-30T11:00:00+07:00"),
-    ),
-    TimeInterval(
-        start_at=datetime.fromisoformat("2026-11-06T09:00:00+07:00"),
-        end_at=datetime.fromisoformat("2026-11-06T11:00:00+07:00"),
-    ),
-]
-
-_FAKE_PREFERENCES_BY_USER: dict[str, UserPreference] = {
-    "user_a": UserPreference(
-        revision=4,
-        effective_revision=4,
-        requested_revision=None,
-        work_interval_seconds=1500,
-        rest_interval_seconds=300,
-        micro_task_seconds=None,
-        reminder_offsets=[900],
-        buffer_multiplier=1.2,
-        reminder_style="gentle",
-        requested_changes=None,
-        pending_proposal_id=None,
-    ),
-    "user_b": UserPreference(
-        revision=1,
-        effective_revision=1,
-        requested_revision=None,
-        work_interval_seconds=1500,
-        rest_interval_seconds=300,
-        micro_task_seconds=None,
-        reminder_offsets=[900],
-        buffer_multiplier=1.2,
-        reminder_style="gentle",
-        requested_changes=None,
-        pending_proposal_id=None,
-    ),
-}
-
-_FAKE_AVAILABILITY_BY_USER: dict[str, Availability] = {
-    "user_a": Availability(
-        availability_id="availability_1",
-        revision=2,
-        timezone="Asia/Ho_Chi_Minh",
-        weekly_rules=[
-            WeeklyRule(weekday=5, start_local="09:00", end_local="11:00"),
-        ],
-        date_overrides=[],
-        task_limits=[],
-        source="user_confirmed",
-        confirmed_at=datetime.fromisoformat("2026-10-29T15:00:00+07:00"),
-        effective_intervals=None,
-        calendar_context=CalendarContextRef(context_id="context_1", revision=2),
-    ),
-    "user_b": Availability(
-        availability_id="availability_b_1",
-        revision=1,
-        timezone="Asia/Ho_Chi_Minh",
-        weekly_rules=[
-            WeeklyRule(weekday=6, start_local="14:00", end_local="16:00"),
-        ],
-        date_overrides=[],
-        task_limits=[],
-        source="user_confirmed",
-        confirmed_at=datetime.fromisoformat("2026-10-29T15:00:00+07:00"),
-        effective_intervals=None,
-        calendar_context=CalendarContextRef(context_id="context_b_1", revision=1),
-    ),
-}
 
 
 @router.get(
@@ -103,11 +33,10 @@ _FAKE_AVAILABILITY_BY_USER: dict[str, Availability] = {
 async def get_preferences(
     request: Request,
     current_user: CurrentUserDep,
+    db: DbSessionDep,
 ) -> SuccessEnvelope[UserPreference]:
     """Trả về cấu hình trợ lý đang có hiệu lực và yêu cầu đang chờ duyệt của người dùng."""
-    pref = _FAKE_PREFERENCES_BY_USER.get(current_user.user_id)
-    if pref is None:
-        pref = _FAKE_PREFERENCES_BY_USER["user_a"]
+    pref = await load_preferences(user_id=current_user.user_id, db=db)
     request_id = getattr(request.state, "request_id", None)
     return SuccessEnvelope(
         data=pref,
@@ -133,6 +62,7 @@ async def get_preferences(
 async def get_availability(
     request: Request,
     current_user: CurrentUserDep,
+    db: DbSessionDep,
     from_at: Annotated[
         datetime | None,
         Query(
@@ -166,19 +96,21 @@ async def get_availability(
                 next_action="fix_request",
             )
 
-    base_avail = _FAKE_AVAILABILITY_BY_USER.get(
-        current_user.user_id, _FAKE_AVAILABILITY_BY_USER["user_a"]
-    )
-    if from_at is None or to_at is None:
-        result_avail = base_avail.model_copy(update={"effective_intervals": None})
-    else:
-        matched_intervals = [
-            interval
-            for interval in _SEED_EFFECTIVE_INTERVALS
-            if interval.start_at < to_at and interval.end_at > from_at
-        ]
+    base_avail = await get_user_availability(current_user.user_id, db)
+    if base_avail is None:
+        raise AppError(
+            status_code=404,
+            code="RESOURCE_NOT_FOUND",
+            message="Bạn chưa có bộ giờ rảnh. Hãy thiết lập và xác nhận giờ rảnh trước.",
+            next_action="configure_availability",
+        )
+    result_avail = base_avail
+    if from_at is not None and to_at is not None:
+        # Khai triển nguồn giờ rảnh; UF2 còn phải trừ lịch bận/lịch đã chốt và kiểm collision.
         result_avail = base_avail.model_copy(
-            update={"effective_intervals": matched_intervals}
+            update={
+                "effective_intervals": compute_effective_free_intervals(base_avail, from_at, to_at),
+            }
         )
 
     request_id = getattr(request.state, "request_id", None)

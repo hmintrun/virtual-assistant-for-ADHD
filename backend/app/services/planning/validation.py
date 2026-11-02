@@ -7,7 +7,7 @@ Kiểm tra 4 nhóm thông tin bắt buộc (Nội dung, Phạm vi, Ràng buộc 
 from __future__ import annotations
 
 import zoneinfo
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 
 from app.schemas.availability import Availability
 from app.schemas.common import ClarificationIssue, TimeConstraint
@@ -227,7 +227,7 @@ def validate_planning_prerequisites(
                     )
                 )
 
-        seen_dates: set[str] = set()
+        seen_dates: set[date | str] = set()
         for idx, override in enumerate(availability.date_overrides):
             if override.date in seen_dates:
                 issues.append(

@@ -3,7 +3,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Header, Path
 
-from app.api.deps import CurrentUserDep
+from app.api.deps import CurrentUserDep, DbSessionDep
 from app.schemas.common import SuccessEnvelope, build_response_meta
 from app.schemas.planning import (
     ConfirmCandidateRequest,
@@ -40,10 +40,12 @@ async def create_candidate(
         ),
     ],
     current_user: CurrentUserDep,
+    db: DbSessionDep,
 ) -> SuccessEnvelope[PlanCandidate]:
     """Dòng 9 trên API Sheet: Tạo phương án chia việc và xếp lịch từ bản nháp đã xác nhận (UF2)."""
     candidate = await plan_service.create_candidate(
         user_id=current_user.user_id,
+        db=db,
         draft_id=draft_id,
         idempotency_key=idempotency_key,
         payload=payload,
@@ -67,10 +69,12 @@ async def get_candidate(
         ),
     ],
     current_user: CurrentUserDep,
+    db: DbSessionDep,
 ) -> SuccessEnvelope[PlanCandidate]:
     """Dòng 10 trên API Sheet: Xem phương án chia bước và xếp lịch chưa duyệt (UF2)."""
     candidate = await plan_service.get_candidate_by_id(
         user_id=current_user.user_id,
+        db=db,
         candidate_id=candidate_id,
     )
     return SuccessEnvelope(
@@ -101,10 +105,12 @@ async def patch_candidate(
         ),
     ],
     current_user: CurrentUserDep,
+    db: DbSessionDep,
 ) -> SuccessEnvelope[PlanCandidate]:
     """Dòng 11 trên API Sheet: Sửa phương án nháp theo client_*_key và tính/kiểm lại (UF2)."""
     candidate = await plan_service.patch_candidate(
         user_id=current_user.user_id,
+        db=db,
         candidate_id=candidate_id,
         idempotency_key=idempotency_key,
         payload=payload,
@@ -138,10 +144,12 @@ async def confirm_candidate(
         ),
     ],
     current_user: CurrentUserDep,
+    db: DbSessionDep,
 ) -> SuccessEnvelope[ConfirmCandidateResult]:
     """Dòng 12 trên API Sheet: Duyệt và lưu kế hoạch chính thức nguyên tử (UF2)."""
     result = await plan_service.confirm_candidate(
         user_id=current_user.user_id,
+        db=db,
         candidate_id=candidate_id,
         idempotency_key=idempotency_key,
         payload=payload,

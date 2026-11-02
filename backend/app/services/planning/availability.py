@@ -136,7 +136,7 @@ def compute_effective_free_intervals(
     end_date = local_end.date()
 
     override_map = {
-        ov.date: ov.intervals for ov in availability.date_overrides
+        ov.date.isoformat(): ov.intervals for ov in availability.date_overrides
     }
 
     raw_free_intervals: list[tuple[datetime, datetime]] = []
