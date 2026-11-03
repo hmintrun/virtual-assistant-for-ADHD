@@ -3,10 +3,11 @@
 from dataclasses import dataclass
 from uuid import UUID
 
-from sqlalchemy import case, func, select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import PlanningPart, Task
+from app.models import Session, Step, Task
+from app.services.planning.durations import calculate_buffered_work
 
 
 @dataclass(frozen=True)
@@ -20,38 +21,46 @@ async def get_task_planning_states(
 ) -> dict[UUID, TaskPlanningState]:
     if not task_ids:
         return {}
-    stmt = (
-        select(
-            Task.id,
-            func.count(PlanningPart.id),
-            func.sum(case((PlanningPart.decomposition_state == "complete", 1), else_=0)),
-            func.sum(case((PlanningPart.decomposition_state == "not_started", 1), else_=0)),
-            func.sum(case((PlanningPart.scheduling_state == "complete", 1), else_=0)),
-            func.sum(case((PlanningPart.scheduling_state == "not_scheduled", 1), else_=0)),
-        )
-        .outerjoin(
-            PlanningPart, (PlanningPart.task_id == Task.id) & (PlanningPart.user_id == Task.user_id)
-        )
-        .where(Task.user_id == user_id, Task.id.in_(task_ids))
-        .group_by(Task.id)
-    )
+    tasks = (
+        await db.scalars(select(Task).where(Task.user_id == user_id, Task.id.in_(task_ids)))
+    ).all()
+    steps = (
+        await db.scalars(select(Step).where(Step.user_id == user_id, Step.task_id.in_(task_ids)))
+    ).all()
+    work = {
+        key: seconds
+        for key, seconds in (
+            await db.execute(
+                select(Session.step_id, func.sum(Session.work_seconds))
+                .join(Step, Step.id == Session.step_id)
+                .where(
+                    Session.user_id == user_id,
+                    Step.user_id == user_id,
+                    Step.task_id.in_(task_ids),
+                    Session.status != "cancelled",
+                )
+                .group_by(Session.step_id)
+            )
+        ).all()
+    }
     result = {}
-    for task_id, total, decomposed, untouched, scheduled, unscheduled in (
-        await db.execute(stmt)
-    ).all():
-        decomposition = (
-            "not_started"
-            if total == 0 or untouched == total
-            else "complete"
-            if decomposed == total
-            else "partial"
+    for task in tasks:
+        children = [step for step in steps if step.task_id == task.id]
+        fully_scheduled = (
+            bool(children)
+            and task.decomposition_state == "complete"
+            and not task.unexpanded_scope
+            and all(
+                (work.get(step.id, 0) or 0)
+                >= calculate_buffered_work(step.remaining_base_seconds, step.buffer_multiplier)
+                if step.remaining_base_seconds
+                else True
+                for step in children
+            )
         )
-        scheduling = (
-            "not_scheduled"
-            if total == 0 or unscheduled == total
-            else "complete"
-            if scheduled == total and decomposition == "complete"
-            else "partial"
+        any_scheduled = any(work.get(step.id, 0) for step in children)
+        result[task.id] = TaskPlanningState(
+            task.decomposition_state,
+            "complete" if fully_scheduled else "partial" if any_scheduled else "not_scheduled",
         )
-        result[task_id] = TaskPlanningState(decomposition, scheduling)
     return result

@@ -1,6 +1,6 @@
 # Đặc tả đối tượng và schema Backend ProActive
 
-> **Trạng thái đồng bộ ngày 03/11/2026:** Tài liệu gồm nghiệp vụ đích và dữ liệu đang triển khai. UF1 mới nhận giờ rảnh riêng trong `TaskSummary.availability`, xác nhận cùng summary, không yêu cầu Settings trước. Nháp cũ dùng `availability_ref` vẫn tương thích. Task, Candidate sources và CalendarContext đang theo luồng UF2 cũ; chưa được hiểu rằng chúng đã nhận nguồn giờ riêng. UF2 chủ động chặn nguồn mới bằng `409 PLAN_NOT_CONFIRMABLE` / `wait_for_configuration` cho đến khi I02 được nối. Google Calendar thật chưa được ghép. Các thẻ Docs và Sheet online chưa được đồng bộ trong lượt sửa tài liệu này.
+> **Cập nhật C01 ngày 03/11/2026:** Code UF1–UF2 dùng giờ rảnh riêng từ Draft, khóa nguồn qua CalendarContext và lưu snapshot khi confirm Task. Cấu trúc hiện hành là Task → Steps → Sessions; không có PlanningPart trong API mới. Google Calendar thật được tích hợp sau. Unit đạt 10/10, integration đạt 10/10 trên SQLite tạm/AI giả, gồm hai ca migration DB mới/dữ liệu cũ. Chưa áp migration DB app hoặc system test trên điện thoại; chưa nghiệm thu nguồn thật.
 
 
 Cập nhật: **30/10/2026**. Phạm vi: O01–O26 của cả 7 UF, cấu trúc lồng và các DTO hỗ trợ trong hợp đồng API. Tài liệu mô tả dữ liệu để triển khai và review; không xác nhận ORM/API đã được code.
@@ -30,21 +30,20 @@ Cập nhật: **30/10/2026**. Phạm vi: O01–O26 của cả 7 UF, cấu trúc 
 User
  ├─ Preferences / Availability
  ├─ PlanningDraft ──> PlanCandidate ──(xác nhận UF2)──> Task
- │                                                    └─ PlanningPart
- │                                                        └─ Step
- │                                                            └─ Session
- │                                                                ├─ SessionRun ──> CheckIn
- │                                                                ├─ Reminder
- │                                                                └─ CalendarEventLink ──> CalendarSyncJob
+ │                                                    └─ Step
+ │                                                        └─ Session
+ │                                                            ├─ SessionRun ──> CheckIn
+ │                                                            ├─ Reminder
+ │                                                            └─ CalendarEventLink ──> CalendarSyncJob
  ├─ CalendarConnection ──> CalendarContext / CalendarEvent
  ├─ RescheduleProposal ──(duyệt UF6)──> ScheduleVersion
  ├─ Thought ──(chuyển thành nháp)──> PlanningDraft
  └─ CommandReceipt / AuditEvent / AdaptationSuggestion
 ```
 
-- UF1 xác nhận Summary, chưa có Task. UF2 confirm mới lưu Task/Parts/Steps/Sessions/ScheduleVersion; Thought chỉ ghi converted_task_id sau thành công này.
-- Candidate dùng client_part_key/client_step_key/client_session_key. Khi confirm trả key_mapping sang ID thật; giữ liên kết cha đúng nguồn.
-- Một Task có phần chưa chia vẫn giữ PlanningPart với unexpanded_scope và trạng thái; không tạo Step/Session giả hoặc gán 0 cho estimate chưa biết.
+- UF1 xác nhận Summary, chưa có Task. UF2 confirm mới lưu Task/Steps/Sessions/ScheduleVersion; Thought chỉ ghi converted_task_id sau thành công này.
+- Candidate dùng client_step_key/client_session_key. Khi confirm trả key_mapping.steps/sessions sang ID thật; Step thuộc trực tiếp Task.
+- Candidate/Task giữ `unexpanded_scope` và `decomposition_state=partial` khi còn phạm vi chưa chia. Steps đã biết nhưng chưa xếp nằm trong report; không tạo Step/Session giả hoặc gán 0 cho phần chưa ước lượng.
 - Session là lịch dự kiến; SessionRun là lần thực hiện được chấp nhận start. not_started không có Run giả.
 - CalendarEventLink dùng bộ connection_id/google_calendar_id/google_event_id; Session giữ ID nội bộ. Google event status không thay outcome của Task/Step/Run.
 
@@ -55,7 +54,7 @@ User
 | Draft, Candidate, Proposal | Lưu bền vững ID/revisions và snapshot cần phục hồi; có thể dùng JSON kèm cột query/CAS. Không chỉ để biến RAM giữa nhiều request/worker |
 | Availability, Preferences | Có ID/revision và bản user xác nhận/effective; effective_intervals là dữ liệu tính theo phạm vi |
 | CalendarContext | Giữ snapshot theo context_id/revision đủ cho GET/review/confirm và đối soát nguồn; payload của ref cũ không bị ghi đè âm thầm |
-| Task/Part/Step/Session/Run/CheckIn | Dữ liệu chính thức và kết quả thực hiện lưu qua transaction/migration |
+| Task/Step/Session/Run/CheckIn | Dữ liệu chính thức và kết quả thực hiện lưu qua transaction/migration |
 | ScheduleVersion, Receipt, Job | Lưu cùng thay đổi lịch cần áp dụng; Google thực hiện sau commit |
 | Thought audio, DND restore snapshot | Audio/snapshot hệ thống chủ yếu ở thiết bị; Backend giữ metadata được hợp đồng cho phép |
 | DTO/Value object | Summary, TimeConstraint, Feasibility và Event không bắt buộc có bảng riêng; nhúng snapshot theo nhu cầu |
@@ -144,7 +143,7 @@ API liên quan: [dòng 2](https://docs.google.com/spreadsheets/d/1RTI0Hv0DydDX5S
 
 **DraftAvailability:** `{timezone:string, weekly_rules:WeeklyRule[], date_overrides:DateOverride[]}`. Dùng lại kiểu ngày/thứ và giờ địa phương của O02; `weekday` 1=Thứ Hai..7=Chủ Nhật. Ngày cụ thể thay thế quy tắc lặp của chính ngày đó; `intervals:[]` nghĩa là ngày đó không rảnh. Trường ngày/thứ không rõ từ AI giữ trong ngữ cảnh nội bộ và câu hỏi, không tự đoán. `PATCH summary.availability` thay toàn bộ trường; omitted giữ nguyên, null xóa. Client không gửi confirmed_at hoặc cờ khả thi trong trường này.
 
-**Ranh giới triển khai UF1 mới:** `can_plan` kiểm đủ dữ liệu và có giờ khai báo trong khoảng thực hiện còn lại; chưa trừ Calendar hoặc chứng minh lịch khả thi. Confirm UF1 xác nhận giờ rảnh cùng summary, chưa tạo Task/Step/Session. JSON được lưu trong cột summary hiện có, không tạo migration. Google là nguồn bận riêng. UF2 hiện chưa đọc giờ riêng theo Draft nên trả 409 PLAN_NOT_CONFIRMABLE/next_action=wait_for_configuration cho nguồn mới; không dùng nhầm availability_ref cũ. Luồng UF2 dùng ref cũ được giữ để tương thích. Đây là trạng thái Backend; giao diện test được cập nhật riêng, không phải bằng chứng Mobile đã đồng bộ. Docs/Sheet online còn chờ cập nhật.
+**Ranh giới UF1–UF2:** `can_plan` chỉ kiểm đủ đầu vào và giờ khai báo còn sử dụng được, chưa chứng minh khả thi. Confirm UF1 xác nhận giờ cùng summary, chưa tạo Task. UF2 đọc đúng Draft/revision, trừ bận nội bộ/manual trong Context rồi tạo Candidate; confirm UF2 mới lưu Task/Steps/Sessions. Không buộc nhập giờ cố định trong Settings. Chưa tích hợp Google thật nên không bảo đảm đã kiểm lịch bận bên ngoài.
 
 ### O05 PlanningDraft
 
@@ -180,18 +179,19 @@ API liên quan: [dòng 9](https://docs.google.com/spreadsheets/d/1RTI0Hv0DydDX5S
 | `draft_id` | string | ID nháp nguồn của Candidate. |
 | `source_summary_revision` | integer | Phiên bản tóm tắt đã dùng để tạo phương án. |
 | `source_planning_input_revision` | integer | Bản đầu vào Draft dùng để tạo Candidate; xác nhận phải trùng planning_input_revision hiện tại, cùng các revision tóm tắt, phương án và nguồn lịch. |
-| `steps` | array<CandidateStep> | Các bước đã chia trong phần được chọn; mỗi bước có client_step_key và tham chiếu phần nguồn, chưa giả làm ID chính thức. |
+| `steps` | array<CandidateStep> | Các bước đã chia, có client_step_key và order_index duy nhất trong Candidate; chưa có ID chính thức. |
 | `sessions` | array<CandidateSession> | Các phiên đã đề xuất; mỗi phiên có client_session_key và tham chiếu bước dự kiến. Chưa có timer, alarm hoặc sự kiện Calendar vận hành. |
 | `feasibility` | O10 | Kết quả kiểm tra phương án có đáp ứng các ràng buộc. |
 | `min_inter_session_gap_seconds` | integer | Khoảng cách tối thiểu giữa phiên: 900 giây, kể cả khác Task. |
 | `review_revision` | integer | Phiên bản phương án người dùng xem; xác nhận phải đúng bản này. |
-| `planning_parts` | array<CandidatePart> | Toàn bộ phần phạm vi dự kiến theo O22, kể cả phần chưa có Step. Mỗi phần có client_part_key ổn định trong nháp. |
+| `decomposition_state` | partial \| complete | partial khi còn phạm vi chưa chia; không dùng kết quả giai đoạn đầu để tuyên bố toàn Task đã hoàn tất phân rã. |
+| `unexpanded_scope` | string \| null | Mô tả phạm vi còn tổng quan/chưa chia; bắt buộc có nội dung khi partial. Không phải một thực thể con. |
 | `planning_horizon` | TimeInterval | Khoảng bắt đầu–kết thúc của giai đoạn chi tiết, mặc định 14 ngày sắp tới và không vượt window được xác nhận. |
 | `source_revisions` | SourceRevisions | Các revision của giờ rảnh, cấu hình, lịch nền và CalendarContext dùng tính; xác nhận phải kiểm lại các nguồn này. |
 | `user_step_proposal` | string \| null | Ý tưởng chia bước nguồn đã dùng để tạo phương án, hoặc null khi người dùng giao trợ lý đề xuất. |
 | `stale` | boolean | Server tính từ toàn bộ revisions/nguồn hiện hành; không tin cờ false lưu từ lần tính cũ. |
 
-CandidatePart/CandidateStep/CandidateSession giữ nội dung tương ứng O22/O08/O09 nhưng dùng client key thay ID chính thức và chưa có lịch vận hành. feasible chỉ áp dụng verification_scope, không bao gồm tự động các phần chưa chia. stale do server tính từ nguồn hiện hành.
+CandidateStep/CandidateSession tương ứng O08/O09, dùng client key trước confirm và chưa có lịch vận hành. feasible chỉ áp dụng các Steps trong verification_scope và horizon; không tự bao gồm unexpanded_scope. Candidate cũ có schema PlanningPart chỉ được chuyển đổi để đọc, bị đánh stale và phải tạo lại trước confirm.
 
 ### O07 Task
 
@@ -209,11 +209,15 @@ API liên quan: [dòng 12](https://docs.google.com/spreadsheets/d/1RTI0Hv0DydDX5
 | `importance` | integer \| null | Số nguyên dương tùy chọn; lớn hơn nghĩa là quan trọng hơn, null khi user chưa chọn. Deadline/phụ thuộc vẫn ưu tiên trước; không cho phép collision. |
 | `status` | string enum | Trạng thái thực hiện của Task; không đồng nghĩa trạng thái đã chia hay đã xếp và không tự complete do timer hết. |
 | `source_draft_id` | string | Liên kết nháp nguồn và ngăn một nháp tạo nhiều Task. |
-| `decomposition_state` | string enum | Tổng hợp từ các PlanningPart: not_started, partial, complete; còn phần chưa chia thì chưa complete. |
+| `decomposition_state` | string enum | not_started, partial, complete; còn unexpanded_scope thì chưa complete. Candidate được tạo có partial hoặc complete. |
 | `scheduling_state` | string enum | Tổng hợp: not_scheduled, partial, complete; chỉ complete khi toàn bộ phạm vi đã được chia và xếp đủ. |
-| `availability_ref` | AvailabilityRef | Nguồn của Task tạo qua luồng UF2 cũ. Đợt sửa UF1 chưa thay trường Task này; Task từ giờ riêng của Draft chưa được tạo cho đến khi I02 nối và chốt cách lưu nguồn. |
+| `availability_ref` | AvailabilityRef \| null | Chỉ giữ liên kết nguồn cũ nếu Task thực sự dùng nguồn đó; luồng giờ riêng không tạo ref giả. |
+| `availability` | DraftAvailability \| null | Snapshot giờ riêng của Task tại confirm; không tự đổi khi sửa một Draft khác. Task cũ thiếu dữ liệu giữ null. |
+| `revision` | integer >=1 | Phiên bản Task, dùng khi yêu cầu sửa giờ của Task đã lưu. |
+| `source_summary_revision` | integer \| null | Phiên bản summary đã xác nhận để tạo Task; null nếu dữ liệu cũ không có bằng chứng. |
+| `source_planning_input_revision` | integer \| null | Phiên bản đầu vào đã dùng khi confirm. |
+| `unexpanded_scope` | string \| null | Phạm vi còn chưa chia, giữ nguyên ở Task để lập tiếp về sau. |
 | `task_id` | string | Trường bổ sung từ response Sheet; mã tài nguyên hoặc liên kết server. |
-| `planning_parts` | array<PlanningPart> | Trường bổ sung từ response Sheet; xem điều kiện trả của endpoint tương ứng. |
 | `steps` | array<Step> | Trường bổ sung từ response Sheet; xem điều kiện trả của endpoint tương ứng. |
 | `sessions` | array<Session> | Trường bổ sung từ response Sheet; xem điều kiện trả của endpoint tương ứng. |
 | `source_summary` | O04 | Trường bổ sung từ response Sheet; xem điều kiện trả của endpoint tương ứng. |
@@ -222,7 +226,7 @@ source_summary giữ đầy đủ O04, kể cả goal và nguồn giá trị. Kh
 
 ### O08 Step
 
-Bước có đầu ra cần đạt thuộc một phần việc.
+Bước có đầu ra cần đạt, thuộc trực tiếp một Task.
 
 API liên quan: [dòng 9](https://docs.google.com/spreadsheets/d/1RTI0Hv0DydDX5S0DMq1clSFmGggCuGkAMORynke6J0w/edit#gid=1522506644&range=A9:J9), [dòng 12](https://docs.google.com/spreadsheets/d/1RTI0Hv0DydDX5S0DMq1clSFmGggCuGkAMORynke6J0w/edit#gid=1522506644&range=A12:J12), [dòng 14](https://docs.google.com/spreadsheets/d/1RTI0Hv0DydDX5S0DMq1clSFmGggCuGkAMORynke6J0w/edit#gid=1522506644&range=A14:J14).
 
@@ -231,12 +235,11 @@ API liên quan: [dòng 9](https://docs.google.com/spreadsheets/d/1RTI0Hv0DydDX5S
 | `task_id` | string | Công việc sở hữu bước này. |
 | `title` | string | Hành động cần làm ở bước này. |
 | `expected_output` | string | Đầu ra dùng hỏi người dùng bước đã xong hay chưa. |
-| `order_index` | integer | Thứ tự Step trong Task; phải kết hợp order_index của PlanningPart để giữ đúng thứ tự qua các lần chia dần. |
+| `order_index` | integer | Thứ tự duy nhất của Step trong Task; giữ thứ tự khi chia tiếp, không cần cấp Part. |
 | `estimated_base_seconds` | integer | Ước lượng làm chính gốc, chưa buffer, micro-task hoặc nghỉ; không bị ghi đè bằng actual hay thời lượng đã nhân k. |
 | `remaining_base_seconds` | integer | Ước lượng phần còn lại để lập lịch tiếp; không tự lấy timer trừ estimate. |
 | `buffer_multiplier` | number | Hệ số dự phòng đã dùng; chỉ nhân một lần vào làm chính. |
 | `status` | string enum | Bước đang chờ, đang làm, hoàn thành hay bị bỏ qua. |
-| `planning_part_id` | string | PlanningPart sở hữu bước sau xác nhận; giữ liên kết để lập phần tiếp mà không tạo trùng phần cũ. |
 | `estimate_source` | string enum | Nguồn ước lượng gốc và revision liên quan; phân biệt AI đề xuất với người dùng đã chỉnh/xác nhận. |
 | `step_id` | string | Trường bổ sung từ response Sheet; mã tài nguyên hoặc liên kết server. |
 
@@ -283,8 +286,8 @@ API liên quan: [dòng 9](https://docs.google.com/spreadsheets/d/1RTI0Hv0DydDX5S
 | `fully_scheduled` | boolean | Chỉ true khi toàn bộ phạm vi ghi trong report có Session cụ thể và qua các kiểm tra; không tự đồng nghĩa toàn Task đã có lịch. |
 | `blocking_reasons` | array<BlockingReason> | Lý do vướng: ô quá ngắn, sai thứ tự, thiếu khoảng nghỉ giữa phiên… |
 | `deficit_seconds` | integer \| null | Cận dưới thiếu thời lượng khi so required_seconds với available_seconds cho phần đã ước lượng. Bằng 0 vẫn có thể không xếp được; không cộng 900 giây vào từng phiên. |
-| `unestimated_part_ids` | array<string> | Các phần chưa có ước lượng đủ nghĩa; giữ rõ phần chưa biết, không tự gán 0 phút. |
-| `unplanned_part_ids` | array<string> | Các phần còn chưa chia hoặc chưa xếp đầy đủ; giúp hiển thị phần còn lại của Task. |
+| `unscheduled_step_keys` | array<string> | client_step_key của Steps đã biết nhưng chưa được xếp đủ trong Candidate. |
+| `unexpanded_scope` | string \| null | Phạm vi chưa chia/chưa ước lượng; không gộp thành 0 giây hoặc vào required_seconds. |
 | `extension_candidate_at` | date-time \| null | Mốc kết thúc được gợi ý sau khi thử xếp thêm; không gọi là hạn tối thiểu tối ưu nếu chưa chứng minh. |
 
 ### O11 ScheduleVersion
@@ -514,30 +517,20 @@ API liên quan: [dòng 57](https://docs.google.com/spreadsheets/d/1RTI0Hv0DydDX5
 | `calendar_errors` | array<CalendarError> | Lỗi theo cặp connection_id/google_calendar_id; không đổi lỗi thành lịch bận trống. |
 | `event_snapshots` | array<O26> | Các sự kiện O26 đã đọc để nhận diện bản của app và thay đổi bên ngoài; không mặc định lưu toàn bộ nội dung Calendar dài hạn. |
 | `coverage_state` | string enum | Dữ liệu đã bao phủ đủ nguồn/thời gian được chọn, chỉ một phần hoặc không truy cập được; thiếu nguồn không được coi là lịch trống. |
-| `availability_ref` | AvailabilityRef | Bộ giờ chung và revision dùng xây Context trong luồng cũ. Context theo giờ riêng của Draft còn chờ I02 chốt liên kết Draft/phiên bản; chưa tự dùng ref chung thay cho nguồn mới. |
+| `availability_ref` | AvailabilityRef \| null | Chỉ dùng khi tạo Context theo nguồn cũ; không đồng thời với nguồn Draft. |
+| `source_draft_id` | string \| null | Draft sở hữu giờ riêng dùng lập Context; phải đúng owner và đúng Draft của Candidate. |
+| `source_summary_revision` | integer \| null | Phiên bản summary tại lúc chụp; sửa giờ/summary làm nguồn cũ không còn hợp lệ để confirm. |
+| `availability_snapshot` | DraftAvailability \| null | Bản giờ riêng đã chụp; không ghi đè snapshot cũ âm thầm. |
 | `manual_busy_intervals` | array<ManualBusyInterval> | Khoảng bận user nhập; giữ ID và nguồn để gửi lại không nhân đôi. |
 | `excluded_sources` | array<ExcludedCalendarSource> | Nguồn user xác nhận loại khỏi lần lập phương án; giữ lý do/thời điểm, không coi nguồn lỗi đã được kiểm đủ. |
 | `context_id` | string | Trường bổ sung từ response Sheet; mã tài nguyên hoặc liên kết server. |
 | `revision` | integer | Trường bổ sung từ response Sheet; xem điều kiện trả của endpoint tương ứng. |
 
-### O22 PlanningPart
+### O22 — Không còn dùng trong hợp đồng mới
 
-Một phần phạm vi của Task, có thể chưa chia Steps.
+PlanningPart được loại khỏi mô hình nghiệp vụ và DTO. Giữ mã O22 để các mã O23–O26 không bị đổi. Phạm vi chưa chia nằm ở `Candidate/Task.unexpanded_scope`; thứ tự Steps thuộc trực tiếp Task.
 
-API liên quan: [dòng 9](https://docs.google.com/spreadsheets/d/1RTI0Hv0DydDX5S0DMq1clSFmGggCuGkAMORynke6J0w/edit#gid=1522506644&range=A9:J9), [dòng 12](https://docs.google.com/spreadsheets/d/1RTI0Hv0DydDX5S0DMq1clSFmGggCuGkAMORynke6J0w/edit#gid=1522506644&range=A12:J12), [dòng 14](https://docs.google.com/spreadsheets/d/1RTI0Hv0DydDX5S0DMq1clSFmGggCuGkAMORynke6J0w/edit#gid=1522506644&range=A14:J14), [dòng 33](https://docs.google.com/spreadsheets/d/1RTI0Hv0DydDX5S0DMq1clSFmGggCuGkAMORynke6J0w/edit#gid=1522506644&range=A33:J33).
-
-| Trường dữ liệu | Kiểu JSON | Tác dụng và ràng buộc |
-| --- | --- | --- |
-| `task_id` | string | Task chính thức sở hữu phần này; trước confirm dùng tham chiếu draft/candidate, chưa giả có Task ID. |
-| `client_part_key` | string | Mã phần ổn định từ nháp đến xác nhận; yêu cầu chia tiếp hoặc gửi lại không tạo trùng phần. |
-| `scope_description` | string | Phạm vi và đầu ra của phần công việc, giữ được cả phần chưa chia chi tiết. |
-| `order_index` | integer | Thứ tự các phần trong Task; lập phần tiếp phải tôn trọng phần trước và phụ thuộc liên quan. |
-| `decomposition_state` | string enum | not_started, partial, complete tương ứng chưa chia, chia một phần và chia đủ phạm vi. |
-| `scheduling_state` | string enum | not_scheduled, partial, complete; chỉ complete khi toàn bộ phạm vi đã chia và có lịch đủ. |
-| `unexpanded_scope` | string \| null | Phần mô tả phạm vi còn chưa chia thành Step; không biến thành Step/Session giả. |
-| `rough_estimate_seconds` | integer \| null | Ước lượng sơ bộ làm chính trước buffer cho phần này; chưa biết thì null, không cộng trùng với Steps đã ước lượng. |
-| `estimate_source` | string \| null | Nguồn và độ mới của ước lượng sơ bộ; không dùng số chưa đáng tin để kết luận toàn Task kịp hạn. |
-| `planning_part_id` | string | Trường bổ sung từ response Sheet; mã tài nguyên hoặc liên kết server. |
+Migration mở rộng vẫn giữ bảng/cột Part cũ để đối chiếu dữ liệu và receipt; runtime mới không đọc/ghi Part như thực thể nghiệp vụ. Chưa drop vật lý hoặc xóa dữ liệu cũ.
 
 ### O23 CalendarConnection
 
@@ -652,16 +645,16 @@ Kiểu dùng chung được định nghĩa ở bảng dưới và mục bổ sun
 | CandidateRef | candidate_id:string; review_revision:integer; cả hai bắt buộc khi candidate_ref khác null. |
 | TimeInterval | start_at: date-time; end_at: date-time. start_at phải nhỏ hơn end_at; các tên scheduled_start/end ở Session vẫn giữ nguyên. |
 | SessionSegment | order_index: integer; kind: work\|rest; duration_seconds: integer. Tổng các quãng phải khớp work_seconds, rest_seconds và duration_seconds. |
-| SourceRevisions | Luồng UF2 cũ: availability: integer; preferences: integer; schedule: integer; calendar_context: CalendarContextRef. Nguồn giờ riêng còn chờ I02 chốt mapping; không tự lấy summary_revision làm availability revision hoặc bỏ nguồn lỗi. |
-| VerificationScope | Hai biến thể phân biệt scope_type: candidate_parts → {scope_type,client_part_keys:array<string>,planning_horizon:TimeInterval}; persisted_schedule → {scope_type,task_ids:array<string>,session_ids:array<string>,planning_part_ids:array<string>,planning_horizon:TimeInterval}. Phạm vi được kiểm không tự bao gồm toàn Task; không trộn client key với ID lưu chính thức. |
+| SourceRevisions | availability:integer\|null; preferences:integer; schedule:integer; calendar_context:CalendarContextRef. Nguồn Draft dùng availability=null; khóa Draft/summary nằm trong Candidate và Context, không dùng summary revision giả làm availability revision. |
+| VerificationScope | candidate_steps → {scope_type,client_step_keys:array<string>,planning_horizon:TimeInterval}; persisted_schedule → {scope_type,task_ids:array<string>,session_ids:array<string>,step_ids:array<string>,planning_horizon:TimeInterval}. Chỉ kết luận phạm vi được kiểm, không tự bao gồm unexpanded_scope. |
 | FieldSource | source: string enum; source_ref: string. Map field_sources dùng tên trường làm khóa để giữ nguồn do user nhập, AI gợi ý hoặc user xác nhận. |
 | ClarificationIssue | code, field_path, message, question: string; blocking: boolean. |
 | BlockingReason | code, message: string; có thể cần field/session/part ref khi đặc tả lỗi chi tiết. |
 | SettingsSnapshot | effective_revision: integer; session: bản chụp O09 tại lúc start. Không cập nhật snapshot khi user đổi cài đặt sau đó. |
 | CalendarDateTime | Event có giờ: date_time: date-time; time_zone: string. Event cả ngày: date: string YYYY-MM-DD. Không trộn hai nhánh; end của event cả ngày là ngày kết thúc không bao gồm. |
 | ResourceRef | Các mã tài nguyên cần thiết, ví dụ {task_id: string}. Schema phụ thuộc loại tài nguyên; phải định nghĩa cụ thể cho từng endpoint. |
-| CandidatePart Step Session | Dùng client_part_key/client_step_key/client_session_key trước khi lưu; quan hệ dùng client key tương ứng. Sau confirm nhận key_mapping sang ID thật. |
-| ProposedChanges | {planning_parts:array<PlanningPartChange>,steps:array<StepChange>,sessions:array<SessionChange>}. [] nghĩa là không đổi nhóm đó. add dùng client_*_key và after, before=null; update/move/cancel dùng ID đã lưu. move chỉ đổi giờ Session, before/after giữ đúng start_at/end_at; cancel có before và after=null. Step/Part thay đổi phải có before/after đầy đủ phần dữ liệu đã xem, giữ phạm vi nguồn. Không thay việc đã hoàn thành hoặc Run đang active. |
+| CandidateStep / CandidateSession | client_step_key và client_session_key trước khi lưu; Session tham chiếu client_step_key. Sau confirm nhận key_mapping.steps/sessions. |
+| ProposedChanges | Thiết kế UF6: {steps:array<StepChange>,sessions:array<SessionChange>}; không có planning_parts. add dùng client key; update/move/cancel dùng ID đã lưu và before/after. UF6 chưa triển khai đầy đủ trong đợt C01 này. |
 | BusyInterval | {start_at:date-time,end_at:date-time,source:{kind:calendar_event\|confirmed_session\|manual,connection_id:string\|null,google_calendar_id:string\|null,google_event_id:string\|null,session_id:string\|null,client_interval_id:string\|null}}. calendar_event cần bộ 3 mã Google; confirmed_session cần session_id; manual cần client_interval_id. Chỉ loại own-event khi trùng mapping cụ thể, không loại mọi event của cùng calendar. |
 
 ### Kiểu dữ liệu bổ sung dùng trong API
@@ -672,13 +665,13 @@ WeeklyRule — {weekday:integer 1..7 (Thứ Hai=1),start_local:string HH:mm,end_
 
 DateOverride — {date:string YYYY-MM-DD,intervals:array<{start_local:string HH:mm,end_local:string HH:mm}>}; thay toàn bộ lịch rảnh của ngày đó, [] nghĩa là ngày không rảnh; không trùng date.
 
-TaskAvailabilityLimit — {task_id:string,intervals:array<TimeInterval>}; là giới hạn bổ sung trên giờ rảnh chung cho Task đã lưu, không mở rộng giờ rảnh chung; [] nghĩa là chưa có khoảng được phép cho Task đó. Luồng nguồn cũ dùng availability_ref và time_constraint trước khi có task_id. UF1 mới dùng summary.availability; đây không phải TaskAvailabilityLimit và chưa được bộ đọc UF2/Context hiện tại hỗ trợ.
+TaskAvailabilityLimit — Kiểu tương thích nguồn Availability cũ: {task_id:string,intervals:array<TimeInterval>}. Không dùng thay DraftAvailability của yêu cầu mới.
 
-SettingsChange — {preferences?:{work_interval_seconds?:integer>0,rest_interval_seconds?:integer>=0,reminder_offsets?:array<integer>=0 đúng 1 phần tử,buffer_multiplier?:number>0 theo policy,reminder_style?:string},availability?:{timezone?:string,weekly_rules?:array<WeeklyRule>,date_overrides?:array<DateOverride>,task_limits?:array<TaskAvailabilityLimit>}}. Ít nhất một trường hợp lệ; không sửa revision/trường do server quản lý. Miền buffer và số giây min/max khác lấy capabilities, chưa tự gán số minh họa.
+SettingsChange — changes:{preferences?:PreferenceChanges,availability?:DraftAvailability}. Sửa giờ phải chọn đúng một target_draft_id hoặc target_task_id. Draft cần expected_summary_revision + expected_planning_input_revision; Task cần expected_task_revision. availability là bản thay thế đầy đủ, không dùng expected_availability_revision. Task đã lưu cần UF6 nên hiện trả 503 POLICY_NOT_CONFIGURED và giữ lịch/giờ cũ. Lần đầu preferences dùng expected_preferences_revision=0, không phải nhập giờ rảnh cố định.
 
 PreferenceChanges — Các trường cấu hình được phép sửa trong SettingsChange.preferences. Trên O01 requested_changes là PreferenceChanges|null; trên kết quả change-request requested_changes là SettingsChange có namespace preferences/availability.
 
-StructuredChanges — Theo trigger: not_started → {session_ids:array<string> không rỗng}; step_completed_early → {completed_step_id:string,session_ids?:array<string>}; continue_next_session → {next_session_id:string}; remaining_work → {step_id:string,remaining_note:string}; extend_horizon → {selected_part_ids:array<string> không rỗng,planning_horizon:TimeInterval}; settings_change → {change_request_id:string}; calendar_change → {preview_id:string}. reschedule có thể dùng request_text và các constraint đã làm rõ. ID phải thuộc user/Task và phạm vi được cho phép; không tự thêm Task vào allowed_task_ids.
+StructuredChanges — Theo trigger: not_started → {session_ids:array<string> không rỗng}; step_completed_early → {completed_step_id:string,session_ids?:array<string>}; continue_next_session → {next_session_id:string}; remaining_work → {step_id:string,remaining_note:string}; extend_horizon (thiết kế UF6, chưa triển khai) → {selected_step_ids:array<string> không rỗng,planning_horizon:TimeInterval}; settings_change → {change_request_id:string}; calendar_change → {preview_id:string}. reschedule có thể dùng request_text và các constraint đã làm rõ. ID phải thuộc user/Task và phạm vi được cho phép; không tự thêm Task vào allowed_task_ids.
 
 SuggestionValue — kind=buffer_multiplier: number>0 trong miền policy; kind=reminder_offset: array<integer>, đúng một phần tử >=0 giây. current_value/suggested_value/edited_value/accepted_value phải cùng biến thể. Không suy chính sách học buffer từ một thẻ chỉnh nhắc.
 
@@ -700,6 +693,29 @@ Importance — importance: integer dương|null. Giá trị lớn hơn có mức
 
 Các cấu trúc dưới đây phục vụ endpoint cụ thể, không tự đánh thêm mã O27… hoặc tạo bảng DB chỉ vì có DTO. Trường được liệt kê từ các biến thể response hiện hành; có giá trị null trong mẫu không đủ để suy ra kiểu đầy đủ, nên dùng mô tả/ghi chú nguồn khi khóa model.
 
+### Tạo và chỉnh Candidate UF2 — bổ sung 03/11/2026
+
+`POST /api/v1/drafts/{draft_id}/candidates` giữ source_summary_revision, source_planning_input_revision, planning_horizon và calendar_context_ref. Có ba cách lấy Steps: để AI chia (mặc định); chọn selected_step_keys của Candidate nguồn hợp lệ; hoặc gửi manual_steps. Không gửi đồng thời manual_steps và selected_step_keys.
+
+| Trường bổ sung | Kiểu | Ý nghĩa |
+|---|---|---|
+| manual_steps | array<ManualStepInput> hoặc null | User tự cung cấp Steps khi AI chưa sẵn sàng. Không gọi AI phân rã ở nhánh này |
+| manual_steps[].order_index | integer >= 0 | Dãy liên tục 0..N−1, không trùng |
+| manual_steps[].title | string 1–255 ký tự | Tên bước; theo giới hạn cột Step hiện có |
+| manual_steps[].expected_output | string không rỗng | Đầu ra cần đạt |
+| manual_steps[].estimated_base_seconds | integer > 0 | Lượng làm chính gốc, chưa nhân buffer |
+| unexpanded_scope | string hoặc null | Chỉ gửi cùng manual_steps; mô tả phạm vi chưa chia. Không tạo Step giả cho phần này |
+
+Server tạo client keys và ghi estimate_source=user_confirmed cho nguồn thủ công. Cùng Context/preferences và Algorithm được dùng như nhánh AI; vẫn cần user review và confirm riêng. A04 cần làm rõ trả 422 DECOMPOSITION_REQUIRES_CLARIFICATION, field user_step_proposal; Draft được giữ, chưa có Candidate mới.
+
+`PATCH /api/v1/candidates/{candidate_id}` giữ expected_review_revision, nhận **đúng một** trong edits (sửa có cấu trúc hiện có) hoặc user_instruction (string 1–2000 ký tự, không chỉ khoảng trắng). Success vẫn là O06 PlanCandidate; không thay response bằng text của AI.
+
+- NL chỉ sửa Step đã có: title, expected_output, estimated_base_seconds, order_index. Dùng đúng client_step_key qua reorder; không thêm/xóa/gộp hoặc sửa Session bằng NL trong bản này. Sửa Session có cấu trúc tiếp tục dùng edits.sessions.
+- Kết quả AI nội bộ có keyed step_edits và các cờ cần hỏi lại/đổi Draft/thao tác chưa hỗ trợ. Đây là DTO nội bộ, không tạo object DB hoặc endpoint mới.
+- Đổi availability/deadline/window trả 422 DRAFT_UPDATE_REQUIRED, next_action=edit_draft_and_reconfirm. User sửa Draft, xác nhận UF1 và tạo lại nguồn/phương án phù hợp; không áp một phần Step của yêu cầu hỗn hợp.
+- 422 ADJUSTMENT_REQUIRES_CLARIFICATION / UNSUPPORTED_CANDIDATE_CHANGE / NO_CANDIDATE_CHANGES hoặc 503 AI_UNAVAILABLE giữ nguyên phương án/revision. Lỗi có câu hỏi/field_errors; không lấy assistant_note làm bằng chứng đã thay đổi lịch.
+- Kết quả AI cũ gặp nguồn/review revision đã đổi bị chặn 409. Replay lệnh thành công vẫn đọc receipt trước kiểm bản đã thay đổi; cùng key khác payload bị từ chối.
+
 ### ConfirmSummaryResult
 
 | Trường | Kiểu JSON | Lưu ý |
@@ -716,7 +732,7 @@ Các cấu trúc dưới đây phục vụ endpoint cụ thể, không tự đá
 | --- | --- | --- |
 | `app_save_state` | string | Đọc điều kiện và ghi chú của endpoint; không cho client sửa trường dẫn xuất. |
 | `task` | O07 | Đọc điều kiện và ghi chú của endpoint; không cho client sửa trường dẫn xuất. |
-| `key_mapping` | {planning_parts:map<string,string>,steps:map<string,string>,sessions:map<string,string>} | Đọc điều kiện và ghi chú của endpoint; không cho client sửa trường dẫn xuất. |
+| `key_mapping` | {steps:map<string,string>,sessions:map<string,string>} | Đổi client key sang ID thật; không có Part hoặc Google event ID. |
 | `schedule_version` | O11 | Đọc điều kiện và ghi chú của endpoint; không cho client sửa trường dẫn xuất. |
 | `alarm_sync_state` | string | Đọc điều kiện và ghi chú của endpoint; không cho client sửa trường dẫn xuất. |
 | `calendar_sync_summary` | string | Đọc điều kiện và ghi chú của endpoint; không cho client sửa trường dẫn xuất. |
@@ -750,9 +766,13 @@ Các cấu trúc dưới đây phục vụ endpoint cụ thể, không tự đá
 | `requested_revision` | integer \| null | Đọc điều kiện và ghi chú của endpoint; không cho client sửa trường dẫn xuất. |
 | `effective_revision` | integer | Đọc điều kiện và ghi chú của endpoint; không cho client sửa trường dẫn xuất. |
 | `requested_availability_revision` | integer \| null | Đọc điều kiện và ghi chú của endpoint; không cho client sửa trường dẫn xuất. |
-| `effective_availability_revision` | integer | Đọc điều kiện và ghi chú của endpoint; không cho client sửa trường dẫn xuất. |
+| `effective_availability_revision` | integer \| null | null cho nguồn giờ riêng; dùng revision Draft/Task để kiểm thay đổi. |
 | `requested_changes` | SettingsChange | Đọc điều kiện và ghi chú của endpoint; không cho client sửa trường dẫn xuất. |
 | `pending_proposal_id` | string \| null | Đọc điều kiện và ghi chú của endpoint; không cho client sửa trường dẫn xuất. |
+| `target_draft_id` | string \| null | Draft được chỉnh giờ. |
+| `target_task_id` | string \| null | Task được yêu cầu chỉnh giờ; hiện chờ UF6. |
+| `summary_revision` | integer \| null | Revision sau sửa Draft; đọc lại Draft trước confirm. |
+| `planning_input_revision` | integer \| null | Revision đầu vào sau sửa Draft. |
 
 ### SuggestionResponse
 
@@ -880,12 +900,12 @@ Các cấu trúc dưới đây phục vụ endpoint cụ thể, không tự đá
 
 | Cấu trúc | Nhận diện và quan hệ |
 |---|---|
-| CandidatePart | client_part_key; nội dung phạm vi/trạng thái như O22; chưa có planning_part_id/task_id thật |
-| CandidateStep | client_step_key + client_part_key; title/expected_output/order_index/estimated_base_seconds/remaining_base_seconds/buffer_multiplier/estimate_source/status như O08 |
+
+| CandidateStep | client_step_key; title/expected_output/order_index/estimated_base_seconds/remaining_base_seconds/buffer_multiplier/estimate_source/status như O08; không có client_part_key. |
 | CandidateSession | client_session_key + client_step_key; scheduled_start/end, micro-task, work/rest/segments/duration và start state như JSON dòng 9; không áp thêm mọi cột của Session đã lưu |
-| KeyMapping | planning_parts/steps/sessions là map client key → server ID; không đổi ID nội bộ thành Google event ID |
-| PartChange / StepChange / SessionChange | add dùng client key và after, before=null; thao tác trên dữ liệu đã lưu dùng ID. move chỉ đổi giờ; cancel có before và after=null. Các before/after phải mô tả đúng phần user đã xem |
-| SourceRevisions | availability:integer; preferences:integer; schedule:integer; calendar_context:{context_id:string,revision:integer}. Không dùng availability_rev/preference_rev/calendar_context_rev cũ |
+| KeyMapping | steps/sessions là map client key → server ID; không có tầng Part. |
+| StepChange / SessionChange | Thiết kế UF6: add dùng client key và after; sửa/dời/hủy dùng ID và before/after. Không thay việc đã hoàn tất hoặc Run đang active. |
+| SourceRevisions | availability:integer\|null; preferences:integer; schedule:integer; calendar_context:CalendarContextRef. Nguồn Draft dùng availability=null; khóa Draft/summary nằm trong Candidate và Context, không dùng summary revision giả làm availability revision. |
 
 ### Danh sách endpoint để truy vết schema
 
@@ -893,14 +913,14 @@ Bảng này là chỉ mục, không thay request validation. Các trường dư�
 
 | Dòng Sheet | Method / endpoint | Dữ liệu request trong ví dụ |
 | --- | --- | --- |
-| 2 | POST `/api/v1/drafts` | body: client_draft_id, input_source, raw_input |
+| 2 | POST `/api/v1/drafts` | body: client_draft_id, input_source, raw_input; summary có thể gửi kèm giờ riêng và form đã nhập. |
 | 3 | GET `/api/v1/drafts` | query: limit; body: null |
 | 4 | GET `/api/v1/drafts/{draft_id}` | path: draft_id; body: null |
 | 5 | POST `/api/v1/drafts/{draft_id}/analyze` | path: draft_id; body: expected_summary_revision, message, expected_planning_input_revision |
 | 6 | PATCH `/api/v1/drafts/{draft_id}` | path: draft_id; body: expected_summary_revision, changes, expected_planning_input_revision |
 | 7 | POST `/api/v1/drafts/{draft_id}/confirm-summary` | path: draft_id; body: expected_summary_revision |
 | 8 | POST `/api/v1/voice/transcriptions` | multipart_fields: purpose, thought_id, device_id, file |
-| 9 | POST `/api/v1/drafts/{draft_id}/candidates` | path: draft_id; body: source_summary_revision, source_planning_input_revision |
+| 9 | POST `/api/v1/drafts/{draft_id}/candidates` | body: source_summary_revision, source_planning_input_revision; selected_step_keys, planning_horizon, calendar_context_ref là tùy chọn. |
 | 10 | GET `/api/v1/candidates/{candidate_id}` | path: candidate_id; body: null |
 | 11 | PATCH `/api/v1/candidates/{candidate_id}` | path: candidate_id; body: expected_review_revision, edits |
 | 12 | POST `/api/v1/candidates/{candidate_id}/confirm` | path: candidate_id; body: expected_review_revision, expected_summary_revision, expected_source_revisions, expected_planning_input_revision |
@@ -932,7 +952,7 @@ Bảng này là chỉ mục, không thay request validation. Các trường dư�
 | 38 | POST `/api/v1/proposals/{proposal_id}/reject` | path: proposal_id; body: expected_proposal_revision, reason |
 | 39 | GET `/api/v1/preferences` | body: null |
 | 40 | GET `/api/v1/availability` | body: null; query: from, to |
-| 41 | POST `/api/v1/settings/change-requests` | body: expected_preferences_revision khi sửa preferences, expected_availability_revision khi sửa availability, changes; 0 nghĩa chưa có tài nguyên, tạo lần đầu thành 1 |
+| 41 | POST `/api/v1/settings/change-requests` | body: changes; sửa preferences cần expected_preferences_revision (lần đầu 0); sửa giờ cần target_draft_id + hai revision Draft hoặc target_task_id + expected_task_revision. Không dùng expected_availability_revision cho giờ riêng. |
 | 42 | POST `/api/v1/settings/change-requests/{change_request_id}/cancel` | path: change_request_id; body: expected_request_revision |
 | 43 | GET `/api/v1/suggestions/current` | query: kind; body: null |
 | 44 | POST `/api/v1/suggestions/{suggestion_id}/response` | path: suggestion_id; body: expected_suggestion_revision, action, annoyance_feedback; body: expected_suggestion_revision, action; body: expected_suggestion_revision, action, edited_value |
@@ -952,7 +972,7 @@ Bảng này là chỉ mục, không thay request validation. Các trường dư�
 | 58 | GET `/api/v1/calendar/sync-jobs/{job_id}` | path: job_id; body: null |
 | 59 | POST `/api/v1/calendar/sync-jobs/{job_id}/retry` | path: job_id; body: expected_job_revision |
 | 60 | GET `/api/v1/capabilities` | body: null |
-| 61 | POST `/api/v1/planning-contexts` | body: availability_ref, from, to, selected_calendar_sources, manual_busy_intervals, excluded_sources |
+| 61 | POST `/api/v1/planning-contexts` | body: source_draft_id, expected_summary_revision, from, to, selected_calendar_sources, manual_busy_intervals, excluded_sources; nguồn cũ dùng availability_ref thay hai trường Draft. |
 | 62 | GET `/api/v1/planning-contexts/{context_id}` | path: context_id; body: null |
 | 63 | GET `/api/v1/commands/{command_id}` | path: command_id; body: null |
 
@@ -1003,42 +1023,28 @@ Google Sign-In và Calendar OAuth là hai luồng riêng; đăng nhập không t
 
 Các trường streak trong schema cũ (current_streak_days, streak_frozen, streak_freeze_tokens, last_streak_date) là **phần mở rộng chưa có trong Backend Docs/Sheet hiện hành**. Giữ chúng ngoài schema tối thiểu và không áp mặc định 2 freeze tokens hoặc tự phát sinh luật streak từ file cũ. Bản này cũng không tạo yêu cầu đăng nhập mật khẩu/hashed_password khi cơ chế được chọn là Google Sign-In.
 
-## 9. Điểm chưa được đặc tả đủ hoặc hai nguồn còn lệch
+## 9. Giới hạn và trạng thái triển khai C01 — 03/11/2026
 
-| Nội dung | Cách xử lý trong bản đồng bộ |
-|---|---|
-| O03 deadline/window | Ngày 02/11 user duyệt hai nhánh theo code/Sheet: đúng một mốc cuối theo kind. Local đã đồng bộ; mô tả thẻ 02 online còn chờ cập nhật. |
-| Enum đầy đủ | Dùng những nhãn được nguồn nêu, không bịa danh sách đầy đủ từ ví dụ. Đặc biệt stage/status theo từng object, estimate_source, FieldSource, sync/job states cần khóa khi triển khai |
-| FieldError / BlockingReason / ResourceRef | Giữ cấu trúc nguồn hiện có; trường phụ thuộc từng loại lỗi/thao tác cần đặc tả đầy đủ, không mở dict tùy ý rồi gọi là schema đã chốt |
-| CandidateEdits và PATCH lồng | Đã rõ omitted/null và revision; allowlist sửa Part/Step/Session, merge object/thay mảng và đổi kind cần khóa trước viết DTO input cuối |
-| Chọn Context khi tạo Candidate | Dòng 9 chưa gửi context_ref tường minh; cần thống nhất server resolve nguồn nào và phạm vi bao phủ. Không dùng context mới nhất bất kỳ để thay nguồn đúng user/window |
-| Công suất ví dụ liên endpoint | Dòng 40 có hai khoảng rảnh 2 giờ trong horizon; Candidate mẫu available_seconds=7200 trong khi Context mẫu trống bận. Không dùng các ví dụ độc lập làm chuỗi test chung nếu chưa đồng bộ nguồn/ngoại lệ |
-| Chính sách chưa cấu hình | caps có buffer_multiplier_range,minimum_sample_count,audio limits,preview TTL còn null. Không lấy số minh họa làm ngưỡng nghiên cứu |
-| Auth, streak và lưu trữ | Auth app được chọn nhưng endpoint/session policy chưa công bố; streak và lựa chọn ORM/FK/retention là thiết kế bổ sung, không tự nâng thành hợp đồng API đã thống nhất |
-| Giới hạn/phân trang/độ mới nguồn | limit max, cursor/filter, TTL/revalidate nguồn và các miền cấu hình phải đặc tả đủ trước nghiệm thu; không tự đưa các số đề xuất chặng 0 thành chuẩn hiện hành |
+- Đã sửa DTO/service/model cho giờ riêng Draft → Context → Candidate → Task và cấu trúc không Part. Đây là trạng thái code, chưa phải nghiệm thu.
+- `POST planning-contexts`: đúng một nguồn Draft+summary revision hoặc Availability cũ. Nguồn Draft chụp giờ riêng vào availability_snapshot. Context sai owner/Draft/revision/range hoặc đã hết hiệu lực không dùng được để confirm.
+- Tạo Candidate có thể chỉ định calendar_context_ref. Khi không chỉ định, Backend tìm Context hợp lệ đúng nguồn; chỉ tự tạo manual_only nếu không có nguồn Google đọc đã cấu hình. Candidate giữ ref đó để PATCH/confirm không tự đổi sang Context khác.
+- Google Calendar thật được tích hợp sau. coverage_state=manual_only chỉ xét giờ khai báo, lịch nội bộ và bận nhập tay; không chứng minh đã kiểm lịch bên ngoài. Confirm trả calendar_sync_summary=not_integrated, không tạo job/event giả.
+- Settings sửa giờ của Draft tái dùng PATCH UF1, kiểm hai revision, không mất scope/yêu cầu và hủy xác nhận cũ khi dữ liệu đổi. Sửa Task hoặc cấu hình ảnh hưởng lịch đã lưu trả POLICY_NOT_CONFIGURED cho tới khi UF6 sẵn sàng. reminder_style có thể đổi riêng.
+- Cuốn chiếu giữ 14 ngày chi tiết và unexpanded_scope ở Candidate/Task. Không tự mở 21 ngày, I03 hoặc scheduler nhiều Task. Lịch khả thi cho Steps đã biết không chứng minh toàn phần chưa chia kịp deadline.
+- Candidate cũ được chuyển dạng khi đọc và đánh stale; tạo lại trước confirm. Receipt cũ được giải mã ở biên mà không áp dụng lại thay đổi nghiệp vụ.
+- Migration `20261103_01_c01_sources.py` thêm snapshot/revision/trạng thái, chuyển thứ tự Steps cũ và giữ dữ liệu Part để đối chiếu. Đã kiểm migration trên DB SQLite tạm mới và có dữ liệu cũ; chưa áp vào DB app. Không hạ migration hoặc drop Part tự động.
+- AI phân rã được yêu cầu trả Steps và unexpanded_scope; khi provider lỗi giữ Draft/Candidate cũ và trả AI_UNAVAILABLE, không giả lập thành công bằng ba bước mẫu.
+- Phần UF3–UF7, Google CRUD và Auth production trong tài liệu vẫn là mục tiêu thiết kế; không suy hoàn thành từ thay DTO C01. Miền k/cỡ mẫu/chất lượng AI/STT và trải nghiệm ADHD vẫn cần kiểm riêng.
 
-Bản đồng bộ này không thay đổi Backend Docs, Sheet API, source code hoặc kế hoạch triển khai. Khi nhóm chốt các mục trên, cập nhật nguồn chuẩn trước và đồng bộ schema/DTO/tests cùng thay đổi.
+## 10. Kiểm chứng và chuyển giao
 
-## 10. Bổ sung triển khai UF1–UF2 ngày 02/11/2026
+- Script review: `_temp/c01_tests/conftest.py`, `test_unit.py`, `test_integration.py`, `system_test.md`. User đã duyệt chạy: unit 10/10 và integration 10/10 đạt ngày 03/11/2026; system chưa chạy, phải thao tác app thật.
+- Static lint/type đạt. Bộ 20 ca C01 đã chạy trên SQLite tạm/AI giả; không thay kiểm app, provider thật hoặc PostgreSQL. Mốc 175 ca ngày 02/11 là kết quả trước đợt đổi contract này.
+- Test cũ còn dùng PlanningPart cần được chuyển fixture/assert theo contract mới; không sửa/xóa test để che lỗi hoặc coi suite cũ đã chạy đạt.
+- Mobile cần bỏ Part keys, đọc giờ riêng và SourceRevisions.availability=null, gửi đúng revisions/Context. Không sửa source Mobile trong đợt Backend này.
 
-- DTO AI nội bộ có goal, time_constraint chưa đầy đủ và issue theo trường; API Mobile vẫn trả PlanningDraft/TaskSummary hiện hành. Snapshot ai_context không trả ra JSON công khai; lưu trong summary._api_meta của Draft và phục hồi qua DB.
-- AI null/omitted không xóa dữ liệu user. PATCH giữ quy tắc omitted/null hiện có. AI bổ sung yêu cầu được trim/loại trùng chính xác, giữ yêu cầu cũ; user sửa form có thể thay cả danh sách.
-- Gửi lại full form không tự xác nhận các trường không đổi. Muốn giữ giá trị cũ ở field-review, gửi PATCH chỉ trường đó cùng giá trị; đổi giá trị cũng cần gửi đúng trường user sửa. Issue khác vẫn chặn can_plan. AI giải thích bất lợi có căn cứ, không tự khẳng định khả thi hoặc số phút thiếu.
-- Ghi Draft và CommandReceipt trong cùng transaction. UF1/Voice có receipt DB; GET commands theo owner chỉ trả ref công khai. Dịch vụ AI/STT có thể gọi lại sau sự cố trước khi lưu; kết quả nghiệp vụ không được áp dụng hai lần.
-- Settings bootstrap: expected_*_revision=0 khi tài nguyên chưa tồn tại, lưu lần đầu revision=1. Không đổi nhóm nào thì không tăng revision nhóm đó. Lần đầu preferences cần đủ giá trị user chọn, không tự gán hệ số pilot. Nếu preferences chưa có thì effective_revision=0 trong kết quả bootstrap Availability để thể hiện chưa cấu hình; GET preferences vẫn báo cần cấu hình.
-- POST settings/change-requests hiện chỉ áp dụng trước khi có Task. Khi đã có kế hoạch, trả 503 POLICY_NOT_CONFIGURED/wait_for_configuration cho tới khi luồng tác động/UF6 sẵn sàng; chưa giả trả proposal. Chưa triển khai cancel hoặc toàn bộ UF7.
-- Luồng cũ: Availability đã xác nhận là khung được phép, CalendarContext liên kết availability_ref. Luồng mới: giờ riêng trong Draft được xác nhận cùng UF1; bộ đọc Context/UF2 còn chờ nối. Calendar giữ vai trò nguồn bận có nguồn gốc/độ mới; Google thật chưa được triển khai.
-- UF2 không tự sinh ba bước mẫu khi hết provider hợp lệ; giữ Draft/Candidate cũ và trả AI_UNAVAILABLE để retry/sửa. Chưa hoàn tất phân rã nhiều tầng A04 hoặc lập tiếp Task đã lưu I03.
+### Kết quả kiểm C01 ngày 03/11/2026
 
-
-## 11. Điểm giao UF1 mới — 03/11/2026
-
-- Các endpoint tạo, đọc, sửa, phân tích và xác nhận Draft giữ nguyên đường dẫn. Create/PATCH nhận `summary.availability`; response TaskSummary trả cùng trường, bên cạnh các trường hiện có.
-- Input voice/text đầu tiên chứa công việc, thời gian và giờ rảnh. Thiếu/mơ hồ thì hỏi bổ sung trong UF1, không tự dùng giờ mặc định hoặc buộc cấu hình Settings trước.
-- Giờ theo thứ lặp hoặc ngày cụ thể dùng múi giờ IANA. `date_overrides` thay quy tắc tuần của chính ngày đó; `intervals:[]` là ngày không rảnh. Chỉ có ngày đóng không đủ để xác nhận một kế hoạch cần giờ làm.
-- PATCH omitted giữ giờ cũ; gửi availability thay toàn bộ trường; null xóa giờ riêng và không tự quay lại ref chung. Khi áp giờ riêng, ref cũ bị bỏ. Sửa thực sự tăng revision và hủy xác nhận summary cũ.
-- AI đề xuất khác dữ liệu user đã nhập/xác nhận thì giữ bản cũ và trả vấn đề review. Trường `availability_update_mode` merge/replace là DTO AI nội bộ, không phải field client gửi trong TaskSummary.
-- Khung AI chưa đủ ngày/giờ hoặc không hợp lệ được giữ trong ai_context nội bộ và clarification_issues; không trả nó như một WeeklyRule hợp lệ. ai_context không xuất hiện trong API công khai.
-- UF1 kiểm có khoảng khai báo giao với thời gian thực hiện còn lại, chưa trừ Google hay chứng minh đủ thời lượng. Confirm chỉ xác nhận đầu vào, chưa tạo Task/Steps/Sessions.
-- Nối UF2 cần dùng đúng Draft và revision, không lẫn Context giữa yêu cầu; phải chốt cách giữ nguồn trong Candidate/Task trước khi bỏ guard. Chưa thay request planning-contexts hoặc SourceRevisions thành một hợp đồng mới chưa được triển khai.
-- Kiểm tra gần nhất: 175 ca Backend/review đạt bằng DB tạm và provider giả ngày 02/11/2026; lint/type đạt. Đây không phải nghiệm thu AI/STT/Google thật hoặc trải nghiệm Mobile. Lượt sửa tài liệu ngày 03/11 không chạy lại bộ test.
+- Unit 10/10; integration 10/10 đạt sau sửa. Confirm UF2 dùng HTTP 201 theo router/hợp đồng gốc; UF1 thiếu giờ trả 422 VALIDATION_ERROR, next_action=fix_fields, field_path=availability.
+- Đã sửa GET Context trả đúng draft_id công khai thay vì UUID khóa ngoại; snapshot và summary revision được kiểm trong integration.
+- Test dùng SQLite tạm, AI giả, user giả và preferences có sẵn; chưa kiểm AI trích xuất voice/text, Google, PostgreSQL hoặc cảm ứng Mobile.

@@ -1472,6 +1472,8 @@ async def analyze_draft(
         + " bạn có thể làm từ mấy giờ đến mấy giờ cụ thể để mình xếp lịch chuẩn xác?",
     }
     for index, question in enumerate(dict.fromkeys(extracted.clarification_questions)):
+        if any(issue.question == question for issue in ai_issues):
+            continue
         if question in generated_availability_questions:
             if any(i.field_path == "availability" for i in ai_issues):
                 continue
@@ -1531,6 +1533,12 @@ async def analyze_draft(
         )
         if not resolved and issue not in ai_issues:
             ai_issues.append(issue)
+    structured_questions = {i.question for i in ai_issues if i.code != "AI_CLARIFICATION"}
+    ai_issues = [
+        i
+        for i in ai_issues
+        if i.code != "AI_CLARIFICATION" or i.question not in structured_questions
+    ]
     ai_issues = list({(i.code, i.field_path, i.question): i for i in ai_issues}.values())
     merged_summary = TaskSummary.model_validate(
         {

@@ -13,7 +13,7 @@ from __future__ import annotations
 import zoneinfo
 from datetime import UTC, datetime, time, timedelta
 
-from app.schemas.availability import Availability
+from app.schemas.availability import Availability, DraftAvailability
 from app.schemas.calendar import CalendarContext, ManualBusyInterval
 from app.schemas.common import TimeInterval
 from app.schemas.task import Session
@@ -93,7 +93,7 @@ def _subtract_intervals(
 
 
 def compute_effective_free_intervals(
-    availability: Availability,
+    availability: Availability | DraftAvailability,
     window_start: datetime,
     window_end: datetime,
     calendar_context: CalendarContext | None = None,
@@ -135,9 +135,7 @@ def compute_effective_free_intervals(
     start_date = local_start.date()
     end_date = local_end.date()
 
-    override_map = {
-        ov.date.isoformat(): ov.intervals for ov in availability.date_overrides
-    }
+    override_map = {ov.date.isoformat(): ov.intervals for ov in availability.date_overrides}
 
     raw_free_intervals: list[tuple[datetime, datetime]] = []
     curr_date = start_date
@@ -148,9 +146,7 @@ def compute_effective_free_intervals(
             day_intervals = override_map[date_str]
         else:
             wday = curr_date.isoweekday()
-            day_intervals = [
-                r for r in availability.weekly_rules if r.weekday == wday
-            ]
+            day_intervals = [r for r in availability.weekly_rules if r.weekday == wday]
 
         for interval in day_intervals:
             s_h, s_m = _parse_time_str(interval.start_local)
@@ -178,9 +174,9 @@ def compute_effective_free_intervals(
 
     merged_free = _merge_intervals(raw_free_intervals)
 
-    if task_id and availability.task_limits:
+    if task_id and getattr(availability, "task_limits", []):
         task_lims = [
-            lim for lim in availability.task_limits if lim.task_id == task_id
+            lim for lim in getattr(availability, "task_limits", []) if lim.task_id == task_id
         ]
         if task_lims:
             lim_intervals = [
@@ -246,7 +242,4 @@ def compute_effective_free_intervals(
 
     effective_raw = _subtract_intervals(clipped_free, merged_busy)
 
-    return [
-        TimeInterval(start_at=start_dt, end_at=end_dt)
-        for start_dt, end_dt in effective_raw
-    ]
+    return [TimeInterval(start_at=start_dt, end_at=end_dt) for start_dt, end_dt in effective_raw]
