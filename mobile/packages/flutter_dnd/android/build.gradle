@@ -1,0 +1,13 @@
+group 'com.github.sathish76.flutter_dnd'
+version '1.0'
+
+apply plugin: 'com.android.library'
+
+android {
+    namespace 'com.github.sathish76.flutter_dnd'
+    compileSdk 36
+
+    defaultConfig {
+        minSdk 21
+    }
+}
