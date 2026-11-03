@@ -1028,7 +1028,7 @@ Bản đồng bộ này không thay đổi Backend Docs, Sheet API, source code 
 - Settings bootstrap: expected_*_revision=0 khi tài nguyên chưa tồn tại, lưu lần đầu revision=1. Không đổi nhóm nào thì không tăng revision nhóm đó. Lần đầu preferences cần đủ giá trị user chọn, không tự gán hệ số pilot. Nếu preferences chưa có thì effective_revision=0 trong kết quả bootstrap Availability để thể hiện chưa cấu hình; GET preferences vẫn báo cần cấu hình.
 - POST settings/change-requests hiện chỉ áp dụng trước khi có Task. Khi đã có kế hoạch, trả 503 POLICY_NOT_CONFIGURED/wait_for_configuration cho tới khi luồng tác động/UF6 sẵn sàng; chưa giả trả proposal. Chưa triển khai cancel hoặc toàn bộ UF7.
 - Luồng cũ: Availability đã xác nhận là khung được phép, CalendarContext liên kết availability_ref. Luồng mới: giờ riêng trong Draft được xác nhận cùng UF1; bộ đọc Context/UF2 còn chờ nối. Calendar giữ vai trò nguồn bận có nguồn gốc/độ mới; Google thật chưa được triển khai.
-- UF2 không tự sinh ba bước mẫu khi hết provider hợp lệ; giữ Draft/Candidate cũ và trả AI_UNAVAILABLE để retry/sửa. Chưa hoàn tất phân rã nhiều tầng A04 hoặc lập tiếp Task đã lưu I03.
+- UF2 dùng fallback Python tầng 3 khi các provider lỗi hoặc hết thời gian: sinh đề xuất ba bước theo thời lượng tập trung user và phạm vi đầu vào, kèm micro-task. Đề xuất vẫn phải qua scheduler kiểm khả thi và user xác nhận trước khi lưu lịch chính thức. Chưa hoàn tất phân rã nhiều tầng A04 hoặc lập tiếp Task đã lưu I03.
 
 
 ## 11. Điểm giao UF1 mới — 03/11/2026
