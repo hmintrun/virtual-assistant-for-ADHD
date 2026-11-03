@@ -50,9 +50,7 @@ def compute_task_priority_key(
     start_utc = time_constraint.start_at.astimezone(UTC)
     imp_score = -(importance if importance is not None else 0)
     created_utc = (
-        created_at.astimezone(UTC)
-        if created_at is not None
-        else datetime.min.replace(tzinfo=UTC)
+        created_at.astimezone(UTC) if created_at is not None else datetime.min.replace(tzinfo=UTC)
     )
 
     return (end_utc, imp_score, start_utc, (created_utc, task_id))
@@ -81,16 +79,8 @@ def order_steps_by_priority(
     )
 
     def sort_key(step: CandidateStep) -> tuple:
-        task_id = (
-            step_to_task_map.get(step.client_step_key, "")
-            if step_to_task_map
-            else ""
-        )
-        task_prio = (
-            task_priority_map.get(task_id, default_task_key)
-            if task_priority_map
-            else (0,)
-        )
+        task_id = step_to_task_map.get(step.client_step_key, "") if step_to_task_map else ""
+        task_prio = task_priority_map.get(task_id, default_task_key) if task_priority_map else (0,)
         return (task_prio, part_order_map.get(step.client_part_key, 0), step.order_index)
 
     return sorted(steps, key=sort_key)
@@ -156,9 +146,7 @@ def schedule_candidate_sessions(
 
     if task_priority_map is None and task_id:
         task_prio_map = {
-            task_id: compute_task_priority_key(
-                time_constraint, importance, created_at, task_id
-            )
+            task_id: compute_task_priority_key(time_constraint, importance, created_at, task_id)
         }
         s_to_t_map = step_to_task_map or {s.client_step_key: task_id for s in steps}
     else:

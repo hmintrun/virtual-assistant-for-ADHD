@@ -104,8 +104,7 @@ def sample_valid_availability():
         timezone="Asia/Ho_Chi_Minh",
         confirmed_at=datetime(2026, 10, 30, 8, 0, tzinfo=UTC),
         weekly_rules=[
-            WeeklyRule(weekday=w, start_local="08:00", end_local="18:00")
-            for w in range(1, 8)
+            WeeklyRule(weekday=w, start_local="08:00", end_local="18:00") for w in range(1, 8)
         ],
         date_overrides=[],
         task_limits=[],
@@ -146,9 +145,7 @@ def test_validation_missing_fields(sample_valid_summary, sample_valid_availabili
     invalid_summary = sample_valid_summary.model_copy(
         update={"title": "", "scope": None, "time_constraint": None}
     )
-    can_plan, issues = validate_planning_prerequisites(
-        invalid_summary, sample_valid_availability
-    )
+    can_plan, issues = validate_planning_prerequisites(invalid_summary, sample_valid_availability)
     assert can_plan is False
     codes = {iss.code for iss in issues}
     assert "MISSING_TITLE" in codes
@@ -158,9 +155,7 @@ def test_validation_missing_fields(sample_valid_summary, sample_valid_availabili
 
 def test_validation_unconfirmed_availability(sample_valid_summary, sample_valid_availability):
     unconfirmed_avail = sample_valid_availability.model_copy(update={"confirmed_at": None})
-    can_plan, issues = validate_planning_prerequisites(
-        sample_valid_summary, unconfirmed_avail
-    )
+    can_plan, issues = validate_planning_prerequisites(sample_valid_summary, unconfirmed_avail)
     assert can_plan is False
     assert any(iss.code == "AVAILABILITY_NOT_CONFIRMED" for iss in issues)
 
@@ -261,9 +256,7 @@ def test_own_event_protection(sample_valid_availability):
     )
 
     # b1 được loại bỏ nên 09:00-10:00 vẫn là giờ rảnh; b2 vẫn chặn 11:00-12:00
-    assert not any(
-        inv.start_at <= b2_start and inv.end_at >= b2_end for inv in free_intervals
-    )
+    assert not any(inv.start_at <= b2_start and inv.end_at >= b2_end for inv in free_intervals)
 
 
 # ==============================================================================
@@ -277,7 +270,7 @@ def sample_pref():
         revision=1,
         effective_revision=1,
         work_interval_seconds=1500,  # 25p
-        rest_interval_seconds=300,   # 5p
+        rest_interval_seconds=300,  # 5p
         buffer_multiplier=1.2,
         reminder_offsets=[900],
         reminder_style="gentle",
@@ -432,8 +425,15 @@ def test_compute_task_priority_key_rules():
 
     assert key_late_imp5 < key_late_imp2 < key_late_none
 
-    tc_start_early = TimeConstraint(kind="deadline", start_at=t_now, deadline_at=t_late_deadline, input_timezone="UTC")
-    tc_start_later = TimeConstraint(kind="deadline", start_at=t_now + timedelta(hours=2), deadline_at=t_late_deadline, input_timezone="UTC")
+    tc_start_early = TimeConstraint(
+        kind="deadline", start_at=t_now, deadline_at=t_late_deadline, input_timezone="UTC"
+    )
+    tc_start_later = TimeConstraint(
+        kind="deadline",
+        start_at=t_now + timedelta(hours=2),
+        deadline_at=t_late_deadline,
+        input_timezone="UTC",
+    )
     k_start_early = compute_task_priority_key(tc_start_early, importance=3, task_id="t1")
     k_start_later = compute_task_priority_key(tc_start_later, importance=3, task_id="t2")
     assert k_start_early < k_start_later
@@ -441,22 +441,88 @@ def test_compute_task_priority_key_rules():
 
 def test_order_steps_by_priority_multitask():
     t_now = datetime(2026, 10, 30, 8, 0, tzinfo=UTC)
-    tc_task_a = TimeConstraint(kind="deadline", start_at=t_now, deadline_at=datetime(2026, 10, 30, 12, 0, tzinfo=UTC), input_timezone="UTC")
-    tc_task_b = TimeConstraint(kind="deadline", start_at=t_now, deadline_at=datetime(2026, 10, 30, 18, 0, tzinfo=UTC), input_timezone="UTC")
+    tc_task_a = TimeConstraint(
+        kind="deadline",
+        start_at=t_now,
+        deadline_at=datetime(2026, 10, 30, 12, 0, tzinfo=UTC),
+        input_timezone="UTC",
+    )
+    tc_task_b = TimeConstraint(
+        kind="deadline",
+        start_at=t_now,
+        deadline_at=datetime(2026, 10, 30, 18, 0, tzinfo=UTC),
+        input_timezone="UTC",
+    )
 
     key_a = compute_task_priority_key(tc_task_a, importance=1, task_id="task_a")
     key_b = compute_task_priority_key(tc_task_b, importance=5, task_id="task_b")
     task_priority_map = {"task_a": key_a, "task_b": key_b}
 
     parts = [
-        CandidatePart(client_part_key="p_a", scope_description="Part A", order_index=0, decomposition_state="complete", scheduling_state="complete"),
-        CandidatePart(client_part_key="p_b", scope_description="Part B", order_index=0, decomposition_state="complete", scheduling_state="complete"),
+        CandidatePart(
+            client_part_key="p_a",
+            scope_description="Part A",
+            order_index=0,
+            decomposition_state="complete",
+            scheduling_state="complete",
+        ),
+        CandidatePart(
+            client_part_key="p_b",
+            scope_description="Part B",
+            order_index=0,
+            decomposition_state="complete",
+            scheduling_state="complete",
+        ),
     ]
 
-    s_a1 = CandidateStep(client_step_key="sa1", client_part_key="p_a", title="A1", expected_output="out", order_index=0, estimated_base_seconds=1500, remaining_base_seconds=1500, buffer_multiplier=1.2, estimate_source="user_confirmed", status="pending")
-    s_a2 = CandidateStep(client_step_key="sa2", client_part_key="p_a", title="A2", expected_output="out", order_index=1, estimated_base_seconds=1500, remaining_base_seconds=1500, buffer_multiplier=1.2, estimate_source="user_confirmed", status="pending")
-    s_b1 = CandidateStep(client_step_key="sb1", client_part_key="p_b", title="B1", expected_output="out", order_index=0, estimated_base_seconds=1500, remaining_base_seconds=1500, buffer_multiplier=1.2, estimate_source="user_confirmed", status="pending")
-    s_b2 = CandidateStep(client_step_key="sb2", client_part_key="p_b", title="B2", expected_output="out", order_index=1, estimated_base_seconds=1500, remaining_base_seconds=1500, buffer_multiplier=1.2, estimate_source="user_confirmed", status="pending")
+    s_a1 = CandidateStep(
+        client_step_key="sa1",
+        client_part_key="p_a",
+        title="A1",
+        expected_output="out",
+        order_index=0,
+        estimated_base_seconds=1500,
+        remaining_base_seconds=1500,
+        buffer_multiplier=1.2,
+        estimate_source="user_confirmed",
+        status="pending",
+    )
+    s_a2 = CandidateStep(
+        client_step_key="sa2",
+        client_part_key="p_a",
+        title="A2",
+        expected_output="out",
+        order_index=1,
+        estimated_base_seconds=1500,
+        remaining_base_seconds=1500,
+        buffer_multiplier=1.2,
+        estimate_source="user_confirmed",
+        status="pending",
+    )
+    s_b1 = CandidateStep(
+        client_step_key="sb1",
+        client_part_key="p_b",
+        title="B1",
+        expected_output="out",
+        order_index=0,
+        estimated_base_seconds=1500,
+        remaining_base_seconds=1500,
+        buffer_multiplier=1.2,
+        estimate_source="user_confirmed",
+        status="pending",
+    )
+    s_b2 = CandidateStep(
+        client_step_key="sb2",
+        client_part_key="p_b",
+        title="B2",
+        expected_output="out",
+        order_index=1,
+        estimated_base_seconds=1500,
+        remaining_base_seconds=1500,
+        buffer_multiplier=1.2,
+        estimate_source="user_confirmed",
+        status="pending",
+    )
 
     step_to_task = {"sa1": "task_a", "sa2": "task_a", "sb1": "task_b", "sb2": "task_b"}
     scrambled_steps = [s_b2, s_a2, s_b1, s_a1]
@@ -542,14 +608,55 @@ def test_shift_elapsed_sessions():
 def test_evaluate_buffer_adaptation_median():
     # 5 bước hoàn tất có tỷ số: [1.3, 1.4, 1.3, 1.35, 1.3] -> median = 1.30
     samples = [
-        {"step_id": "st1", "status": "completed", "estimated_base_seconds": 3000, "actual_work_seconds": 3900, "scope_modified": False},
-        {"step_id": "st2", "status": "completed", "estimated_base_seconds": 2000, "actual_work_seconds": 2800, "scope_modified": False},
-        {"step_id": "st3", "status": "completed", "estimated_base_seconds": 3000, "actual_work_seconds": 3900, "scope_modified": False},
-        {"step_id": "st4", "status": "completed", "estimated_base_seconds": 4000, "actual_work_seconds": 5400, "scope_modified": False},
-        {"step_id": "st5", "status": "completed", "estimated_base_seconds": 3000, "actual_work_seconds": 3900, "scope_modified": False},
+        {
+            "step_id": "st1",
+            "status": "completed",
+            "estimated_base_seconds": 3000,
+            "actual_work_seconds": 3900,
+            "scope_modified": False,
+        },
+        {
+            "step_id": "st2",
+            "status": "completed",
+            "estimated_base_seconds": 2000,
+            "actual_work_seconds": 2800,
+            "scope_modified": False,
+        },
+        {
+            "step_id": "st3",
+            "status": "completed",
+            "estimated_base_seconds": 3000,
+            "actual_work_seconds": 3900,
+            "scope_modified": False,
+        },
+        {
+            "step_id": "st4",
+            "status": "completed",
+            "estimated_base_seconds": 4000,
+            "actual_work_seconds": 5400,
+            "scope_modified": False,
+        },
+        {
+            "step_id": "st5",
+            "status": "completed",
+            "estimated_base_seconds": 3000,
+            "actual_work_seconds": 3900,
+            "scope_modified": False,
+        },
         # Bước chưa hoàn thành hoặc đổi scope -> phải bị lọc bỏ
-        {"step_id": "st6_incomplete", "status": "incomplete", "estimated_base_seconds": 3000, "actual_work_seconds": 3900},
-        {"step_id": "st7_scope_mod", "status": "completed", "estimated_base_seconds": 3000, "actual_work_seconds": 3900, "scope_modified": True},
+        {
+            "step_id": "st6_incomplete",
+            "status": "incomplete",
+            "estimated_base_seconds": 3000,
+            "actual_work_seconds": 3900,
+        },
+        {
+            "step_id": "st7_scope_mod",
+            "status": "completed",
+            "estimated_base_seconds": 3000,
+            "actual_work_seconds": 3900,
+            "scope_modified": True,
+        },
     ]
 
     # Buffer hiện tại là 1.05. Độ lệch |1.30 - 1.05| = 0.25 >= 0.20 -> sinh gợi ý

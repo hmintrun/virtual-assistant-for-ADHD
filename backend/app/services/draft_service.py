@@ -900,8 +900,7 @@ async def patch_draft(
     summary_changed = False
     if "summary" in changes_fields and payload.changes.summary is not None:
         summary_patch = {
-            k: getattr(payload.changes.summary, k)
-            for k in payload.changes.summary.model_fields_set
+            k: getattr(payload.changes.summary, k) for k in payload.changes.summary.model_fields_set
         }
         if "availability" in summary_patch:
             # User sửa/xóa giờ riêng không có nghĩa đồng ý quay về giờ chung cũ.
@@ -1097,11 +1096,7 @@ async def confirm_draft_summary(
                 else avail_ref["availability_id"],
             )
         )
-        ref_rev = (
-            avail_ref.revision
-            if hasattr(avail_ref, "revision")
-            else avail_ref["revision"]
-        )
+        ref_rev = avail_ref.revision if hasattr(avail_ref, "revision") else avail_ref["revision"]
         if current_avail_rev is not None and ref_rev != current_avail_rev:
             raise AppError(
                 status_code=409,
