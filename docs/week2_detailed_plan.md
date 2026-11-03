@@ -20,7 +20,7 @@ Phần tổng kết ghi nhận công việc tuần 1 đã thực hiện đến n
 
 **Điểm xuất phát:** `dev` là nhánh tích hợp chung của Mobile và Backend; API contract và JSON mẫu đã được dùng chung. Tuần 2 kế thừa nền này, triển khai phần UF3–UF4 còn thiếu và cập nhật contract chung khi tính năng mới cần bổ sung. Đầu giai đoạn 1, Trung cùng Hưng đối chiếu `dev`, nhánh Backend và thay đổi local, chỉ review/tích hợp phần còn thiếu rồi ghi commit nền để nhóm rẽ nhánh. Bản sửa fallback và tài liệu local không mặc định đã lên remote; không merge lại thay đổi đã có hoặc gom phần chưa được review.
 
-**Bằng chứng đã có:** 33 test cùng 2 subtest AI/DTO/scheduler đạt sau bản sửa fallback; lint, format và type check phần AI đạt. Đây chưa phải kết quả nghiệm thu Mobile hoặc Android.
+**Bằng chứng ban đầu:** 33 test cùng 2 subtest AI/DTO/scheduler đạt khi sửa fallback riêng. Kết quả kiểm lại toàn bộ Backend sau tích hợp và commit nền được ghi trong [biên bản nền tuần 2](week2_baseline.md). Mobile trên máy MT chưa build/analyze vì chưa có Flutter SDK; theo lựa chọn người dùng, chốt nền Backend và chờ người có SDK kiểm Mobile. Đây chưa phải nghiệm thu giai đoạn 1 hoặc Android.
 
 ## 2. Bảng phân công công việc từng người
 

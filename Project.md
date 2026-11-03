@@ -2,7 +2,7 @@
 
 > **Tên dự án:** **ProPlan VA** — Trợ lý ảo AI hỗ trợ lập kế hoạch, chia nhỏ công việc và nhắc lịch chủ động bằng giọng nói trên thiết bị di động cho người mắc hội chứng ADHD.
 > **Mục đích tài liệu:** Cung cấp ngữ cảnh toàn diện (Business Logic, Cơ sở khoa học, Kiến trúc kỹ thuật, Luồng nghiệp vụ UF1–UF7, Mô hình dữ liệu và Quy tắc cốt lõi) cho các **AI Coding Agents** và thành viên trong nhóm phát triển trên toàn bộ Monorepo.
-> **Đồng bộ schema ngày 03/11/2026:** Đối chiếu [schema Backend](docs/backend/schema.md) (bản cập nhật 30/10/2026), các ORM models và migrations hiện có. Mục 6 mô tả hợp đồng dữ liệu; mục 7 ánh xạ sang UF1–UF7. Các chính sách mới còn lệch quy tắc cũ được ghi riêng tại mục 8.2, không tự coi là quyết định đã chốt hoặc tính năng đã triển khai.
+> **Đồng bộ ngày 03/11/2026:** Đối chiếu [schema Backend](docs/backend/schema.md), ORM/migrations và các quyết định tuần 2 đã được người dùng chốt. Mục 6–7 phản ánh cả giờ rảnh riêng UF1 mới; mục 8.2 phân biệt quyết định đã chốt với policy còn chờ. Nhắc 15/10/5 phút, chuông đúng hạn và Undo Thought 5 giây là yêu cầu triển khai tuần 2; chưa được coi là code đã hỗ trợ. Kết quả tích hợp và giới hạn kiểm chứng xem [biên bản nền tuần 2](docs/week2_baseline.md).
 
 ---
 
@@ -207,7 +207,7 @@ Tên object và trường dưới đây theo [schema Backend](docs/backend/schem
 
 - **Kiểu dữ liệu:** ID trên API là string; DB có thể dùng UUID nhưng không ép mọi client phải UUIDv4. Thời lượng trao đổi là **integer giây**. Timestamp tuyệt đối có offset, lưu UTC; lịch tuần dùng giờ `HH:mm` kèm timezone IANA. Revision theo tài nguyên; `CheckIn.response_revision` mới có thể bằng 0.
 - **Null khác rỗng:** Chưa biết/không áp dụng giữ null; `[]` chỉ dùng khi đã biết danh sách rỗng. PATCH omitted giữ nguyên; null chỉ xóa trường được phép. Không có query from/to thì `Availability.effective_intervals=null`; đã tính và thật sự không rảnh mới là `[]`.
-- **Giờ rảnh có xác nhận:** `AvailabilityRef={availability_id,revision}` là nguồn giờ rảnh user đã xác nhận. Calendar chỉ bổ sung bận. Lỗi hoặc thiếu coverage không được đổi thành busy intervals rỗng để thông qua kiểm khả thi.
+- **Giờ rảnh có xác nhận:** Yêu cầu UF1 mới dùng `TaskSummary.availability` (`DraftAvailability`), review/xác nhận cùng `summary_confirmed_revision`, không bắt buộc cấu hình Settings trước. Nháp cũ vẫn dùng `AvailabilityRef={availability_id,revision}` khi user đã chọn nguồn chung. Sửa/xóa giờ riêng không tự quay lại ref chung. Calendar chỉ bổ sung bận; lỗi/thiếu coverage không được giả thành lịch trống. UF2/Context hiện chưa nối nguồn Draft mới và trả `409 PLAN_NOT_CONFIRMABLE` / `wait_for_configuration` cho nguồn này; đây là việc giai đoạn 1 cần hoàn thiện.
 - **Revision Draft:** `raw_input`, Summary hoặc `user_step_proposal` thực sự đổi thì tăng `planning_input_revision` một lần trong lần ghi. Summary đổi tăng `summary_revision` và mất xác nhận UF1; raw input đổi cũng vô hiệu xác nhận. Chỉ sửa ý tưởng chia bước giữ xác nhận Summary nhưng làm Candidate cũ stale. No-op/metadata/confirm không tự tăng đầu vào.
 - **Revision Candidate:** Sinh từ `source_summary_revision` và `source_planning_input_revision`; PATCH kiểm `expected_review_revision`. Confirm kiểm `expected_review_revision`, `expected_summary_revision`, `expected_planning_input_revision`, `expected_source_revisions` trong transaction áp dụng. `SourceRevisions` gồm `availability`, `preferences`, `schedule`, `calendar_context={context_id,revision}`.
 - **Khóa tạm → ID thật:** Candidate dùng `client_part_key/client_step_key/client_session_key`, quan hệ cha cũng dùng khóa tạm tương ứng. UF2 confirm trả `key_mapping`; không dùng client key để start Session thật. `source_draft_id` ngăn một nháp sinh nhiều Task đầu tiên.
@@ -219,7 +219,7 @@ Tên object và trường dưới đây theo [schema Backend](docs/backend/schem
 
 - Một Session có thể gồm nhiều segment `work/rest`: `duration_seconds = work_seconds + rest_seconds = tổng segments[].duration_seconds`. Buffer chỉ nhân **một lần** lên làm chính; không nhân lại work đã buffer khi tạo timer.
 - Micro-task là gợi ý chuẩn bị trước Session, không có timer/Run riêng, không có `active_phase=micro`, không nằm trong segments và không cộng vào duration/actual/Google event. Số giây micro-task có thể null trong hợp đồng; mục tiêu UX 2 phút và policy cần chốt được ghi ở mục 8.2.
-- Phân biệt ba mốc trong schema: reminder mặc định `[900]`; start grace 900 giây; gap tối thiểu giữa hai Session liên tiếp 900 giây, cùng hoặc khác Task. Reminder là cấu hình; grace và gap là ràng buộc khác nhau. Một Session đứng riêng không tự cộng gap trước/sau.
+- Phân biệt các mốc: reminder đích tuần 2 mặc định `[900, 600, 300]`, code nền hiện vẫn `[900]`; start grace 900 giây; gap tối thiểu giữa hai Session liên tiếp 900 giây, cùng hoặc khác Task. Reminder là cấu hình, grace và gap là ràng buộc khác nhau; mở rộng reminder không đổi grace/gap. Một Session đứng riêng không tự cộng gap trước/sau.
 - `Session.start_state=not_started` khi đến `scheduled_start + 900` mà chưa có Run; hiển thị **Bắt đầu** hoặc **Hoãn lại**, không tạo `ended_at`/actual giả. Bắt đầu sớm/muộn phải kiểm giờ rảnh, thứ tự, collision và gap; nếu cần đổi lịch thì qua UF6.
 - `ended_at` là lúc Run thật sự dừng; `checkin_timeout_at=ended_at+300`. Thời gian chờ phản hồi không kéo dài actual. Tách `work_elapsed_seconds`, `rest_elapsed_seconds` và `actual_work_seconds` với `actual_source=timer_proxy/self_report`; thiếu nguồn actual thì null, không lấy planned thay actual.
 - Không phản hồi cuối Run là `CheckIn.response_state=no_respond`, `outcome` chưa xác nhận vẫn `unknown`. Phản hồi muộn sửa cùng CheckIn và revision, không tạo Run/mẫu học mới, không dời `ended_at`.
@@ -274,7 +274,7 @@ flowchart TD
 #### UF7 — Thiết lập ban đầu & Tùy chỉnh trợ lý
 - **Mục tiêu & Điểm bắt đầu:** Người dùng cấu hình trợ lý trước khi bắt đầu lập lịch lần đầu hoặc vào phần Cài đặt để tùy chỉnh phương thức nhắc nhở và tập trung.
 - **Luồng xử lý chính (4 bước):**
-  1. **Lựa chọn thông số:** Dùng `work_interval_seconds`, `rest_interval_seconds`, `reminder_offsets`, `reminder_style`, `buffer_multiplier`; giờ rảnh lưu riêng trong `Availability`. Các giá trị 25p làm/5p nghỉ là cấu hình minh họa cũ, không phải mặc định API đã được schema khóa. Schema hiện mô tả một mốc nhắc user chọn, mặc định `[900]`; khác chính sách 15/10/5p cũ, xem mục 8.2.
+  1. **Lựa chọn thông số:** Dùng `work_interval_seconds`, `rest_interval_seconds`, `reminder_offsets`, `reminder_style`, `buffer_multiplier`; giờ rảnh lưu riêng trong `Availability`. Các giá trị 25p làm/5p nghỉ là cấu hình minh họa cũ, không phải mặc định API đã được schema khóa. Quyết định tuần 2 nhận 1–3 mốc không trùng, mặc định `[900, 600, 300]`; giữ lựa chọn đã lưu. Code nền vẫn một offset `[900]`, cần cập nhật đồng bộ theo mục 8.2.
   2. **Đánh giá tác động & Giữ nguyên phiên hiện tại:** Hệ thống kiểm tra điều kiện thay đổi; giữ nguyên cấu hình cho phiên đang chạy ở UF3. Nếu thay đổi làm lệch các phiên đã lên lịch trong tương lai (đổi thời lượng phiên/nghỉ), chuyển sang **UF6 (Phương án chờ)** để người dùng duyệt lại lịch.
   3. **Tách yêu cầu và hiệu lực:** `requested_changes/requested_revision` không thay ngay `effective_revision` khi đang chờ duyệt đổi lịch. Run hiện tại giữ `settings_snapshot`; thay đổi giọng/cách nhắc áp dụng cho phiên sau, thay đổi ảnh hưởng lịch đi qua change-request và UF6.
   4. **Gợi ý hệ số đệm:** Luôn ưu tiên cấu hình user; không âm thầm ghi đè. Schema mới chỉ học từ Step đã hoàn tất cùng phạm vi và actual có nguồn; một Step nhiều phiên chỉ là một mẫu. `AdaptationSuggestion` giữ `sample_refs`, `sample_count`, `policy_revision`. Quy tắc cũ Moving Average 7–10 phiên, kiểm hằng tuần và ngưỡng 0.2 đang lệch cơ sở mẫu của schema; ghi tại mục 8.2 để chốt policy trước triển khai.
@@ -288,7 +288,7 @@ flowchart TD
   2. **Kiểm tra 4 nhóm thông tin bắt buộc:** Hệ thống đối chiếu dữ liệu để đảm bảo có đủ 4 thành phần:
      - *Nội dung công việc (Task content)*
      - *Phạm vi / Đầu ra mong muốn (Scope)*
-     - *Khung giờ rảnh:* `AvailabilityRef` trỏ bộ giờ rảnh user đã xác nhận; **Google Calendar MCP / API** bổ sung khoảng bận để Python tính giờ khả dụng, không tự coi khoảng trống Calendar là giờ rảnh đã được xác nhận.
+     - *Khung giờ rảnh:* `TaskSummary.availability` cho yêu cầu mới, xác nhận cùng Summary; `AvailabilityRef` chỉ dùng cho nháp cũ/nguồn chung user đã chọn. **Google Calendar MCP / API** bổ sung khoảng bận để Python tính giờ khả dụng, không tự coi khoảng trống Calendar là giờ rảnh đã được xác nhận.
      - *Ràng buộc thời gian:* `TimeConstraint.kind=deadline/window` có `start_at` và mốc cuối theo nhánh; giữ `input_timezone`, không dùng `timeframe` làm nhãn wire.
      - **Nguyên tắc:** Đánh dấu rõ các điểm thiếu, mơ hồ hoặc mâu thuẫn; **tuyệt đối không tự đoán dữ liệu**.
   3. **Gộp 1 vòng duy nhất (Single-Round Clarification):** Hiển thị bản tóm tắt trực quan kèm câu hỏi làm rõ tất cả các chỗ còn thiếu/mâu thuẫn trong **1 lần hiển thị duy nhất** (không hỏi lắt nhắt nhiều lượt). Người dùng bổ sung hoặc chỉnh sửa trực tiếp trên giao diện.
@@ -341,7 +341,7 @@ flowchart TD
 #### UF3 — Thông báo & Thực hiện phiên tập trung
 - **Mục tiêu & Điểm bắt đầu:** Đưa người dùng vào trạng thái làm việc đơn nhiệm, bảo vệ sự tập trung tối đa theo lịch đã chốt.
 - **Luồng xử lý chính (5 bước):**
-  1. **Thông báo nhắc trước giờ:** `Reminder` gắn Session, schedule revision và device, chống nhắc trùng qua `dedupe_key`. Schema hiện dùng một offset user chọn, mặc định 900 giây; khác ba mốc 15/10/5p trong quy tắc cũ, xem mục 8.2 trước triển khai.
+  1. **Thông báo nhắc trước giờ:** `Reminder` gắn Session, schedule revision và device, chống nhắc trùng qua `dedupe_key`. Quyết định tuần 2 mặc định ba mốc 15/10/5 phút, nhận 1–3 mốc hợp lệ; không phát nhắc thừa sau start hoặc phát dồn các mốc đã qua. Code nền hiện vẫn nhận một offset; việc mở rộng DTO/default/worker/adapter phải được ghép cùng nhau theo mục 8.2.
   2. **Micro-task chuẩn bị:** Hiển thị gợi ý một việc siêu nhỏ (ví dụ: *"Mở sẵn tài liệu và đọc lướt mục lục"*) cùng lời nhắc. Không có timer riêng, không bắt buộc đánh dấu xong và không tự start Run. Đến `scheduled_start+900` chưa start thì `start_state=not_started`, hiển thị **Bắt đầu** hoặc **Hoãn lại**; không tạo Run/actual giả.
   3. **Kích hoạt Gộp 1 chạm (1-Tap Focus):** Người dùng bấm `"Bắt đầu đếm giờ [X]p"`; Backend kiểm quyền, schedule revision, lịch/giờ rảnh/thứ tự/gap và thiết bị trước khi chấp nhận `SessionRun`. Sau đó ứng dụng kích hoạt:
      - Bật **Chế độ Tập trung** và giữ sáng màn hình nhẹ (`wakelock_plus`).
@@ -481,20 +481,22 @@ Bảng này giữ các nguyên tắc nghiệp vụ và bổ sung cách thể hi�
 | **10. Ba mốc xác nhận & Tính nguyên tử** | UF1 xác nhận Summary; UF2 confirm lưu kế hoạch đầu tiên; UF6 approve thay đổi lịch đã có. Mỗi thao tác kiểm revision/quyền; lưu dữ liệu, receipt và outbox nguyên tử. Không gộp thành một `Task.status=confirmed`; retry không tạo Task/Run/lệnh Google trùng. |
 | **11. Rolling Horizon & Phạm vi chưa chia** | Horizon mặc định 14 ngày trong giới hạn xác nhận; giữ PlanningPart chưa chia với estimate null khi chưa biết. Mở rộng theo yêu cầu dùng cùng Task/Part IDs, không tạo Task mới cho mỗi horizon. Task có trạng thái thực hiện, trạng thái phân rã và trạng thái xếp lịch riêng. |
 
-### 8.2. Khác biệt Chính sách cần Chốt với Schema
+### 8.2. Quyết định Tuần 2 và Chính sách còn Chờ
 
 > [!IMPORTANT]
 > Schema mới bổ sung hợp đồng dữ liệu nhưng có các đề xuất lệch `AGENTS.md` và quyết định cũ của Project. Bảng này ghi nhận rõ khác biệt, **không tự bãi bỏ guardrail**. Trước khi code hành vi phụ thuộc các dòng dưới, nhóm phải chốt và đồng bộ Project, AGENTS, schema, OpenAPI/fixtures cùng thay đổi; không tự chọn một phía rồi coi là đã thống nhất.
 
 | Nội dung | Quy tắc cũ / AGENTS | Schema hiện hành & Việc cần chốt |
 | :--- | :--- | :--- |
-| Nhắc trước phiên | Các mốc 15/10/5 phút. | Đã chốt trong kế hoạch tuần 2: mở rộng nhận 1–3 integer giây không âm, không trùng, thứ tự giảm dần; default mới `[900, 600, 300]`, giữ lựa chọn user đã lưu. DTO/schema hiện vẫn một offset: cần cập nhật đồng bộ input/output, default DB/service, capabilities liên quan, JSON mẫu và Mobile trước khi sử dụng. Kiểm tạo/hủy lời nhắc và khả năng phát từng mốc khi Doze; quyết định này chưa có nghĩa code đã hỗ trợ. |
+| Nhắc trước phiên | Các mốc 15/10/5 phút. | Đã chốt trong kế hoạch tuần 2: mở rộng nhận 1–3 integer giây không âm, không trùng, thứ tự giảm dần; default mới `[900, 600, 300]`, giữ lựa chọn user đã lưu. Code nền hiện vẫn một offset; schema mô tả đích tuần 2: cần cập nhật đồng bộ input/output, default DB/service, capabilities liên quan, JSON mẫu và Mobile trước khi sử dụng. Kiểm tạo/hủy lời nhắc và khả năng phát từng mốc khi Doze; quyết định này chưa có nghĩa code đã hỗ trợ. |
 | Micro-task | Mục tiêu UX khởi động 2 phút; AI chủ động có đề xuất. | O09/O12 mô tả một gợi ý trước phiên, không timer/Run/segment riêng, `micro_task_seconds` có thể null; độ nhỏ cần nghiên cứu/policy. Không ép số 120 như ràng buộc API đã chốt; vẫn giữ đề xuất chủ động để tránh màn hình trống. |
 | Học buffer | Moving Average 7–10 phiên, gợi ý cuối tuần khi chênh >0.2; cấu hình minh họa buffer 1.2. | O19/mục 6 của schema chọn Step hoàn tất cùng phạm vi làm một mẫu, actual có nguồn. Miền k/cỡ mẫu/chu kỳ chưa khóa; cần chốt lại thuật toán, không dùng số phiên như số Step hoặc hard-code giá trị minh họa. Luôn tôn trọng cấu hình user. |
 | DND khi làm tiếp | Giữ DND nếu user chọn làm tiếp ngay phiên sau. | Schema yêu cầu khôi phục khi xác nhận check-in cuối hoặc tới timeout, cùng gap 900 giây giữa Session. Cần chốt policy handoff/owner và UX làm tiếp; không bỏ kiểm gap hoặc để timeout cũ giải phóng DND của Run mới. |
 | Undo & Xóa | UI dùng Undo 5 giây thay hộp thoại xác nhận. | Đã chốt cho Thought tuần 2: cất mới lưu bền file/metadata tại thiết bị, outbox chờ 5 giây mới được gửi metadata; Undo hợp lệ hủy gói gửi nguyên tử rồi dọn file. Xóa bản có sẵn phải giữ khả năng khôi phục trong 5 giây trước khi thực hiện xóa. Lưu hạn/trạng thái/ID chống trùng, xử lý restart và tranh chấp gửi/hủy. Cần triển khai và kiểm thử; không suy mọi tài nguyên khác có cùng retention hoặc API Undo. Calendar preview/confirm vẫn là duyệt nội dung thay đổi. |
 
 **Chuông khi đang thu UF4 — quyết định tuần 2:** Giữ yêu cầu âm thanh báo hết phiên sai lệch ≤1 giây, không hoãn tối đa 15 giây để chờ thả nút. Bảo vệ file đang thu và phối hợp audio focus/finalize; phần hỏi check-in có thể chờ thao tác thu kết thúc nhưng không lùi `ended_at`, cộng thời gian này vào actual hoặc lùi hạn khôi phục DND. Phải kiểm cả âm thanh thực sự phát và file nghe lại được trên máy thật. Phân công và tiêu chí triển khai tại [kế hoạch tuần 2](docs/week2_detailed_plan.md).
+
+**CheckIn tối thiểu tuần 2:** End Run phải trả CheckIn cuối/ID/revision; phản hồi Chọn nghỉ/Báo bận và lazy timeout xử lý cùng Run, giữ actual/ended_at. Khi đọc/start sau `ended_at+300`, đối soát trạng thái quá hạn nguyên tử; thiết bị vẫn tự khôi phục DND đúng hạn không phụ thuộc request Backend. “Chọn nghỉ” không tự xác nhận hoàn thành. Payload nghỉ khi chưa xác nhận kết quả còn cần MT/Hưng/Cương/An chốt ở giai đoạn 1; không phát minh enum hoặc gán `completed` để vượt validation.
 
 ### 8.3. Phần Hợp đồng còn Thiếu Chi tiết
 

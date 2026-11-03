@@ -1,6 +1,6 @@
 # Checklist kỹ thuật và bằng chứng tuần 2
 
-Đi kèm [kế hoạch tuần 2](week2_detailed_plan.md), theo [Project.md](../Project.md) và [schema Backend](backend/schema.md). Đây là đầu việc cần triển khai/kiểm chứng, không phải báo cáo đã đạt. Các ghi nhận code bên dưới dựa trên bản local khi rà soát; kiểm lại trên commit nền `dev` trước khi sửa.
+Đi kèm [kế hoạch tuần 2](week2_detailed_plan.md), theo [Project.md](../Project.md) và [schema Backend](backend/schema.md). Đây là đầu việc cần triển khai/kiểm chứng, không phải báo cáo đã đạt. Các ghi nhận code bên dưới đã được đối chiếu trong lượt tích hợp nền; xem commit và kết quả ở [biên bản nền tuần 2](week2_baseline.md). Mobile chưa được build/analyze trên máy MT theo lựa chọn chốt Backend, Mobile chờ kiểm. Mỗi mục triển khai mới vẫn phải kiểm lại trên commit nhóm đang dùng.
 
 ## CheckIn tối thiểu và timeout — giai đoạn 2
 
