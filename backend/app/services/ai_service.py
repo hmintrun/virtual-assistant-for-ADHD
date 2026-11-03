@@ -752,9 +752,11 @@ class AIService:
                 "UF2 chuyển sang Tier 3 Rule-based do lỗi: %s",
                 type(exc).__name__,
             )
-            raise TimeoutError(
-                "AI decomposition unavailable; keep the draft for retry/manual editing"
-            ) from exc
+            return self._fallback_decompose_task(
+                cleaned_title,
+                user_focus_duration=user_focus_duration,
+                scope=scope,
+            )
 
     def _fallback_decompose_task(
         self,
