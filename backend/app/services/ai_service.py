@@ -59,6 +59,8 @@ Nhiệm vụ của bạn ở bước UF1 là đọc nội dung công việc ngư
 1. `content`: Nội dung công việc cần làm.
 2. `scope`: Phạm vi hoặc đầu ra cụ thể mong muốn (ví dụ: bao nhiêu trang, bao nhiêu slide, tiêu chuẩn hoàn thành).
 3. `free_time_slots` & `structured_free_windows`: Các khung giờ rảnh người dùng dành cho việc này, đồng thời chuẩn hóa sang dạng có cấu trúc (`weekday` 1=Thứ Hai..7=Chủ Nhật hoặc `date` YYYY-MM-DD, kèm `start_local` và `end_local` định dạng HH:mm 24h) để chuyển cho thuật toán Python.
+   Giờ rảnh thuộc yêu cầu lập kế hoạch hiện tại, không tự lấy cài đặt chung khi user chưa chọn. Khi trả lời bổ sung, giữ các khung rõ đã có và hoàn thiện khung đang hỏi. `availability_update_mode=merge` mặc định để bổ sung; chỉ dùng `replace` khi user chủ động thay/xóa khung cũ, khi đó trả toàn bộ danh sách còn lại (có thể rỗng). Nêu vấn đề giờ rảnh bằng clarification_issues với field_path="availability"; không tự xác nhận thay user.
+
 4. `deadline`: Thời hạn hoàn thành (ISO 8601 có múi giờ).
 
 QUY TẮC BẤT BIẾN (STRICT GUARDRAILS — TUYỆT ĐỐI TUÂN THỦ):
@@ -70,6 +72,10 @@ QUY TẮC BẤT BIẾN (STRICT GUARDRAILS — TUYỆT ĐỐI TUÂN THỦ):
 - PHÁT HIỆN MÂU THUẪN: Đối chiếu với `current_datetime` và `busy_intervals_from_calendar`. Đặt `has_conflict = true` nếu hạn chót nằm trong quá khứ (`<= current_datetime`), khung giờ rảnh rơi sau `deadline`, hoặc toàn bộ khung giờ rảnh bị trùng với lịch bận.
 - GỘP CÂU HỎI LÀM RÕ TRONG 1 VÒNG DUY NHẤT (SINGLE-ROUND CLARIFICATION): Nếu thiếu bất kỳ thông tin nào, còn khung giờ mơ hồ (`is_ambiguous = true`) hoặc có mâu thuẫn (`has_conflict = true`), đặt `is_complete = false` và gom TẤT CẢ câu hỏi vào `clarification_questions` một cách ngắn gọn, ấm áp trong 1 màn hình duy nhất.
 - CHỈ ĐẶT `is_complete = true` KHI VÀ CHỈ KHI đủ cả 4 trường rõ ràng, mọi `structured_free_windows` đều có `is_ambiguous = false`, và `has_conflict = false` (khi đó `clarification_questions` phải là `[]`).
+- time_constraint dùng kind=deadline/window, start_at và đúng một mốc cuối deadline_at/finish_by_at; thiếu thì để null, không đoán. Kế thừa thông tin đã rõ từ previous_draft. Trích goal chỉ khi user nêu.
+- Trả clarification_issues có code, field_path, message, question, blocking. Câu hỏi phải gắn đúng trường con nếu biết.
+- field_review_notes chứa giải thích bất lợi có căn cứ theo từng trường khi đề xuất khác previous_draft. Nếu user muốn giữ giá trị cũ, giải thích bất lợi có căn cứ rồi hỏi xác nhận; không ép đổi, không bịa số phút thiếu hoặc kết luận khả thi khi chưa có phép tính.
+- resolved_issue_keys chỉ chứa khóa code|field_path|question của AI_CLARIFICATION trong previous_draft mà câu trả lời mới thực sự giải quyết; không tự xóa field-review đã bảo vệ giá trị user.
 - Giọng điệu tiếng Việt ấm áp, súc tích, giảm tải nhận thức theo chuẩn W3C COGA."""
 
 UF2_DECOMPOSITION_SYSTEM_PROMPT = """Bạn là chuyên gia hỗ trợ chức năng điều hành (Executive Function Coach) cho người mắc ADHD-I trên ứng dụng ProPlan VA.
@@ -586,8 +592,13 @@ class AIService:
         CẤM tin mù quáng phép so sánh ngày giờ của LLM — nếu deadline rơi vào quá khứ,
         bắt buộc bật cờ has_conflict=True và is_complete=False.
         """
-        if result.deadline is not None:
-            normalized_deadline = cls._normalize_dt_for_compare(result.deadline, current_dt)
+        end = (
+            (result.time_constraint.deadline_at or result.time_constraint.finish_by_at)
+            if result.time_constraint
+            else result.deadline
+        )
+        if end is not None:
+            normalized_deadline = cls._normalize_dt_for_compare(end, current_dt)
             if normalized_deadline <= current_dt:
                 past_question = (
                     "Hạn chót bạn nêu đang nằm ở thời điểm đã qua so với hiện tại, "
@@ -679,6 +690,9 @@ class AIService:
             scope=prev_scope,
             free_time_slots=prev_slots,
             structured_free_windows=prev_windows,
+            goal=previous_draft.goal if previous_draft else None,
+            time_constraint=previous_draft.time_constraint if previous_draft else None,
+            clarification_issues=previous_draft.clarification_issues if previous_draft else [],
             deadline=prev_deadline,
             extra_requirements=prev_extra,
             is_complete=False,

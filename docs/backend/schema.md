@@ -1,6 +1,9 @@
 # Đặc tả đối tượng và schema Backend ProActive
 
-Cập nhật: **30/10/2026**. Phạm vi: O01–O26 của cả 7 UF, cấu trúc lồng và các DTO hỗ trợ trong hợp đồng API. Tài liệu mô tả dữ liệu để triển khai và review; không xác nhận ORM/API đã được code.
+> **Trạng thái đồng bộ ngày 03/11/2026:** Tài liệu gồm nghiệp vụ đích và dữ liệu đang triển khai. UF1 mới nhận giờ rảnh riêng trong `TaskSummary.availability`, xác nhận cùng summary, không yêu cầu Settings trước. Nháp cũ dùng `availability_ref` vẫn tương thích. Task, Candidate sources và CalendarContext đang theo luồng UF2 cũ; chưa được hiểu rằng chúng đã nhận nguồn giờ riêng. UF2 chủ động chặn nguồn mới bằng `409 PLAN_NOT_CONFIRMABLE` / `wait_for_configuration` cho đến khi I02 được nối. Google Calendar thật chưa được ghép. Các thẻ Docs và Sheet online chưa được đồng bộ trong lượt sửa tài liệu này.
+
+
+Cập nhật nguồn gốc: **30/10/2026**; đồng bộ local và quyết định tuần 2: **03/11/2026**. Phạm vi: O01–O26 của cả 7 UF, cấu trúc lồng và các DTO hỗ trợ trong hợp đồng API. Tài liệu mô tả dữ liệu để triển khai và review; không xác nhận ORM/API đã được code.
 
 ## 1. Nguồn chuẩn và cách đọc
 
@@ -8,7 +11,7 @@ Cập nhật: **30/10/2026**. Phạm vi: O01–O26 của cả 7 UF, cấu trúc 
 - [Sheet API — tab api](https://docs.google.com/spreadsheets/d/1RTI0Hv0DydDX5S0DMq1clSFmGggCuGkAMORynke6J0w/edit#gid=1522506644): request, success/fail JSON và **ghi chú trong ô** của 62 endpoint, dòng 2–63.
 - Tên trường và biến thể JSON trao đổi theo Sheet; nghiệp vụ theo thẻ 01. Chỗ hai nguồn chưa khớp được ghi tại mục 9; không tự coi một ví dụ là toàn bộ schema hoặc enum.
 - O00 User ở mục 8 là thiết kế tài khoản nội bộ bổ sung theo lựa chọn Google Sign-In; chưa phải object/API đăng nhập đã được công bố trong hai nguồn.
-- schema.md là bản triển khai được đồng bộ từ các nguồn trên, không tự nhận là nguồn chuẩn thay chúng. Các tài liệu trong _temp không phải phụ thuộc để dùng file này.
+- schema.md đồng bộ các nguồn trên và các quyết định local được người dùng chốt trong Project/kế hoạch tuần 2. Mục 12 ghi rõ phần thay đổi local còn chờ cập nhật Docs/Sheet và triển khai DTO/code; không coi tài liệu online đã được cập nhật. Các tài liệu trong _temp không phải phụ thuộc để dùng file này.
 
 ### Quy ước kiểu dữ liệu
 
@@ -72,7 +75,7 @@ API liên quan: [dòng 39](https://docs.google.com/spreadsheets/d/1RTI0Hv0DydDX5
 | `work_interval_seconds` | integer | Độ dài tối đa một quãng làm chính theo cấu hình có hiệu lực; không phải toàn Session. |
 | `rest_interval_seconds` | integer | Độ dài nghỉ bên trong khi có; khác khoảng cách 900 giây giữa hai Session. Có thể không tạo quãng nghỉ bên trong. |
 | `micro_task_seconds` | integer \| null | Ước lượng độ nhỏ của gợi ý chuẩn bị nếu có; có thể null khi chưa chốt qua nghiên cứu. Không có timer riêng và không cộng vào thời lượng Run/Session chính. |
-| `reminder_offsets` | array<integer> | Một mốc nhắc do user chọn; mặc định [900] giây trước phiên. Micro-task được hiển thị cùng lời nhắc này, không tự start Run. |
+| `reminder_offsets` | array<integer> | Đích tuần 2 đã chốt: 1–3 integer giây không âm, không trùng, chuẩn hóa giảm dần; default mới `[900, 600, 300]`, giữ cấu hình user đã lưu. Code nền vẫn một offset `[900]`, chưa gửi mảng ba phần tử vào API cho tới khi DTO/validation được mở rộng. Micro-task hiển thị cùng lời nhắc, không tự start Run. |
 | `requested_revision` | integer \| null | Phiên bản cài đặt mới được yêu cầu, có thể đang chờ đổi lịch. |
 | `effective_revision` | integer | Phiên bản đã có hiệu lực; dùng tạo lịch hoặc snapshot thực thi. |
 | `buffer_multiplier` | number | Hệ số dự phòng đang có hiệu lực; chỉ áp một lần lên làm chính. Giá trị cụ thể cần nghiên cứu/pilot. |
@@ -82,6 +85,8 @@ API liên quan: [dòng 39](https://docs.google.com/spreadsheets/d/1RTI0Hv0DydDX5
 | `revision` | integer | Trường bổ sung từ response Sheet; xem điều kiện trả của endpoint tương ứng. |
 
 ### O02 Availability
+
+O02 mô tả tài nguyên giờ rảnh chung/nguồn cũ. Giờ riêng của yêu cầu mới nằm ở `O04.availability` (DraftAvailability), không tự ghi vào O02. `confirmed_at` của O02 không phải điều kiện bắt buộc cho UF1 mới; nguồn mới được xác nhận bằng `summary_confirmed_revision` của Draft.
 
 Giờ rảnh do user xác nhận, có timezone và nguồn.
 
@@ -114,7 +119,7 @@ API liên quan: [dòng 2](https://docs.google.com/spreadsheets/d/1RTI0Hv0DydDX5S
 | `deadline_at` | date-time \| null | Bắt buộc khác null khi kind=deadline; null khi kind=window. Mốc cuối theo nhánh là deadline_at hoặc finish_by_at; không yêu cầu hai trường cùng có giá trị. |
 | `input_timezone` | string | Múi giờ để hiểu đúng các ngày và giờ người dùng nhập. |
 
-**Hai nhánh JSON:** deadline → start_at + deadline_at, finish_by_at=null; window → start_at + finish_by_at, deadline_at=null. start_at phải trước mốc cuối. Draft có thể chưa đủ để làm rõ; confirm-summary/UF2 yêu cầu đủ dữ liệu. Thẻ 02 còn mô tả finish_by_at khác nhánh deadline; ở đây giữ đúng JSON Sheet và ghi nhận tại mục 9.
+**Hai nhánh JSON đã được duyệt ngày 02/11/2026:** deadline → start_at + deadline_at, finish_by_at=null; window → start_at + finish_by_at, deadline_at=null. start_at phải trước mốc cuối. Draft có thể chưa đủ để làm rõ; thông tin AI chưa đủ được giữ trong snapshot nội bộ, time_constraint công khai vẫn là null cho đến khi hợp lệ. Mốc cuối đã qua chặn can_plan/confirm-summary; start quá khứ với mốc cuối tương lai vẫn được xem xét lập lịch từ hiện tại. Thẻ 02 online còn chờ cập nhật mô tả.
 
 ### O04 TaskSummary
 
@@ -130,11 +135,16 @@ API liên quan: [dòng 2](https://docs.google.com/spreadsheets/d/1RTI0Hv0DydDX5S
 | `scope` | string \| null | Đầu ra và giới hạn công việc để chia bước đúng ý người dùng. |
 | `extra_requirements` | array<string> | Các yêu cầu bổ sung cần giữ khi chia việc và xếp lịch. |
 | `time_constraint` | O03 \| null | Khoảng bắt đầu và kết thúc đã làm rõ theo O03. |
-| `availability_ref` | AvailabilityRef \| null | Bộ giờ rảnh và revision đã xác nhận; Calendar chỉ bổ sung lịch bận, không thay trường bắt buộc này. |
+| `availability` | DraftAvailability \| null | Giờ rảnh user nhập cùng yêu cầu voice/text hiện tại; được review và xác nhận cùng summary UF1. Không ghi đè giờ rảnh chung hoặc plan khác. |
+| `availability_ref` | AvailabilityRef \| null | Tương thích nháp cũ đã chủ động chọn nguồn giờ rảnh chung. Nháp dùng availability trực tiếp không bắt buộc ref; sửa/xóa giờ riêng không tự quay lại nguồn chung. |
 | `importance` | integer \| null | Số nguyên dương tùy chọn; lớn hơn nghĩa là quan trọng hơn, null khi user chưa chọn. Deadline/phụ thuộc vẫn ưu tiên trước; không cho phép collision. |
 | `clarification_issues` | array<ClarificationIssue> | Những chỗ thiếu, mơ hồ hoặc mâu thuẫn cần hỏi lại. |
-| `can_plan` | boolean | Cho biết đã đủ dữ liệu để chuyển sang lập phương án UF2. |
+| `can_plan` | boolean | Đủ dữ liệu đầu vào UF1, không còn vấn đề chặn; chưa chứng minh lịch khả thi và không thay trạng thái sẵn sàng của tích hợp UF2. |
 | `field_sources` | map<string, FieldSource> | Nguồn của từng giá trị: người dùng nhập, sửa, xác nhận hoặc AI đề xuất; giữ được yêu cầu gốc khi sửa tóm tắt. |
+
+**DraftAvailability:** `{timezone:string, weekly_rules:WeeklyRule[], date_overrides:DateOverride[]}`. Dùng lại kiểu ngày/thứ và giờ địa phương của O02; `weekday` 1=Thứ Hai..7=Chủ Nhật. Ngày cụ thể thay thế quy tắc lặp của chính ngày đó; `intervals:[]` nghĩa là ngày đó không rảnh. Trường ngày/thứ không rõ từ AI giữ trong ngữ cảnh nội bộ và câu hỏi, không tự đoán. `PATCH summary.availability` thay toàn bộ trường; omitted giữ nguyên, null xóa. Client không gửi confirmed_at hoặc cờ khả thi trong trường này.
+
+**Ranh giới triển khai UF1 mới:** `can_plan` kiểm đủ dữ liệu và có giờ khai báo trong khoảng thực hiện còn lại; chưa trừ Calendar hoặc chứng minh lịch khả thi. Confirm UF1 xác nhận giờ rảnh cùng summary, chưa tạo Task/Step/Session. JSON được lưu trong cột summary hiện có, không tạo migration. Google là nguồn bận riêng. UF2 hiện chưa đọc giờ riêng theo Draft nên trả 409 PLAN_NOT_CONFIRMABLE/next_action=wait_for_configuration cho nguồn mới; không dùng nhầm availability_ref cũ. Luồng UF2 dùng ref cũ được giữ để tương thích. Đây là trạng thái Backend; giao diện test được cập nhật riêng, không phải bằng chứng Mobile đã đồng bộ. Docs/Sheet online còn chờ cập nhật.
 
 ### O05 PlanningDraft
 
@@ -201,7 +211,7 @@ API liên quan: [dòng 12](https://docs.google.com/spreadsheets/d/1RTI0Hv0DydDX5
 | `source_draft_id` | string | Liên kết nháp nguồn và ngăn một nháp tạo nhiều Task. |
 | `decomposition_state` | string enum | Tổng hợp từ các PlanningPart: not_started, partial, complete; còn phần chưa chia thì chưa complete. |
 | `scheduling_state` | string enum | Tổng hợp: not_scheduled, partial, complete; chỉ complete khi toàn bộ phạm vi đã được chia và xếp đủ. |
-| `availability_ref` | AvailabilityRef | Giờ rảnh và revision đã xác nhận áp dụng cho Task; giúp tái lập lịch đúng phạm vi người dùng cho phép. |
+| `availability_ref` | AvailabilityRef | Nguồn của Task tạo qua luồng UF2 cũ. Đợt sửa UF1 chưa thay trường Task này; Task từ giờ riêng của Draft chưa được tạo cho đến khi I02 nối và chốt cách lưu nguồn. |
 | `task_id` | string | Trường bổ sung từ response Sheet; mã tài nguyên hoặc liên kết server. |
 | `planning_parts` | array<PlanningPart> | Trường bổ sung từ response Sheet; xem điều kiện trả của endpoint tương ứng. |
 | `steps` | array<Step> | Trường bổ sung từ response Sheet; xem điều kiện trả của endpoint tương ứng. |
@@ -459,7 +469,7 @@ API liên quan: [dòng 43](https://docs.google.com/spreadsheets/d/1RTI0Hv0DydDX5
 | --- | --- | --- |
 | `kind` | string enum | Gợi ý đổi buffer hoặc giảm tần suất lời nhắc. |
 | `sample_count` | integer | Số mẫu hợp lệ đã dùng; một Step không thành nhiều mẫu theo số phiên. |
-| `current_value` | number \| array<integer> | Theo kind: buffer_multiplier dùng number dương trong miền policy; reminder_offset dùng mảng đúng một integer >=0 giây. Không nhận object cấu hình tùy ý chưa có schema. |
+| `current_value` | number \| array<integer> | Theo kind: buffer_multiplier dùng number dương trong miền policy; reminder_offset đích đồng bộ theo cấu hình nhắc tuần 2: mảng 1–3 integer >=0, không trùng; code/contract gợi ý UF7 hiện chưa được xác nhận hỗ trợ nhiều mốc, phải review khi triển khai UF7. Không nhận object cấu hình tùy ý chưa có schema. |
 | `suggested_value` | number \| array<integer> | Giá trị gợi ý cùng biến thể với current_value; edited_value/accepted_value của API cũng theo kind này. |
 | `reason` | string | Giải thích vì sao có gợi ý; không suy diễn chẩn đoán. |
 | `policy_revision` | string | Quy tắc hoặc thuật toán đã tạo gợi ý. |
@@ -504,7 +514,7 @@ API liên quan: [dòng 57](https://docs.google.com/spreadsheets/d/1RTI0Hv0DydDX5
 | `calendar_errors` | array<CalendarError> | Lỗi theo cặp connection_id/google_calendar_id; không đổi lỗi thành lịch bận trống. |
 | `event_snapshots` | array<O26> | Các sự kiện O26 đã đọc để nhận diện bản của app và thay đổi bên ngoài; không mặc định lưu toàn bộ nội dung Calendar dài hạn. |
 | `coverage_state` | string enum | Dữ liệu đã bao phủ đủ nguồn/thời gian được chọn, chỉ một phần hoặc không truy cập được; thiếu nguồn không được coi là lịch trống. |
-| `availability_ref` | AvailabilityRef | Bộ giờ rảnh và revision dùng xây Context; nguồn thay đổi phải tạo/tính lại Context phù hợp. |
+| `availability_ref` | AvailabilityRef | Bộ giờ chung và revision dùng xây Context trong luồng cũ. Context theo giờ riêng của Draft còn chờ I02 chốt liên kết Draft/phiên bản; chưa tự dùng ref chung thay cho nguồn mới. |
 | `manual_busy_intervals` | array<ManualBusyInterval> | Khoảng bận user nhập; giữ ID và nguồn để gửi lại không nhân đôi. |
 | `excluded_sources` | array<ExcludedCalendarSource> | Nguồn user xác nhận loại khỏi lần lập phương án; giữ lý do/thời điểm, không coi nguồn lỗi đã được kiểm đủ. |
 | `context_id` | string | Trường bổ sung từ response Sheet; mã tài nguyên hoặc liên kết server. |
@@ -642,7 +652,7 @@ Kiểu dùng chung được định nghĩa ở bảng dưới và mục bổ sun
 | CandidateRef | candidate_id:string; review_revision:integer; cả hai bắt buộc khi candidate_ref khác null. |
 | TimeInterval | start_at: date-time; end_at: date-time. start_at phải nhỏ hơn end_at; các tên scheduled_start/end ở Session vẫn giữ nguyên. |
 | SessionSegment | order_index: integer; kind: work\|rest; duration_seconds: integer. Tổng các quãng phải khớp work_seconds, rest_seconds và duration_seconds. |
-| SourceRevisions | availability: integer; preferences: integer; schedule: integer; calendar_context: CalendarContextRef. Nhánh dùng nguồn thay thế phải mô tả rõ ref thay vì tự bỏ nguồn lỗi. |
+| SourceRevisions | Luồng UF2 cũ: availability: integer; preferences: integer; schedule: integer; calendar_context: CalendarContextRef. Nguồn giờ riêng còn chờ I02 chốt mapping; không tự lấy summary_revision làm availability revision hoặc bỏ nguồn lỗi. |
 | VerificationScope | Hai biến thể phân biệt scope_type: candidate_parts → {scope_type,client_part_keys:array<string>,planning_horizon:TimeInterval}; persisted_schedule → {scope_type,task_ids:array<string>,session_ids:array<string>,planning_part_ids:array<string>,planning_horizon:TimeInterval}. Phạm vi được kiểm không tự bao gồm toàn Task; không trộn client key với ID lưu chính thức. |
 | FieldSource | source: string enum; source_ref: string. Map field_sources dùng tên trường làm khóa để giữ nguồn do user nhập, AI gợi ý hoặc user xác nhận. |
 | ClarificationIssue | code, field_path, message, question: string; blocking: boolean. |
@@ -662,15 +672,15 @@ WeeklyRule — {weekday:integer 1..7 (Thứ Hai=1),start_local:string HH:mm,end_
 
 DateOverride — {date:string YYYY-MM-DD,intervals:array<{start_local:string HH:mm,end_local:string HH:mm}>}; thay toàn bộ lịch rảnh của ngày đó, [] nghĩa là ngày không rảnh; không trùng date.
 
-TaskAvailabilityLimit — {task_id:string,intervals:array<TimeInterval>}; là giới hạn bổ sung trên giờ rảnh chung cho Task đã lưu, không mở rộng giờ rảnh chung; [] nghĩa là chưa có khoảng được phép cho Task đó. Task mới dùng availability_ref và time_constraint trước khi có task_id.
+TaskAvailabilityLimit — {task_id:string,intervals:array<TimeInterval>}; là giới hạn bổ sung trên giờ rảnh chung cho Task đã lưu, không mở rộng giờ rảnh chung; [] nghĩa là chưa có khoảng được phép cho Task đó. Luồng nguồn cũ dùng availability_ref và time_constraint trước khi có task_id. UF1 mới dùng summary.availability; đây không phải TaskAvailabilityLimit và chưa được bộ đọc UF2/Context hiện tại hỗ trợ.
 
-SettingsChange — {preferences?:{work_interval_seconds?:integer>0,rest_interval_seconds?:integer>=0,reminder_offsets?:array<integer>=0 đúng 1 phần tử,buffer_multiplier?:number>0 theo policy,reminder_style?:string},availability?:{timezone?:string,weekly_rules?:array<WeeklyRule>,date_overrides?:array<DateOverride>,task_limits?:array<TaskAvailabilityLimit>}}. Ít nhất một trường hợp lệ; không sửa revision/trường do server quản lý. Miền buffer và số giây min/max khác lấy capabilities, chưa tự gán số minh họa.
+SettingsChange — {preferences?:{work_interval_seconds?:integer>0,rest_interval_seconds?:integer>=0,reminder_offsets?:array<integer>=0 gồm 1–3 phần tử không trùng, giảm dần (đích tuần 2; code nền còn khóa 1),buffer_multiplier?:number>0 theo policy,reminder_style?:string},availability?:{timezone?:string,weekly_rules?:array<WeeklyRule>,date_overrides?:array<DateOverride>,task_limits?:array<TaskAvailabilityLimit>}}. Ít nhất một trường hợp lệ; không sửa revision/trường do server quản lý. Miền buffer và số giây min/max khác lấy capabilities, chưa tự gán số minh họa.
 
 PreferenceChanges — Các trường cấu hình được phép sửa trong SettingsChange.preferences. Trên O01 requested_changes là PreferenceChanges|null; trên kết quả change-request requested_changes là SettingsChange có namespace preferences/availability.
 
 StructuredChanges — Theo trigger: not_started → {session_ids:array<string> không rỗng}; step_completed_early → {completed_step_id:string,session_ids?:array<string>}; continue_next_session → {next_session_id:string}; remaining_work → {step_id:string,remaining_note:string}; extend_horizon → {selected_part_ids:array<string> không rỗng,planning_horizon:TimeInterval}; settings_change → {change_request_id:string}; calendar_change → {preview_id:string}. reschedule có thể dùng request_text và các constraint đã làm rõ. ID phải thuộc user/Task và phạm vi được cho phép; không tự thêm Task vào allowed_task_ids.
 
-SuggestionValue — kind=buffer_multiplier: number>0 trong miền policy; kind=reminder_offset: array<integer>, đúng một phần tử >=0 giây. current_value/suggested_value/edited_value/accepted_value phải cùng biến thể. Không suy chính sách học buffer từ một thẻ chỉnh nhắc.
+SuggestionValue — kind=buffer_multiplier: number>0 trong miền policy; kind=reminder_offset: array<integer> >=0, đích đồng bộ cấu hình tuần 2 là 1–3 phần tử không trùng, giảm dần; cần cập nhật contract/DTO/tests của gợi ý UF7 trước khi dùng nhiều mốc. current_value/suggested_value/edited_value/accepted_value phải cùng biến thể. Không suy chính sách học buffer từ một thẻ chỉnh nhắc.
 
 ManualBusyInterval — {client_interval_id:string,start_at:date-time,end_at:date-time}; ID ổn định trong một ý định gửi lại, thời gian hợp lệ. Không dùng để giả rằng nguồn Google lỗi đã được kiểm tra.
 
@@ -828,7 +838,7 @@ Các cấu trúc dưới đây phục vụ endpoint cụ thể, không tự đá
 | `audio_max_seconds` | integer \| null | Đọc điều kiện và ghi chú của endpoint; không cho client sửa trường dẫn xuất. |
 | `audio_max_bytes` | integer \| null | Đọc điều kiện và ghi chú của endpoint; không cho client sửa trường dẫn xuất. |
 | `preview_ttl_seconds` | integer \| null | Đọc điều kiện và ghi chú của endpoint; không cho client sửa trường dẫn xuất. |
-| `default_reminder_offset_seconds` | integer | Đọc điều kiện và ghi chú của endpoint; không cho client sửa trường dẫn xuất. |
+| `default_reminder_offset_seconds` | integer | Wire hiện hành vẫn là số đơn 900. Đích nhắc tuần 2 dùng default `[900, 600, 300]`; cách công bố nhiều mốc trong capabilities cần Cương/Hưng chốt và cập nhật DTO/Mobile trước khi dùng, không đổi trường integer thành array một phía. |
 | `start_grace_seconds` | integer | Đọc điều kiện và ghi chú của endpoint; không cho client sửa trường dẫn xuất. |
 | `min_inter_session_gap_seconds` | integer | Đọc điều kiện và ghi chú của endpoint; không cho client sửa trường dẫn xuất. |
 | `checkin_timeout_seconds` | integer | Đọc điều kiện và ghi chú của endpoint; không cho client sửa trường dẫn xuất. |
@@ -922,7 +932,7 @@ Bảng này là chỉ mục, không thay request validation. Các trường dư�
 | 38 | POST `/api/v1/proposals/{proposal_id}/reject` | path: proposal_id; body: expected_proposal_revision, reason |
 | 39 | GET `/api/v1/preferences` | body: null |
 | 40 | GET `/api/v1/availability` | body: null; query: from, to |
-| 41 | POST `/api/v1/settings/change-requests` | body: expected_preferences_revision, changes |
+| 41 | POST `/api/v1/settings/change-requests` | body: expected_preferences_revision khi sửa preferences, expected_availability_revision khi sửa availability, changes; 0 nghĩa chưa có tài nguyên, tạo lần đầu thành 1 |
 | 42 | POST `/api/v1/settings/change-requests/{change_request_id}/cancel` | path: change_request_id; body: expected_request_revision |
 | 43 | GET `/api/v1/suggestions/current` | query: kind; body: null |
 | 44 | POST `/api/v1/suggestions/{suggestion_id}/response` | path: suggestion_id; body: expected_suggestion_revision, action, annoyance_feedback; body: expected_suggestion_revision, action; body: expected_suggestion_revision, action, edited_value |
@@ -972,7 +982,7 @@ Bảng này là chỉ mục, không thay request validation. Các trường dư�
 - Các dữ liệu audio path/DND snapshot/queue local không trở thành dữ liệu Backend phải nhận/trả. Thiết bị báo trạng thái và revision đúng DTO.
 - Lưu lịch trong transaction có kiểm quyền/revision và CAS hoặc khóa phù hợp. Hai confirm đồng thời không được cùng áp lên lịch nền cũ. Worker dùng outbox đã commit; không giữ transaction dài chờ AI/Google.
 - Unique theo phạm vi: client_draft_id + user; command_id + user; client key trong nguồn Part/Step/Session; source_draft_id chống tạo nhiều Task đầu tiên.
-- Chính sách xóa/retention/Undo cần xác định theo loại tài nguyên. Không biến đề nghị Undo 5 giây hoặc “cấm mọi hard delete” từ bản cũ thành quy tắc đã chốt của API; giữ lịch sử nghiệp vụ cần đối soát và quyền xóa đúng endpoint.
+- Undo Thought đã chốt tuần 2: lưu bền file/metadata local, outbox giữ 5 giây trước khi gửi; Undo cất mới hủy gửi nguyên tử và dọn file. Xóa Thought có sẵn giữ khả năng khôi phục trong 5 giây trước thực hiện xóa; giữ dữ liệu còn phụ thuộc nghiệp vụ. Phải kiểm restart, tranh chấp gửi/hủy và retry. Chưa xác nhận code/API đã hỗ trợ; không áp retention này mặc định cho mọi loại tài nguyên khác.
 - Bí mật và transcript/audio không ghi log. credential_ref/payload_hash/payload_snapshot nội bộ không trả ra chỉ vì object có chúng.
 - offline_start_supported=false trong capabilities hiện hành; cache/thu âm local không tự đồng nghĩa được start độc lập offline.
 
@@ -997,7 +1007,7 @@ Các trường streak trong schema cũ (current_streak_days, streak_frozen, stre
 
 | Nội dung | Cách xử lý trong bản đồng bộ |
 |---|---|
-| O03 deadline/window | Thẻ 02 còn ghi finish_by_at bắt buộc và deadline_at khớp nó. Sheet chỉ dùng một mốc cuối tùy kind; schema này theo wire JSON Sheet, ghi rõ hai nhánh; chưa sửa Google Docs |
+| O03 deadline/window | Ngày 02/11 user duyệt hai nhánh theo code/Sheet: đúng một mốc cuối theo kind. Local đã đồng bộ; mô tả thẻ 02 online còn chờ cập nhật. |
 | Enum đầy đủ | Dùng những nhãn được nguồn nêu, không bịa danh sách đầy đủ từ ví dụ. Đặc biệt stage/status theo từng object, estimate_source, FieldSource, sync/job states cần khóa khi triển khai |
 | FieldError / BlockingReason / ResourceRef | Giữ cấu trúc nguồn hiện có; trường phụ thuộc từng loại lỗi/thao tác cần đặc tả đầy đủ, không mở dict tùy ý rồi gọi là schema đã chốt |
 | CandidateEdits và PATCH lồng | Đã rõ omitted/null và revision; allowlist sửa Part/Step/Session, merge object/thay mảng và đổi kind cần khóa trước viết DTO input cuối |
@@ -1007,4 +1017,44 @@ Các trường streak trong schema cũ (current_streak_days, streak_frozen, stre
 | Auth, streak và lưu trữ | Auth app được chọn nhưng endpoint/session policy chưa công bố; streak và lựa chọn ORM/FK/retention là thiết kế bổ sung, không tự nâng thành hợp đồng API đã thống nhất |
 | Giới hạn/phân trang/độ mới nguồn | limit max, cursor/filter, TTL/revalidate nguồn và các miền cấu hình phải đặc tả đủ trước nghiệm thu; không tự đưa các số đề xuất chặng 0 thành chuẩn hiện hành |
 
-Bản đồng bộ này không thay đổi Backend Docs, Sheet API, source code hoặc kế hoạch triển khai. Khi nhóm chốt các mục trên, cập nhật nguồn chuẩn trước và đồng bộ schema/DTO/tests cùng thay đổi.
+Bản đồng bộ local không tự cập nhật Backend Docs/Sheet hoặc triển khai code. Các quyết định tuần 2 được người dùng chốt ở Project/kế hoạch và ghi tại mục 12; phần còn mở phải tiếp tục chốt, cập nhật nguồn liên quan và DTO/tests cùng thay đổi.
+
+## 10. Bổ sung triển khai UF1–UF2 ngày 02/11/2026
+
+- DTO AI nội bộ có goal, time_constraint chưa đầy đủ và issue theo trường; API Mobile vẫn trả PlanningDraft/TaskSummary hiện hành. Snapshot ai_context không trả ra JSON công khai; lưu trong summary._api_meta của Draft và phục hồi qua DB.
+- AI null/omitted không xóa dữ liệu user. PATCH giữ quy tắc omitted/null hiện có. AI bổ sung yêu cầu được trim/loại trùng chính xác, giữ yêu cầu cũ; user sửa form có thể thay cả danh sách.
+- Gửi lại full form không tự xác nhận các trường không đổi. Muốn giữ giá trị cũ ở field-review, gửi PATCH chỉ trường đó cùng giá trị; đổi giá trị cũng cần gửi đúng trường user sửa. Issue khác vẫn chặn can_plan. AI giải thích bất lợi có căn cứ, không tự khẳng định khả thi hoặc số phút thiếu.
+- Ghi Draft và CommandReceipt trong cùng transaction. UF1/Voice có receipt DB; GET commands theo owner chỉ trả ref công khai. Dịch vụ AI/STT có thể gọi lại sau sự cố trước khi lưu; kết quả nghiệp vụ không được áp dụng hai lần.
+- Settings bootstrap: expected_*_revision=0 khi tài nguyên chưa tồn tại, lưu lần đầu revision=1. Không đổi nhóm nào thì không tăng revision nhóm đó. Lần đầu preferences cần đủ giá trị user chọn, không tự gán hệ số pilot. Nếu preferences chưa có thì effective_revision=0 trong kết quả bootstrap Availability để thể hiện chưa cấu hình; GET preferences vẫn báo cần cấu hình.
+- POST settings/change-requests hiện chỉ áp dụng trước khi có Task. Khi đã có kế hoạch, trả 503 POLICY_NOT_CONFIGURED/wait_for_configuration cho tới khi luồng tác động/UF6 sẵn sàng; chưa giả trả proposal. Chưa triển khai cancel hoặc toàn bộ UF7.
+- Luồng cũ: Availability đã xác nhận là khung được phép, CalendarContext liên kết availability_ref. Luồng mới: giờ riêng trong Draft được xác nhận cùng UF1; bộ đọc Context/UF2 còn chờ nối. Calendar giữ vai trò nguồn bận có nguồn gốc/độ mới; Google thật chưa được triển khai.
+- UF2 dùng fallback Python tầng 3 khi các provider lỗi hoặc hết thời gian: sinh đề xuất ba bước theo thời lượng tập trung user và phạm vi đầu vào, kèm micro-task. Đề xuất vẫn phải qua scheduler kiểm khả thi và user xác nhận trước khi lưu lịch chính thức. Chưa hoàn tất phân rã nhiều tầng A04 hoặc lập tiếp Task đã lưu I03.
+
+
+## 11. Điểm giao UF1 mới — 03/11/2026
+
+- Các endpoint tạo, đọc, sửa, phân tích và xác nhận Draft giữ nguyên đường dẫn. Create/PATCH nhận `summary.availability`; response TaskSummary trả cùng trường, bên cạnh các trường hiện có.
+- Input voice/text đầu tiên chứa công việc, thời gian và giờ rảnh. Thiếu/mơ hồ thì hỏi bổ sung trong UF1, không tự dùng giờ mặc định hoặc buộc cấu hình Settings trước.
+- Giờ theo thứ lặp hoặc ngày cụ thể dùng múi giờ IANA. `date_overrides` thay quy tắc tuần của chính ngày đó; `intervals:[]` là ngày không rảnh. Chỉ có ngày đóng không đủ để xác nhận một kế hoạch cần giờ làm.
+- PATCH omitted giữ giờ cũ; gửi availability thay toàn bộ trường; null xóa giờ riêng và không tự quay lại ref chung. Khi áp giờ riêng, ref cũ bị bỏ. Sửa thực sự tăng revision và hủy xác nhận summary cũ.
+- AI đề xuất khác dữ liệu user đã nhập/xác nhận thì giữ bản cũ và trả vấn đề review. Trường `availability_update_mode` merge/replace là DTO AI nội bộ, không phải field client gửi trong TaskSummary.
+- Khung AI chưa đủ ngày/giờ hoặc không hợp lệ được giữ trong ai_context nội bộ và clarification_issues; không trả nó như một WeeklyRule hợp lệ. ai_context không xuất hiện trong API công khai.
+- UF1 kiểm có khoảng khai báo giao với thời gian thực hiện còn lại, chưa trừ Google hay chứng minh đủ thời lượng. Confirm chỉ xác nhận đầu vào, chưa tạo Task/Steps/Sessions.
+- Nối UF2 cần dùng đúng Draft và revision, không lẫn Context giữa yêu cầu; phải chốt cách giữ nguồn trong Candidate/Task trước khi bỏ guard. Chưa thay request planning-contexts hoặc SourceRevisions thành một hợp đồng mới chưa được triển khai.
+- Kiểm tra gần nhất: 175 ca Backend/review đạt bằng DB tạm và provider giả ngày 02/11/2026; lint/type đạt. Đây không phải nghiệm thu AI/STT/Google thật hoặc trải nghiệm Mobile. Lượt sửa tài liệu ngày 03/11 không chạy lại bộ test.
+
+
+## 12. Quyết định tuần 2 và trạng thái code nền — 03/11/2026
+
+Quyết định đã được người dùng chốt, lấy [Project mục 8.2](../../Project.md) và [kế hoạch tuần 2](../week2_detailed_plan.md) làm tham chiếu local. Docs/Sheet online chưa được cập nhật trong lượt này. Kết quả kiểm nền ghi ở [biên bản nền tuần 2](../week2_baseline.md).
+
+| Nội dung | Yêu cầu đã chốt | Trạng thái triển khai tại nền tuần 2 |
+| --- | --- | --- |
+| Nhắc trước phiên | Default mới `[900, 600, 300]`, 1–3 mốc integer không âm, không trùng, giảm dần; giữ lựa chọn user cũ | Code/Settings còn khóa một mốc, default `[900]`; dedupe đã có offset. Capabilities số đơn chưa biểu diễn default nhiều mốc; Cương/Hưng cập nhật đồng bộ DTO, service và Mobile theo checklist |
+| Chuông khi thu âm | Âm thanh báo hết giờ ≤1 giây, bảo vệ file; không hoãn 15 giây hoặc dùng rung/UI thay điều kiện âm thanh | Chưa có bằng chứng Android. Không dời ended_at/actual/timeout DND theo lúc finalize; kiểm sớm 04/11 và nghiệm thu thiết bị |
+| Undo Thought | Outbox local lưu bền chờ 5 giây; Undo cất mới hủy gửi/dọn file, xóa bản cũ giữ khả năng phục hồi | Local repository/outbox/UI và API UF4 còn phải triển khai; không coi DELETE là đã có endpoint Undo |
+| Kết thúc tối thiểu | CheckIn cuối, phản hồi và lazy timeout đọc/start sau hạn; thiết bị tự khôi phục DND đúng owner | Router/service UF3–UF4/CheckIn mới là khung. “Chọn nghỉ” chưa xác nhận kết quả cần ví dụ payload được nhóm chốt, không suy completed |
+| Thought → Draft | Metadata Thought có trên server, user yêu cầu sau phiên: POST voice/transcriptions purpose=thought_to_draft → POST thoughts/{id}/draft; retry riêng từng bước | STT có kiểm owner/Run và receipt DB, còn cache RAM trùng; API tạo Draft từ Thought chờ triển khai. FK unique source_thought_id đã có, chỉ kiểm migration/đường dùng và ánh xạ liên kết |
+| Vai trò tuần 2 | Cương: router/DTO/HTTP; Hưng: service nghiệp vụ; Tín: schema/migration/repository; An/Thịnh/Khải: UI/local/native | Kế thừa contract chung trên dev; không tạo bộ JSON riêng theo người |
+
+Bản nền phục vụ bắt đầu phát triển, chưa phải nghiệm thu giai đoạn 1 hay MVP: UF1 mới nhận giờ riêng nhưng UF2 vẫn chặn nguồn mới; Mobile chưa xử lý đầy đủ trường availability riêng, chưa build/analyze trên máy MT vì chưa có SDK. Không tự bỏ guard UF2, thay nguồn giờ hoặc đánh dấu các output này đã đạt.

@@ -16,14 +16,20 @@ from app.services.planning.durations import (
     prepare_step_durations,
 )
 from app.services.planning.rescheduling import shift_elapsed_sessions
-from app.services.planning.scheduling import schedule_candidate_sessions
+from app.services.planning.scheduling import (
+    compute_task_priority_key,
+    order_steps_by_priority,
+    schedule_candidate_sessions,
+)
 from app.services.planning.validation import validate_planning_prerequisites
 
 __all__ = [
     "build_session_segments",
     "calculate_buffered_work",
     "compute_effective_free_intervals",
+    "compute_task_priority_key",
     "evaluate_buffer_adaptation",
+    "order_steps_by_priority",
     "prepare_step_durations",
     "schedule_candidate_sessions",
     "shift_elapsed_sessions",

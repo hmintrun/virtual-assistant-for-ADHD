@@ -1,5 +1,5 @@
 # Schema/DTO cho cài đặt trợ lý (UserPreference - Dòng 39) và tái xuất Availability từ availability.py (Dòng 40)
-from pydantic import Field
+from pydantic import Field, model_validator
 
 from app.schemas.availability import (
     Availability,
@@ -50,3 +50,64 @@ __all__ = [
     "UserPreference",
     "WeeklyRule",
 ]
+
+
+class AvailabilityChanges(ApiModel):
+    timezone: str | None = None
+    weekly_rules: list[WeeklyRule] | None = None
+    date_overrides: list[DateOverride] | None = None
+    task_limits: list[TaskAvailabilityLimit] | None = None
+
+    @model_validator(mode="after")
+    def nonempty(self):
+        if not self.model_fields_set or any(
+            getattr(self, k) is None for k in self.model_fields_set
+        ):
+            raise ValueError(
+                "Gửi ít nhất một trường giờ rảnh hợp lệ; không dùng null để xóa quy tắc"
+            )
+        return self
+
+
+class SettingsChanges(ApiModel):
+    availability: AvailabilityChanges | None = None
+    preferences: PreferenceChanges | None = None
+
+    @model_validator(mode="after")
+    def nonempty(self):
+        if not self.model_fields_set or any(
+            getattr(self, k) is None for k in self.model_fields_set
+        ):
+            raise ValueError("Cần ít nhất một nhóm thay đổi không rỗng")
+        if self.preferences is not None and (
+            not self.preferences.model_fields_set
+            or any(getattr(self.preferences, k) is None for k in self.preferences.model_fields_set)
+        ):
+            raise ValueError("preferences không được rỗng hoặc có null")
+        return self
+
+
+class SettingsChangeRequest(ApiModel):
+    expected_preferences_revision: int | None = Field(default=None, ge=0)
+    expected_availability_revision: int | None = Field(default=None, ge=0)
+    changes: SettingsChanges
+
+    @model_validator(mode="after")
+    def required_revisions(self):
+        if self.changes.availability is not None and self.expected_availability_revision is None:
+            raise ValueError("Đổi giờ rảnh cần expected_availability_revision; lần đầu dùng 0")
+        if self.changes.preferences is not None and self.expected_preferences_revision is None:
+            raise ValueError("Đổi cài đặt cần expected_preferences_revision; lần đầu dùng 0")
+        return self
+
+
+class SettingsChangeResult(ApiModel):
+    change_request_id: str
+    request_revision: int
+    application_state: str
+    requested_revision: int | None
+    effective_revision: int
+    requested_availability_revision: int | None
+    effective_availability_revision: int
+    requested_changes: SettingsChanges
+    pending_proposal_id: str | None

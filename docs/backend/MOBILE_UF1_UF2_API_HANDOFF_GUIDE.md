@@ -1,5 +1,7 @@
 # Tài Liệu Lý Thuyết FastAPI & Hướng Dẫn Từng API UF1–UF2 Cho Mobile
 
+> **Cập nhật UF1 — 02/11/2026:** Giờ rảnh có thể gửi/nhận trong `summary.availability = {timezone,weekly_rules,date_overrides}` ngay từ yêu cầu voice/text. Tạo Draft → analyze → sửa bằng PATCH → confirm-summary cùng giờ rảnh. Không cần tạo Settings trước; không tự ghi đè giờ chung. Giờ mơ hồ được hỏi lại. `availability_ref` chỉ phục vụ nháp cũ, bị bỏ khi áp giờ riêng. UF2 chưa nối nguồn mới và trả `409 PLAN_NOT_CONFIRMABLE`, `next_action=wait_for_configuration`; chưa được coi là lỗi thiếu giờ để tự chọn lại nguồn chung. Website/Mobile chưa được sửa trong chặng này; Google thật chưa được ghép. Chi tiết kiểu dữ liệu theo `schema.md` O04.
+
 **Người lập & bàn giao:** Quốc Hưng (Backend Lead)  
 **Phạm vi:** Lý thuyết kiến trúc FastAPI (từ kế hoạch triển khai) + Hướng dẫn chi tiết từng API trong **20 Endpoints UF1–UF2** cho Mobile (Flutter).
 
@@ -343,3 +345,37 @@ Dưới đây là giải thích chi tiết từng API trong 20 Endpoints (chia t
   * Nếu nhận `200 OK` với `state == "applied"`: Lệnh đã được Server thực thi thành công $\rightarrow$ lấy `result_reference.task_id` để mở thẳng màn hình công việc mới mà không cần gửi lại.
   * Nếu nhận `404 RESOURCE_NOT_FOUND`: Server chưa ghi nhận lệnh đó $\rightarrow$ Mobile gửi lại lệnh `POST` với **giữ nguyên `Idempotency-Key` cũ**.
 
+
+## Bổ sung hợp đồng và triển khai ngày 02/11/2026
+
+1. Analyze title >100 ký tự trả 422 VALIDATION_ERROR tại summary.title; raw_input và nháp giữ nguyên.
+2. PATCH giữ issue chưa xử lý. Mobile gửi đúng trường user sửa; full form không tự xác nhận trường không đổi. Giữ giá trị cũ có thể gửi PATCH chỉ trường review cùng giá trị. User vẫn phải xử lý các lỗi bắt buộc; không mở UF2 nếu còn blocking.
+3. AI có thể điền goal và cả hai nhánh thời gian. AI đang có thông tin thời gian chưa đủ thì API time_constraint vẫn null, issue yêu cầu bổ sung; snapshot nội bộ được phục hồi trên server.
+4. UF1/Voice đã có receipt DB. Retry cùng key/payload trả kết quả cũ cả sau restart; nội dung/operation/resource khác dùng mã mới. GET commands không trả _response.
+5. Schedule trả calendar_event_link_id nhất quán với Task; có link pending không có nghĩa Google đã đồng bộ.
+
+### API bổ sung — Dòng 41: POST /api/v1/settings/change-requests
+
+Dùng khi user chủ động lưu/xác nhận giờ rảnh hoặc cấu hình trước khi có kế hoạch. Nhánh đã có Task cần UF6, hiện trả 503 và giữ nguyên dữ liệu.
+
+Header: Idempotency-Key. Body mẫu tạo giờ rảnh lần đầu:
+
+```json
+{
+  "expected_availability_revision": 0,
+  "changes": {
+    "availability": {
+      "timezone": "Asia/Ho_Chi_Minh",
+      "weekly_rules": [{"weekday": 1, "start_local": "19:00", "end_local": "21:00"}],
+      "date_overrides": [],
+      "task_limits": []
+    }
+  }
+}
+```
+
+0 nghĩa chưa có bộ giờ rảnh; lưu thành công effective_availability_revision=1. Sau đó GET availability lấy availability_id/revision/confirmed_at cho Draft. Nếu đã có bộ khác thì không dùng lại 0: tải và gửi revision hiện hành.
+
+Đổi preferences cần expected_preferences_revision; tạo lần đầu dùng 0 và cung cấp đầy đủ work_interval_seconds, rest_interval_seconds, buffer_multiplier, reminder_offsets (một phần tử), reminder_style theo lựa chọn user. Nhánh chỉ availability không tự tạo preferences mặc định.
+
+200 trả SettingsChangeResult theo schema; 409 khi revision/key không khớp; 422 khi thiếu/sai dữ liệu; 503 khi đã có Task cần workflow tác động chưa sẵn sàng. Đây là phần hỗ trợ bootstrap UF1–UF2, không phải toàn bộ Settings đã triển khai.

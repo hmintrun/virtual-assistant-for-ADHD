@@ -14,6 +14,7 @@ from app.models.execution import SessionRun
 from app.models.thought import Thought
 from app.schemas.common import FieldError, SuccessEnvelope, build_response_meta
 from app.schemas.voice import TranscriptionData
+from app.services import command_service
 from app.services.draft_service import resolve_user_uuid
 from app.services.voice_service import SttError, SttErrorCode, get_voice_service
 
@@ -208,6 +209,15 @@ async def create_transcription(
         },
         sort_keys=True,
     )
+    digest = command_service.command_hash(
+        "voice_transcription", thought_id or "", json.loads(fingerprint)
+    )
+    saved = await command_service.replay(db, current_user.user_id, idempotency_key, digest)
+    if saved is not None:
+        return SuccessEnvelope(
+            data=TranscriptionData.model_validate(saved), meta=build_response_meta()
+        )
+    await db.rollback()
     idem_record = _VOICE_IDEMPOTENCY_STORE.get((current_user.user_id, idempotency_key))
     if idem_record is not None:
         saved_fingerprint, saved_data = idem_record
@@ -242,6 +252,17 @@ async def create_transcription(
         input_source="thought" if purpose == "thought_to_draft" else "voice",
         thought_id=thought_id if purpose == "thought_to_draft" else None,
     )
+    await command_service.lock_owner(db, current_user.user_id)
+    saved = await command_service.replay(db, current_user.user_id, idempotency_key, digest)
+    if saved is not None:
+        await db.rollback()
+        return SuccessEnvelope(
+            data=TranscriptionData.model_validate(saved), meta=build_response_meta()
+        )
+    command_service.record(
+        db, current_user.user_id, idempotency_key, digest, "voice_transcription", data
+    )
+    await db.commit()
     _VOICE_IDEMPOTENCY_STORE[(current_user.user_id, idempotency_key)] = (
         fingerprint,
         data,

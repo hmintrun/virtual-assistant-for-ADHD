@@ -495,6 +495,15 @@ async def _sources(
     *,
     create_manual: bool = False,
 ) -> PlanningSources:
+    # UF1 đã nhận giờ rảnh riêng; UF2 chưa có bộ đọc/context theo Draft.
+    # Chặn rõ thay vì âm thầm dùng giờ chung còn lưu từ trước.
+    if draft.summary.availability is not None:
+        raise _error(
+            "PLAN_NOT_CONFIRMABLE",
+            "UF1 đã lưu giờ rảnh của yêu cầu này. UF2 chưa nối nguồn giờ rảnh theo Draft; "
+            "chưa thể tạo hoặc xác nhận phương án từ nguồn mới.",
+            action="wait_for_configuration",
+        )
     owner = draft_service.resolve_user_uuid(user_id)
     availability = await _availability(db, user_id)
     ref = draft.summary.availability_ref
@@ -1736,13 +1745,29 @@ async def get_schedule(
         )
     ).all()
     page, next_cursor = _page(list(rows), limit, cursor, "id")
+    links = (
+        (
+            await db.scalars(
+                select(CalendarEventLink)
+                .where(
+                    CalendarEventLink.user_id == owner,
+                    CalendarEventLink.session_id.in_([item.id for item in page]),
+                    CalendarEventLink.is_current.is_(True),
+                )
+                .order_by(CalendarEventLink.id)
+            )
+        ).all()
+        if page
+        else []
+    )
+    link_ids = {item.session_id: str(item.id) for item in links}
     version = await _schedule_revision(db, owner)
     latest = await db.scalar(
         select(VersionRow).where(VersionRow.user_id == owner, VersionRow.version_number == version)
     )
     return ScheduleData(
         schedule_revision=version,
-        items=[_session_schema(item) for item in page],
+        items=[_session_schema(item, link_ids.get(item.id)) for item in page],
         next_cursor=next_cursor,
         alarm_sync_state=latest.alarm_sync_state if latest else "not_required",
         calendar_sync_summary=await _calendar_state(db, owner, version),

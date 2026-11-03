@@ -1,6 +1,6 @@
 # Tầng Service điều phối nghiệp vụ cho bản nháp công việc UF1 (PlanningDraft)
 import json
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any, Literal, cast
 from uuid import NAMESPACE_DNS, UUID, uuid4, uuid5
 
@@ -14,7 +14,7 @@ from app.models.planning import PlanningDraft as PlanningDraftModel
 from app.models.settings import Availability as AvailabilityModel
 from app.models.user import User as UserModel
 from app.models.user import UserPreference as UserPreferenceModel
-from app.schemas.availability import Availability
+from app.schemas.availability import Availability, DraftAvailability
 from app.schemas.common import (
     AvailabilityRef,
     CandidateRef,
@@ -34,8 +34,14 @@ from app.schemas.draft import (
     TaskSummary,
     UpdateDraftRequest,
 )
-from app.schemas.task import LLMTaskExtractionPayload, TaskExtractionResult
+from app.schemas.task import (
+    ExtractedFreeWindowSchema,
+    ExtractedTimeConstraint,
+    LLMTaskExtractionPayload,
+    TaskExtractionResult,
+)
 from app.services.ai_service import ai_service
+from app.services.command_service import durable_command
 from app.services.scheduler_engine import validate_planning_prerequisites
 
 
@@ -152,6 +158,7 @@ def _serialize_summary_payload(draft: PlanningDraft) -> dict[str, Any]:
     """Đóng gói TaskSummary kèm metadata API vào cột JSON summary của bảng planning_drafts."""
     summary_dict = draft.summary.model_dump(mode="json")
     summary_dict["_api_meta"] = {
+        "ai_context": draft.ai_context,
         "draft_id": draft.draft_id,
         "candidate_ref": (
             draft.candidate_ref.model_dump(mode="json") if draft.candidate_ref is not None else None
@@ -176,6 +183,7 @@ def _row_to_schema(row: PlanningDraftModel, fallback_draft_id: str | None = None
         str(row.source_thought_id) if row.source_thought_id else None
     )
     return PlanningDraft(
+        ai_context=api_meta.get("ai_context") or {},
         draft_id=draft_id_str,
         client_draft_id=row.client_draft_id,
         stage=row.stage,
@@ -339,7 +347,10 @@ async def _persist_draft_to_db(
                     )
                 for name, value in values.items():
                     setattr(row, name, value)
-        await db.commit()
+        if not db.info.get("defer_command_commit"):
+            await db.commit()
+        else:
+            await db.flush()
     _FAKE_DRAFTS_BY_OWNER[(user_id, draft.draft_id)] = draft
     _CLIENT_DRAFT_INDEX[(user_id, draft.client_draft_id)] = draft.draft_id
 
@@ -368,12 +379,125 @@ async def get_user_availability(user_id: str, db: AsyncSession) -> Availability 
     )
 
 
+def _free_windows(availability: Availability | DraftAvailability) -> list[dict[str, Any]]:
+    windows = []
+    for rule in availability.weekly_rules:
+        windows.append(
+            {
+                "kind": "weekly_rule",
+                "weekday": rule.weekday,
+                "start_local": rule.start_local.strftime("%H:%M"),
+                "end_local": rule.end_local.strftime("%H:%M"),
+                "raw_phrase": f"Thứ ISO {rule.weekday}: {rule.start_local:%H:%M}–{rule.end_local:%H:%M}",
+            }
+        )
+    for override in availability.date_overrides:
+        for interval in override.intervals:
+            windows.append(
+                {
+                    "kind": "specific_date",
+                    "date": override.date.isoformat(),
+                    "start_local": interval.start_local.strftime("%H:%M"),
+                    "end_local": interval.end_local.strftime("%H:%M"),
+                    "raw_phrase": f"{override.date}: {interval.start_local:%H:%M}–{interval.end_local:%H:%M}",
+                }
+            )
+    return windows
+
+
+def _merge_free_windows(previous, incoming):
+    """Chỉ hoàn thiện cùng ngày/thứ và các mốc đã rõ phải khớp; không đoán ngày."""
+    result = list(previous)
+    for item in incoming:
+        identity = (item.kind, item.weekday, item.date, item.start_local, item.end_local)
+        if any(
+            (old.kind, old.weekday, old.date, old.start_local, old.end_local) == identity
+            and old.is_ambiguous == item.is_ambiguous
+            for old in result
+        ):
+            continue
+        result = [
+            old
+            for old in result
+            if not (
+                old.is_ambiguous
+                and not item.is_ambiguous
+                and (old.kind, old.weekday, old.date) == (item.kind, item.weekday, item.date)
+                and (old.start_local is None or old.start_local == item.start_local)
+                and (old.end_local is None or old.end_local == item.end_local)
+            )
+        ]
+        result.append(item)
+    return result
+
+
+def _availability_proposal(extracted, draft, legacy, timezone_name):
+    """Trả bản giờ rảnh hợp lệ + các khung mơ hồ còn cần user làm rõ."""
+    context = draft.ai_context
+    base = draft.summary.availability or legacy
+    previous = [
+        ExtractedFreeWindowSchema.model_validate(item)
+        for item in context.get("availability_windows", _free_windows(base) if base else [])
+    ]
+    incoming = extracted.structured_free_windows
+    if not incoming and extracted.availability_update_mode != "replace":
+        return None, None
+    windows = (
+        list(incoming)
+        if extracted.availability_update_mode == "replace"
+        else _merge_free_windows(previous, incoming)
+    )
+    weekly, dates, unresolved = [], {}, []
+    for item in windows:
+        if item.is_ambiguous:
+            unresolved.append(item.model_dump(mode="json"))
+            continue
+        interval = {"start_local": item.start_local, "end_local": item.end_local}
+        try:
+            if item.kind == "weekly_rule":
+                checked = DraftAvailability(
+                    timezone=timezone_name, weekly_rules=[{**interval, "weekday": item.weekday}]
+                )
+                weekly.extend(checked.weekly_rules)
+            else:
+                checked = DraftAvailability(
+                    timezone=timezone_name,
+                    date_overrides=[{"date": item.date, "intervals": [interval]}],
+                )
+                dates.setdefault(item.date, []).extend(checked.date_overrides[0].intervals)
+        except ValidationError:
+            item.is_ambiguous = True
+            unresolved.append(item.model_dump(mode="json"))
+    # Không để AI làm mất ngoại lệ ngày không rảnh đã có chỉ vì nó không có window.
+    if base is not None and extracted.availability_update_mode != "replace":
+        for override in base.date_overrides:
+            if not override.intervals:
+                dates.setdefault(override.date.isoformat(), [])
+    proposal = DraftAvailability(
+        timezone=timezone_name,
+        weekly_rules=weekly,
+        date_overrides=[{"date": day, "intervals": values} for day, values in dates.items()],
+    )
+    # Giữ tương thích nháp cũ: AI chỉ nhắc lại giờ đã chọn không tự nâng sang nguồn mới.
+    if draft.summary.availability is None and legacy is not None and not unresolved:
+        old = DraftAvailability(
+            timezone=legacy.timezone,
+            weekly_rules=legacy.weekly_rules,
+            date_overrides=legacy.date_overrides,
+        )
+        if proposal == old:
+            return None, None
+    return proposal, (windows, unresolved)
+
+
 async def _summary_availability(
     summary: TaskSummary,
     user_id: str,
     db: AsyncSession | None,
 ) -> Availability | None:
     """Không tự nhận giờ rảnh do AI suy ra là nguồn đã được user xác nhận."""
+    if summary.availability is not None:
+        return None
     ref = summary.availability_ref
     if db is None or ref is None:
         return None
@@ -394,6 +518,7 @@ async def _evaluate_summary_for_user(
     can_plan, issues = validate_planning_prerequisites(
         summary.model_copy(update={"clarification_issues": []}),
         availability,
+        reference_now=datetime.now(UTC),
     )
     if (
         availability is not None
@@ -414,6 +539,13 @@ async def _evaluate_summary_for_user(
 
 def _evaluate_summary_issues(summary: TaskSummary) -> tuple[list[ClarificationIssue], bool]:
     """Kiểm tra 4 thông tin bắt buộc của UF1 (Nội dung, Phạm vi, Khung giờ rảnh, Thời hạn) để lập danh sách câu hỏi."""
+    if summary.availability is not None:
+        can_plan, issues = validate_planning_prerequisites(
+            summary.model_copy(update={"clarification_issues": []}),
+            None,
+            reference_now=datetime.now(UTC),
+        )
+        return issues, can_plan
     issues: list[ClarificationIssue] = []
     if not summary.description and not summary.title:
         issues.append(
@@ -469,6 +601,7 @@ def _build_initial_summary(raw_input: str | None, summary_in: SummaryInput | Non
             "goal",
             "scope",
             "time_constraint",
+            "availability",
             "availability_ref",
             "importance",
         ):
@@ -487,7 +620,10 @@ def _build_initial_summary(raw_input: str | None, summary_in: SummaryInput | Non
             scope=summary_in.scope,
             extra_requirements=list(summary_in.extra_requirements),
             time_constraint=summary_in.time_constraint,
-            availability_ref=summary_in.availability_ref,
+            availability=summary_in.availability,
+            availability_ref=summary_in.availability_ref
+            if summary_in.availability is None
+            else None,
             importance=summary_in.importance,
             clarification_issues=[],
             can_plan=False,
@@ -519,6 +655,7 @@ def _build_initial_summary(raw_input: str | None, summary_in: SummaryInput | Non
     )
 
 
+@durable_command("create_draft", PlanningDraft)
 async def create_draft(
     *,
     user_id: str,
@@ -530,7 +667,7 @@ async def create_draft(
     if db is not None:
         await ensure_dev_seed_in_db(db)
     fingerprint = json.dumps(payload.model_dump(mode="json"), sort_keys=True)
-    idem_record = _CREATE_IDEMPOTENCY_STORE.get((user_id, idempotency_key))
+    idem_record = _CREATE_IDEMPOTENCY_STORE.get((user_id, idempotency_key)) if db is None else None
     if idem_record is not None:
         saved_fingerprint, saved_draft_id = idem_record
         if saved_fingerprint != fingerprint:
@@ -688,6 +825,7 @@ async def get_draft_by_id(
     return in_mem
 
 
+@durable_command("patch_draft", PlanningDraft)
 async def patch_draft(
     *,
     user_id: str,
@@ -704,7 +842,7 @@ async def patch_draft(
         },
         sort_keys=True,
     )
-    idem_record = _PATCH_IDEMPOTENCY_STORE.get((user_id, idempotency_key))
+    idem_record = _PATCH_IDEMPOTENCY_STORE.get((user_id, idempotency_key)) if db is None else None
     if idem_record is not None:
         saved_fingerprint, saved_result = idem_record
         if saved_fingerprint != fingerprint:
@@ -761,7 +899,12 @@ async def patch_draft(
     new_summary = draft.summary
     summary_changed = False
     if "summary" in changes_fields and payload.changes.summary is not None:
-        summary_patch = payload.changes.summary.model_dump(exclude_unset=True)
+        summary_patch = {
+            k: getattr(payload.changes.summary, k) for k in payload.changes.summary.model_fields_set
+        }
+        if "availability" in summary_patch:
+            # User sửa/xóa giờ riêng không có nghĩa đồng ý quay về giờ chung cũ.
+            summary_patch["availability_ref"] = None
         current_summary_dict = draft.summary.model_dump()
         updated_fields: list[str] = []
         for field_name, new_val in summary_patch.items():
@@ -775,11 +918,19 @@ async def patch_draft(
         reviewed_fields = {
             issue.field_path
             for issue in draft.summary.clarification_issues
-            if issue.code.startswith("AI_") and issue.field_path in summary_patch
+            if issue.code.startswith("AI_")
+            and issue.field_path.split(".")[0] in summary_patch
+            and (
+                len(payload.changes.summary.model_fields_set) == 1
+                or summary_patch[issue.field_path.split(".")[0]]
+                != current_summary_dict.get(issue.field_path.split(".")[0])
+            )
         }
         if reviewed_fields:
             summary_changed = True
-            updated_fields.extend(reviewed_fields - set(updated_fields))
+            updated_fields.extend(
+                {field.split(".")[0] for field in reviewed_fields} - set(updated_fields)
+            )
 
         if summary_changed:
             next_summary_rev = draft.summary_revision + 1
@@ -800,6 +951,13 @@ async def patch_draft(
                 }
             )
             issues, can_plan = await _evaluate_summary_for_user(merged_summary, user_id, db)
+            # Recompute structural errors, but keep AI issues the user has not reviewed.
+            issues.extend(
+                issue
+                for issue in draft.summary.clarification_issues
+                if issue.code.startswith("AI_") and issue.field_path not in reviewed_fields
+            )
+            can_plan = can_plan and not any(issue.blocking for issue in issues)
             new_summary = merged_summary.model_copy(
                 update={
                     "clarification_issues": issues,
@@ -828,9 +986,18 @@ async def patch_draft(
         new_summary_confirmed_revision = draft.summary_confirmed_revision
         new_stage = draft.stage
 
+    next_context = dict(draft.ai_context)
+    if payload.changes.summary is not None:
+        edited = payload.changes.summary.model_fields_set
+        if "time_constraint" in edited:
+            next_context.pop("time_constraint", None)
+        if "availability" in edited:
+            next_context.pop("availability_windows", None)
+            next_context.pop("availability_proposal", None)
     updated_draft = draft.model_copy(
         update={
             "raw_input": new_raw_input,
+            "ai_context": next_context,
             "summary": new_summary,
             "user_step_proposal": new_user_step_proposal,
             "summary_revision": new_summary_revision,
@@ -844,6 +1011,7 @@ async def patch_draft(
     return updated_draft
 
 
+@durable_command("confirm_draft_summary", ConfirmSummaryResult)
 async def confirm_draft_summary(
     *,
     user_id: str,
@@ -860,7 +1028,9 @@ async def confirm_draft_summary(
         },
         sort_keys=True,
     )
-    idem_record = _CONFIRM_SUMMARY_IDEMPOTENCY_STORE.get((user_id, idempotency_key))
+    idem_record = (
+        _CONFIRM_SUMMARY_IDEMPOTENCY_STORE.get((user_id, idempotency_key)) if db is None else None
+    )
     if idem_record is not None:
         saved_fingerprint, saved_result = idem_record
         if saved_fingerprint != fingerprint:
@@ -919,9 +1089,15 @@ async def confirm_draft_summary(
     avail_ref = draft.summary.availability_ref
     if db is None and avail_ref is not None:
         current_avail_rev = _CURRENT_AVAILABILITY_REVISIONS.get(
-            (user_id, avail_ref.availability_id)
+            (
+                user_id,
+                avail_ref.availability_id
+                if hasattr(avail_ref, "availability_id")
+                else avail_ref["availability_id"],
+            )
         )
-        if current_avail_rev is not None and avail_ref.revision != current_avail_rev:
+        ref_rev = avail_ref.revision if hasattr(avail_ref, "revision") else avail_ref["revision"]
+        if current_avail_rev is not None and ref_rev != current_avail_rev:
             raise AppError(
                 status_code=409,
                 code="SOURCE_CHANGED",
@@ -931,8 +1107,22 @@ async def confirm_draft_summary(
             )
 
     # 4. Đóng dấu xác nhận UF1 (T04: Chỉ cập nhật summary_confirmed_revision và stage, TUYỆT ĐỐI chưa tạo Task)
+    confirmed_summary = draft.summary
+    if draft.summary.availability is not None:
+        confirmed_summary = draft.summary.model_copy(
+            update={
+                "field_sources": {
+                    **draft.summary.field_sources,
+                    "availability": FieldSource(
+                        source="user_confirmed",
+                        source_ref=f"summary_revision:{draft.summary_revision}",
+                    ),
+                }
+            }
+        )
     confirmed_draft = draft.model_copy(
         update={
+            "summary": confirmed_summary,
             "stage": "summary_confirmed",
             "summary_confirmed_revision": draft.summary_revision,
         }
@@ -953,6 +1143,7 @@ async def confirm_draft_summary(
     return result
 
 
+@durable_command("analyze_draft", PlanningDraft)
 async def analyze_draft(
     *,
     user_id: str,
@@ -969,7 +1160,7 @@ async def analyze_draft(
         },
         sort_keys=True,
     )
-    idem_record = _ANALYZE_IDEMPOTENCY_STORE.get((user_id, idempotency_key))
+    idem_record = _ANALYZE_IDEMPOTENCY_STORE.get((user_id, idempotency_key)) if db is None else None
     if idem_record is not None:
         saved_fingerprint, saved_draft = idem_record
         if saved_fingerprint != fingerprint:
@@ -1009,35 +1200,42 @@ async def analyze_draft(
     summary = snapshot_draft.summary
     tc = summary.time_constraint
     timezone_name = (
-        tc.input_timezone
+        summary.availability.timezone
+        if summary.availability is not None
+        else tc.input_timezone
         if tc is not None
-        else (availability.timezone if availability is not None else "Asia/Ho_Chi_Minh")
+        else availability.timezone
+        if availability is not None
+        else "Asia/Ho_Chi_Minh"
     )
-    windows = []
-    if availability is not None:
-        for rule in availability.weekly_rules:
-            windows.append(
-                {
-                    "kind": "weekly_rule",
-                    "weekday": rule.weekday,
-                    "start_local": rule.start_local.strftime("%H:%M"),
-                    "end_local": rule.end_local.strftime("%H:%M"),
-                    "raw_phrase": f"Thứ {rule.weekday}: {rule.start_local:%H:%M}–{rule.end_local:%H:%M}",
-                }
-            )
-        for override in availability.date_overrides:
-            for interval in override.intervals:
-                windows.append(
-                    {
-                        "kind": "specific_date",
-                        "date": override.date.isoformat(),
-                        "start_local": interval.start_local.strftime("%H:%M"),
-                        "end_local": interval.end_local.strftime("%H:%M"),
-                        "raw_phrase": f"{override.date}: {interval.start_local:%H:%M}–{interval.end_local:%H:%M}",
-                    }
+    base = summary.availability or availability
+    windows = snapshot_draft.ai_context.get(
+        "availability_windows", _free_windows(base) if base else []
+    )
+    # Drafts may retain long titles; validate before building the narrower AI DTO.
+    if summary.title is not None and len(summary.title) > 100:
+        raise AppError(
+            status_code=422,
+            code="VALIDATION_ERROR",
+            message="Tiêu đề quá dài để phân tích. Hãy rút gọn tiêu đề, giữ chi tiết trong nội dung.",
+            field_errors=[
+                FieldError(
+                    field_path="summary.title",
+                    code="string_too_long",
+                    message="Tiêu đề tối đa 100 ký tự; nội dung nhập được giữ nguyên.",
                 )
+            ],
+            next_action="fix_fields",
+        )
     previous = LLMTaskExtractionPayload(
         title=summary.title,
+        goal=summary.goal,
+        time_constraint=ExtractedTimeConstraint.model_validate(
+            tc.model_dump(mode="json")
+            if tc
+            else snapshot_draft.ai_context.get("time_constraint") or {}
+        ),
+        clarification_issues=[i for i in summary.clarification_issues if i.code.startswith("AI_")],
         content=summary.description,
         scope=summary.scope,
         deadline=(tc.deadline_at if tc.kind == "deadline" else tc.finish_by_at) if tc else None,
@@ -1086,6 +1284,16 @@ async def analyze_draft(
             next_action="reload_and_review",
         )
 
+    if availability is not None:
+        fresh_availability = await _summary_availability(current_draft.summary, user_id, db)
+        if fresh_availability is None or fresh_availability.revision != availability.revision:
+            raise AppError(
+                status_code=409,
+                code="SOURCE_CHANGED",
+                message="Bộ giờ rảnh đã đổi trong lúc AI xử lý; hãy tải lại và phân tích lại.",
+                next_action="reload_and_review",
+            )
+
     next_summary_rev = current_draft.summary_revision + 1
     next_input_rev = current_draft.planning_input_revision + 1
     new_field_sources = dict(current_draft.summary.field_sources)
@@ -1095,6 +1303,7 @@ async def analyze_draft(
     for field_name, proposed_val in (
         ("title", extracted.title),
         ("description", extracted.content),
+        ("goal", extracted.goal),
         ("scope", extracted.scope),
     ):
         current_value = getattr(current_draft.summary, field_name)
@@ -1111,7 +1320,13 @@ async def analyze_draft(
                     code="AI_FIELD_REVIEW_REQUIRED",
                     field_path=field_name,
                     message="Kết quả AI khác trường bạn đã chỉnh/xác nhận; giá trị cũ được giữ nguyên.",
-                    question=f"Bạn có muốn đổi trường {field_name} thành: {proposed_val}? Hãy sửa trực tiếp nếu đồng ý.",
+                    question=(
+                        f"Bạn muốn giữ giá trị hiện tại hay đổi trường {field_name} thành: {proposed_val}? "
+                        + extracted.field_review_notes.get(
+                            field_name,
+                            "Chưa đủ dữ liệu để kết luận bất lợi; bạn có quyền giữ giá trị cũ.",
+                        )
+                    ),
                     blocking=True,
                 )
             )
@@ -1121,40 +1336,163 @@ async def analyze_draft(
             source="ai_suggested",
             source_ref=f"summary_revision:{next_summary_rev}",
         )
-    requirements = list(
-        dict.fromkeys(
-            [
-                *current_draft.summary.extra_requirements,
-                *extracted.extra_requirements,
-            ]
-        )
-    )
+    requirements = list(current_draft.summary.extra_requirements)
+    seen_requirements = {item.strip() for item in requirements}
+    for item in extracted.extra_requirements:
+        cleaned = item.strip()
+        if cleaned and cleaned not in seen_requirements:
+            requirements.append(cleaned)
+            seen_requirements.add(cleaned)
     if requirements != current_draft.summary.extra_requirements:
         merged_updates["extra_requirements"] = requirements
         new_field_sources["extra_requirements"] = FieldSource(
             source="ai_suggested",
             source_ref=f"summary_revision:{next_summary_rev}",
         )
-    current_tc = current_draft.summary.time_constraint
-    if extracted.deadline is not None:
-        end = extracted.deadline
+    context = dict(current_draft.ai_context)
+    proposed_availability, availability_state = _availability_proposal(
+        extracted, current_draft, availability, timezone_name
+    )
+    if availability_state is not None:
+        proposal_windows, unresolved = availability_state
+        old_availability = current_draft.summary.availability
+        source = current_draft.summary.field_sources.get("availability")
+        protected = source is not None and source.source in {"user_input", "user_confirmed"}
+        if proposed_availability != old_availability and protected:
+            context["availability_proposal"] = proposed_availability.model_dump(mode="json")
+            proposed_label = "; ".join(
+                w["raw_phrase"] for w in _free_windows(proposed_availability)
+            )
+            proposed_label = proposed_label or "không còn khung giờ rảnh"
+            ai_issues.append(
+                ClarificationIssue(
+                    code="AI_AVAILABILITY_REVIEW_REQUIRED",
+                    field_path="availability",
+                    message="AI đề xuất giờ rảnh khác giá trị bạn đã nhập; giờ cũ được giữ nguyên.",
+                    question=f"Bạn muốn giữ giờ rảnh hiện tại hay sửa thành {proposed_label} "
+                    f"({proposed_availability.timezone})? "
+                    + extracted.field_review_notes.get("availability", ""),
+                    blocking=True,
+                )
+            )
+        else:
+            context["availability_windows"] = [
+                item.model_dump(mode="json") for item in proposal_windows
+            ]
+            if unresolved:
+                phrases = "; ".join(item["raw_phrase"] for item in unresolved)
+                ai_issues.append(
+                    ClarificationIssue(
+                        code="AI_AVAILABILITY_INCOMPLETE",
+                        field_path="availability",
+                        message="Một số khung giờ rảnh chưa đủ ngày/giờ hợp lệ.",
+                        question=f"Bạn làm rõ ngày và giờ bắt đầu–kết thúc cho: {phrases}",
+                        blocking=True,
+                    )
+                )
+            else:
+                context.pop("availability_windows", None)
+            if proposed_availability != old_availability:
+                merged_updates["availability"] = proposed_availability
+                merged_updates["availability_ref"] = None
+                new_field_sources["availability"] = FieldSource(
+                    source="ai_suggested", source_ref=f"summary_revision:{next_summary_rev}"
+                )
+    else:
+        unresolved = []
+    proposed_time = extracted.time_constraint
+    if proposed_time is not None:
+        old_time = current_draft.summary.time_constraint
+        values = (
+            old_time.model_dump(mode="json")
+            if old_time
+            else dict(context.get("time_constraint") or {})
+        )
+        incoming = proposed_time.model_dump(mode="json", exclude_none=True)
+        if incoming.get("kind") and incoming["kind"] != values.get("kind"):
+            values.pop("deadline_at", None)
+            values.pop("finish_by_at", None)
+        values.update(incoming)
+        context["time_constraint"] = values
+        try:
+            complete_time = TimeConstraint.model_validate(values)
+        except ValidationError:
+            complete_time = None
+            ai_issues.append(
+                ClarificationIssue(
+                    code="AI_TIME_INCOMPLETE",
+                    field_path="time_constraint",
+                    message="Thời gian trích xuất chưa đầy đủ hoặc chưa hợp lệ.",
+                    question="Bạn xác nhận kiểu thời gian, mốc bắt đầu, mốc hoàn tất và múi giờ nhé?",
+                    blocking=True,
+                )
+            )
+        if complete_time is not None and complete_time != old_time:
+            source = current_draft.summary.field_sources.get("time_constraint")
+            if (
+                old_time is not None
+                and source
+                and source.source in {"user_input", "user_confirmed"}
+            ):
+                ai_issues.append(
+                    ClarificationIssue(
+                        code="AI_TIME_REVIEW_REQUIRED",
+                        field_path="time_constraint",
+                        message="AI đề xuất thời gian khác bản bạn đã nhập; bản cũ được giữ nguyên.",
+                        question="Bạn muốn giữ thời gian cũ hay sửa theo đề xuất mới?",
+                        blocking=True,
+                    )
+                )
+            else:
+                merged_updates["time_constraint"] = complete_time
+                new_field_sources["time_constraint"] = FieldSource(
+                    source="ai_suggested", source_ref=f"summary_revision:{next_summary_rev}"
+                )
+    elif extracted.deadline is not None:
+        old_time = current_draft.summary.time_constraint
         old_end = (
-            (current_tc.deadline_at if current_tc.kind == "deadline" else current_tc.finish_by_at)
-            if current_tc
+            (old_time.deadline_at if old_time.kind == "deadline" else old_time.finish_by_at)
+            if old_time
             else None
         )
-        if old_end != end:
-            # DTO AI hiện chưa có start_at/kind: không đoán ngày bắt đầu hay đổi window thành deadline.
+        if old_end != extracted.deadline:
+            context["time_constraint"] = {"deadline_at": extracted.deadline.isoformat()}
             ai_issues.append(
                 ClarificationIssue(
                     code="AI_TIME_REVIEW_REQUIRED",
                     field_path="time_constraint",
-                    message=f"AI nhận được mốc hoàn tất {end.isoformat()}, cần kiểm tra trên biểu mẫu thời gian.",
-                    question="Bạn xác nhận mốc bắt đầu, mốc hoàn tất và kiểu deadline/khoảng thời gian giúp mình nhé?",
+                    message="Đã nhận mốc hoàn tất, cần xác nhận mốc bắt đầu và kiểu thời gian.",
+                    question="Bạn xác nhận mốc bắt đầu và thời gian hoàn tất nhé?",
                     blocking=True,
                 )
             )
+    ai_issues.extend(
+        item.model_copy(
+            update={"code": item.code if item.code.startswith("AI_") else f"AI_{item.code}"}
+        )
+        for item in extracted.clarification_issues
+    )
+    ambiguous_phrases = [w.raw_phrase for w in extracted.structured_free_windows if w.is_ambiguous]
+    generated_availability_questions = {
+        "Bạn thường rảnh vào những khung giờ nào để mình xếp phiên tập trung phù hợp?",
+        "Khung giờ "
+        + ", ".join(f"'{phrase}'" for phrase in ambiguous_phrases)
+        + " bạn có thể làm từ mấy giờ đến mấy giờ cụ thể để mình xếp lịch chuẩn xác?",
+    }
     for index, question in enumerate(dict.fromkeys(extracted.clarification_questions)):
+        if question in generated_availability_questions:
+            if any(i.field_path == "availability" for i in ai_issues):
+                continue
+            ai_issues.append(
+                ClarificationIssue(
+                    code="AI_AVAILABILITY_INCOMPLETE",
+                    field_path="availability",
+                    message=question,
+                    question=question,
+                    blocking=True,
+                )
+            )
+            continue
         ai_issues.append(
             ClarificationIssue(
                 code="AI_CLARIFICATION",
@@ -1174,6 +1512,34 @@ async def analyze_draft(
                 blocking=True,
             )
         )
+    active_keys = {
+        f"{i.code}|{i.field_path}|{i.question}": i
+        for i in current_draft.summary.clarification_issues
+        if i.code.startswith("AI_")
+    }
+    for key, issue in active_keys.items():
+        if (
+            issue.code == "AI_TIME_INCOMPLETE"
+            and proposed_time is not None
+            and complete_time is not None
+        ):
+            continue
+        if (
+            issue.code == "AI_AVAILABILITY_INCOMPLETE"
+            and availability_state is not None
+            and not unresolved
+        ):
+            continue
+        # Field-review decisions stay with the user; generic semantic resolutions
+        # must reference the exact current question and a non-empty user reply.
+        resolved = (
+            key in extracted.resolved_issue_keys
+            and bool(payload.message)
+            and issue.code == "AI_CLARIFICATION"
+        )
+        if not resolved and issue not in ai_issues:
+            ai_issues.append(issue)
+    ai_issues = list({(i.code, i.field_path, i.question): i for i in ai_issues}.values())
     merged_summary = TaskSummary.model_validate(
         {
             **current_draft.summary.model_dump(),
@@ -1197,6 +1563,7 @@ async def analyze_draft(
     updated_draft = current_draft.model_copy(
         update={
             "raw_input": new_raw_input,
+            "ai_context": context,
             "source_thought_id": (payload.source_thought_id or current_draft.source_thought_id),
             "summary": final_summary,
             "summary_revision": next_summary_rev,
