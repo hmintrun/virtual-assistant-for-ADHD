@@ -496,3 +496,61 @@ def test_evaluate_buffer_adaptation_median():
     assert suggestion["suggested_value"] == 1.30
     assert suggestion["sample_count"] == 5
     assert suggestion["model_revision"] is None  # Thuần toán học thống kê
+
+# ==============================================================================
+# 7. Test bổ sung đối chiếu PDF (AlgorithmDes.pdf UF2-4, UF2-18)
+# ==============================================================================
+
+
+def test_TC_UF2_04_empty_intervals_returns_not_feasible(sample_pref):
+    """PDF UF2-4: Thiếu giờ rảnh → chỉ là lịch nháp, KHÔNG kết luận feasible."""
+    t_start = datetime(2026, 10, 30, 8, 0, tzinfo=UTC)
+    t_end = datetime(2026, 10, 30, 18, 0, tzinfo=UTC)
+
+    steps = [CandidateStep(
+        client_step_key="s1", client_part_key="p1", title="Bước", expected_output="Kết quả",
+        order_index=0, estimated_base_seconds=1500, remaining_base_seconds=1500,
+        buffer_multiplier=1.2, estimate_source="user_confirmed", status="pending",
+    )]
+    parts = [CandidatePart(
+        client_part_key="p1", scope_description="P1", order_index=0,
+        decomposition_state="complete", scheduling_state="not_scheduled",
+    )]
+    tc = TimeConstraint(kind="deadline", start_at=t_start, deadline_at=t_end, input_timezone="UTC")
+
+    sessions, report = schedule_candidate_sessions(
+        steps=steps, effective_intervals=[], fixed_sessions=[], 
+        time_constraint=tc, pref=sample_pref, planning_parts=parts,
+    )
+
+    assert sessions == [], "Không có giờ rảnh → không được sinh Session"
+    assert report.fully_scheduled is False
+    assert report.status != "feasible", f"PDF UF2-4: thiếu giờ rảnh không được kết luận feasible, status={report.status!r}"
+
+
+def test_TC_UF2_18_scheduler_does_not_modify_time_constraint(sample_pref):
+    """PDF UF2-18: Không tự dời deadline khi tính lịch."""
+    t_start = datetime(2026, 10, 30, 8, 0, tzinfo=UTC)
+    t_end = datetime(2026, 10, 30, 18, 0, tzinfo=UTC)
+
+    tc = TimeConstraint(kind="deadline", start_at=t_start, deadline_at=t_end, input_timezone="UTC")
+    original_start = tc.start_at
+    original_deadline = tc.deadline_at
+
+    steps = [CandidateStep(
+        client_step_key="s1", client_part_key="p1", title="Bước", expected_output="Kết quả",
+        order_index=0, estimated_base_seconds=1500, remaining_base_seconds=1500,
+        buffer_multiplier=1.2, estimate_source="user_confirmed", status="pending",
+    )]
+    parts = [CandidatePart(
+        client_part_key="p1", scope_description="P1", order_index=0,
+        decomposition_state="complete", scheduling_state="not_scheduled",
+    )]
+
+    schedule_candidate_sessions(
+        steps=steps, effective_intervals=[TimeInterval(start_at=t_start, end_at=t_end)],
+        fixed_sessions=[], time_constraint=tc, pref=sample_pref, planning_parts=parts,
+    )
+
+    assert tc.start_at == original_start, "Scheduler không được đổi start_at"
+    assert tc.deadline_at == original_deadline, "PDF UF2-18: Scheduler không được tự dời deadline"
