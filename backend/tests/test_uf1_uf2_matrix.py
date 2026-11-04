@@ -957,7 +957,7 @@ class TestUF1UF2PDFAlignment(unittest.TestCase):
             summary=SummaryInput(
                 title="Báo cáo PTDL", description="Viết báo cáo 10 trang", scope="10 trang PDF",
                 time_constraint=TimeConstraint(
-                    kind="deadline", start_at=datetime.now(UTC) - timedelta(days=1),
+                    kind="deadline", start_at=datetime.now(UTC) + timedelta(hours=3),
                     deadline_at=datetime.now(UTC) + timedelta(days=deadline_days), input_timezone="Asia/Ho_Chi_Minh",
                 ),
                 availability_ref=AvailabilityRef(availability_id=str(avail_id), revision=1),
@@ -967,7 +967,7 @@ class TestUF1UF2PDFAlignment(unittest.TestCase):
             draft = await draft_service.create_draft(user_id="user_a", idempotency_key=f"draft_{cid}", payload=payload, db=db)
         async with factory() as db:
             await draft_service.confirm_draft_summary(
-                user_id="user_a", draft_id=draft.draft_id, idempotency_key=f"conf_{cid}",
+                user_id="user_a", draft_id=draft.draft_id, idempotency_key=f"conf_summary_{cid}",
                 payload=ConfirmSummaryRequest(expected_summary_revision=draft.summary_revision), db=db,
             )
         async with factory() as db:
