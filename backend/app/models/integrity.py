@@ -7,16 +7,6 @@ from app.models.base import Base
 
 def configure_integrity() -> None:
     # FK ghép ngăn gắn bản ghi của user A vào dữ liệu user B, kể cả ghi SQL trực tiếp.
-    parts = Base.metadata.tables["planning_parts"]
-    parts.append_constraint(UniqueConstraint("id", "task_id", name="uq_planning_parts_id_task"))
-    Base.metadata.tables["steps"].append_constraint(
-        ForeignKeyConstraint(
-            ["planning_part_id", "task_id"],
-            ["planning_parts.id", "planning_parts.task_id"],
-            name="fk_steps_part_task",
-            ondelete="RESTRICT",
-        )
-    )
     for table in Base.metadata.tables.values():
         table.append_constraint(CheckConstraint("revision >= 1", name="revision_positive"))
         if "user_id" in table.c:

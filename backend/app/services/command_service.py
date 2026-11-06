@@ -106,6 +106,9 @@ def durable_command(operation, result_type: type[BaseModel]):
             db = bound.arguments.get("db")
             if db is None:
                 return await function(*args, **kwargs)
+            if db.info.get("defer_command_commit"):
+                # Lệnh cha (Settings -> sửa Draft) sở hữu transaction và receipt.
+                return await function(*args, **kwargs)
             user_id = bound.arguments["user_id"]
             key = bound.arguments["idempotency_key"]
             payload = bound.arguments["payload"].model_dump(mode="json", exclude_unset=True)

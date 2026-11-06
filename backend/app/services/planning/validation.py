@@ -213,10 +213,10 @@ def validate_planning_prerequisites(
     if summary.availability is None and summary.availability_ref is None:
         issues.append(
             ClarificationIssue(
-                code="MISSING_AVAILABILITY_REF",
-                field_path="availability_ref",
-                message="Chưa chọn bộ khung giờ rảnh để xếp lịch.",
-                question="Bạn rảnh vào những khung giờ nào trong tuần để thực hiện việc này?",
+                code="MISSING_AVAILABILITY",
+                field_path="availability",
+                message="Bạn chưa cung cấp giờ rảnh để thực hiện công việc này.",
+                question="Bạn có thể thực hiện công việc này vào những ngày và khung giờ nào?",
                 blocking=True,
             )
         )

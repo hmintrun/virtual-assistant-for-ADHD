@@ -4,6 +4,7 @@ from pydantic import Field, model_validator
 from app.schemas.availability import (
     Availability,
     DateOverride,
+    DraftAvailability,
     LocalInterval,
     TaskAvailabilityLimit,
     WeeklyRule,
@@ -70,7 +71,7 @@ class AvailabilityChanges(ApiModel):
 
 
 class SettingsChanges(ApiModel):
-    availability: AvailabilityChanges | None = None
+    availability: DraftAvailability | None = None
     preferences: PreferenceChanges | None = None
 
     @model_validator(mode="after")
@@ -90,12 +91,29 @@ class SettingsChanges(ApiModel):
 class SettingsChangeRequest(ApiModel):
     expected_preferences_revision: int | None = Field(default=None, ge=0)
     expected_availability_revision: int | None = Field(default=None, ge=0)
+    target_draft_id: str | None = Field(default=None, min_length=1)
+    target_task_id: str | None = Field(default=None, min_length=1)
+    expected_summary_revision: int | None = Field(default=None, ge=1)
+    expected_planning_input_revision: int | None = Field(default=None, ge=1)
+    expected_task_revision: int | None = Field(default=None, ge=1)
     changes: SettingsChanges
 
     @model_validator(mode="after")
     def required_revisions(self):
-        if self.changes.availability is not None and self.expected_availability_revision is None:
-            raise ValueError("Đổi giờ rảnh cần expected_availability_revision; lần đầu dùng 0")
+        if self.changes.availability is not None:
+            if (self.target_draft_id is None) == (self.target_task_id is None):
+                raise ValueError("Chỉnh giờ cần chọn đúng một Draft hoặc Task đã có")
+            if self.target_draft_id is not None and (
+                self.expected_summary_revision is None
+                or self.expected_planning_input_revision is None
+            ):
+                raise ValueError("Chỉnh Draft cần hai revision hiện hành")
+            if self.target_task_id is not None and self.expected_task_revision is None:
+                raise ValueError("Chỉnh Task cần expected_task_revision")
+            if self.expected_availability_revision is not None:
+                raise ValueError("Giờ riêng không dùng revision bộ giờ chung")
+        elif self.target_draft_id is not None or self.target_task_id is not None:
+            raise ValueError("Target chỉ áp dụng khi chỉnh giờ đã khai báo")
         if self.changes.preferences is not None and self.expected_preferences_revision is None:
             raise ValueError("Đổi cài đặt cần expected_preferences_revision; lần đầu dùng 0")
         return self
@@ -108,6 +126,10 @@ class SettingsChangeResult(ApiModel):
     requested_revision: int | None
     effective_revision: int
     requested_availability_revision: int | None
-    effective_availability_revision: int
+    effective_availability_revision: int | None
     requested_changes: SettingsChanges
     pending_proposal_id: str | None
+    target_draft_id: str | None = None
+    target_task_id: str | None = None
+    summary_revision: int | None = None
+    planning_input_revision: int | None = None

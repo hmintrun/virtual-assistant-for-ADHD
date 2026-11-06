@@ -132,8 +132,8 @@ class TestAIService(unittest.TestCase):
             self.assertTrue(bool(step.micro_task_prompt.strip()), "Bước phải có micro-task 2 phút")
             self.assertEqual(step.estimated_minutes, 25)
 
-    def test_uf2_provider_failure_returns_tier3_proposal(self) -> None:
-        """Luồng UF2 phải trả đề xuất tầng 3 khi provider lỗi hoặc hết thời gian."""
+    def test_uf2_provider_failure_requires_retry(self) -> None:
+        """C01 giữ Draft khi provider lỗi, không sinh ba bước mẫu thay phạm vi user."""
         service = AIService(
             app_settings=Settings(
                 _env_file=None,
@@ -146,23 +146,15 @@ class TestAIService(unittest.TestCase):
             with (
                 self.subTest(error=type(error).__name__),
                 patch.object(service, "_execute_hedged_structured", side_effect=error),
+                self.assertRaises(TimeoutError),
             ):
-                result = asyncio.run(
+                asyncio.run(
                     service.decompose_task(
                         task_title="  Viết báo cáo môn học  ",
                         scope="Bản nháp gồm 5 trang",
                         user_focus_duration=20,
                     )
                 )
-
-                self.assertEqual(result.generation_tier, "tier_3_rule_based")
-                self.assertEqual(result.task_title, "Viết báo cáo môn học")
-                self.assertEqual([step.order_index for step in result.steps], [1, 2, 3])
-                self.assertIn("Bản nháp gồm 5 trang", result.steps[1].title)
-                for step in result.steps:
-                    self.assertEqual(step.estimated_base_seconds, 1200)
-                    self.assertTrue(step.micro_task_prompt.strip())
-                    self.assertTrue(step.expected_output)
 
     def test_tier3_fallback_uf6(self) -> None:
         """Kiểm tra Fallback Tầng 3 cho UF6: Lời khích lệ nhẹ nhàng (Guilt-free)."""

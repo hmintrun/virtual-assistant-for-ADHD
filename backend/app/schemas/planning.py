@@ -8,6 +8,7 @@ from pydantic import Field, model_validator
 from app.schemas.common import (
     ApiModel,
     BlockingReason,
+    CalendarContextRef,
     SessionSegment,
     SourceRevisions,
     TimeInterval,
@@ -15,20 +16,8 @@ from app.schemas.common import (
 from app.schemas.task import Task
 
 
-class CandidatePart(ApiModel):
-    client_part_key: str = Field(min_length=1)
-    scope_description: str = Field(min_length=1)
-    order_index: int = Field(ge=0)
-    decomposition_state: Literal["not_started", "partial", "complete"]
-    scheduling_state: Literal["not_scheduled", "partial", "complete"]
-    unexpanded_scope: str | None = None
-    rough_estimate_seconds: int | None = Field(default=None, gt=0)
-    estimate_source: str | None = None
-
-
 class CandidateStep(ApiModel):
     client_step_key: str = Field(min_length=1)
-    client_part_key: str = Field(min_length=1)
     title: str = Field(min_length=1)
     expected_output: str = Field(min_length=1)
     order_index: int = Field(ge=0)
@@ -55,33 +44,22 @@ class CandidateSession(ApiModel):
 
     @model_validator(mode="after")
     def valid_duration(self):
-        if (
-            self.scheduled_start.utcoffset() is None
-            or self.scheduled_end.utcoffset() is None
-        ):
+        if self.scheduled_start.utcoffset() is None or self.scheduled_end.utcoffset() is None:
             raise ValueError("Giờ phiên phải có múi giờ")
         if self.duration_seconds != self.work_seconds + self.rest_seconds:
             raise ValueError("Thời lượng phiên không khớp")
-        if (
-            sum(x.duration_seconds for x in self.segments if x.kind == "work")
-            != self.work_seconds
-        ):
+        if sum(x.duration_seconds for x in self.segments if x.kind == "work") != self.work_seconds:
             raise ValueError("Quãng làm chính không khớp")
-        if (
-            sum(x.duration_seconds for x in self.segments if x.kind == "rest")
-            != self.rest_seconds
-        ):
+        if sum(x.duration_seconds for x in self.segments if x.kind == "rest") != self.rest_seconds:
             raise ValueError("Quãng nghỉ không khớp")
-        if (
-            self.scheduled_end - self.scheduled_start
-        ).total_seconds() != self.duration_seconds:
+        if (self.scheduled_end - self.scheduled_start).total_seconds() != self.duration_seconds:
             raise ValueError("Giờ kết thúc không khớp")
         return self
 
 
 class CandidateVerificationScope(ApiModel):
-    scope_type: Literal["candidate_parts"] = "candidate_parts"
-    client_part_keys: list[str] = Field(min_length=1)
+    scope_type: Literal["candidate_steps"] = "candidate_steps"
+    client_step_keys: list[str] = Field(min_length=1)
     planning_horizon: TimeInterval
 
 
@@ -89,7 +67,7 @@ class PersistedVerificationScope(ApiModel):
     scope_type: Literal["persisted_schedule"] = "persisted_schedule"
     task_ids: list[str]
     session_ids: list[str]
-    planning_part_ids: list[str]
+    step_ids: list[str] = Field(default_factory=list)
     planning_horizon: TimeInterval
 
 
@@ -108,8 +86,8 @@ class FeasibilityReport(ApiModel):
     fully_scheduled: bool
     blocking_reasons: list[BlockingReason] = Field(default_factory=list)
     deficit_seconds: int | None = Field(default=None, ge=0)
-    unestimated_part_ids: list[str] = Field(default_factory=list)
-    unplanned_part_ids: list[str] = Field(default_factory=list)
+    unscheduled_step_keys: list[str] = Field(default_factory=list)
+    unexpanded_scope: str | None = None
     extension_candidate_at: datetime | None = None
 
 
@@ -119,7 +97,8 @@ class PlanCandidate(ApiModel):
     source_summary_revision: int = Field(ge=0)
     source_planning_input_revision: int = Field(ge=0)
     review_revision: int = Field(ge=0)
-    planning_parts: list[CandidatePart]
+    decomposition_state: Literal["partial", "complete"] = "complete"
+    unexpanded_scope: str | None = None
     steps: list[CandidateStep]
     sessions: list[CandidateSession]
     planning_horizon: TimeInterval
@@ -131,15 +110,18 @@ class PlanCandidate(ApiModel):
 
     @model_validator(mode="after")
     def valid_client_keys(self):
-        parts = {x.client_part_key for x in self.planning_parts}
         steps = {x.client_step_key for x in self.steps}
         sessions = {x.client_session_key for x in self.sessions}
-        if len(parts) != len(self.planning_parts) or len(steps) != len(self.steps):
-            raise ValueError("Client key phần hoặc bước bị trùng")
+        if len(steps) != len(self.steps):
+            raise ValueError("Client key bước bị trùng")
         if len(sessions) != len(self.sessions):
             raise ValueError("Client key phiên bị trùng")
-        if any(x.client_part_key not in parts for x in self.steps):
-            raise ValueError("Bước tham chiếu phần không có trong phương án")
+        if len({step.order_index for step in self.steps}) != len(self.steps):
+            raise ValueError("Thứ tự bước bị trùng")
+        if self.unexpanded_scope and self.unexpanded_scope.strip():
+            self.decomposition_state = "partial"
+        elif self.decomposition_state == "partial":
+            raise ValueError("Cần mô tả phạm vi chưa chia")
         if any(x.client_step_key not in steps for x in self.sessions):
             raise ValueError("Phiên tham chiếu bước không có trong phương án")
         return self
@@ -156,7 +138,6 @@ class ScheduleVersion(ApiModel):
 
 
 class KeyMapping(ApiModel):
-    planning_parts: dict[str, str]
     steps: dict[str, str]
     sessions: dict[str, str]
 
@@ -170,26 +151,44 @@ class ConfirmCandidateResult(ApiModel):
     calendar_sync_summary: str = Field(min_length=1)
 
 
+class ManualStepInput(ApiModel):
+    """Bước do user nhập khi chưa có Candidate; thời lượng gốc, chưa buffer."""
+
+    order_index: int = Field(ge=0)
+    title: str = Field(min_length=1, max_length=255)
+    expected_output: str = Field(min_length=1)
+    estimated_base_seconds: int = Field(gt=0)
+
+    @model_validator(mode="after")
+    def valid_content(self) -> Self:
+        self.title, self.expected_output = self.title.strip(), self.expected_output.strip()
+        if not self.title or not self.expected_output:
+            raise ValueError("Bước thủ công cần tiêu đề và đầu ra rõ ràng")
+        return self
+
+
 class GenerateCandidateRequest(ApiModel):
     source_summary_revision: int = Field(ge=0)
     source_planning_input_revision: int = Field(ge=0)
-    selected_part_keys: list[str] | None = Field(default=None, min_length=1)
+    selected_step_keys: list[str] | None = Field(default=None, min_length=1)
     planning_horizon: TimeInterval | None = None
-
-
-class CandidatePartEdit(ApiModel):
-    """Allowlist các trường được phép sửa trên một CandidatePart theo client_part_key."""
-
-    client_part_key: str = Field(min_length=1)
-    scope_description: str | None = Field(default=None, min_length=1)
-    rough_estimate_seconds: int | None = Field(default=None, gt=0)
+    calendar_context_ref: CalendarContextRef | None = None
+    manual_steps: list[ManualStepInput] | None = Field(default=None, min_length=1)
+    unexpanded_scope: str | None = None
 
     @model_validator(mode="after")
-    def validate_has_editable_field(self) -> Self:
-        if len(self.model_fields_set - {"client_part_key"}) == 0:
-            raise ValueError(
-                "Phải gửi ít nhất một trường cần sửa cho CandidatePart ngoài client_part_key."
-            )
+    def valid_manual_source(self) -> Self:
+        if self.manual_steps is None:
+            if self.unexpanded_scope is not None:
+                raise ValueError("unexpanded_scope chỉ gửi cùng manual_steps")
+            return self
+        if self.selected_step_keys is not None:
+            raise ValueError("Không chọn Steps nguồn cùng manual_steps")
+        orders = [step.order_index for step in self.manual_steps]
+        if sorted(orders) != list(range(len(orders))):
+            raise ValueError("Thứ tự bước thủ công phải liên tục từ 0 và không trùng")
+        if self.unexpanded_scope is not None:
+            self.unexpanded_scope = self.unexpanded_scope.strip() or None
         return self
 
 
@@ -229,22 +228,30 @@ class CandidateSessionEdit(ApiModel):
 
 
 class CandidateEdits(ApiModel):
-    planning_parts: list[CandidatePartEdit] | None = Field(default=None, min_length=1)
     steps: list[CandidateStepEdit] | None = Field(default=None, min_length=1)
     sessions: list[CandidateSessionEdit] | None = Field(default=None, min_length=1)
 
     @model_validator(mode="after")
     def validate_non_empty_edits(self) -> Self:
-        if not (self.planning_parts or self.steps or self.sessions):
-            raise ValueError(
-                "edits phải chứa ít nhất một thay đổi trong planning_parts, steps hoặc sessions."
-            )
+        if not (self.steps or self.sessions):
+            raise ValueError("edits phải chứa ít nhất một thay đổi trong steps hoặc sessions.")
         return self
 
 
 class UpdateCandidateRequest(ApiModel):
     expected_review_revision: int = Field(ge=0)
-    edits: CandidateEdits
+    edits: CandidateEdits | None = None
+    user_instruction: str | None = Field(default=None, min_length=1, max_length=2000)
+
+    @model_validator(mode="after")
+    def one_edit_source(self) -> Self:
+        if (self.edits is None) == (self.user_instruction is None):
+            raise ValueError("Chọn đúng một nguồn: edits hoặc user_instruction")
+        if self.user_instruction is not None:
+            self.user_instruction = self.user_instruction.strip()
+            if not self.user_instruction:
+                raise ValueError("Cần nội dung yêu cầu điều chỉnh")
+        return self
 
 
 class ConfirmCandidateRequest(ApiModel):

@@ -1,24 +1,21 @@
 """W2 persistence evidence on migrated SQLite; service/API acceptance is separate."""
 
 import asyncio
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from uuid import uuid4
 
 import httpx
 import pytest
-from pydantic import BaseModel
-from sqlalchemy import event, func, select
-from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm.exc import StaleDataError
-from test_models import make_plan
-
+from alembic.autogenerate import compare_metadata
+from alembic.migration import MigrationContext
 from app.api.deps import get_current_user
 from app.api.v1 import voice
 from app.core.database import get_db, make_engine, session_factory
 from app.core.errors import AppError
 from app.main import app
 from app.models import (
+    Base,
     CheckIn,
     CommandReceipt,
     DeviceState,
@@ -33,6 +30,11 @@ from app.models import (
 )
 from app.repositories import device_repository, run_repository, thought_repository
 from app.services import command_service, draft_service
+from pydantic import BaseModel
+from sqlalchemy import event, func, select
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm.exc import StaleDataError
+from test_models import make_plan
 
 
 @pytest.fixture
@@ -600,7 +602,8 @@ async def test_analysis_blocks_live_source_before_provider(storage, http_client,
 @pytest.mark.asyncio
 async def test_device_migration_preserves_populated_database(sqlite_migration):
     url, alembic = sqlite_migration
-    alembic("upgrade", "20261101_01")
+    # Fixture ORM hiện dùng C01; kiểm thêm DeviceState trên DB kế hoạch đã có dữ liệu.
+    alembic("upgrade", "20261103_01")
     engine = make_engine(url)
     try:
         async with session_factory(engine)() as db:
@@ -611,11 +614,13 @@ async def test_device_migration_preserves_populated_database(sqlite_migration):
     finally:
         await engine.dispose()
     alembic("upgrade", "head")
-    alembic("check")
-    alembic("downgrade", "20261101_01")
-    alembic("upgrade", "head")
+    with pytest.raises(
+        AssertionError, match="C01 downgrade requires an explicit snapshot/data recovery plan"
+    ):
+        alembic("downgrade", "base")
     reopened = make_engine(url)
     try:
+        await assert_migrated_schema(reopened)
         async with session_factory(reopened)() as db:
             assert await db.get(User, ids[0]) is not None
             assert await db.get(Task, ids[1]) is not None
@@ -624,3 +629,69 @@ async def test_device_migration_preserves_populated_database(sqlite_migration):
             assert await db.scalar(select(func.count()).select_from(DeviceState)) == 0
     finally:
         await reopened.dispose()
+
+
+@pytest.mark.asyncio
+async def test_merge_preserves_existing_device_branch(sqlite_migration):
+    url, alembic = sqlite_migration
+    alembic("upgrade", "20261105_01")
+    engine = make_engine(url)
+    try:
+        async with session_factory(engine)() as db:
+            user = User(email="existing-device@example.test", display_name="TN")
+            db.add(user)
+            await db.flush()
+            db.add(UserPreference(user_id=user.id, reminder_offsets=[300]))
+            report = device_report(
+                SimpleNamespace(owner=user.id, run_id=None, ended_at=datetime.now(UTC)),
+                3,
+                dnd_apply_state="not_applied",
+                dnd_restore_state="not_required",
+            )
+            await device_repository.save_report(db, report)
+            await db.commit()
+            owner = user.id
+    finally:
+        await engine.dispose()
+
+    alembic("upgrade", "head")
+    with pytest.raises(
+        AssertionError, match="C01 downgrade requires an explicit snapshot/data recovery plan"
+    ):
+        alembic("downgrade", "base")
+    reopened = make_engine(url)
+    try:
+        await assert_migrated_schema(reopened)
+        async with session_factory(reopened)() as db:
+            saved = await device_repository.get_device_state(db, owner, "device-1")
+            assert saved.device_report_revision == 3
+            pref = await db.scalar(select(UserPreference).where(UserPreference.user_id == owner))
+            assert pref.reminder_offsets == [300]
+    finally:
+        await reopened.dispose()
+
+
+async def assert_migrated_schema(engine):
+    """C01 giữ archive Part; mọi khác biệt ngoài archive vẫn phải làm test thất bại."""
+    legacy_columns = {"steps": {"planning_part_id"}, "plan_candidates": {"planning_parts"}}
+
+    def include_object(obj, name, type_, reflected, compare_to):
+        if type_ == "table":
+            return name != "planning_parts"
+        if type_ == "column":
+            return name not in legacy_columns.get(obj.table.name, set())
+        if type_ in ("index", "unique_constraint", "foreign_key_constraint"):
+            return not any(
+                column.name in legacy_columns.get(column.table.name, set())
+                for column in obj.columns
+            )
+        return True
+
+    def compare(connection):
+        context = MigrationContext.configure(
+            connection, opts={"compare_type": True, "include_object": include_object}
+        )
+        assert compare_metadata(context, Base.metadata) == []
+
+    async with engine.connect() as connection:
+        await connection.run_sync(compare)

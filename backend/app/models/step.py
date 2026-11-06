@@ -23,10 +23,6 @@ class Step(RecordMixin, Base):
     )
     user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"), index=True)
     task_id: Mapped[UUID] = mapped_column(ForeignKey("tasks.id", ondelete="RESTRICT"), index=True)
-    # Phần việc chính thức; candidate giữ phần chưa xác nhận trong snapshot.
-    planning_part_id: Mapped[UUID | None] = mapped_column(
-        ForeignKey("planning_parts.id", ondelete="RESTRICT"), index=True
-    )
     title: Mapped[str] = mapped_column(String(255))
     expected_output: Mapped[str | None] = mapped_column(Text)
     order_index: Mapped[int]
