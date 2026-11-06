@@ -1830,16 +1830,155 @@ def _page(
 async def list_tasks(
     *, user_id: str, db: AsyncSession, limit: int = 20, cursor: str | None = None
 ) -> TaskListData:
+    owner = draft_service.resolve_user_uuid(user_id)
     rows = (
         await db.scalars(
             select(TaskRow)
-            .where(TaskRow.user_id == draft_service.resolve_user_uuid(user_id))
+            .where(TaskRow.user_id == owner)
             .order_by(TaskRow.created_at, TaskRow.id)
+            .execution_options(populate_existing=True)
         )
     ).all()
     page, next_cursor = _page(list(rows), limit, cursor, "id")
+    if not page:
+        return TaskListData(items=[], next_cursor=None)
+
+    for row in page:
+        if row.source_draft_id is None or row.source_summary is None:
+            raise _error(
+                "SOURCE_CHANGED", "Công việc thiếu snapshot nguồn theo hợp đồng hiện hành."
+            )
+    task_ids = [item.id for item in page]
+    draft_ids = [item.source_draft_id for item in page]
+
+    # Batch 1: Drafts
+    draft_rows = (
+        (
+            await db.scalars(
+                select(DraftRow)
+                .where(DraftRow.id.in_(draft_ids), DraftRow.user_id == owner)
+                .execution_options(populate_existing=True)
+            )
+        ).all()
+        if draft_ids
+        else []
+    )
+    drafts_by_id = {
+        row.id: draft_service._row_to_schema(row, fallback_draft_id=str(row.id))
+        for row in draft_rows
+    }
+
+    # Batch 2: Steps
+    all_steps = (
+        await db.scalars(
+            select(StepRow)
+            .where(StepRow.task_id.in_(task_ids), StepRow.user_id == owner)
+            .order_by(StepRow.order_index)
+        )
+    ).all()
+    steps_by_task: dict[UUID, list[StepRow]] = {tid: [] for tid in task_ids}
+    for s in all_steps:
+        steps_by_task.setdefault(s.task_id, []).append(s)
+
+    # Batch 3: Sessions
+    all_sessions = (
+        await db.scalars(
+            select(SessionRow)
+            .join(StepRow, StepRow.id == SessionRow.step_id)
+            .where(StepRow.task_id.in_(task_ids), SessionRow.user_id == owner)
+            .order_by(SessionRow.scheduled_start)
+        )
+    ).all()
+    step_to_task = {s.id: s.task_id for s in all_steps}
+    sessions_by_task: dict[UUID, list[SessionRow]] = {tid: [] for tid in task_ids}
+    for sess in all_sessions:
+        tid = step_to_task.get(sess.step_id)
+        if tid is not None:
+            sessions_by_task.setdefault(tid, []).append(sess)
+
+    # Batch 4: Calendar links
+    session_ids = [s.id for s in all_sessions]
+    all_links = (
+        (
+            await db.scalars(
+                select(CalendarEventLink)
+                .where(
+                    CalendarEventLink.user_id == owner,
+                    CalendarEventLink.session_id.in_(session_ids),
+                    CalendarEventLink.is_current.is_(True),
+                )
+                .order_by(CalendarEventLink.id)
+            )
+        ).all()
+        if session_ids
+        else []
+    )
+    link_ids = {item.session_id: str(item.id) for item in all_links}
+
+    # Batch 5: Task planning states
+    from app.services.task_state_service import get_task_planning_states
+
+    task_states = await get_task_planning_states(db, owner, task_ids)
+
+    # Construct Task DTOs in-memory without extra DB queries
+    tasks: list[Task] = []
+    for row in page:
+        task_id = str(row.id)
+        draft = drafts_by_id.get(row.source_draft_id)
+        if draft is None:
+            raise _error("RESOURCE_NOT_FOUND", "Không tìm thấy bản nháp.", 404, "reload")
+        step_rows = steps_by_task.get(row.id, [])
+        session_rows = sessions_by_task.get(row.id, [])
+        state = task_states[row.id]
+
+        steps = [
+            Step.model_validate(
+                dict(
+                    step_id=str(step.id),
+                    task_id=task_id,
+                    title=step.title,
+                    expected_output=step.expected_output,
+                    order_index=step.order_index,
+                    estimated_base_seconds=step.estimated_base_seconds,
+                    remaining_base_seconds=step.remaining_base_seconds,
+                    buffer_multiplier=step.buffer_multiplier,
+                    estimate_source=step.estimate_source,
+                    status=step.status,
+                )
+            )
+            for step in step_rows
+        ]
+        tasks.append(
+            Task.model_validate(
+                dict(
+                    task_id=task_id,
+                    title=row.title,
+                    description=row.description,
+                    scope=row.scope,
+                    extra_requirements=row.extra_requirements or [],
+                    time_constraint=row.time_constraint,
+                    importance=row.importance,
+                    status=row.status,
+                    source_draft_id=draft.draft_id,
+                    decomposition_state=state.decomposition_state,
+                    scheduling_state=state.scheduling_state,
+                    availability_ref=row.availability_ref,
+                    revision=row.revision,
+                    availability=row.availability,
+                    source_summary_revision=row.source_summary_revision,
+                    source_planning_input_revision=row.source_planning_input_revision,
+                    unexpanded_scope=row.unexpanded_scope,
+                    steps=steps,
+                    sessions=[
+                        _session_schema(item, link_ids.get(item.id)) for item in session_rows
+                    ],
+                    source_summary=row.source_summary,
+                )
+            )
+        )
+
     return TaskListData(
-        items=[await get_task_by_id(user_id=user_id, task_id=str(item.id), db=db) for item in page],
+        items=tasks,
         next_cursor=next_cursor,
     )
 
