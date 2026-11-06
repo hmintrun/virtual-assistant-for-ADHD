@@ -117,3 +117,51 @@ class CalendarContext(StrictSchema):
     manual_busy_intervals: list[ManualBusyInterval] = Field(default_factory=list)
     excluded_sources: list[ExcludedCalendarSource] = Field(default_factory=list)
     selected_calendar_sources: list[CalendarSource] = Field(default_factory=list)
+
+
+
+class OAuthAuthUrlResponse(StrictSchema):
+    """URL dẫn tới màn hình đồng ý OAuth 2.0 của Google."""
+
+    auth_url: str
+
+
+class CalendarConnectionRead(StrictSchema):
+    """Thông tin hiển thị kết nối tài khoản lịch O23."""
+
+    connection_id: str
+    provider: str = "google"
+    account_ref: str
+    connection_state: str
+    read_calendar_ids: list[str] = Field(default_factory=list)
+    write_calendar_id: str | None = None
+    granted_scopes: list[str] = Field(default_factory=list)
+    last_successful_sync_at: datetime | None = None
+
+
+class CalendarSummaryItem(StrictSchema):
+    """Tóm tắt một lịch cụ thể của người dùng trong Google Calendar."""
+
+    id: str
+    summary: str
+    description: str | None = None
+    primary: bool = False
+    access_role: str = "reader"
+    background_color: str | None = None
+    selected_for_read: bool = False
+    selected_for_write: bool = False
+
+
+class CalendarListResponse(StrictSchema):
+    """Danh sách các lịch mà người dùng sở hữu hoặc có quyền truy cập."""
+
+    connection_id: str
+    account_ref: str
+    items: list[CalendarSummaryItem] = Field(default_factory=list)
+
+
+class CalendarSelectionUpdateRequest(StrictSchema):
+    """Yêu cầu cập nhật các lịch được chọn để đọc giờ bận và ghi session."""
+
+    read_calendar_ids: list[str] = Field(default_factory=list)
+    write_calendar_id: str | None = None
