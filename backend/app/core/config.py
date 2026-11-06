@@ -57,6 +57,26 @@ class Settings(BaseSettings):
     GROQ_SECONDARY_FALLBACK_MODEL: str = "openai/gpt-oss-20b"
     GROQ_STT_MODEL: str = "whisper-large-v3-turbo"
 
+    # Tích hợp Google Calendar (A22.1 — O23 CalendarConnection & Event Ingestion)
+    # Mode "fake": chạy mock adapter hoàn toàn offline, an toàn cho dev/CI/unit test.
+    # Mode "real": gọi live Google Calendar API v3 qua httpx bằng token/credentials.
+    CALENDAR_PROVIDER_MODE: Literal["real", "fake"] = "fake"
+    GOOGLE_OAUTH_CLIENT_ID: str = Field(
+        default="",
+        repr=False,
+        description="OAuth 2.0 Client ID đăng ký trên Google Cloud Console.",
+    )
+    GOOGLE_OAUTH_CLIENT_SECRET: str = Field(
+        default="",
+        repr=False,
+        description="OAuth 2.0 Client Secret; ẩn hoàn toàn khỏi log/repr để bảo mật.",
+    )
+    GOOGLE_OAUTH_REDIRECT_URI: str = "http://localhost:8000/api/v1/calendars/oauth2callback"
+    GOOGLE_CALENDAR_DEFAULT_SCOPES: list[str] = [
+        "https://www.googleapis.com/auth/calendar.readonly",
+        "https://www.googleapis.com/auth/calendar.events",
+    ]
+
     # Voice STT (V01 & A21) — chọn sau khảo sát STT tiếng Việt 01/11/2026: Gemini Transcribe smart.
     # Dự phòng khi Backend lỗi/mất mạng nằm ở Mobile (speech_to_text on-device).
     VOICE_STT_PROVIDER: Literal["gemini", "fake"] = "gemini"
@@ -121,6 +141,23 @@ class Settings(BaseSettings):
         """Kiểm tra đã cấu hình GROQ_API_KEY hợp lệ (khác rỗng và khác giá trị mẫu)."""
         cleaned = self.GROQ_API_KEY.strip()
         return bool(cleaned and cleaned != "your-groq-api-key-here")
+
+    @property
+    def has_google_oauth_credentials(self) -> bool:
+        """Kiểm tra đã cấu hình đủ Client ID và Client Secret cho Google OAuth 2.0."""
+        client_id = self.GOOGLE_OAUTH_CLIENT_ID.strip()
+        client_secret = self.GOOGLE_OAUTH_CLIENT_SECRET.strip()
+        return bool(
+            client_id
+            and client_id != "your-google-oauth-client-id-here.apps.googleusercontent.com"
+            and client_secret
+            and client_secret != "your-google-oauth-client-secret-here"
+        )
+
+    @property
+    def is_calendar_real_mode(self) -> bool:
+        """Kiểm tra hệ thống có đang bật mode gọi Google Calendar thật hay không."""
+        return self.CALENDAR_PROVIDER_MODE == "real" and self.has_google_oauth_credentials
 
 
 @lru_cache(maxsize=1)
