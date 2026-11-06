@@ -1,5 +1,7 @@
 # Kiểm chứng và sửa Backend local — 07/11/2026
 
+> **Cập nhật cuối 07/11/2026:** Người dùng chọn hợp nhất commit sửa local và giữ các commit remote. Trạng thái hiện hành là mục cuối: giữ lịch sử backend đến `5e72054`, commit local `dc388e7` và lịch sử PR #10; các mục trước là bằng chứng theo từng giai đoạn.
+
 ## Nguồn và phạm vi
 
 - Repository: `D:\HCMUS\CT\ProActive`, nhánh `backend`, HEAD `09f19b9`.
@@ -75,3 +77,16 @@ Commit sửa local: `dc388e7`. Nhánh PR `codex/backend-local-verification-20261
 Suite chạy từ checkout PR độc lập đạt **81 passed, 2 subtests passed**; không cần file untracked `test_adaptation.py` hoặc `_temp/c01_tests`. Ruff và ty toàn backend đều đạt; diffcheck các file sửa của lượt này đạt. Diff toàn PR còn 8 cảnh báo whitespace kế thừa từ tài liệu `UF3_UF4_DEEP_DIVE_ANALYSIS.md` đã có trong lịch sử local; không sửa nội dung ngoài phạm vi để che cảnh báo. Số 118 test ở mục trước là kết quả working tree local có thêm suite adaptation untracked của tác giả, không dùng làm số test của artifact PR.
 
 Vẫn giữ giới hạn PostgreSQL SQL export, provider giả/SQLite và cảnh báo loop-scope pytest-asyncio; chưa nghiệm thu PostgreSQL server, AI/Calendar hoặc Android thật.
+
+
+## Hợp nhất backend, giữ các commit remote — 07/11/2026
+
+Theo lựa chọn của người dùng, giữ toàn bộ lịch sử remote backend `5e72054` (30 commit ngoài nền local), hợp nhất commit sửa `dc388e7` và giữ lịch sử nhánh PR #10 tại `63d1343`. Không force-push hoặc thay remote bằng cây local; không làm mất các tính năng storage/DeviceState/guardrails/migration đã tích hợp.
+
+So với remote trước hợp nhất, production chỉ thêm chuẩn hóa AvailabilityRef model/dict ở nhánh confirm legacy. Tier 3, keyed adjustment, migration PostgreSQL và các regression remote được giữ. Test AI khôi phục assertion mạnh hơn và thêm kiểm expected output trống/scope dài. Suite API local được giữ riêng ở `tests/test_local_planning_regressions.py`, không ghi đè suite API remote.
+
+Đã kiểm `5e72054`, `dc388e7` và `63d1343` đều là tổ tiên của bản hợp nhất. Models, repositories, migrations và Mobile khớp hoàn toàn remote `5e72054`; migration head hiện hành vẫn `20261107_01`.
+
+Kiểm chứng cuối trên bản hợp nhất: **209 passed, 6 skipped, 3 xfailed, 2 subtests passed**, 89.04 giây; không FAIL/ERROR. Ruff và ty toàn backend đạt. Các ca skip/xfail chưa phải chức năng đã nghiệm thu; còn một cảnh báo deprecation FastAPI/Starlette TestClient. SQL export/SQLite tests không thay cho PostgreSQL server, provider/Calendar hoặc Android thật.
+
+Bằng chứng JUnit: `_temp/backend_preserve_remote.xml`. Push backend và nhánh PR dùng fast-forward/atomic; nhánh backup remote `backup/backend-before-local-20261107` vẫn giữ `5e72054`.
