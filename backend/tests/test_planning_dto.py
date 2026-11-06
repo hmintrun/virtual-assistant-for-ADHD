@@ -19,22 +19,9 @@ def candidate_payload():
         "source_summary_revision": 1,
         "source_planning_input_revision": 1,
         "review_revision": 0,
-        "planning_parts": [
-            {
-                "client_part_key": "part_1",
-                "scope_description": "Đọc tài liệu",
-                "order_index": 0,
-                "decomposition_state": "complete",
-                "scheduling_state": "complete",
-                "unexpanded_scope": None,
-                "rough_estimate_seconds": 1500,
-                "estimate_source": "user_confirmed",
-            }
-        ],
         "steps": [
             {
                 "client_step_key": "step_1",
-                "client_part_key": "part_1",
                 "title": "Đọc tài liệu",
                 "expected_output": "Ghi chú",
                 "order_index": 0,
@@ -75,15 +62,15 @@ def candidate_payload():
             "available_seconds": 1800,
             "unscheduled_seconds": 0,
             "verification_scope": {
-                "scope_type": "candidate_parts",
-                "client_part_keys": ["part_1"],
+                "scope_type": "candidate_steps",
+                "client_step_keys": ["step_1"],
                 "planning_horizon": {"start_at": start, "end_at": "2026-11-13T09:00:00+07:00"},
             },
             "fully_scheduled": True,
             "blocking_reasons": [],
             "deficit_seconds": 0,
-            "unestimated_part_ids": [],
-            "unplanned_part_ids": [],
+            "unscheduled_step_keys": [],
+            "unexpanded_scope": None,
             "extension_candidate_at": None,
         },
         "stale": False,

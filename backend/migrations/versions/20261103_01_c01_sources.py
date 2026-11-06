@@ -63,6 +63,11 @@ def upgrade():
             "AND source_draft_id IS NOT NULL AND source_summary_revision IS NOT NULL "
             "AND source_summary_revision > 0 AND availability_snapshot IS NOT NULL)",
         )
+    # Offline PostgreSQL has no reflected connection; use the same SQL online/offline.
+    # SQLite keeps the existing reflected backfill for batch migrations.
+    if op.get_context().dialect.name == "postgresql":
+        op.execute(sa.text(POSTGRES_BACKFILL))
+        return
     connection = op.get_bind()
     meta = sa.MetaData()
     tasks = sa.Table("tasks", meta, autoload_with=connection)
@@ -157,3 +162,91 @@ def upgrade():
 def downgrade():
     # Dropping new snapshots would lose provenance; reverse only after data review.
     raise RuntimeError("C01 downgrade requires an explicit snapshot/data recovery plan")
+
+
+POSTGRES_BACKFILL = r"""
+UPDATE tasks AS t
+SET availability = t.source_summary -> 'availability',
+    decomposition_state = CASE WHEN EXISTS (
+        SELECT 1 FROM planning_parts AS p
+        WHERE p.task_id = t.id AND p.decomposition_state <> 'complete'
+    ) THEN 'partial' ELSE 'complete' END,
+    unexpanded_scope = (
+        SELECT string_agg(COALESCE(NULLIF(p.unexpanded_scope, ''), p.scope_description), chr(10)
+                          ORDER BY p.order_index, p.id)
+        FROM planning_parts AS p
+        WHERE p.task_id = t.id AND p.decomposition_state <> 'complete'
+    );
+
+WITH ordered AS (
+    SELECT s.id, row_number() OVER (
+        PARTITION BY s.task_id
+        ORDER BY p.order_index NULLS LAST, p.id NULLS LAST, s.order_index, s.id
+    ) - 1 AS new_index
+    FROM steps AS s
+    LEFT JOIN planning_parts AS p ON p.id = s.planning_part_id AND p.task_id = s.task_id
+)
+UPDATE steps AS s SET order_index = ordered.new_index
+FROM ordered WHERE s.id = ordered.id;
+
+DO $c01$
+DECLARE
+    candidate RECORD;
+    child RECORD;
+    parts JSONB;
+    selected JSONB;
+    converted JSONB;
+    selected_keys JSONB;
+    report JSONB;
+    remaining TEXT;
+    next_index INTEGER;
+BEGIN
+    FOR candidate IN SELECT * FROM plan_candidates LOOP
+        parts := COALESCE(NULLIF(candidate.planning_parts::jsonb, 'null'::jsonb), '[]'::jsonb);
+        SELECT string_agg(
+            NULLIF(COALESCE(NULLIF(p.item ->> 'unexpanded_scope', ''), p.item ->> 'scope_description'), ''),
+            chr(10) ORDER BY p.position
+        ) INTO remaining
+        FROM jsonb_array_elements(parts) WITH ORDINALITY AS p(item, position)
+        WHERE p.item ->> 'decomposition_state' IS DISTINCT FROM 'complete';
+
+        report := COALESCE(NULLIF(candidate.feasibility::jsonb, 'null'::jsonb), '{}'::jsonb);
+        selected := COALESCE(NULLIF(report -> 'verification_scope' -> 'client_part_keys', 'null'::jsonb), '[]'::jsonb);
+        converted := '[]'::jsonb;
+        selected_keys := '[]'::jsonb;
+        next_index := 0;
+        FOR child IN
+            SELECT s.item
+            FROM jsonb_array_elements(
+                COALESCE(NULLIF(candidate.steps::jsonb, 'null'::jsonb), '[]'::jsonb)
+            ) AS s(item)
+            ORDER BY COALESCE((
+                SELECT (p.item ->> 'order_index')::integer
+                FROM jsonb_array_elements(parts) AS p(item)
+                WHERE p.item ->> 'client_part_key' = s.item ->> 'client_part_key'
+            ), 0), (s.item ->> 'order_index')::integer, s.item ->> 'client_step_key'
+        LOOP
+            converted := converted || jsonb_build_array(
+                (child.item - 'client_part_key') || jsonb_build_object('order_index', next_index)
+            );
+            IF selected = '[]'::jsonb OR selected ? (child.item ->> 'client_part_key') THEN
+                selected_keys := selected_keys || jsonb_build_array(child.item ->> 'client_step_key');
+            END IF;
+            next_index := next_index + 1;
+        END LOOP;
+        report := (report - 'unestimated_part_ids' - 'unplanned_part_ids') || jsonb_build_object(
+            'verification_scope',
+            (COALESCE(report -> 'verification_scope', '{}'::jsonb) - 'client_part_keys') ||
+            jsonb_build_object('scope_type', 'candidate_steps', 'client_step_keys', selected_keys)
+        );
+        UPDATE plan_candidates
+        SET decomposition_state = CASE WHEN remaining IS NOT NULL AND remaining <> ''
+                                       THEN 'partial' ELSE 'complete' END,
+            unexpanded_scope = NULLIF(remaining, ''),
+            steps = converted,
+            feasibility = report
+        WHERE id = candidate.id;
+    END LOOP;
+END;
+$c01$;
+"""

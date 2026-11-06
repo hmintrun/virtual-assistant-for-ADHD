@@ -11,7 +11,6 @@ from sqlalchemy import create_engine, inspect, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session as DBSession
-from test_models import make_plan
 
 from app.core.database import make_engine
 from app.models import (
@@ -19,14 +18,15 @@ from app.models import (
     CheckIn,
     CommandReceipt,
     PlanningDraft,
-    PlanningPart,
     RescheduleProposal,
     SessionRun,
+    Step,
     Task,
     Thought,
     User,
 )
 from app.services.task_state_service import get_task_planning_states
+from tests.test_models import make_plan
 
 
 def run_for(session, user_id, **kwargs):
@@ -199,43 +199,33 @@ async def test_batched_task_derived_states_and_owner_filter():
             user = User(email="states@test.example", display_name="TN")
             db.add(user)
             await db.flush()
-            task = Task(user_id=user.id, title="Task", time_constraint={})
+            task = Task(user_id=user.id, title="Task", time_constraint={}, decomposition_state="not_started")
             db.add(task)
             await db.flush()
             task_id, user_id = task.id, user.id
             result = await get_task_planning_states(db, user_id, [task_id])
             assert result[task_id].decomposition_state == "not_started"
-            first = PlanningPart(
-                user_id=user_id,
-                task_id=task_id,
-                client_part_key="first",
-                scope_description="Đầu",
-                order_index=0,
-                decomposition_state="complete",
-                scheduling_state="complete",
-            )
-            second = PlanningPart(
-                user_id=user_id,
-                task_id=task_id,
-                client_part_key="second",
-                scope_description="Sau",
-                order_index=1,
-                decomposition_state="not_started",
-                scheduling_state="not_scheduled",
-            )
-            db.add_all([first, second])
+            children = [Step(
+                user_id=user_id, task_id=task_id, title=title, order_index=index,
+                estimated_base_seconds=1500, remaining_base_seconds=0,
+                buffer_multiplier=1.0, estimate_source="user_confirmed",
+            ) for index, title in enumerate(("Đầu", "Sau"))]
+            task.decomposition_state = "partial"
+            task.unexpanded_scope = "Phần còn lại chưa chia"
+            db.add_all(children)
             await db.flush()
             result = await get_task_planning_states(db, user_id, [task_id])
             assert result[task_id].decomposition_state == "partial"
-            assert result[task_id].scheduling_state == "partial"
-            second.decomposition_state = "complete"
-            second.scheduling_state = "complete"
+            assert result[task_id].scheduling_state == "not_scheduled"
+            task.decomposition_state = "complete"
+            task.unexpanded_scope = None
             await db.flush()
             result = await get_task_planning_states(db, user_id, [task_id])
             assert result[task_id].decomposition_state == "complete"
             assert result[task_id].scheduling_state == "complete"
             assert await get_task_planning_states(db, uuid4(), [task_id]) == {}
-            assert "decomposition_state" not in Task.__table__.c
+            assert "decomposition_state" in Task.__table__.c
+            assert "planning_parts" not in Base.metadata.tables
     finally:
         await engine.dispose()
 
@@ -260,13 +250,18 @@ def test_sqlite_migration_upgrade_check_downgrade(tmp_path):
     engine = create_engine(url.replace("+aiosqlite", ""))
     with engine.connect() as connection:
         assert set(inspect(connection).get_table_names()) == set(Base.metadata.tables) | {
-            "alembic_version"
+            "alembic_version", "planning_parts"
         }
         assert connection.exec_driver_sql("PRAGMA foreign_key_check").all() == []
     engine.dispose()
-    alembic("check")
-    alembic("downgrade", "base")
-    alembic("upgrade", "head")
+    assert "20261103_01 (head)" in alembic("heads")
+    result = subprocess.run(
+        [sys.executable, "-m", "alembic", "downgrade", "base"],
+        cwd=cwd, env=env, capture_output=True, text=True,
+    )
+    assert result.returncode != 0
+    assert "C01 downgrade requires" in result.stderr
+    assert "20261103_01" in alembic("current")
 
 
 def test_postgresql_offline_migration_contains_deferred_fks():
@@ -281,26 +276,23 @@ def test_postgresql_offline_migration_contains_deferred_fks():
     assert result.returncode == 0, result.stderr
     assert "ALTER TABLE planning_drafts ADD CONSTRAINT fk_draft_source_thought" in result.stdout
     assert "CREATE UNIQUE INDEX uq_user_live_run" in result.stdout
+    assert "UPDATE tasks AS t" in result.stdout
+    assert "row_number() OVER" in result.stdout
+    assert "jsonb_array_elements" in result.stdout
+    assert "client_step_keys" in result.stdout
+    assert "DROP TABLE planning_parts" not in result.stdout
 
 
-def test_part_cannot_belong_to_another_task_of_same_user(engine):
+def test_step_cannot_reference_task_of_another_user(engine):
     with DBSession(engine) as db:
-        user, _, task, step, _ = make_plan(db)
-        other = Task(user_id=user.id, title="Other task", time_constraint={})
-        db.add(other)
+        _, _, _, step, _ = make_plan(db)
+        other_user = User(email="other-task@example.test", display_name="Other")
+        db.add(other_user)
         db.flush()
-        part = PlanningPart(
-            user_id=user.id,
-            task_id=other.id,
-            client_part_key="part",
-            scope_description="Part",
-            order_index=0,
-            decomposition_state="complete",
-            scheduling_state="complete",
-        )
-        db.add(part)
+        other_task = Task(user_id=other_user.id, title="Other task", time_constraint={})
+        db.add(other_task)
         db.flush()
-        step.planning_part_id = part.id
+        step.task_id = other_task.id
         with pytest.raises(IntegrityError):
             db.commit()
 

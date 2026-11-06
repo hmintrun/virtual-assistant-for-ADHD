@@ -1086,6 +1086,8 @@ async def confirm_draft_summary(
     # 3. Kiểm tra nguồn giờ rảnh (availability_ref) có bị lệch revision hiện tại không (409 SOURCE_CHANGED)
     avail_ref = draft.summary.availability_ref
     if db is None and avail_ref is not None:
+        # Nháp legacy có thể giữ dict; chuẩn hóa trước khi đọc ID/revision.
+        avail_ref = AvailabilityRef.model_validate(avail_ref)
         current_avail_rev = _CURRENT_AVAILABILITY_REVISIONS.get(
             (user_id, avail_ref.availability_id)
         )

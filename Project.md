@@ -2,6 +2,7 @@
 
 > **Tên dự án:** **ProPlan VA** — Trợ lý ảo AI hỗ trợ lập kế hoạch, chia nhỏ công việc và nhắc lịch chủ động bằng giọng nói trên thiết bị di động cho người mắc hội chứng ADHD.
 > **Mục đích tài liệu:** Cung cấp ngữ cảnh toàn diện (Business Logic, Cơ sở khoa học, Kiến trúc kỹ thuật, Luồng nghiệp vụ UF1–UF7, Mô hình dữ liệu và Quy tắc cốt lõi) cho các **AI Coding Agents** và thành viên trong nhóm phát triển trên toàn bộ Monorepo.
+> **Đồng bộ Backend local ngày 07/11/2026:** Nguồn kiểm chứng là nhánh `backend` local tại `09f19b9` trong `D:\HCMUS\CT\ProActive`, không lấy nhánh remote đã hợp nhất làm nền. Giữ C01, Tier 3 khi phân rã và chỉnh Candidate theo key; chỉnh sửa lỗi trả `AI_UNAVAILABLE`, giữ nguyên phương án cũ. Mục 6 và 8.2 ghi hợp đồng/giới hạn hiện hành; lượt này không xét Mobile hoặc làm pagination.
 
 ---
 
@@ -128,89 +129,46 @@ $$\text{1 Công việc (Task)} \longrightarrow \text{Nhiều Bước (Steps)} \l
 > [!WARNING]
 > **Quy tắc nghiệp vụ bất biến:** Việc kết thúc thời lượng đếm ngược của **1 Phiên (Session)** **KHÔNG** tự động đồng nghĩa với việc đã hoàn thành Phiên đó, và hoàn thành 1 Phiên cũng **KHÔNG** tự động đánh dấu hoàn thành **Bước (Step)** hay **Công việc (Task)**. Trạng thái phải được xác nhận qua luồng Check-in (UF5).
 
-### 6.2. Sơ đồ Thực thể Liên kết (ERD Khái niệm)
+### 6.2. Sơ đồ Thực thể Liên kết theo C01
+
+Đây là quan hệ khái niệm; trường/enum API theo [schema Backend](docs/backend/schema.md), DTO và ORM. Không dùng tên/trường minh họa cũ như DDL hiện hành.
 
 ```mermaid
 erDiagram
-    USER ||--o{ TASK : creates
-    USER ||--|| USER_PREFERENCE : configures
-    USER ||--o{ DRAFT_THOUGHT : records
-    TASK ||--|{ STEP : decomposes_into
-    STEP ||--|{ SESSION : scheduled_as
-    TASK ||--o{ SCHEDULE_PROPOSAL : has_pending
-
-    USER {
-        uuid id PK
-        string email
-        string display_name
-        int current_streak
-        boolean streak_frozen
-        float personal_buffer_multiplier "Hệ số đệm cá nhân hóa (mặc định 1.2)"
-    }
-
-    USER_PREFERENCE {
-        uuid user_id PK, FK
-        int focus_duration_min "Thời lượng 1 phiên (VD: 25p)"
-        int break_duration_min "Thời lượng nghỉ ngắn (VD: 5p)"
-        string reminder_frequency "Tần suất nhắc"
-        string assistant_style "Phong cách giọng nói/khích lệ"
-        json free_time_slots "Khung giờ rảnh trong tuần"
-    }
-
-    TASK {
-        uuid id PK
-        uuid user_id FK
-        string title
-        text scope_description
-        datetime deadline
-        string priority_level
-        string status "draft | confirmed | in_progress | completed | archived"
-        int avoidance_count "Số lần bị né tránh/bỏ qua"
-    }
-
-    STEP {
-        uuid id PK
-        uuid task_id FK
-        int order_index
-        string title
-        text micro_task_prompt "Việc khởi động 2 phút"
-        int estimated_minutes
-        string status "pending | in_progress | completed | skipped"
-    }
-
-    SESSION {
-        uuid id PK
-        uuid step_id FK
-        int session_index
-        datetime scheduled_start
-        datetime scheduled_end
-        int planned_duration_min
-        int buffer_duration_min
-        int actual_duration_min
-        string status "scheduled | active | completed | incomplete | skipped | no_response"
-        text ai_schedule_reason "Giải thích lý do xếp/dời lịch"
-    }
-
-    DRAFT_THOUGHT {
-        uuid id PK
-        uuid user_id FK
-        uuid source_session_id FK "Phiên đang chạy khi bấm Cất suy nghĩ (UF4)"
-        string raw_audio_path "Đường dẫn file ghi âm thô (.m4a/.wav)"
-        text transcribed_text "Chỉ có khi user chuyển thành Task sau phiên"
-        string status "raw_saved | converted_to_task | discarded"
-        datetime created_at
-    }
-
-    SCHEDULE_PROPOSAL {
-        uuid id PK
-        uuid user_id FK
-        json proposed_sessions_payload "Phương án lịch chờ xác nhận (UF6)"
-        string trigger_reason "incomplete | busy | setting_changed | manual"
-        text ai_empathetic_note "Lời giải thích & động viên không gây áp lực"
-        string status "pending_approval | approved | expired_recalculated"
-        datetime created_at
-    }
+    USER ||--o| USER_PREFERENCE : configures
+    USER ||--o{ AVAILABILITY : confirms
+    USER ||--o{ PLANNING_DRAFT : saves
+    PLANNING_DRAFT ||--o{ PLAN_CANDIDATE : generates
+    PLANNING_DRAFT ||--o| TASK : becomes_after_UF2
+    TASK ||--o{ STEP : decomposes_into
+    STEP ||--o{ SESSION : scheduled_as
+    SESSION ||--o{ SESSION_RUN : executed_as
+    SESSION_RUN ||--o{ CHECK_IN : receives
+    USER ||--o{ THOUGHT : captures
+    THOUGHT o|--o| PLANNING_DRAFT : converts_to
+    PLANNING_DRAFT o|--o{ PLANNING_CONTEXT : snapshots_private_hours
+    AVAILABILITY o|--o{ PLANNING_CONTEXT : references_shared_hours
+    USER ||--o{ RESCHEDULE_PROPOSAL : reviews
+    USER ||--o{ SCHEDULE_VERSION : approves
 ```
+
+### 6.3. Đầu vào, Candidate và dữ liệu chính thức
+
+- UF1 lưu `PlanningDraft`/`TaskSummary`; xác nhận `summary_revision` chỉ ghi `summary_confirmed_revision`, chưa tạo Task hoặc lịch chính thức.
+- Giờ riêng nằm ở `TaskSummary.availability` và được xác nhận cùng Summary. Nháp legacy dùng `availability_ref` khi user đã chọn nguồn chung. PATCH omitted giữ nguyên; null chỉ xóa trường được phép, xóa giờ riêng không tự quay lại nguồn chung. Summary phải được validate lại bằng Pydantic trước khi đọc model lồng; nhánh kiểm revision legacy đọc được cả ref model/dict.
+- UF2 tạo `PlanCandidate` chứa Steps/Sessions; `client_step_key` và `client_session_key` là khóa trong phương án. `order_index` Candidate bắt đầu từ 0. Confirm trả `key_mapping.steps/sessions` sang ID thật, tạo Task → Steps → Sessions cùng ScheduleVersion/receipt trong transaction.
+- Không có `PlanningPart`/`CandidatePart` trong ORM/API C01. Phần chưa chia nằm ở `unexpanded_scope`/`decomposition_state` trên Candidate/Task; không tạo Step/Session giả hoặc thời lượng 0 cho phần chưa biết.
+- Chọn phạm vi theo `selected_step_keys`; kiểm chứng Candidate qua `scope_type=candidate_steps` và `client_step_keys`. Các caller scheduler không truyền `planning_parts`. Hoàn tất các Step đã chia trong horizon không đồng nghĩa hoàn tất toàn Task.
+- Thời lượng API dùng integer giây; `estimated_base_seconds` là thời lượng gốc. Scheduler nhân buffer một lần, tách work/rest, kiểm gap 900 giây và không dời Task khác. Micro-task nằm ngoài duration/actual.
+- Session là lịch dự kiến; SessionRun/CheckIn giữ thực hiện và phản hồi. Timer hết không tự hoàn thành Session/Step/Task; `no_respond` là trạng thái phản hồi CheckIn, không phải Session.status.
+
+### 6.4. Nguồn, revision và migration
+
+- Candidate khóa `source_summary_revision`, `source_planning_input_revision`, `review_revision` và `source_revisions`. Giờ riêng được snapshot ở PlanningContext theo Draft/revision; `SourceRevisions.availability=null` hợp lệ cho nhánh này. Calendar chỉ bổ sung khoảng bận, không biến lỗi/thiếu coverage thành lịch trống.
+- PATCH kiểm `expected_review_revision`; confirm kiểm mọi revision/nguồn trong transaction. Không giữ transaction trong lúc chờ AI. Retry cùng Idempotency-Key/payload trả cùng kết quả; cùng khóa khác payload bị từ chối.
+- Local tại mốc này có chuỗi migration đến **`20261103_01`**, gồm C01 và các revision tiền nhiệm. Giữ dữ liệu Part legacy để đối soát; không xóa bảng/cột chỉ vì ORM không còn dùng. Backfill trải phẳng thứ tự Step, giữ nguồn giờ rảnh, phần chưa chia và đánh dấu Candidate legacy cần review lại.
+- PostgreSQL dùng SQL backfill chung cho online/offline; SQLite giữ đường batch/reflection. Không bỏ backfill khi `--sql`. Downgrade C01 bị chặn vì cần kế hoạch phục hồi dữ liệu.
+- Không tự đưa migration DeviceState hoặc merge head của remote vào local khi chưa tích hợp mã phụ thuộc tương ứng. Bằng chứng xuất SQL không thay cho chạy PostgreSQL server thật.
 
 ---
 
@@ -241,12 +199,8 @@ flowchart TD
 - **Luồng xử lý chính (4 bước):**
   1. **Lựa chọn thông số:** Người dùng chọn thời lượng tập trung mỗi phiên (`focus_duration_min`, mặc định 25p), thời gian nghỉ ngắn (`break_duration_min`, mặc định 5p), tần suất nhắc trước phiên (`reminder_frequency`: 15p, 10p, 5p), phong cách nhắc/khích lệ (`assistant_style`: trực tiếp hoặc gợi mở) và bật/tắt các hình thức hỗ trợ.
   2. **Đánh giá tác động & Giữ nguyên phiên hiện tại:** Hệ thống kiểm tra điều kiện thay đổi; giữ nguyên cấu hình cho phiên đang chạy ở UF3. Nếu thay đổi làm lệch các phiên đã lên lịch trong tương lai (đổi thời lượng phiên/nghỉ), chuyển sang **UF6 (Phương án chờ)** để người dùng duyệt lại lịch.
-  3. **Ghi nhận & Chu kỳ cập nhật hệ số đệm:** Cấu hình mới được áp dụng từ phiên tiếp theo. Hệ thống chạy ngầm việc đối chiếu thời gian dự kiến so với thực tế để tính hệ số đệm cá nhân hóa ($k_{\text{buffer}}$).
-  4. **Quy tắc Tính toán & Thứ tự Ưu tiên (Đã chốt):**
-     - **Công thức Hệ số đệm từ Lịch sử ($k_{\text{history}}$):** Áp dụng trung bình trượt (Moving Average) cho 7–10 phiên gần nhất:
-       $$k_{\text{history}} = \frac{1}{N} \sum_{j=1}^{N} \frac{\text{actual\_duration}_j}{\text{planned\_duration}_j}$$
-     - **Quy tắc ưu tiên cấu hình:** Luôn ưu tiên cấu hình thủ công của người dùng ($k_{\text{user}}$) để tôn trọng quyền tự chủ và tạo cảm giác kiểm soát.
-     - **Chu kỳ kiểm tra & Gợi ý (Weekly Check):** Định kỳ 1 lần/tuần (vào cuối tuần), nếu độ lệch giữa cấu hình người dùng và thực tế vượt quá 20% ($|k_{\text{user}} - k_{\text{history}}| > 0.2$), hệ thống hiển thị một gợi ý nhẹ nhàng, không phán xét (*guilt-free suggestion*) để người dùng cân nhắc cập nhật.
+  3. **Cấu hình hiệu lực:** Giữ snapshot của Run hiện tại; thay đổi ảnh hưởng lịch tương lai phải qua UF6, không âm thầm ghi đè lịch đã chốt.
+  4. **Gợi ý hệ số đệm A20:** Giữ trung vị actual/estimate gốc theo Step sạch đã hoàn tất, đúng nguồn actual và không đổi phạm vi; một Step chỉ tính một mẫu. Decimal kiểm số hữu hạn, loại trùng/xung đột trước cửa sổ, làm tròn `ROUND_HALF_UP`. Mặc định kỹ thuật 5 mẫu tối thiểu, cửa sổ 15 Step, bước 0.05, miền `[1.0,2.0]`, chênh tuyệt đối 0.2 và cooldown 0 là **cấu hình thử nghiệm**, chưa phải policy sản phẩm đã chốt. Không áp lại quy tắc cũ trung bình 7–10 phiên hoặc mặc định gợi ý hằng tuần. Luôn để user quyết định, helper không tự đổi cài đặt.
 
 ---
 
@@ -261,10 +215,10 @@ flowchart TD
      - *Hạn chót hoặc khoảng thời gian hoàn thành (Deadline / Timeframe)*
      - **Nguyên tắc:** Đánh dấu rõ các điểm thiếu, mơ hồ hoặc mâu thuẫn; **tuyệt đối không tự đoán dữ liệu**.
   3. **Gộp 1 vòng duy nhất (Single-Round Clarification):** Hiển thị bản tóm tắt trực quan kèm câu hỏi làm rõ tất cả các chỗ còn thiếu/mâu thuẫn trong **1 lần hiển thị duy nhất** (không hỏi lắt nhắt nhiều lượt). Người dùng bổ sung hoặc chỉnh sửa trực tiếp trên giao diện.
-  4. **Xác nhận & Chuyển luồng:** Khi đủ 4 thông tin bắt buộc và người dùng bấm Xác nhận 1 lần $\rightarrow$ chuyển sang **UF2**.
+  4. **Xác nhận & Chuyển luồng:** Khi đủ 4 nhóm thông tin và đúng revision, user xác nhận Summary để chuyển UF2; chưa tạo Task, Session hay lịch chính thức.
 - **Xử lý ngoại lệ & Bảo toàn dữ liệu:**
   - Nếu thông tin chưa rõ/thiếu, hệ thống chỉ giữ ở bước 3, chưa chuyển sang UF2.
-  - Nếu người dùng thoát app hoặc chưa muốn bổ sung ngay $\rightarrow$ **tự động lưu nháp (`status = 'draft'`)** vào Hộp nháp (Draft Tasks) để không bao giờ mất dữ liệu.
+  - Nếu người dùng thoát app hoặc chưa muốn bổ sung ngay $\rightarrow$ **tự động lưu `PlanningDraft`/Summary/revisions** vào Hộp nháp để không bao giờ mất dữ liệu.
 
 ```mermaid
 flowchart TD
@@ -273,7 +227,7 @@ flowchart TD
     C --> D{"Đủ thông tin & Không mâu thuẫn?"}
     D -->|"Thiếu / Mâu thuẫn"| E["Hiển thị Bản tóm tắt + Gộp hỏi bổ sung trong 1 màn hình"]
     E --> F{"Hành động của User?"}
-    F -->|"Thoát app / Bấm Lưu nháp"| G["Auto-save vào Hộp nháp (Draft Task)"]
+    F -->|"Thoát app / Bấm Lưu nháp"| G["Auto-save PlanningDraft + Summary + revisions"]
     F -->|"Bổ sung thông tin"| C
     D -->|"Đầy đủ"| H["Hiển thị Bản tóm tắt hoàn chỉnh"]
     H --> I{"User bấm Xác nhận?"}
@@ -284,7 +238,7 @@ flowchart TD
 ---
 
 #### UF2 — Xem các bước & Chốt kế hoạch
-- **Mục tiêu & Điểm bắt đầu:** Bẻ nhỏ công việc đã xác nhận ở UF1 thành các bước (`Steps`) và phiên (`Sessions`), xếp lịch vào khung giờ rảnh khả dụng và chốt lịch chính thức.
+- **Mục tiêu & Điểm bắt đầu:** Từ PlanningDraft có Summary đã xác nhận, tạo PlanCandidate theo C01 để review; chỉ confirm Candidate mới tạo Task/Steps/Sessions và lịch chính thức.
 - **Luồng xử lý chính (5 bước):**
   1. **Đề xuất phân rã chủ động (Tránh Tê liệt khởi động):** Để giải quyết rào cản *Blank Canvas / ADHD Paralysis*, AI (Gemini Flash) **chủ động sinh sẵn một phương án chia bước chuẩn** (`Default Decomposition Proposal`) gồm danh sách các bước, thời lượng dự kiến và Micro-task khởi động 2 phút, kèm nút `"Tùy chỉnh theo ý tôi"` để người dùng tự điều chỉnh nếu muốn.
   2. **Thuật toán Python xếp phiên & Kiểm tra khả thi:** Thuật toán Python (`scheduler_engine.py`) chia các bước thành các phiên (`Sessions`) theo cấu hình tập trung/nghỉ của UF7, nhân hệ số đệm cá nhân hóa ($k_{\text{buffer}}$) và xếp vào các khung giờ rảnh chưa có lịch ($T_{\text{free}}$) trước Deadline trong cửa sổ **Rolling Horizon (2–3 tuần gần nhất)**.
@@ -299,7 +253,9 @@ flowchart TD
 - **Cơ chế Dự phòng Đa tầng khi AI lỗi (3-Tier Fallback):**
   - **Tầng 1:** `gemini-3.8-flash` (Primary) + `gemini-3.5-flash-lite` (Warm Backup chạy ngầm từ `3.1s`, ưu tiên Primary tới `5.4s`, ngắt cứng UF2 tại `6.0s`).
   - **Tầng 2:** Chuyển sang LLM dự phòng chéo hãng trên Groq Cloud (`qwen/qwen3.8-27b` $\rightarrow$ `openai/gpt-oss-20b` tại mốc `4.4s` hoặc ngay khi Google lỗi nhanh).
-  - **Tầng 3:** Nếu mất mạng toàn diện tới AI, Thuật toán Python tự động chia công việc thành các phiên cố định `20–25 phút` (theo cấu hình user) + `5 phút nghỉ`, không bao giờ trả về lỗi trắng.
+  - **Tầng 3 khi phân rã:** Provider lỗi/timeout hoặc phân rã thiếu expected output thì gọi `_fallback_decompose_task`, tạo ba bước theo cấu hình user, kèm expected output/micro-task. Scheduler vẫn kiểm khả thi, user vẫn review/xác nhận. Chỉ rút gọn tên/phạm vi đưa vào nhãn bước để đúng giới hạn DTO; Summary gốc không bị sửa.
+  - **Chỉnh Candidate theo key:** `adjust_candidate_by_nl` chỉ sửa title, expected output, thời lượng gốc và thứ tự theo client_step_key hiện có. Không suy key theo vị trí/tên; yêu cầu đổi giờ rảnh/deadline cần sửa Draft và xác nhận UF1. Lỗi AI chuyển qua `TimeoutError` → `503 AI_UNAVAILABLE`, giữ Steps/Sessions/review revision và Candidate cũ; **không dùng fallback phân rã để thay yêu cầu chỉnh sửa**.
+  - **Câu hỏi UF1:** Giữ validation Pydantic và dedup câu hỏi tự do trùng nguyên văn với câu hỏi có cấu trúc. Không bỏ các vấn đề chặn khác nhau chỉ vì chúng gần giống nhau.
 
 ---
 
@@ -416,9 +372,9 @@ Bảng dưới đây là kim chỉ nam bắt buộc cho toàn bộ logic điều
 
 | Mã Flow | Đầu vào (Trigger) | Trạng thái / Đầu ra (Output State) | Luồng đích (Next Flow) | Ràng buộc Nghiệp vụ Cốt lõi |
 | :--- | :--- | :--- | :--- | :--- |
-| **UF7** | Mở Cài đặt / Lần đầu dùng app | Cấu hình lưu vào `USER_PREFERENCE` (áp dụng từ phiên sau) | **UF1** (nếu cài đặt ban đầu) hoặc **UF6** (nếu lệch lịch đã chốt) | Giữ nguyên phiên đang chạy; tính $k_{\text{history}}$ theo Moving Average 7–10 phiên; gợi ý cập nhật 1 lần/tuần nếu lệch > 20%. |
-| **UF1** | Nhập công việc bằng Voice (Groq Whisper) hoặc Text | `TASK(status='draft')` nếu thiếu tin; `TASK(status='confirmed')` khi đủ 4 trường | **UF2** (khi đủ 4 thông tin & bấm xác nhận) | Gộp toàn bộ câu hỏi làm rõ vào 1 vòng duy nhất; tự động lưu nháp nếu thoát app; đọc giờ bận từ Google Calendar MCP. |
-| **UF2** | `TASK(status='confirmed')` từ UF1 | `SESSION(status='scheduled')` thuộc `Official Schedule` | **UF3** | AI sinh sẵn đề xuất chia bước tránh tê liệt khởi động; thuật toán tính $\Delta T_{\text{deficit}}$; tuyệt đối không tự ý dời Task khác; đồng bộ Google Calendar qua MCP sau khi bấm xác nhận. |
+| **UF7** | Cài đặt trợ lý | UserPreference và Availability; change request khi cần | **UF1** hoặc **UF6** | Giữ Run hiện tại; thay lịch phải duyệt; A20 theo Step sạch, policy thử nghiệm chưa khóa. |
+| **UF1** | Nhập Voice/Text | PlanningDraft + Summary; ghi summary_confirmed_revision khi xác nhận | **UF2** | Hỏi gộp, auto-save, giữ nguồn giờ rảnh và revision; chưa tạo Task. |
+| **UF2** | Draft có Summary đã xác nhận | PlanCandidate → confirm tạo Task/Steps/Sessions/ScheduleVersion | **UF3** | C01 theo Step keys; Tier 3 khi phân rã; chỉnh AI lỗi giữ phương án cũ; không dời Task khác. |
 | **UF3** | Đến mốc nhắc (15/10/5p) & User bấm "Bắt đầu" | Kích hoạt Focus Mode + Bật DND + Chạy Visual Timer trên 1-Step UI | **UF4** (nhánh phụ), **UF5** (hết giờ/báo kết quả), **UF6** (đột xuất) | Giao diện tuân thủ 1-Step UI; chạy offline hoàn toàn nếu mất mạng; chuông báo thức chính xác $\le 1\text{s}$. |
 | **UF4** | Bấm giữ nút Push-to-Talk "Cất suy nghĩ" trong UF3 | Lưu file ghi âm thô vào `DRAFT_THOUGHT(status='raw_saved')` | **Quay lại UF3 ngay lập tức** | KHÔNG gọi STT, KHÔNG gọi LLM trong phiên; thử lại tối đa 3 lần nếu lỗi $\rightarrow$ mở ô nhập text; timer UF3 vẫn chạy liên tục. |
 | **UF5** | Hết giờ phiên / Check-in / Báo kết quả | Ghi nhận `actual_duration_min` và trạng thái `completed`, `incomplete`, `busy`, `skipped`, hoặc `no_response` | **UF3** (nghỉ giải lao / giữ lịch) hoặc **UF6** (đổi lịch / đôn lịch) | Phân biệt rõ kết quả Phiên vs Bước; khi Bỏ qua hiện 3 chip rõ ràng; tự động tắt DND sau 5 phút nếu không phản hồi (`no_response`). |
@@ -441,6 +397,15 @@ Bảng dưới đây tổng hợp các quyết định kỹ thuật và nghiệp
 | **7. Luồng Giọng nói (STT/TTS) & Hộp nháp UF4** | • **UF1, UF2, UF5, UF6:** Ưu tiên gọi **Groq Whisper (STT)** và **edge-tts (TTS)** qua Backend; tự động fallback về `speech_to_text` và `flutter_tts` trên thiết bị nếu mất mạng/timeout.<br>• **UF4 (Cất suy nghĩ):** Trong phiên chỉ lưu file ghi âm thô (`.m4a`/`.wav`) vào Hộp nháp cục bộ (thử lại 3 lần $\rightarrow$ mở ô nhập text). Sau phiên, người dùng bấm *"Tạo việc từ ghi âm này"* mới gọi STT và chuyển sang UF1. |
 | **8. Bảo toàn Lịch khi Đóng App Đột ngột (UF6)** | • Đóng app **KHÔNG** đồng nghĩa với việc đồng ý lịch mới. Hệ thống giữ nguyên lịch cũ đã xác nhận, lưu lịch mới vào `ScheduleProposal(status='pending_approval')`.<br>• Khi người dùng mở lại app, thuật toán **tự động kiểm tra lại tính khả thi theo thời gian thực tế** (tịnh tiến các ô lịch đã trôi qua) rồi mới hiển thị cho người dùng duyệt. |
 | **9. Tích hợp Google Calendar qua MCP & Strict Guardrails** | • **Đọc ngữ cảnh (UF1):** Google Calendar MCP chỉ cung cấp các khoảng thời gian bận ($T_{\text{busy}}$) làm tham số đầu vào cho thuật toán Python tính quỹ giờ rảnh ($T_{\text{free}}$). CẤM để LLM tự ý ước lượng hay gán đè lịch.<br>• **Ghi sự kiện (UF2/UF6):** Chỉ đồng bộ sự kiện Focus Sessions lên Google Calendar **SAU KHI** người dùng bấm **Xác nhận/Duyệt** (Human-in-the-loop). Tuyệt đối KHÔNG tự động ghi lên Google Calendar khi kế hoạch còn ở dạng nháp (`draft`) hay phương án chờ (`pending_approval`). |
+
+### 8.2. Quyết định kiểm chứng Backend local — 07/11/2026
+
+- Dùng local `backend@09f19b9` làm nền; không pull/merge/checkout đè từ remote đã hợp nhất với dev.
+- Giữ C01, batch loading và chữ ký scheduler hiện có. `list_tasks` là **5 nhóm batch**, test local đo **8 SELECT** cho trang 1/10/20 Task. Truy vấn Task đầu còn tải toàn bộ trước khi phân trang trong RAM; tối ưu pagination là việc riêng, chưa nằm trong lượt này.
+- Giữ `draft_service` tái validate Pydantic, tương thích ref legacy và dedup câu hỏi. Giữ `adjust_candidate_by_nl`/xử lý lỗi hiện tại; sửa Tier 3 cho luồng phân rã khi regression chứng minh bị ngắt.
+- Giữ các suite AI/baseline và coverage scheduler; chuyển fixture/assert Part cũ sang C01, không khôi phục model Part để test chạy hoặc xóa assertion che lỗi.
+- Giữ chuỗi migration local và dữ liệu legacy. Không thêm các head remote không thuộc local. Mọi migration test dùng DB tạm, không chạy lên DB app.
+- Phân biệt yêu cầu sản phẩm với trạng thái triển khai; không suy toàn bộ UF1–UF7 đã hoàn tất chỉ từ backend unit/API tests. Kết quả và giới hạn tại [báo cáo kiểm chứng local](docs/backend/BACKEND_LOCAL_VERIFICATION_20261107.md).
 
 ---
 

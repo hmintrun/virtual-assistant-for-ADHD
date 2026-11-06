@@ -18,7 +18,7 @@ from app.schemas.availability import Availability, WeeklyRule
 from app.schemas.calendar import BusyInterval, BusyIntervalSource, CalendarContext
 from app.schemas.common import SessionSegment, TimeConstraint, TimeInterval
 from app.schemas.draft import AvailabilityRef, TaskSummary
-from app.schemas.planning import CandidatePart, CandidateStep
+from app.schemas.planning import CandidateStep
 from app.schemas.settings import UserPreference
 from app.schemas.task import Session
 from app.services.scheduler_engine import (
@@ -292,7 +292,6 @@ def test_schedule_sessions_feasible(sample_pref):
     steps = [
         CandidateStep(
             client_step_key="step-1",
-            client_part_key="part-1",
             title="Nghiên cứu tài liệu",
             expected_output="Ghi chú",
             order_index=0,
@@ -304,7 +303,6 @@ def test_schedule_sessions_feasible(sample_pref):
         ),
         CandidateStep(
             client_step_key="step-2",
-            client_part_key="part-1",
             title="Viết phác thảo",
             expected_output="Bản thảo",
             order_index=1,
@@ -316,15 +314,6 @@ def test_schedule_sessions_feasible(sample_pref):
         ),
     ]
 
-    parts = [
-        CandidatePart(
-            client_part_key="part-1",
-            scope_description="Phần 1",
-            order_index=0,
-            decomposition_state="complete",
-            scheduling_state="complete",
-        )
-    ]
 
     # Khoảng rảnh cả ngày 08:00 - 18:00 (10 giờ = 36000s)
     effective_intervals = [TimeInterval(start_at=t_start, end_at=t_end)]
@@ -342,7 +331,6 @@ def test_schedule_sessions_feasible(sample_pref):
         fixed_sessions=[],
         time_constraint=tc,
         pref=sample_pref,
-        planning_parts=parts,
     )
 
     assert report.status == "feasible"
@@ -365,7 +353,6 @@ def test_schedule_sessions_deficit(sample_pref):
     steps = [
         CandidateStep(
             client_step_key="step-1",
-            client_part_key="part-1",
             title="Viết báo cáo dài",
             expected_output="Báo cáo",
             order_index=0,
@@ -377,15 +364,6 @@ def test_schedule_sessions_deficit(sample_pref):
         )
     ]
 
-    parts = [
-        CandidatePart(
-            client_part_key="part-1",
-            scope_description="P1",
-            order_index=0,
-            decomposition_state="complete",
-            scheduling_state="not_scheduled",
-        )
-    ]
     effective_intervals = [TimeInterval(start_at=t_start, end_at=t_end)]
     tc = TimeConstraint(kind="deadline", start_at=t_start, deadline_at=t_end, input_timezone="UTC")
 
@@ -395,12 +373,11 @@ def test_schedule_sessions_deficit(sample_pref):
         fixed_sessions=[],
         time_constraint=tc,
         pref=sample_pref,
-        planning_parts=parts,
     )
 
     assert report.status == "infeasible"
     assert report.fully_scheduled is False
-    assert report.deficit_seconds > 0
+    assert report.deficit_seconds is not None and report.deficit_seconds > 0
     assert any(b.code == "TOTAL_DEFICIT" for b in report.blocking_reasons)
 
 
@@ -448,22 +425,17 @@ def test_order_steps_by_priority_multitask():
     key_b = compute_task_priority_key(tc_task_b, importance=5, task_id="task_b")
     task_priority_map = {"task_a": key_a, "task_b": key_b}
 
-    parts = [
-        CandidatePart(client_part_key="p_a", scope_description="Part A", order_index=0, decomposition_state="complete", scheduling_state="complete"),
-        CandidatePart(client_part_key="p_b", scope_description="Part B", order_index=0, decomposition_state="complete", scheduling_state="complete"),
-    ]
 
-    s_a1 = CandidateStep(client_step_key="sa1", client_part_key="p_a", title="A1", expected_output="out", order_index=0, estimated_base_seconds=1500, remaining_base_seconds=1500, buffer_multiplier=1.2, estimate_source="user_confirmed", status="pending")
-    s_a2 = CandidateStep(client_step_key="sa2", client_part_key="p_a", title="A2", expected_output="out", order_index=1, estimated_base_seconds=1500, remaining_base_seconds=1500, buffer_multiplier=1.2, estimate_source="user_confirmed", status="pending")
-    s_b1 = CandidateStep(client_step_key="sb1", client_part_key="p_b", title="B1", expected_output="out", order_index=0, estimated_base_seconds=1500, remaining_base_seconds=1500, buffer_multiplier=1.2, estimate_source="user_confirmed", status="pending")
-    s_b2 = CandidateStep(client_step_key="sb2", client_part_key="p_b", title="B2", expected_output="out", order_index=1, estimated_base_seconds=1500, remaining_base_seconds=1500, buffer_multiplier=1.2, estimate_source="user_confirmed", status="pending")
+    s_a1 = CandidateStep(client_step_key="sa1", title="A1", expected_output="out", order_index=0, estimated_base_seconds=1500, remaining_base_seconds=1500, buffer_multiplier=1.2, estimate_source="user_confirmed", status="pending")
+    s_a2 = CandidateStep(client_step_key="sa2", title="A2", expected_output="out", order_index=1, estimated_base_seconds=1500, remaining_base_seconds=1500, buffer_multiplier=1.2, estimate_source="user_confirmed", status="pending")
+    s_b1 = CandidateStep(client_step_key="sb1", title="B1", expected_output="out", order_index=0, estimated_base_seconds=1500, remaining_base_seconds=1500, buffer_multiplier=1.2, estimate_source="user_confirmed", status="pending")
+    s_b2 = CandidateStep(client_step_key="sb2", title="B2", expected_output="out", order_index=1, estimated_base_seconds=1500, remaining_base_seconds=1500, buffer_multiplier=1.2, estimate_source="user_confirmed", status="pending")
 
     step_to_task = {"sa1": "task_a", "sa2": "task_a", "sb1": "task_b", "sb2": "task_b"}
     scrambled_steps = [s_b2, s_a2, s_b1, s_a1]
 
     ordered = order_steps_by_priority(
         steps=scrambled_steps,
-        planning_parts=parts,
         task_priority_map=task_priority_map,
         step_to_task_map=step_to_task,
     )
@@ -542,14 +514,14 @@ def test_shift_elapsed_sessions():
 def test_evaluate_buffer_adaptation_median():
     # 5 bước hoàn tất có tỷ số: [1.3, 1.4, 1.3, 1.35, 1.3] -> median = 1.30
     samples = [
-        {"step_id": "st1", "status": "completed", "estimated_base_seconds": 3000, "actual_work_seconds": 3900, "scope_modified": False},
-        {"step_id": "st2", "status": "completed", "estimated_base_seconds": 2000, "actual_work_seconds": 2800, "scope_modified": False},
-        {"step_id": "st3", "status": "completed", "estimated_base_seconds": 3000, "actual_work_seconds": 3900, "scope_modified": False},
-        {"step_id": "st4", "status": "completed", "estimated_base_seconds": 4000, "actual_work_seconds": 5400, "scope_modified": False},
-        {"step_id": "st5", "status": "completed", "estimated_base_seconds": 3000, "actual_work_seconds": 3900, "scope_modified": False},
+        {"step_id": "st1", "status": "completed", "estimated_base_seconds": 3000, "actual_work_seconds": 3900, "scope_modified": False, "actual_source": "timer_proxy"},
+        {"step_id": "st2", "status": "completed", "estimated_base_seconds": 2000, "actual_work_seconds": 2800, "scope_modified": False, "actual_source": "timer_proxy"},
+        {"step_id": "st3", "status": "completed", "estimated_base_seconds": 3000, "actual_work_seconds": 3900, "scope_modified": False, "actual_source": "timer_proxy"},
+        {"step_id": "st4", "status": "completed", "estimated_base_seconds": 4000, "actual_work_seconds": 5400, "scope_modified": False, "actual_source": "timer_proxy"},
+        {"step_id": "st5", "status": "completed", "estimated_base_seconds": 3000, "actual_work_seconds": 3900, "scope_modified": False, "actual_source": "timer_proxy"},
         # Bước chưa hoàn thành hoặc đổi scope -> phải bị lọc bỏ
-        {"step_id": "st6_incomplete", "status": "incomplete", "estimated_base_seconds": 3000, "actual_work_seconds": 3900},
-        {"step_id": "st7_scope_mod", "status": "completed", "estimated_base_seconds": 3000, "actual_work_seconds": 3900, "scope_modified": True},
+        {"step_id": "st6_incomplete", "status": "incomplete", "estimated_base_seconds": 3000, "actual_work_seconds": 3900, "scope_modified": False, "actual_source": "timer_proxy"},
+        {"step_id": "st7_scope_mod", "status": "completed", "estimated_base_seconds": 3000, "actual_work_seconds": 3900, "scope_modified": True, "actual_source": "timer_proxy"},
     ]
 
     # Buffer hiện tại là 1.05. Độ lệch |1.30 - 1.05| = 0.25 >= 0.20 -> sinh gợi ý

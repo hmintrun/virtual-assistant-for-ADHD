@@ -772,18 +772,23 @@ class AIService:
                 schema_cls=LLMTaskDecompositionPayload,
                 profile=self._decomposition_profile(),
             )
+            if not llm_payload.requires_clarification and any(
+                not step.expected_output or not step.expected_output.strip()
+                for step in llm_payload.steps
+            ):
+                raise ValueError("AI decomposition is missing expected outputs")
             return TaskDecompositionResult(
                 **llm_payload.model_dump(),
                 generation_tier=winner_tier,
             )
         except Exception as exc:
             logger.warning(
-                "UF2 chưa có phương án hợp lệ; giữ Draft để thử lại: %s",
+                "UF2 chuyển sang Tier 3 Python dự phòng do lỗi: %s",
                 type(exc).__name__,
             )
-            raise TimeoutError(
-                "AI decomposition unavailable; keep the draft for retry/manual editing"
-            ) from exc
+            return self._fallback_decompose_task(
+                cleaned_title, user_focus_duration=user_focus_duration, scope=scope
+            )
 
     def _fallback_decompose_task(
         self,
@@ -796,9 +801,9 @@ class AIService:
         Khi mất kết nối tới cả 2 tầng AI, tự động chia thành 3 bước chuẩn theo thời lượng
         tập trung mặc định của người dùng kèm Micro-task khởi động 2 phút cụ thể.
         """
-        cleaned_title = task_title.strip() or "Công việc hiện tại"
+        cleaned_title = (task_title.strip() or "Công việc hiện tại")[:100]
         safe_duration = max(5, min(180, user_focus_duration))
-        scope_hint = f" ({scope.strip()})" if scope and scope.strip() else ""
+        scope_hint = f" ({scope.strip()[:80]})" if scope and scope.strip() else ""
 
         steps = [
             StepPromptItem(
