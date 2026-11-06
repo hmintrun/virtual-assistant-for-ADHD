@@ -1048,3 +1048,21 @@ Các trường streak trong schema cũ (current_streak_days, streak_frozen, stre
 - Unit 10/10; integration 10/10 đạt sau sửa. Confirm UF2 dùng HTTP 201 theo router/hợp đồng gốc; UF1 thiếu giờ trả 422 VALIDATION_ERROR, next_action=fix_fields, field_path=availability.
 - Đã sửa GET Context trả đúng draft_id công khai thay vì UUID khóa ngoại; snapshot và summary revision được kiểm trong integration.
 - Test dùng SQLite tạm, AI giả, user giả và preferences có sẵn; chưa kiểm AI trích xuất voice/text, Google, PostgreSQL hoặc cảm ứng Mobile.
+
+
+> Phần sau ghi snapshot nền dev ngày 03/11, không thay trạng thái C01 phía trên hoặc kết quả kiểm chứng local ngày 07/11.
+
+## 12. Quyết định tuần 2 và trạng thái code nền — 03/11/2026
+
+Quyết định đã được người dùng chốt, lấy [Project mục 8.2](../../Project.md) và [kế hoạch tuần 2](../week2_detailed_plan.md) làm tham chiếu local. Docs/Sheet online chưa được cập nhật trong lượt này. Kết quả kiểm nền ghi ở [biên bản nền tuần 2](../week2_baseline.md).
+
+| Nội dung | Yêu cầu đã chốt | Trạng thái triển khai tại nền tuần 2 |
+| --- | --- | --- |
+| Nhắc trước phiên | Default mới `[900, 600, 300]`, 1–3 mốc integer không âm, không trùng, giảm dần; giữ lựa chọn user cũ | Code/Settings còn khóa một mốc, default `[900]`; dedupe đã có offset. Capabilities số đơn chưa biểu diễn default nhiều mốc; Cương/Hưng cập nhật đồng bộ DTO, service và Mobile theo checklist |
+| Chuông khi thu âm | Âm thanh báo hết giờ ≤1 giây, bảo vệ file; không hoãn 15 giây hoặc dùng rung/UI thay điều kiện âm thanh | Chưa có bằng chứng Android. Không dời ended_at/actual/timeout DND theo lúc finalize; kiểm sớm 04/11 và nghiệm thu thiết bị |
+| Undo Thought | Outbox local lưu bền chờ 5 giây; Undo cất mới hủy gửi/dọn file, xóa bản cũ giữ khả năng phục hồi | Local repository/outbox/UI và API UF4 còn phải triển khai; không coi DELETE là đã có endpoint Undo |
+| Kết thúc tối thiểu | CheckIn cuối, phản hồi và lazy timeout đọc/start sau hạn; thiết bị tự khôi phục DND đúng owner | Router/service UF3–UF4/CheckIn mới là khung. “Chọn nghỉ” chưa xác nhận kết quả cần ví dụ payload được nhóm chốt, không suy completed |
+| Thought → Draft | Metadata Thought có trên server, user yêu cầu sau phiên: POST voice/transcriptions purpose=thought_to_draft → POST thoughts/{id}/draft; retry riêng từng bước | STT có kiểm owner/Run và receipt DB, còn cache RAM trùng; API tạo Draft từ Thought chờ triển khai. FK unique source_thought_id đã có, chỉ kiểm migration/đường dùng và ánh xạ liên kết |
+| Vai trò tuần 2 | Cương: router/DTO/HTTP; Hưng: service nghiệp vụ; Tín: schema/migration/repository; An/Thịnh/Khải: UI/local/native | Kế thừa contract chung trên dev; không tạo bộ JSON riêng theo người |
+
+Bản nền phục vụ bắt đầu phát triển, chưa phải nghiệm thu giai đoạn 1 hay MVP: UF1 mới nhận giờ riêng nhưng UF2 vẫn chặn nguồn mới; Mobile chưa xử lý đầy đủ trường availability riêng, chưa build/analyze trên máy MT vì chưa có SDK. Không tự bỏ guard UF2, thay nguồn giờ hoặc đánh dấu các output này đã đạt.

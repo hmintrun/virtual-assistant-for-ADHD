@@ -64,3 +64,14 @@ Không tự `alembic upgrade head` lên DB app để thay cho test. Chuỗi loca
 - Còn cảnh báo cấu hình loop scope từ pytest-asyncio hiện có; không đổi dependency/config ngoài phạm vi để che cảnh báo.
 - A20 vẫn giữ mặc định thử nghiệm; không áp tự động settings. Rolling horizon cho Candidate đầu không đồng nghĩa API lập tiếp Task đã lưu đã hoàn tất.
 - Bản Project.md từng sửa ở checkout tạm dưới `cp/_temp` không phải nguồn của lần kiểm chứng này. Project.md trong repo local được cập nhật riêng theo đúng code local và quyết định đã chốt.
+
+
+## Kiểm chứng nhánh PR vào dev
+
+Commit sửa local: `dc388e7`. Nhánh PR `codex/backend-local-verification-20261107` ghép thêm `origin/dev@935e3cc` trong worktree riêng; không merge remote backend và không thay các sửa dở của working tree local.
+
+Đã giải quyết sáu conflict ở Project, AI service, scheduler, AI/scheduler tests và schema. Toàn bộ `backend/` sau giải quyết khớp commit local đã kiểm chứng; `mobile/` khớp hoàn toàn dev. Tài liệu giữ các nội dung nền dev đồng thời chuyển phần Part và nguồn giờ rảnh sang C01.
+
+Suite chạy từ checkout PR độc lập đạt **81 passed, 2 subtests passed**; không cần file untracked `test_adaptation.py` hoặc `_temp/c01_tests`. Ruff và ty toàn backend đều đạt; diffcheck so với dev đạt. Số 118 test ở mục trước là kết quả working tree local có thêm suite adaptation untracked của tác giả, không dùng làm số test của artifact PR.
+
+Vẫn giữ giới hạn PostgreSQL SQL export, provider giả/SQLite và cảnh báo loop-scope pytest-asyncio; chưa nghiệm thu PostgreSQL server, AI/Calendar hoặc Android thật.

@@ -1,0 +1,20 @@
+name: flutter_dnd
+description: Local compatibility patch of flutter_dnd for modern Flutter and Gradle.
+version: 0.1.4+1
+publish_to: none
+homepage: https://github.com/sathish76/flutter_dnd
+
+environment:
+  sdk: '>=3.2.0 <4.0.0'
+  flutter: '>=3.29.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+flutter:
+  plugin:
+    platforms:
+      android:
+        package: com.github.sathish76.flutter_dnd
+        pluginClass: FlutterDndPlugin
