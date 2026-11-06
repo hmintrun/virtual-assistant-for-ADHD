@@ -16,6 +16,7 @@ from pydantic import BaseModel, ValidationError
 from sqlalchemy import func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.core.errors import AppError
 from app.models.calendar import (
     CalendarConnection,
@@ -242,7 +243,7 @@ async def get_preferences(*, user_id: str, db: AsyncSession) -> UserPreference:
         requested_revision=row.requested_revision,
         work_interval_seconds=row.work_interval_seconds,
         rest_interval_seconds=row.rest_interval_seconds,
-        micro_task_seconds=row.micro_task_seconds,
+        micro_task_seconds=row.micro_task_seconds if row.micro_task_seconds is not None else 120,
         reminder_offsets=row.reminder_offsets,
         buffer_multiplier=row.buffer_multiplier,
         reminder_style=row.reminder_style,
@@ -444,6 +445,28 @@ async def create_planning_context(
             ],
         )
         if draft is not None:
+            overlaps = (
+                await db.scalars(
+                    select(PlanningContext).where(
+                        PlanningContext.user_id == draft_service.resolve_user_uuid(user_id),
+                        PlanningContext.source_draft_id
+                        == draft_service.resolve_draft_uuid(draft.draft_id),
+                        PlanningContext.source_summary_revision == draft.summary_revision,
+                        PlanningContext.query_start < payload.to_at,
+                        PlanningContext.query_end > payload.from_at,
+                        PlanningContext.sync_state == "valid",
+                    )
+                )
+            ).all()
+            if any(
+                (row.busy_intervals or row.manual_busy_intervals or row.selected_calendar_sources)
+                and (row.query_start < payload.from_at or row.query_end > payload.to_at)
+                for row in overlaps
+            ):
+                raise _invalid(
+                    "Ngữ cảnh mới cần bao phủ ngữ cảnh cũ để không làm mất lịch bận ngoài khoảng cập nhật.",
+                    "from/to",
+                )
             await db.execute(
                 update(PlanningContext)
                 .where(
@@ -602,6 +625,32 @@ async def _sources(
         .with_for_update()
     )
     if row is None:
+        # Context ngắn/hết hạn vẫn có thể chứa lịch bận đã khai báo. Không biến
+        # việc thiếu coverage thành một lịch trống và ghi đè hiểu biết đó.
+        known_query = select(PlanningContext).where(
+            PlanningContext.user_id == owner,
+            PlanningContext.query_start < horizon.end_at,
+            PlanningContext.query_end > horizon.start_at,
+        )
+        if inline is not None:
+            known_query = known_query.where(
+                PlanningContext.source_draft_id == draft_service.resolve_draft_uuid(draft.draft_id)
+            )
+        else:
+            assert legacy is not None
+            known_query = known_query.where(
+                PlanningContext.availability_id == _uuid(legacy.availability_id)
+            )
+        known = (await db.scalars(known_query)).all()
+        if any(
+            c.busy_intervals or c.manual_busy_intervals or c.selected_calendar_sources
+            for c in known
+        ):
+            raise _error(
+                "CALENDAR_CONTEXT_UNAVAILABLE",
+                "Đã có lịch bận nhưng ngữ cảnh chưa đủ phạm vi hoặc đã hết hạn. Hãy cập nhật lịch bận trước khi xếp lại.",
+                action="create_planning_context",
+            )
         configured = (
             await db.scalars(select(CalendarConnection).where(CalendarConnection.user_id == owner))
         ).all()
@@ -684,7 +733,10 @@ def _horizon(draft: PlanningDraft, requested: TimeInterval | None) -> TimeInterv
     terminal = tc.deadline_at if tc.kind == "deadline" else tc.finish_by_at
     if terminal is None:
         raise _invalid("Thiếu mốc kết thúc.")
-    start = max(tc.start_at, datetime.now(UTC))
+    # Giữ thời gian xem/duyệt và khởi động trước phiên đầu; không tự chốt lịch đã quá giờ.
+    start = max(
+        tc.start_at, datetime.now(UTC) + timedelta(seconds=settings.PLANNING_REVIEW_LEAD_SECONDS)
+    )
     end = min(terminal, start + timedelta(days=14))
     if requested is not None:
         start = max(start, requested.start_at)
@@ -1576,6 +1628,12 @@ async def confirm_candidate(
                 "Nguồn lịch, giờ rảnh hoặc cấu hình đã đổi; cần tạo phương án mới.",
             )
         issues = _concrete_issues(candidate, source)
+        if any(issue.code == "PAST_SESSION" for issue in issues):
+            raise _error(
+                "CANDIDATE_EXPIRED",
+                "Giờ bắt đầu đã qua. Hãy tạo lại phương án và xem lịch mới trước khi xác nhận.",
+                action="regenerate_candidate",
+            )
         if (
             candidate.feasibility.status != "feasible"
             or not candidate.feasibility.fully_scheduled

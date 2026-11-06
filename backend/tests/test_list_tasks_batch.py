@@ -5,7 +5,7 @@ from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import event, select, update
+from sqlalchemy import delete, event, select, update
 
 from app.core.database import make_engine, session_factory
 from app.core.errors import AppError
@@ -252,7 +252,7 @@ async def test_unavailable_linked_draft_keeps_404(data, source):
         await connection.exec_driver_sql("PRAGMA foreign_keys=OFF")
         if source == "missing":
             await connection.execute(
-                PlanningDraft.__table__.delete().where(PlanningDraft.id == data.draft_ids[0])
+                delete(PlanningDraft).where(PlanningDraft.id == data.draft_ids[0])
             )
         else:
             await connection.execute(

@@ -21,7 +21,7 @@ SEED_USER_B = CurrentUser(
 
 def resolve_dev_current_user() -> CurrentUser:
     """Trả về user thử nghiệm trong môi trường development/test; từ chối nếu ở môi trường dùng thật."""
-    if settings.ENVIRONMENT not in {"development", "test"}:
+    if settings.ENVIRONMENT not in {"development", "testing"}:
         raise AppError(
             status_code=401,
             code="UNAUTHENTICATED",
@@ -29,4 +29,3 @@ def resolve_dev_current_user() -> CurrentUser:
             next_action="authenticate",
         )
     return SEED_USER_A
-

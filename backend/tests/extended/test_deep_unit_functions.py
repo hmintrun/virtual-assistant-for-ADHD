@@ -16,6 +16,7 @@ from datetime import UTC, datetime, timedelta, timezone
 from unittest.mock import patch
 
 import pytest
+
 from app.core.config import Settings
 from app.schemas.availability import Availability, WeeklyRule
 from app.schemas.calendar import (
@@ -334,7 +335,7 @@ class TestSchedulingDeepScenarios:
         )
         assert report_exc.status == "infeasible"
         assert report_exc.fully_scheduled is False
-        assert report_exc.deficit_seconds >= 1
+        assert report_exc.deficit_seconds is not None and report_exc.deficit_seconds >= 1
 
     def test_schedule_enforces_minimum_gap_900s(self):
         """Hai phiên liên tiếp bắt buộc cách nhau tối thiểu 900 giây (15 phút)."""
@@ -644,13 +645,15 @@ class TestAIServiceDeepScenarios:
             assert step.estimated_minutes == 25
 
     @pytest.mark.asyncio
-    async def test_public_decomposition_provider_failure_requires_retry(self, svc: AIService):
-        """Public UF2 không tự đổi sang helper ba bước khi provider không trả kết quả."""
+    async def test_public_decomposition_provider_failure_uses_fallback(self, svc: AIService):
+        """UF2 vẫn sinh phương án dự phòng khi cả hai nhà cung cấp lỗi."""
         with patch.object(
             svc, "_execute_hedged_structured", side_effect=RuntimeError("provider disabled")
         ):
-            with pytest.raises(TimeoutError, match="keep the draft"):
-                await svc.decompose_task(task_title="Báo cáo", scope="1 trang")
+            result = await svc.decompose_task(task_title="Báo cáo", scope="1 trang")
+        assert result.generation_tier == "tier_3_rule_based"
+        assert len(result.steps) == 3
+        assert all(step.expected_output and step.micro_task_prompt for step in result.steps)
 
     @pytest.mark.asyncio
     async def test_adjust_candidate_plan_tier3_safe_preservation(self, svc: AIService):

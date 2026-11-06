@@ -3,10 +3,11 @@
 from copy import deepcopy
 
 import pytest
+from pydantic import ValidationError
+
 from app.schemas.availability import Availability
 from app.schemas.common import TimeConstraint
 from app.schemas.planning import PlanCandidate
-from pydantic import ValidationError
 
 
 def candidate_payload():

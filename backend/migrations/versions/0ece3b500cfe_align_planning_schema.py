@@ -33,6 +33,7 @@ def upgrade():
             existing_type=sa.VARCHAR(length=255),
             type_=sa.JSON(),
             existing_nullable=False,
+            postgresql_using="to_json(resource_ref)",
         )
 
     with op.batch_alter_table("session_runs", schema=None) as batch_op:
@@ -44,6 +45,7 @@ def upgrade():
             existing_type=sa.VARCHAR(length=32),
             type_=sa.Integer(),
             existing_nullable=True,
+            postgresql_using="NULLIF(importance, '')::integer",
         )
 
     with op.batch_alter_table("thoughts", schema=None) as batch_op:

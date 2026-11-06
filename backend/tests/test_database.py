@@ -10,6 +10,12 @@ from threading import Barrier
 from uuid import uuid4
 
 import pytest
+from pydantic import BaseModel
+from sqlalchemy import create_engine, event, inspect, select, update
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import Session as DBSession
+
 from app.core.database import make_engine, session_factory
 from app.models import (
     Base,
@@ -28,12 +34,7 @@ from app.models import (
 from app.services import command_service
 from app.services.plan_service import get_command_result
 from app.services.task_state_service import get_task_planning_states
-from pydantic import BaseModel
-from sqlalchemy import create_engine, event, inspect, select
-from sqlalchemy.exc import IntegrityError
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import Session as DBSession
-from test_models import make_plan
+from tests.test_models import make_plan
 
 
 def run_for(session, user_id, **kwargs):
@@ -393,9 +394,12 @@ def test_reminder_offsets_storage_preserves_existing_preferences(engine):
         existing_id, new_id = existing.id, new.id
 
     with DBSession(engine) as db:
-        offsets = dict(
-            db.execute(select(UserPreference.user_id, UserPreference.reminder_offsets)).all()
-        )
+        offsets = {
+            owner: values
+            for owner, values in db.execute(
+                select(UserPreference.user_id, UserPreference.reminder_offsets)
+            ).all()
+        }
         assert offsets == {existing_id: [300], new_id: [900, 600, 300]}
 
 
@@ -515,6 +519,31 @@ def test_postgresql_offline_migration_contains_deferred_fks():
     assert result.returncode == 0, result.stderr
     assert "ALTER TABLE planning_drafts ADD CONSTRAINT fk_draft_source_thought" in result.stdout
     assert "CREATE UNIQUE INDEX uq_user_live_run" in result.stdout
+    assert "DO $c01$" in result.stdout
+    assert "client_step_keys" in result.stdout
+    assert "USING to_json(resource_ref)" in result.stdout
+
+
+def test_focus_defaults_upgrade_preserves_existing_preferences(sqlite_migration):
+    url, migrate = sqlite_migration
+    migrate("upgrade", "20261106_01")
+    engine = create_engine(url.replace("+aiosqlite", ""))
+    with DBSession(engine) as db:
+        user = User(email="legacy-defaults@example.test", display_name="Legacy")
+        db.add(user)
+        db.flush()
+        db.add(UserPreference(user_id=user.id, reminder_offsets=[300], micro_task_seconds=45))
+        db.commit()
+        owner = user.id
+        db.execute(update(UserPreference).values(micro_task_seconds=None))
+        db.commit()
+    migrate("upgrade", "head")
+    with DBSession(engine) as db:
+        pref = db.scalar(select(UserPreference).where(UserPreference.user_id == owner))
+        assert pref is not None
+        assert pref.micro_task_seconds == 120
+        assert pref.reminder_offsets == [300]
+    engine.dispose()
 
 
 def test_step_cannot_reference_task_of_another_user(engine):

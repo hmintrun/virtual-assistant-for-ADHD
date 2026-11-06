@@ -132,8 +132,8 @@ class TestAIService(unittest.TestCase):
             self.assertTrue(bool(step.micro_task_prompt.strip()), "Bước phải có micro-task 2 phút")
             self.assertEqual(step.estimated_minutes, 25)
 
-    def test_uf2_provider_failure_requires_retry(self) -> None:
-        """C01 giữ Draft khi provider lỗi, không sinh ba bước mẫu thay phạm vi user."""
+    def test_uf2_provider_failure_uses_configured_python_fallback(self) -> None:
+        """Provider lỗi vẫn có phương án dự phòng để user xem và quyết định."""
         service = AIService(
             app_settings=Settings(
                 _env_file=None,
@@ -146,15 +146,18 @@ class TestAIService(unittest.TestCase):
             with (
                 self.subTest(error=type(error).__name__),
                 patch.object(service, "_execute_hedged_structured", side_effect=error),
-                self.assertRaises(TimeoutError),
             ):
-                asyncio.run(
+                result = asyncio.run(
                     service.decompose_task(
                         task_title="  Viết báo cáo môn học  ",
                         scope="Bản nháp gồm 5 trang",
                         user_focus_duration=20,
                     )
                 )
+                self.assertEqual(result.generation_tier, "tier_3_rule_based")
+                self.assertEqual(len(result.steps), 3)
+                self.assertTrue(all(step.estimated_minutes == 20 for step in result.steps))
+                self.assertTrue(all(step.expected_output for step in result.steps))
 
     def test_tier3_fallback_uf6(self) -> None:
         """Kiểm tra Fallback Tầng 3 cho UF6: Lời khích lệ nhẹ nhàng (Guilt-free)."""
@@ -279,6 +282,7 @@ class TestAIService(unittest.TestCase):
                     StepPromptItem(
                         order_index=1,
                         title="Thiết kế cấu trúc đề cương LaTeX",
+                        expected_output="Đề cương đã có đủ các chương.",
                         estimated_minutes=30,
                         micro_task_prompt="Tạo file main.tex trong thư mục khóa luận.",
                         cognitive_load="light",
@@ -286,6 +290,7 @@ class TestAIService(unittest.TestCase):
                     StepPromptItem(
                         order_index=2,
                         title="Xử lý tập dữ liệu mẫu",
+                        expected_output="Tập dữ liệu mẫu đã làm sạch.",
                         estimated_minutes=45,
                         micro_task_prompt="Mở notebook và đọc 10 dòng đầu tiên của dữ liệu.",
                         cognitive_load="medium",

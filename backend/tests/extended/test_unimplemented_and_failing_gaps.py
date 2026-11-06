@@ -12,6 +12,10 @@ import unittest
 
 import httpx
 import pytest
+from fastapi.testclient import TestClient
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
 from app.api.deps import get_current_user
 from app.core.database import get_db
 from app.main import app
@@ -20,10 +24,6 @@ from app.models.user import UserPreference as PreferenceRow
 from app.schemas.settings import UserPreference
 from app.schemas.user import CurrentUser
 from app.services import draft_service
-from fastapi.testclient import TestClient
-from pydantic import ValidationError
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 
 class MissingEndpoint(AssertionError):
@@ -89,7 +89,7 @@ class TestUnimplementedAndHiddenGaps(unittest.TestCase):
                             PreferenceRow.user_id == draft_service.resolve_user_uuid("user_a")
                         )
                     )
-                    self.assertIsNotNone(pref)
+                    assert pref is not None
                     self.assertEqual(pref.work_interval_seconds, 900)
                     self.assertEqual(pref.buffer_multiplier, 1.4)
                     self.assertEqual(pref.effective_revision, 2)
@@ -100,13 +100,8 @@ class TestUnimplementedAndHiddenGaps(unittest.TestCase):
 
         asyncio.run(run())
 
-    @pytest.mark.xfail(
-        strict=True,
-        raises=ValidationError,
-        reason="Giới hạn hiện hành: UserPreference chỉ cho một mốc reminder; hỗ trợ nhiều mốc chưa triển khai.",
-    )
     def test_gap_reminder_offsets_multi_memos_blocked(self):
-        """Mong muốn hai mốc, đơn vị giây; không bắt ValidationError rồi ép fail."""
+        """Cấu hình nhiều mốc nhắc đã được triển khai; phải chạy như ca PASS."""
         pref = UserPreference(
             revision=1,
             effective_revision=1,

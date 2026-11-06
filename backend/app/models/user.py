@@ -57,8 +57,8 @@ class UserPreference(RecordMixin, Base):
     user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"), unique=True)
     work_interval_seconds: Mapped[int] = mapped_column(default=1500)
     rest_interval_seconds: Mapped[int] = mapped_column(default=300)
-    micro_task_seconds: Mapped[int | None]
-    reminder_offsets: Mapped[list[int]] = mapped_column(JSON, default=lambda: [900])
+    micro_task_seconds: Mapped[int | None] = mapped_column(default=120)
+    reminder_offsets: Mapped[list[int]] = mapped_column(JSON, default=lambda: [900, 600, 300])
     requested_revision: Mapped[int | None]
     effective_revision: Mapped[int] = mapped_column(default=1)
     buffer_multiplier: Mapped[float] = mapped_column(default=1.2)

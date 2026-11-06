@@ -12,6 +12,9 @@ from datetime import UTC, datetime, timedelta
 from unittest.mock import patch
 
 import pytest
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
 from app.core.errors import AppError
 from app.models import Base, Task
 from app.schemas.availability import DraftAvailability, WeeklyRule
@@ -19,8 +22,6 @@ from app.schemas.common import TimeConstraint
 from app.schemas.draft import ConfirmSummaryRequest, CreateDraftRequest, SummaryInput
 from app.schemas.planning import ConfirmCandidateRequest, GenerateCandidateRequest, ManualStepInput
 from app.services import draft_service, plan_service
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 
 class TestRequirementGapsAndADHDScenarios(unittest.TestCase):
@@ -181,7 +182,7 @@ class TestRequirementGapsAndADHDScenarios(unittest.TestCase):
                                 ),
                                 db=db,
                             )
-                        self.assertEqual(ctx.exception.code, "PLAN_NOT_CONFIRMABLE")
+                        self.assertEqual(ctx.exception.code, "CANDIDATE_EXPIRED")
                 async with factory() as db:
                     self.assertIsNone(await db.scalar(select(Task.id)))
                     kept = await plan_service.get_candidate_by_id(

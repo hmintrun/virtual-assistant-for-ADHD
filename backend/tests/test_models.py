@@ -61,9 +61,9 @@ def test_csv_values_and_roundtrip(engine):
     with DBSession(engine) as db:
         user, pref, task, step, session = make_plan(db)
         db.expire_all()
-        assert pref.micro_task_seconds is None
+        assert pref.micro_task_seconds == 120
         assert pref.requested_revision is None
-        assert pref.reminder_offsets == [900]
+        assert pref.reminder_offsets == [900, 600, 300]
         assert pref.work_interval_seconds == 1500
         assert pref.buffer_multiplier == 1.2
         assert task.status == "pending"

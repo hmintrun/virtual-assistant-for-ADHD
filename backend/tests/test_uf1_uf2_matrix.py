@@ -30,6 +30,9 @@ from datetime import UTC, datetime, timedelta, timezone
 from typing import Any
 from unittest.mock import patch
 
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
 from app.core.config import Settings
 from app.core.errors import AppError
 from app.models import (
@@ -77,8 +80,6 @@ from app.schemas.task import (
 )
 from app.services import draft_service, plan_service
 from app.services.ai_service import AIService, ai_service
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Hằng dùng chung

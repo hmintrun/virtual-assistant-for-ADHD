@@ -20,6 +20,9 @@ import unittest
 from datetime import UTC, datetime, timedelta, timezone
 from unittest.mock import patch
 
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
 from app.core.config import Settings
 from app.core.errors import AppError
 from app.models import (
@@ -56,8 +59,6 @@ from app.services import draft_service, plan_service
 from app.services.ai_service import AIService, ai_service
 from app.services.planning.adaptation import evaluate_buffer_adaptation
 from app.services.planning.rescheduling import shift_elapsed_sessions
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 VN_TZ = timezone(timedelta(hours=7))
 DAYTIME_ANCHOR = datetime(2026, 11, 2, 9, 0, tzinfo=VN_TZ)  # 09:00 sáng Thứ Hai
@@ -396,6 +397,7 @@ class TestDeepChainedPipeline(unittest.TestCase):
                     )
                     self.assertEqual(cand.feasibility.status, "infeasible")
                     self.assertFalse(cand.feasibility.fully_scheduled)
+                    assert cand.feasibility.deficit_seconds is not None
                     self.assertGreater(cand.feasibility.deficit_seconds, 0)
 
                 # BƯỚC 2: Cố tình chốt lịch Infeasible -> BỊ CHẶN với mã lỗi PLAN_NOT_CONFIRMABLE
@@ -614,14 +616,14 @@ class TestDeepChainedPipeline(unittest.TestCase):
             delta_threshold=0.20,
         )
 
-        self.assertIsNotNone(suggestion)
+        assert suggestion is not None
         self.assertEqual(suggestion["kind"], "buffer_multiplier")
         self.assertEqual(suggestion["suggested_value"], 1.40)
         self.assertEqual(suggestion["sample_count"], 5)
         self.assertIn("1.40", suggestion["reason"])
 
     def test_pipeline_6_ai_unavailable_keeps_confirmed_draft(self):
-        """Public UF2 lỗi provider -> AI_UNAVAILABLE; không mất Draft hoặc ghi Task nửa chừng."""
+        """Public UF2 lỗi provider -> phương án Python; chỉ ghi Task khi user xác nhận."""
 
         async def run():
             engine, factory = await self._async_setup_db()
@@ -670,28 +672,27 @@ class TestDeepChainedPipeline(unittest.TestCase):
                     AIService.decompose_task.__get__(ai_service, AIService),
                 ):
                     async with factory() as db:
-                        with self.assertRaises(AppError) as ctx:
-                            await plan_service.create_candidate(
-                                user_id="user_a",
-                                draft_id=draft.draft_id,
-                                idempotency_key="ai_failure_candidate",
-                                payload=GenerateCandidateRequest(
-                                    source_summary_revision=draft.summary_revision,
-                                    source_planning_input_revision=draft.planning_input_revision,
-                                ),
-                                db=db,
-                            )
-                        self.assertEqual(ctx.exception.status_code, 503)
-                        self.assertEqual(ctx.exception.code, "AI_UNAVAILABLE")
+                        generated = await plan_service.create_candidate(
+                            user_id="user_a",
+                            draft_id=draft.draft_id,
+                            idempotency_key="ai_failure_candidate",
+                            payload=GenerateCandidateRequest(
+                                source_summary_revision=draft.summary_revision,
+                                source_planning_input_revision=draft.planning_input_revision,
+                            ),
+                            db=db,
+                        )
+                        self.assertEqual(len(generated.steps), 3)
+                        self.assertTrue(generated.sessions)
                 async with factory() as db:
                     kept = await draft_service.get_draft_by_id(
                         user_id="user_a", draft_id=draft.draft_id, db=db
                     )
-                    self.assertEqual(kept.stage, "summary_confirmed")
+                    self.assertEqual(kept.stage, "candidate_review")
                     self.assertEqual(kept.summary_revision, draft.summary_revision)
                     self.assertEqual(kept.summary.scope, "1 trang")
                     self.assertIsNone(kept.confirmed_task_id)
-                    self.assertIsNone(await db.scalar(select(CandidateModel.id)))
+                    self.assertIsNotNone(await db.scalar(select(CandidateModel.id)))
                     self.assertIsNone(await db.scalar(select(TaskModel.id)))
             finally:
                 await engine.dispose()

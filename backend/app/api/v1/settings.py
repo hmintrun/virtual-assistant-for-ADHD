@@ -238,8 +238,9 @@ async def apply_settings_change(
             work <= 0
             or rest < 0
             or buffer < 1
-            or len(offsets) != 1
-            or offsets[0] < 0
+            or not 1 <= len(offsets) <= 3
+            or len(set(offsets)) != len(offsets)
+            or any(offset < 0 for offset in offsets)
             or not style.strip()
         ):
             raise AppError(
@@ -261,7 +262,7 @@ async def apply_settings_change(
             )
         if preferences is None:
             preferences = PreferenceRow(
-                user_id=owner, effective_revision=1, micro_task_seconds=None, **values
+                user_id=owner, effective_revision=1, micro_task_seconds=120, **values
             )
             db.add(preferences)
         elif any(getattr(preferences, k) != v for k, v in values.items()):

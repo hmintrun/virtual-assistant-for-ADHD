@@ -203,6 +203,8 @@ def _row_to_schema(row: PlanningDraftModel, fallback_draft_id: str | None = None
 
 async def ensure_dev_seed_in_db(db: AsyncSession) -> None:
     """Bước 5.1 (F07, T23): Khởi tạo bảng và seed idempotent cho User A, User B cùng các Draft mẫu."""
+    if db.info.get("dev_seed_ready"):
+        return
     bind = db.get_bind()
     engine_key = id(bind)
     if engine_key not in _INITIALIZED_ENGINES:
@@ -241,7 +243,8 @@ async def ensure_dev_seed_in_db(db: AsyncSession) -> None:
                     effective_revision=1,
                     buffer_multiplier=1.2,
                     reminder_style="gentle",
-                    reminder_offsets=[900],
+                    micro_task_seconds=120,
+                    reminder_offsets=[900, 600, 300],
                 )
             )
             changed = True
@@ -280,6 +283,7 @@ async def ensure_dev_seed_in_db(db: AsyncSession) -> None:
 
     if changed:
         await db.commit()
+    db.info["dev_seed_ready"] = True
 
 
 async def _validate_source_thought(

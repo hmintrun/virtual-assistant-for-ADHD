@@ -9,6 +9,11 @@ import httpx
 import pytest
 from alembic.autogenerate import compare_metadata
 from alembic.migration import MigrationContext
+from pydantic import BaseModel
+from sqlalchemy import event, func, select
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm.exc import StaleDataError
+
 from app.api.deps import get_current_user
 from app.api.v1 import voice
 from app.core.database import get_db, make_engine, session_factory
@@ -30,11 +35,7 @@ from app.models import (
 )
 from app.repositories import device_repository, run_repository, thought_repository
 from app.services import command_service, draft_service
-from pydantic import BaseModel
-from sqlalchemy import event, func, select
-from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm.exc import StaleDataError
-from test_models import make_plan
+from tests.test_models import make_plan
 
 
 @pytest.fixture
@@ -115,6 +116,7 @@ async def test_conversion_rollback_receipt_reopen_and_forward_links(storage):
         await db.rollback()
     async with storage.sessions() as db:
         thought = await thought_repository.get_thought(db, storage.owner, storage.thought_id)
+        assert thought is not None
         assert thought.revision == 1
         assert await thought_repository.get_links(db, storage.owner, [storage.thought_id]) == {}
         assert await command_service.replay(db, owner, key, digest) is None
@@ -277,6 +279,7 @@ async def test_device_reports_keep_latest_owner_and_rollback(storage):
         await db.rollback()
     async with storage.sessions() as db:
         saved = await device_repository.get_device_state(db, storage.owner, "device-1")
+        assert saved is not None
         assert saved.device_report_revision == 2 and saved.active_run_id == storage.run_id
         assert saved.dnd_restore_state == "pending"
         assert await device_repository.get_device_state(db, storage.other, "device-1") is None
@@ -298,6 +301,7 @@ async def test_concurrent_device_reports_keep_highest_revision(storage):
     await asyncio.gather(send(2), send(3))
     async with storage.sessions() as db:
         saved = await device_repository.get_device_state(db, storage.owner, "device-1")
+        assert saved is not None
         assert saved.device_report_revision == 3
         assert await db.scalar(select(func.count()).select_from(DeviceState)) == 1
 
@@ -306,7 +310,9 @@ async def test_concurrent_device_reports_keep_highest_revision(storage):
 async def test_run_checkin_revision_conflict_and_event_scope(storage):
     async with storage.sessions() as first, storage.sessions() as second:
         checkin = await run_repository.get_final_checkin(first, storage.owner, storage.run_id)
+        assert checkin is not None
         stale = await run_repository.get_final_checkin(second, storage.owner, storage.run_id)
+        assert stale is not None
         checkin.response_state = "no_respond"
         await first.commit()
         stale.response_state = "answered"
@@ -314,12 +320,14 @@ async def test_run_checkin_revision_conflict_and_event_scope(storage):
             await second.commit()
         await second.rollback()
         fresh = await run_repository.get_final_checkin(second, storage.owner, storage.run_id)
+        assert fresh is not None
         assert fresh.id == checkin.id and fresh.response_state == "no_respond"
         fresh.response_state, fresh.response_revision = "answered", 1
         fresh.session_outcome = "partial"
         await second.commit()
     async with storage.sessions() as db:
         run = await run_repository.get_live_run(db, storage.owner)
+        assert run is not None
         assert run.id == storage.run_id and run.outcome == "unknown"
         assert run.ended_at == storage.ended_at and run.actual_work_seconds == 3600
         assert await run_repository.get_run(db, storage.other, storage.run_id) is None
@@ -625,6 +633,7 @@ async def test_device_migration_preserves_populated_database(sqlite_migration):
             assert await db.get(User, ids[0]) is not None
             assert await db.get(Task, ids[1]) is not None
             pref = await db.scalar(select(UserPreference).where(UserPreference.user_id == ids[0]))
+            assert pref is not None
             assert pref.reminder_offsets == [300]
             assert await db.scalar(select(func.count()).select_from(DeviceState)) == 0
     finally:
@@ -664,8 +673,10 @@ async def test_merge_preserves_existing_device_branch(sqlite_migration):
         await assert_migrated_schema(reopened)
         async with session_factory(reopened)() as db:
             saved = await device_repository.get_device_state(db, owner, "device-1")
+            assert saved is not None
             assert saved.device_report_revision == 3
             pref = await db.scalar(select(UserPreference).where(UserPreference.user_id == owner))
+            assert pref is not None
             assert pref.reminder_offsets == [300]
     finally:
         await reopened.dispose()

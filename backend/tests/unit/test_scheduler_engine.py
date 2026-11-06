@@ -13,6 +13,7 @@ Kiểm thử các bài toán:
 from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
+
 from app.schemas.availability import Availability, WeeklyRule
 from app.schemas.calendar import BusyInterval, BusyIntervalSource, CalendarContext
 from app.schemas.common import SessionSegment, TimeConstraint, TimeInterval
@@ -374,7 +375,7 @@ def test_schedule_sessions_deficit(sample_pref):
 
     assert report.status == "infeasible"
     assert report.fully_scheduled is False
-    assert report.deficit_seconds > 0
+    assert report.deficit_seconds is not None and report.deficit_seconds > 0
     assert any(b.code == "TOTAL_DEFICIT" for b in report.blocking_reasons)
 
 

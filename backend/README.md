@@ -23,4 +23,28 @@ uv export --frozen --no-dev --no-hashes --no-emit-project -o requirements.txt
 
 Backend đã có API/service UF1–UF2, C01 ba tầng Task → Steps → Sessions, receipt DB và tầng lưu trữ tuần 2. Hướng dẫn chạy và kết quả bản ghép hiện tại nằm trong [bàn giao nền tuần 2 ngày 06/11](../docs/week2_baseline_20261106.md).
 
+Bản tích hợp sửa UF1–UF2 trên PR #9 và kết quả kiểm chứng mới nằm trong [báo cáo ngày 07/11](../docs/backend/UF1_UF2_PR9_INTEGRATION_20261107.md). Báo cáo này cập nhật hành vi fallback Python và sửa lỗi xuất SQL PostgreSQL của bản bàn giao 06/11. Google Calendar được để tích hợp sau.
+
+Kiểm tra backend từ thư mục `backend/`:
+
+```powershell
+uv run --frozen ruff check .
+uv run --frozen ty check
+uv run --frozen python -m pytest -q -ra
+```
+
+Suite có test khởi chạy Uvicorn trên loopback với SQLite tạm, xác nhận UF1–UF2 rồi khởi động lại để kiểm receipt và dữ liệu. Test không cần khóa provider. Đặt `PLANNING_REVIEW_LEAD_SECONDS` để thay khoảng chờ xem lịch trước phiên đầu (mặc định 300 giây, tối thiểu 120); phương án đã quá giờ phải tạo lại để duyệt.
+
+Kiểm tra bổ sung SQL PostgreSQL bằng PGlite, từ thư mục `backend/` (cần Node/npm):
+
+```powershell
+$pgCheckRoot = Join-Path (Get-Location).Path '../_temp/pgcheck'
+npm install --prefix $pgCheckRoot @electric-sql/pglite@0.5.15 --no-save --ignore-scripts --no-audit --no-fund
+$env:PGLITE_MODULE_ROOT = (Resolve-Path $pgCheckRoot).Path
+$env:PYTHON = (uv run --frozen python -c "import sys; print(sys.executable)").Trim()
+node scripts/check_postgres_migrations.mjs
+```
+
+Script chạy migration SQL trên PostgreSQL WASM cho DB mới và dữ liệu cũ có Parts, candidate, giờ rảnh và cấu hình cá nhân. Bước này chưa kiểm kết nối `asyncpg` với server PostgreSQL triển khai thực tế.
+
 Service/router UF3–UF4 và CheckIn tối thiểu vẫn cần triển khai. Auth hiện dùng tài khoản demo trong development; kiểm khởi động không thay bằng chứng Android, provider thật hoặc triển khai production.

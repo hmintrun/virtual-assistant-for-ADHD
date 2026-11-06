@@ -5,8 +5,9 @@ import sys
 from pathlib import Path
 
 import pytest
-from app.models import Base
 from sqlalchemy import create_engine, event
+
+from app.models import Base
 
 
 @pytest.fixture(autouse=True)
