@@ -6,6 +6,7 @@ from uuid import NAMESPACE_DNS, UUID, uuid4, uuid5
 
 from pydantic import ValidationError
 from sqlalchemy import select, update
+from sqlalchemy.exc import MultipleResultsFound
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import AppError
@@ -14,6 +15,7 @@ from app.models.planning import PlanningDraft as PlanningDraftModel
 from app.models.settings import Availability as AvailabilityModel
 from app.models.user import User as UserModel
 from app.models.user import UserPreference as UserPreferenceModel
+from app.repositories import run_repository, thought_repository
 from app.schemas.availability import Availability, DraftAvailability
 from app.schemas.common import (
     AvailabilityRef,
@@ -41,7 +43,7 @@ from app.schemas.task import (
     TaskExtractionResult,
 )
 from app.services.ai_service import ai_service
-from app.services.command_service import durable_command
+from app.services.command_service import durable_command, lock_owner
 from app.services.scheduler_engine import validate_planning_prerequisites
 
 
@@ -164,7 +166,6 @@ def _serialize_summary_payload(draft: PlanningDraft) -> dict[str, Any]:
             draft.candidate_ref.model_dump(mode="json") if draft.candidate_ref is not None else None
         ),
         "confirmed_task_id": draft.confirmed_task_id,
-        "source_thought_id": draft.source_thought_id,
     }
     return summary_dict
 
@@ -179,8 +180,8 @@ def _row_to_schema(row: PlanningDraftModel, fallback_draft_id: str | None = None
     cand_ref_raw = api_meta.get("candidate_ref")
     cand_ref = CandidateRef.model_validate(cand_ref_raw) if isinstance(cand_ref_raw, dict) else None
     confirmed_task_id = api_meta.get("confirmed_task_id")
-    source_thought_id = api_meta.get("source_thought_id") or (
-        str(row.source_thought_id) if row.source_thought_id else None
+    source_thought_id = (
+        str(row.source_thought_id) if row.source_thought_id else api_meta.get("source_thought_id")
     )
     return PlanningDraft(
         ai_context=api_meta.get("ai_context") or {},
@@ -281,6 +282,57 @@ async def ensure_dev_seed_in_db(db: AsyncSession) -> None:
         await db.commit()
 
 
+async def _validate_source_thought(
+    db: AsyncSession, user_id: str, draft_id: str, source_thought_id: str | None
+) -> UUID | None:
+    if source_thought_id is None:
+        return None
+    try:
+        thought_id = UUID(source_thought_id)
+    except ValueError:
+        thought_id = None
+    owner = resolve_user_uuid(user_id)
+    thought = (
+        await thought_repository.get_thought(db, owner, thought_id)
+        if thought_id is not None
+        else None
+    )
+    if thought is None:
+        raise AppError(
+            status_code=404,
+            code="RESOURCE_NOT_FOUND",
+            message="Không tìm thấy suy nghĩ nguồn.",
+            next_action="reload",
+        )
+    if thought.source_run_id is not None:
+        run = await run_repository.get_run(db, owner, thought.source_run_id)
+        if run is None or run.ended_at is None:
+            raise AppError(
+                status_code=409,
+                code="SESSION_STILL_RUNNING",
+                message="Chỉ tạo nháp từ suy nghĩ sau khi phiên nguồn kết thúc.",
+                next_action="wait_for_session_end",
+            )
+    try:
+        links = await thought_repository.get_links(db, owner, [thought.id])
+    except MultipleResultsFound:
+        raise AppError(
+            status_code=409,
+            code="SOURCE_CHANGED",
+            message="Dữ liệu cũ có nhiều nháp cùng nguồn suy nghĩ; cần đối soát liên kết.",
+            next_action="reload_and_review",
+        ) from None
+    linked = links.get(thought.id)
+    if linked is not None and linked.draft.id != resolve_draft_uuid(draft_id):
+        raise AppError(
+            status_code=409,
+            code="THOUGHT_ALREADY_LINKED",
+            message="Suy nghĩ này đã có bản nháp.",
+            next_action="open_linked_draft",
+        )
+    return thought.id
+
+
 async def _persist_draft_to_db(
     db: AsyncSession | None,
     user_id: str,
@@ -293,6 +345,13 @@ async def _persist_draft_to_db(
         await ensure_dev_seed_in_db(db)
         did = resolve_draft_uuid(draft.draft_id)
         uid = resolve_user_uuid(user_id)
+        if draft.source_thought_id is not None:
+            await lock_owner(db, user_id)
+        source_thought_id = await _validate_source_thought(
+            db, user_id, draft.draft_id, draft.source_thought_id
+        )
+        if source_thought_id is not None:
+            draft.source_thought_id = str(source_thought_id)
         values = {
             "stage": draft.stage,
             "raw_input": draft.raw_input,
@@ -302,6 +361,7 @@ async def _persist_draft_to_db(
             "summary_confirmed_revision": draft.summary_confirmed_revision,
             "planning_input_revision": draft.planning_input_revision,
             "user_step_proposal": draft.user_step_proposal,
+            "source_thought_id": source_thought_id,
         }
         if expected is not None:
             written_id = await db.scalar(
@@ -1193,6 +1253,12 @@ async def analyze_draft(
                 "planning_input_revision": snapshot_draft.planning_input_revision,
             },
             next_action="reload_and_review",
+        )
+
+    # Kiểm nguồn trước provider và kiểm lại lúc lưu để chặn chuyển suy nghĩ trong phiên.
+    if db is not None:
+        await _validate_source_thought(
+            db, user_id, draft_id, payload.source_thought_id or snapshot_draft.source_thought_id
         )
 
     # Pha 2: Gọi AI ngoài transaction; giữ snapshot làm ngữ cảnh, không tạo Task.
