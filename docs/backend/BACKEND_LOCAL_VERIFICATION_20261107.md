@@ -72,6 +72,6 @@ Commit sửa local: `dc388e7`. Nhánh PR `codex/backend-local-verification-20261
 
 Đã giải quyết sáu conflict ở Project, AI service, scheduler, AI/scheduler tests và schema. Toàn bộ `backend/` sau giải quyết khớp commit local đã kiểm chứng; `mobile/` khớp hoàn toàn dev. Tài liệu giữ các nội dung nền dev đồng thời chuyển phần Part và nguồn giờ rảnh sang C01.
 
-Suite chạy từ checkout PR độc lập đạt **81 passed, 2 subtests passed**; không cần file untracked `test_adaptation.py` hoặc `_temp/c01_tests`. Ruff và ty toàn backend đều đạt; diffcheck so với dev đạt. Số 118 test ở mục trước là kết quả working tree local có thêm suite adaptation untracked của tác giả, không dùng làm số test của artifact PR.
+Suite chạy từ checkout PR độc lập đạt **81 passed, 2 subtests passed**; không cần file untracked `test_adaptation.py` hoặc `_temp/c01_tests`. Ruff và ty toàn backend đều đạt; diffcheck các file sửa của lượt này đạt. Diff toàn PR còn 8 cảnh báo whitespace kế thừa từ tài liệu `UF3_UF4_DEEP_DIVE_ANALYSIS.md` đã có trong lịch sử local; không sửa nội dung ngoài phạm vi để che cảnh báo. Số 118 test ở mục trước là kết quả working tree local có thêm suite adaptation untracked của tác giả, không dùng làm số test của artifact PR.
 
 Vẫn giữ giới hạn PostgreSQL SQL export, provider giả/SQLite và cảnh báo loop-scope pytest-asyncio; chưa nghiệm thu PostgreSQL server, AI/Calendar hoặc Android thật.
