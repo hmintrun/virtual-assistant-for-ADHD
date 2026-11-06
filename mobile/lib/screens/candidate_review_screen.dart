@@ -4,7 +4,8 @@ import 'package:provider/provider.dart';
 import '../core/theme.dart';
 import '../providers/task_provider.dart';
 import '../widgets/melbel_ui.dart';
-import 'uf2_screens.dart' show PlanLockedScreen, UnconfirmedPlanScreen;
+import 'uf2_screens.dart'
+    show DecompositionChoiceScreen, PlanLockedScreen, UnconfirmedPlanScreen;
 
 class CandidateReviewScreen extends StatelessWidget {
   const CandidateReviewScreen({super.key});
@@ -32,21 +33,21 @@ class CandidateReviewScreen extends StatelessWidget {
     final title = task.title.isEmpty ? 'Công việc' : task.title;
 
     return Scaffold(
-      appBar: const MelbelAppBar(title: 'Phương án từ máy chủ', showBack: true),
+      appBar: const MelbelAppBar(title: 'Kế hoạch đề xuất', showBack: true),
       body: SafeArea(
         child: ListView(
           padding: const EdgeInsets.fromLTRB(20, 12, 20, 28),
           children: [
-            const Eyebrow('UF2 · CANDIDATE CHƯA CHỐT'),
+            const Eyebrow('UF2 · ĐỀ XUẤT CHƯA CHỐT'),
             const SizedBox(height: 8),
             Text(title,
-                style: const TextStyle(
+                style: TextStyle(
                     fontSize: 22,
                     fontWeight: FontWeight.w600,
                     color: MelbelColors.kOnSurface)),
             const SizedBox(height: 6),
             Text('Hạn chót: ${task.formatDeadline(task.deadline)}',
-                style: const TextStyle(color: MelbelColors.kOnSurfaceVariant)),
+                style: TextStyle(color: MelbelColors.kOnSurfaceVariant)),
             const SizedBox(height: 14),
             MelbelCard(
                 child: Column(
@@ -64,38 +65,52 @@ class CandidateReviewScreen extends StatelessWidget {
                     Expanded(
                         child: Text(
                             _feasibilityLabel(candidate.feasibilityStatus),
-                            style: const TextStyle(
+                            style: TextStyle(
                                 color: MelbelColors.kOnSurface,
                                 fontWeight: FontWeight.w600)))
                   ]),
                   const SizedBox(height: 8),
                   Text(
-                      'Candidate ${candidate.candidateId} · bản xem ${candidate.reviewRevision}',
-                      style: const TextStyle(
-                          color: MelbelColors.kOnSurfaceVariant)),
+                      'Mã phương án ${candidate.candidateId} · bản ${candidate.reviewRevision}',
+                      style: TextStyle(color: MelbelColors.kOnSurfaceVariant)),
                   if (deficitSeconds != null) ...[
                     const SizedBox(height: 8),
                     Text(
                         'Thiếu tối thiểu ${_minutes(deficitSeconds)} phút theo kết quả backend.',
-                        style: const TextStyle(
-                            color: MelbelColors.kOnSurfaceVariant)),
+                        style:
+                            TextStyle(color: MelbelColors.kOnSurfaceVariant)),
                   ],
                   if (candidate.stale) ...[
                     const SizedBox(height: 8),
-                    const Text(
+                    Text(
                         'Nguồn dữ liệu đã thay đổi. Hãy tạo lại phương án trước khi xác nhận.',
                         style:
                             TextStyle(color: MelbelColors.kTertiaryFixedDim)),
                   ],
                   if (hasPastSession) ...[
                     const SizedBox(height: 8),
-                    const Text(
+                    Text(
                         'Backend đang trả phiên đã qua hoặc thiếu giờ bắt đầu; chưa thể chốt lịch này.',
                         style:
                             TextStyle(color: MelbelColors.kTertiaryFixedDim)),
                   ],
                 ])),
             const SizedBox(height: 14),
+            Align(
+              alignment: Alignment.centerLeft,
+              child: TextButton.icon(
+                onPressed: task.isApiBusy
+                    ? null
+                    : () => Navigator.push(
+                          context,
+                          MaterialPageRoute<void>(
+                            builder: (_) => const DecompositionChoiceScreen(),
+                          ),
+                        ),
+                icon: const Icon(Icons.tune),
+                label: const Text('Tùy chỉnh theo ý tôi'),
+              ),
+            ),
             for (var i = 0; i < candidate.steps.length; i++) ...[
               _stepCard(context, candidate.steps[i], i),
               const SizedBox(height: 10),
@@ -110,7 +125,7 @@ class CandidateReviewScreen extends StatelessWidget {
             ],
             if (candidate.planningParts
                 .any((part) => part['decomposition_state'] != 'complete'))
-              const MelbelCard(
+              MelbelCard(
                   child: Text(
                       'Một số phần nằm ngoài phạm vi phân rã chi tiết hiện tại; có thể tiếp tục khi kế hoạch được cập nhật.',
                       style: TextStyle(color: MelbelColors.kOnSurfaceVariant))),
@@ -145,8 +160,7 @@ class CandidateReviewScreen extends StatelessWidget {
             if (task.apiError != null) ...[
               const SizedBox(height: 10),
               Text(task.apiError!,
-                  style:
-                      const TextStyle(color: MelbelColors.kTertiaryFixedDim)),
+                  style: TextStyle(color: MelbelColors.kTertiaryFixedDim)),
             ],
           ],
         ),
@@ -172,7 +186,7 @@ class CandidateReviewScreen extends StatelessWidget {
         const SizedBox(width: 10),
         Expanded(
             child: Text(step['title'] as String? ?? 'Bước chưa có tên',
-                style: const TextStyle(
+                style: TextStyle(
                     fontWeight: FontWeight.w600,
                     color: MelbelColors.kOnSurface))),
         IconButton(
@@ -181,12 +195,12 @@ class CandidateReviewScreen extends StatelessWidget {
             icon: const Icon(Icons.edit_outlined))
       ]),
       Text(step['expected_output'] as String? ?? 'Chưa có kết quả đầu ra',
-          style: const TextStyle(color: MelbelColors.kOnSurfaceVariant)),
+          style: TextStyle(color: MelbelColors.kOnSurfaceVariant)),
       const SizedBox(height: 6),
       Text(
           'Ước tính gốc: ${_minutes(seconds)} phút · hệ số đệm ${step['buffer_multiplier'] ?? '—'}',
-          style: const TextStyle(
-              color: MelbelColors.kOnSurfaceVariant, fontSize: 12)),
+          style:
+              TextStyle(color: MelbelColors.kOnSurfaceVariant, fontSize: 12)),
     ]));
   }
 
@@ -200,15 +214,15 @@ class CandidateReviewScreen extends StatelessWidget {
     return MelbelCard(
         child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
       Text('${time(start)} – ${time(end)}',
-          style: const TextStyle(
+          style: TextStyle(
               fontWeight: FontWeight.w600, color: MelbelColors.kOnSurface)),
       const SizedBox(height: 5),
       Text(
           'Làm ${_minutes(session['work_seconds'] as int? ?? 0)}p · nghỉ ${_minutes(session['rest_seconds'] as int? ?? 0)}p',
-          style: const TextStyle(color: MelbelColors.kOnSurfaceVariant)),
+          style: TextStyle(color: MelbelColors.kOnSurfaceVariant)),
       const SizedBox(height: 5),
       Text('Khởi động 2 phút: ${session['micro_task_text'] ?? 'Chưa có gợi ý'}',
-          style: const TextStyle(color: MelbelColors.kOnSurfaceVariant)),
+          style: TextStyle(color: MelbelColors.kOnSurfaceVariant)),
     ]));
   }
 
