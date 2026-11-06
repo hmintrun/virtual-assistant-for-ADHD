@@ -2,7 +2,7 @@
 
 > **Tên dự án:** **ProPlan VA** — Trợ lý ảo AI hỗ trợ lập kế hoạch, chia nhỏ công việc và nhắc lịch chủ động bằng giọng nói trên thiết bị di động cho người mắc hội chứng ADHD.
 > **Mục đích tài liệu:** Cung cấp ngữ cảnh toàn diện (Business Logic, Cơ sở khoa học, Kiến trúc kỹ thuật, Luồng nghiệp vụ UF1–UF7, Mô hình dữ liệu và Quy tắc cốt lõi) cho các **AI Coding Agents** và thành viên trong nhóm phát triển trên toàn bộ Monorepo.
-> **Đồng bộ ngày 03/11/2026:** Đối chiếu [schema Backend](docs/backend/schema.md), ORM/migrations và các quyết định tuần 2 đã được người dùng chốt. Mục 6–7 phản ánh cả giờ rảnh riêng UF1 mới; mục 8.2 phân biệt quyết định đã chốt với policy còn chờ. Nhắc 15/10/5 phút, chuông đúng hạn và Undo Thought 5 giây là yêu cầu triển khai tuần 2; chưa được coi là code đã hỗ trợ. Kết quả tích hợp và giới hạn kiểm chứng xem [biên bản nền tuần 2](docs/week2_baseline.md).
+> **Đồng bộ Backend ngày 07/11/2026:** Theo lựa chọn của Quốc Hưng, hợp nhất commit sửa local `dc388e7` với remote backend `5e72054`, giữ toàn bộ lịch sử và tính năng remote. Giữ C01 Task → Step → Session, Tier 3 khi phân rã, Pydantic/dedup UF1 và keyed adjustment; AI chỉnh sửa lỗi trả AI_UNAVAILABLE và giữ phương án cũ. Giữ đầy đủ migration C01/DeviceState/merge/focus defaults đến head `20261107_01`. Không force-push và không sửa dữ liệu app; bằng chứng kiểm chứng theo báo cáo Backend local và bản hợp nhất.
 
 ---
 
@@ -113,6 +113,7 @@ Các ứng dụng hiện có như **Goblin Tools** (chỉ bẻ nhỏ việc rờ
   1. **Tầng 1 (Primary + Warm Backup Gemini):** Gọi **`gemini-3.8-flash`** kết hợp khởi chạy ngầm **`gemini-3.5-flash-lite`** (Warm Backup giữ sẵn trong RAM nếu model chính xử lý chậm).
   2. **Tầng 2 (Cross-Provider Groq Fallback):** Nếu nhánh Google lỗi nhanh, quá hạn mức (Rate Limit 429) hoặc chạm mốc Hedge, Backend tự động chuyển sang **`qwen/qwen3.8-27b`** trên Groq Cloud (và model phụ **`openai/gpt-oss-20b`** nếu chạm trần TPM — dùng chung `GROQ_API_KEY` với Groq Whisper).
   3. **Tầng 3 (Deterministic Rule-based Fallback):** Nếu mất kết nối tới cả 2 nhà cung cấp AI, hệ thống tự động kích hoạt thuật toán chia công việc thành các phiên cố định theo thời lượng tập trung mặc định của người dùng (ví dụ: `20–25 phút/phiên` + `5 phút nghỉ`) kèm câu thông báo thân thiện để không làm đứt mạch làm việc.
+  - **Phạm vi áp dụng UF2:** Khi sinh Candidate bị lỗi provider, timeout hoặc kết quả phân rã AI không hợp lệ, dùng `_fallback_decompose_task` theo cấu hình user rồi để scheduler kiểm lịch. Khi chỉnh Candidate theo key thất bại, service trả `503 AI_UNAVAILABLE` với thông báo phương án cũ được giữ nguyên; không phân rã lại hoặc tạo Candidate thay thế. Lỗi quyền/revision/nguồn và yêu cầu cần làm rõ vẫn theo kiểm tra nghiệp vụ, không được bỏ qua bằng fallback.
 
 ### 5.4. Cơ chế Giữ chân Người dùng (Retention Mechanics)
 - **Chuỗi ngày duy trì (Guilt-free Streak):** Có hệ thống cột mốc (milestone) và huy hiệu tạo niềm vui, nhưng áp dụng cơ chế **Đóng băng chuỗi (Streak Freeze)** khi người dùng nghỉ hoặc lỡ nhịp chứ không xóa sạch chuỗi về 0 nhằm tránh hiệu ứng tâm lý *"đằng nào cũng hỏng rồi, bỏ luôn"* (*All-or-Nothing mindset*).
@@ -124,12 +125,14 @@ Các ứng dụng hiện có như **Goblin Tools** (chỉ bẻ nhỏ việc rờ
 
 ### 6.1. Phân cấp công việc & Vòng đời lập kế hoạch
 
-Ba đối tượng nghiệp vụ cốt lõi vẫn là **Task → Step → Session**. Schema bổ sung **PlanningPart** để giữ từng phần phạm vi, kể cả phần chưa chia chi tiết trong Rolling Horizon:
+Theo C01, mô hình nghiệp vụ và hợp đồng API hiện hành chỉ có **3 tầng**; Step thuộc trực tiếp Task:
 
-$$\text{Task} \longrightarrow \text{PlanningPart} \longrightarrow \text{Step} \longrightarrow \text{Session}$$
+$$\text{Task} \longrightarrow \text{Step} \longrightarrow \text{Session}$$
 
 - **UF1:** Lưu `PlanningDraft` và `TaskSummary`; xác nhận Summary chưa tạo Task chính thức.
-- **UF2:** Sinh `PlanCandidate` để review. Chỉ khi xác nhận Candidate mới lưu `Task`, `PlanningPart`, `Step`, `Session` và `ScheduleVersion` trong một transaction.
+- **UF2:** Sinh `PlanCandidate` gồm Steps/Sessions để review. Chỉ khi xác nhận Candidate mới lưu `Task`, `Step`, `Session` và `ScheduleVersion` trong một transaction.
+- **Rolling Horizon:** Candidate và Task giữ `decomposition_state` cùng `unexpanded_scope` cho phần chưa chia. Không tạo Part, Step/Session giả hay thời lượng 0 để đại diện phần chưa biết; hoàn tất phần đã xếp chưa đồng nghĩa hoàn tất toàn Task.
+- **Dữ liệu cũ:** `PlanningPart`/`CandidatePart` không thuộc ORM/API C01. Bảng/cột Part legacy được migration giữ để đối soát và phục hồi; không tự xóa dữ liệu hoặc đưa tầng Part trở lại luồng mới.
 - **UF3–UF5:** `Session` là lịch dự kiến; `SessionRun` là lần thực hiện được chấp nhận start; `CheckIn` lưu phản hồi. Phiên chưa bắt đầu không có Run giả.
 - **UF6:** `RescheduleProposal` giữ thay đổi chờ duyệt; chỉ approve thành công mới tạo bản lịch chính thức mới.
 
@@ -147,8 +150,7 @@ erDiagram
     USER ||--o{ PLANNING_DRAFT : saves
     PLANNING_DRAFT ||--o{ PLAN_CANDIDATE : generates
     PLANNING_DRAFT ||--o| TASK : becomes_after_UF2
-    TASK ||--o{ PLANNING_PART : retains_scope
-    PLANNING_PART ||--o{ STEP : decomposes_into
+    TASK ||--o{ STEP : decomposes_into
     STEP ||--o{ SESSION : scheduled_as
     SESSION ||--o{ SESSION_RUN : executed_as
     SESSION_RUN ||--o{ CHECK_IN : receives
@@ -164,7 +166,8 @@ erDiagram
     USER ||--o{ CALENDAR_CONNECTION : authorizes
     CALENDAR_CONNECTION ||--o{ CALENDAR_EVENT : provides
     CALENDAR_CONNECTION }o--o{ CALENDAR_CONTEXT : contributes_to
-    AVAILABILITY ||--o{ CALENDAR_CONTEXT : constrains
+    AVAILABILITY o|--o{ CALENDAR_CONTEXT : constrains
+    PLANNING_DRAFT o|--o{ CALENDAR_CONTEXT : snapshots_private_availability
     SESSION ||--o| CALENDAR_EVENT_LINK : exports_through
     CALENDAR_CONNECTION ||--o{ CALENDAR_EVENT_LINK : owns
     CALENDAR_CONNECTION ||--o{ CALENDAR_SYNC_JOB : processes
@@ -179,13 +182,13 @@ Tên object và trường dưới đây theo [schema Backend](docs/backend/schem
 | O01 | `UserPreference` | `work_interval_seconds`, `rest_interval_seconds`, `micro_task_seconds`, `reminder_offsets`, `buffer_multiplier`, `reminder_style`; tách `requested_revision` và `effective_revision`, giữ `requested_changes`/`pending_proposal_id`. |
 | O02 | `Availability` | `weekly_rules`, `date_overrides`, `task_limits`, `timezone`, `confirmed_at`; `effective_intervals` dẫn xuất theo from/to và `calendar_context` có revision. |
 | O03 | `TimeConstraint` | `kind=deadline` dùng `start_at` + `deadline_at`, `finish_by_at=null`; `kind=window` dùng `start_at` + `finish_by_at`, `deadline_at=null`; giữ `input_timezone`. |
-| O04 | `TaskSummary` | `title`, `description`, `goal`, `scope`, `extra_requirements`, `time_constraint`, `availability_ref`, `importance`, `clarification_issues`, `can_plan`, `field_sources`. |
+| O04 | `TaskSummary` | `title`, `description`, `goal`, `scope`, `extra_requirements`, `time_constraint`, `availability` riêng hoặc `availability_ref` nguồn chung đã chọn, `importance`, `clarification_issues`, `can_plan`, `field_sources`. |
 | O05 | `PlanningDraft` | `client_draft_id`, `raw_input`, `input_source`, `stage`, `summary`, `summary_revision`, `planning_input_revision`, `summary_confirmed_revision`, `user_step_proposal`; liên kết Thought/Candidate/Task khi có. |
-| O06 | `PlanCandidate` | Parts/Steps/Sessions dùng client keys; `planning_horizon`, `feasibility`, `review_revision`, hai revision đầu vào Draft, `source_revisions`, `stale` do server tính. Chưa có lịch vận hành. |
-| O07 | `Task` | Giữ nội dung/phạm vi, `time_constraint`, `importance`, `source_draft_id`, `availability_ref`; tách `status`, `decomposition_state` và `scheduling_state`. `source_summary` giữ cả goal/nguồn giá trị. |
-| O08 | `Step` | Thuộc Task và `planning_part_id`; `expected_output`, `order_index`, `estimated_base_seconds`, `remaining_base_seconds`, `buffer_multiplier`, `estimate_source`, `status`. |
+| O06 | `PlanCandidate` | Steps/Sessions dùng `client_step_key`/`client_session_key`; `decomposition_state`, `unexpanded_scope`, `planning_horizon`, `feasibility`, `review_revision`, hai revision đầu vào Draft, `source_revisions`, `stale` do server tính. Chưa có lịch vận hành. |
+| O07 | `Task` | Giữ nội dung/phạm vi, `time_constraint`, `importance`, `source_draft_id`, `availability` snapshot hoặc `availability_ref`, hai revision nguồn Draft và `unexpanded_scope`; tách `status`, `decomposition_state` và `scheduling_state`. `source_summary` giữ cả goal/nguồn giá trị. |
+| O08 | `Step` | Thuộc trực tiếp Task qua `task_id`; `expected_output`, `order_index` từ 0, `estimated_base_seconds`, `remaining_base_seconds`, `buffer_multiplier`, `estimate_source`, `status`. Không có `planning_part_id` trong ORM/API mới. |
 | O09 | `Session` | `scheduled_start/end`, `work_seconds`, `rest_seconds`, `segments`, `duration_seconds`, gợi ý micro-task; `schedule_revision`, `status`, `start_state`, `start_decision_due_at`, `calendar_event_link_id`. |
-| O10 | `FeasibilityReport` | `verification_scope`, `status`, `fully_scheduled`, `required_seconds`, `available_seconds`, `unscheduled_seconds`, `deficit_seconds`, `blocking_reasons`; chỉ rõ phần chưa ước lượng/chưa lập kế hoạch. |
+| O10 | `FeasibilityReport` | `verification_scope`, `status`, `fully_scheduled`, `required_seconds`, `available_seconds`, `unscheduled_seconds`, `deficit_seconds`, `blocking_reasons`, `unscheduled_step_keys`, `unexpanded_scope`. Candidate scope dùng `scope_type=candidate_steps` và `client_step_keys`; lịch đã lưu dùng `persisted_schedule` và ID thật. |
 | O11 | `ScheduleVersion` | `version_number`, `base_version`, `approved_at`, `affected_task_ids`, `min_inter_session_gap_seconds`; tách `alarm_sync_state` với `calendar_sync_summary`. |
 | O12 | `SessionRun` | `session_id`, `device_id`, `started_at`, `ended_at`, `run_state`, `active_phase`, `segment_index`, `settings_snapshot`, thời gian work/rest, `actual_source`, `outcome`, mốc check-in/DND. |
 | O13 | `CheckIn` | `run_id`, `kind`, `response_state`, `session_outcome`, `step_completed`, `task_completed`, `skip_scope`, `remaining_note`, `asked_at`, `responded_at`, `response_revision`. |
@@ -196,30 +199,33 @@ Tên object và trường dưới đây theo [schema Backend](docs/backend/schem
 | O18 | `CommandReceipt` | `command_id`, `command_type`, `state`, `result_reference`, `applied_at`; `payload_hash` nội bộ, `queue_state` là dữ liệu hàng chờ local. |
 | O19 | `AdaptationSuggestion` | `kind`, `current_value`, `suggested_value`, `sample_count`, `sample_refs`, `reason`, `policy_revision`, `model_revision`, revision và liên kết gợi ý bị thay thế. |
 | O20 | `AuditEvent` | `event_id`, `event_type`, `resource_ref`, `resource_revision`, `command_id`, `occurred_at`, `received_at`, `duration_source`; truy vết retry và nguồn actual. |
-| O21 | `CalendarContext` | Snapshot theo `context_id/revision`; cặp nguồn `connection_id/google_calendar_id`, phạm vi truy vấn, busy intervals, coverage/errors, nguồn loại trừ và giờ bận thủ công. ORM hiện dùng tên `PlanningContext`. |
-| O22 | `PlanningPart` | `client_part_key`, `scope_description`, `order_index`, trạng thái chia/xếp, `unexpanded_scope`, `rough_estimate_seconds`, `estimate_source`; chưa biết estimate giữ null. |
+| O21 | `CalendarContext` | Snapshot theo `context_id/revision`; nguồn giờ riêng gồm `source_draft_id`, `source_summary_revision`, `availability_snapshot`, hoặc nguồn chung `availability_id/revision`, không trộn hai nhánh. Giữ phạm vi truy vấn, busy intervals, coverage/errors và giờ bận thủ công. ORM dùng tên `PlanningContext`. |
+| O22 | `PlanningPart` — legacy | Giữ mã tài liệu để truy vết dữ liệu trước C01; không còn là object API/ORM hiện hành. Phần chưa chia chuyển sang `unexpanded_scope`/`decomposition_state` trên Candidate/Task, thứ tự Step được trải phẳng khi migration. |
 | O23 | `CalendarConnection` | `account_ref`, các lịch được phép đọc, một lịch đích ghi, `granted_scopes`, `connection_state`, `revision`; `credential_ref` chỉ dùng nội bộ. |
 | O24 | `CalendarEventLink` | Ánh xạ Session với bộ ba connection/calendar/event của Google, `google_etag`, revision lịch mong muốn/đã sync, `sync_state`, `last_synced_at`. |
 | O25 | `CalendarSyncJob` | `target_kind`, `target_ref`, `operation`, revision lịch/etag nguồn, trạng thái job/retry; payload snapshot và idempotency key nội bộ, không trả toàn bộ ra API. |
 | O26 | `CalendarEvent` | Dữ liệu sự kiện ngoài app hoặc gắn Session: start/end, timezone hoặc ngày all-day, `transparency`, provider status, `etag`, `session_link_id`, reminders và phạm vi recurrence. |
 
+**DTO chỉnh Candidate:** `CandidateStepAdjustment` định danh Step bằng `client_step_key`, chỉ sửa `title`, `expected_output`, `estimated_base_seconds` và `order_index`. `CandidateAdjustmentResult` giữ các edits, trạng thái cần làm rõ/sửa Draft, thay đổi chưa hỗ trợ, lời giải thích và `generation_tier`. Không thêm object O22 mới để thay mã legacy hoặc ép kết quả phân rã toàn phương án thành keyed edits.
+
 ### 6.4. Quy ước Dữ liệu, Revision & Transaction
 
 - **Kiểu dữ liệu:** ID trên API là string; DB có thể dùng UUID nhưng không ép mọi client phải UUIDv4. Thời lượng trao đổi là **integer giây**. Timestamp tuyệt đối có offset, lưu UTC; lịch tuần dùng giờ `HH:mm` kèm timezone IANA. Revision theo tài nguyên; `CheckIn.response_revision` mới có thể bằng 0.
 - **Null khác rỗng:** Chưa biết/không áp dụng giữ null; `[]` chỉ dùng khi đã biết danh sách rỗng. PATCH omitted giữ nguyên; null chỉ xóa trường được phép. Không có query from/to thì `Availability.effective_intervals=null`; đã tính và thật sự không rảnh mới là `[]`.
-- **Giờ rảnh có xác nhận:** Yêu cầu UF1 mới dùng `TaskSummary.availability` (`DraftAvailability`), review/xác nhận cùng `summary_confirmed_revision`, không bắt buộc cấu hình Settings trước. Nháp cũ vẫn dùng `AvailabilityRef={availability_id,revision}` khi user đã chọn nguồn chung. Sửa/xóa giờ riêng không tự quay lại ref chung. Calendar chỉ bổ sung bận; lỗi/thiếu coverage không được giả thành lịch trống. UF2/Context hiện chưa nối nguồn Draft mới và trả `409 PLAN_NOT_CONFIRMABLE` / `wait_for_configuration` cho nguồn này; đây là việc giai đoạn 1 cần hoàn thiện.
+- **Giờ rảnh có xác nhận:** Yêu cầu UF1 mới dùng `TaskSummary.availability` (`DraftAvailability`), review/xác nhận cùng `summary_confirmed_revision`, không bắt buộc cấu hình giờ chung trước. UF2/Context C01 đã đọc nguồn Draft và khóa snapshot theo Draft/revision. Nháp cũ vẫn dùng `AvailabilityRef={availability_id,revision}` khi user đã chọn nguồn chung. Sửa/xóa giờ riêng không tự quay lại ref chung. Calendar chỉ bổ sung bận; lỗi/thiếu coverage không được giả thành lịch trống. Thiếu cấu hình preferences là điều kiện riêng, không tự bịa hệ số user.
 - **Revision Draft:** `raw_input`, Summary hoặc `user_step_proposal` thực sự đổi thì tăng `planning_input_revision` một lần trong lần ghi. Summary đổi tăng `summary_revision` và mất xác nhận UF1; raw input đổi cũng vô hiệu xác nhận. Chỉ sửa ý tưởng chia bước giữ xác nhận Summary nhưng làm Candidate cũ stale. No-op/metadata/confirm không tự tăng đầu vào.
-- **Revision Candidate:** Sinh từ `source_summary_revision` và `source_planning_input_revision`; PATCH kiểm `expected_review_revision`. Confirm kiểm `expected_review_revision`, `expected_summary_revision`, `expected_planning_input_revision`, `expected_source_revisions` trong transaction áp dụng. `SourceRevisions` gồm `availability`, `preferences`, `schedule`, `calendar_context={context_id,revision}`.
-- **Khóa tạm → ID thật:** Candidate dùng `client_part_key/client_step_key/client_session_key`, quan hệ cha cũng dùng khóa tạm tương ứng. UF2 confirm trả `key_mapping`; không dùng client key để start Session thật. `source_draft_id` ngăn một nháp sinh nhiều Task đầu tiên.
-- **Chống retry trùng:** `user_id` lấy từ app token. Giữ `Idempotency-Key` cho cùng ý định/payload; cùng khóa khác nội dung bị từ chối. Client draft ID và command ID unique trong phạm vi user; Part/Step/Session keys unique trong phạm vi nguồn tương ứng.
+- **Revision Candidate:** Sinh từ `source_summary_revision` và `source_planning_input_revision`; PATCH kiểm `expected_review_revision`. Confirm kiểm `expected_review_revision`, `expected_summary_revision`, `expected_planning_input_revision`, `expected_source_revisions` trong transaction áp dụng. `SourceRevisions` gồm `availability`, `preferences`, `schedule`, `calendar_context={context_id,revision}`; `availability=null` hợp lệ khi dùng giờ riêng, nguồn được kiểm qua Draft và Context snapshot. Candidate trước C01 có schema version cũ phải được sinh lại để review; không chốt thẳng bản legacy.
+- **Khóa tạm → ID thật:** Candidate dùng `client_step_key/client_session_key`; Session tham chiếu `client_step_key`. UF2 confirm trả `key_mapping.steps/sessions`; không dùng client key để start Session thật. `source_draft_id` ngăn một nháp sinh nhiều Task đầu tiên.
+- **Chống retry trùng:** `user_id` lấy từ app token. Giữ `Idempotency-Key` cho cùng ý định/payload; cùng khóa khác nội dung bị từ chối. Client draft ID và command ID unique trong phạm vi user; Step/Session keys unique trong phạm vi nguồn tương ứng.
+- **PATCH UF1 và câu hỏi:** Phân biệt omitted/null, tái validate Summary bằng Pydantic trước khi đọc model lồng; không để dict thay model trong bộ nhớ. Khi đọc nguồn legacy, hỗ trợ `availability_ref` dạng model/dict theo đường hiện có. Giữ câu hỏi có cấu trúc theo field/code, bỏ câu hỏi `AI_CLARIFICATION` trùng nguyên văn với chúng và dedup theo `(code, field_path, question)`; không gộp mất vấn đề nghiệp vụ khác nhau chỉ vì cách hỏi gần giống.
 - **Lưu nguyên tử:** Confirm/approve kiểm quyền, nguồn và revision bằng CAS/khóa phù hợp; lưu lịch, receipt và outbox trong cùng transaction. Không giữ transaction chờ AI/Google. Google worker chỉ chạy sau commit, không ghi đè revision mới hoặc khôi phục Session đã hủy.
 - **Ranh giới API/DB/local:** Summary/Feasibility/ref không bắt buộc có bảng riêng. Audio path, DND restore snapshot và queue local không tự trở thành DTO Backend. Không ghi token, transcript hoặc audio vào log.
 
 ### 6.5. Session, Run & Kết quả Thực hiện
 
 - Một Session có thể gồm nhiều segment `work/rest`: `duration_seconds = work_seconds + rest_seconds = tổng segments[].duration_seconds`. Buffer chỉ nhân **một lần** lên làm chính; không nhân lại work đã buffer khi tạo timer.
-- Micro-task là gợi ý chuẩn bị trước Session, không có timer/Run riêng, không có `active_phase=micro`, không nằm trong segments và không cộng vào duration/actual/Google event. Số giây micro-task có thể null trong hợp đồng; mục tiêu UX 2 phút và policy cần chốt được ghi ở mục 8.2.
-- Phân biệt các mốc: reminder đích tuần 2 mặc định `[900, 600, 300]`, code nền hiện vẫn `[900]`; start grace 900 giây; gap tối thiểu giữa hai Session liên tiếp 900 giây, cùng hoặc khác Task. Reminder là cấu hình, grace và gap là ràng buộc khác nhau; mở rộng reminder không đổi grace/gap. Một Session đứng riêng không tự cộng gap trước/sau.
+- Micro-task là gợi ý chuẩn bị trước Session, không có timer/Run riêng, không có `active_phase=micro`, không nằm trong segments và không cộng vào duration/actual/Google event. Backend hiện mặc định 120 giây cho user mới và backfill preferences còn null; DTO vẫn có chỗ nullable, không ép đây là field luôn khác null ở mọi đối tượng.
+- Phân biệt các mốc: Backend hiện nhận 1–3 reminder offsets không âm, không trùng, thứ tự giảm dần; user mới mặc định `[900, 600, 300]`, không ghi đè lựa chọn user đã lưu. Start grace 900 giây; gap tối thiểu giữa hai Session liên tiếp 900 giây, cùng hoặc khác Task. Reminder, grace và gap là các ràng buộc riêng. Sinh Candidate chừa mặc định 300 giây trước phiên đầu theo cấu hình server; confirm phiên đã trôi qua trả `409 CANDIDATE_EXPIRED`, không ghi kế hoạch.
 - `Session.start_state=not_started` khi đến `scheduled_start + 900` mà chưa có Run; hiển thị **Bắt đầu** hoặc **Hoãn lại**, không tạo `ended_at`/actual giả. Bắt đầu sớm/muộn phải kiểm giờ rảnh, thứ tự, collision và gap; nếu cần đổi lịch thì qua UF6.
 - `ended_at` là lúc Run thật sự dừng; `checkin_timeout_at=ended_at+300`. Thời gian chờ phản hồi không kéo dài actual. Tách `work_elapsed_seconds`, `rest_elapsed_seconds` và `actual_work_seconds` với `actual_source=timer_proxy/self_report`; thiếu nguồn actual thì null, không lấy planned thay actual.
 - Không phản hồi cuối Run là `CheckIn.response_state=no_respond`, `outcome` chưa xác nhận vẫn `unknown`. Phản hồi muộn sửa cùng CheckIn và revision, không tạo Run/mẫu học mới, không dời `ended_at`.
@@ -236,6 +242,8 @@ Tên object và trường dưới đây theo [schema Backend](docs/backend/schem
 | `actual_duration_min` trên Session | Thời gian thực hiện ở `SessionRun`, đơn vị giây và có nguồn; UI có thể quy đổi phút để hiển thị. |
 | `focus_duration_min`, `break_duration_min` | `work_interval_seconds`, `rest_interval_seconds`; một quãng work không nhất thiết là toàn Session. |
 | `free_time_slots`, `reminder_frequency`, `assistant_style` | `Availability` riêng; cấu hình nhắc dùng `reminder_offsets` và `reminder_style`. |
+| `PlanningPart`, `CandidatePart`, `planning_part_id` | Legacy trước C01; luồng hiện hành nối Task → Step, giữ phần chưa chia trên Candidate/Task. Không đưa Part trở lại DTO mới. |
+| `client_part_keys`, `selected_part_keys` | Phạm vi mới dùng `client_step_keys`/`selected_step_keys`. Chỉ nhận `selected_part_keys=null` để tương thích request cũ; giá trị khác null bị từ chối, không tự đoán ánh xạ Part → Step. |
 
 ### 6.7. Tài khoản, Calendar & Phạm vi triển khai
 
@@ -246,6 +254,8 @@ Tên object và trường dưới đây theo [schema Backend](docs/backend/schem
 - **Streak Freeze:** Giữ mục tiêu UX ở mục 5.4; các trường streak và số freeze tokens chưa thuộc schema tối thiểu, không tự thêm vào User/API hoặc gán quota mặc định.
 - **Trạng thái triển khai:** ORM đã có nhiều model nêu trên, nhưng không có nghĩa mọi API/worker/mobile đã triển khai. Hợp đồng schema, models/migrations và OpenAPI/kiểm thử phải đối chiếu riêng trước bàn giao. Các mục chưa khóa trong schema mục 9 vẫn cần nhóm chốt.
 - **Migration đã bổ sung:** `0ece3b500cfe_align_planning_schema.py` sửa tổng duration không gồm micro-task, khóa `CheckIn.response_state` theo wire, bỏ micro elapsed khỏi Run, đổi importance sang integer và bổ sung audit command/ref. `20261101_01_distinct_planning_part_constraints.py` sửa tên hai unique constraints theo Task + client part key và Task + order; không thay dữ liệu nghiệp vụ. Đây là thay đổi lưu trữ, không phải bằng chứng toàn luồng API đã hoàn tất.
+- **Chuỗi migration C01:** Giữ `backend/migrations/versions/20261103_01_c01_sources.py` cùng nhánh DeviceState `20261105_01_device_state.py`, merge head `20261106_01_merge_c01_device_state.py` và revision tiếp theo `20261107_01_focus_defaults.py`. Head tại mốc đối chiếu là `20261107_01`; không chép riêng file C01 rồi bỏ các nhánh phụ thuộc. C01 backfill snapshot, trải phẳng thứ tự Step và giữ phần chưa chia/dữ liệu Part legacy; PostgreSQL có SQL backfill riêng, SQLite dùng đường migration tương ứng.
+- **Nâng cấp dữ liệu cũ:** Kiểm DB mới và DB có Task/Candidate trước C01 trên cả SQLite/PostgreSQL; kiểm đúng một head. DB từng chạy revision cục bộ `20261106_01_scoped_availability.py` trùng mã nhưng khác schema phải được đối soát riêng, không tự stamp để vượt kiểm tra. Downgrade C01/merge head bị chặn vì cần kế hoạch phục hồi snapshot/dữ liệu.
 
 ---
 
@@ -274,10 +284,10 @@ flowchart TD
 #### UF7 — Thiết lập ban đầu & Tùy chỉnh trợ lý
 - **Mục tiêu & Điểm bắt đầu:** Người dùng cấu hình trợ lý trước khi bắt đầu lập lịch lần đầu hoặc vào phần Cài đặt để tùy chỉnh phương thức nhắc nhở và tập trung.
 - **Luồng xử lý chính (4 bước):**
-  1. **Lựa chọn thông số:** Dùng `work_interval_seconds`, `rest_interval_seconds`, `reminder_offsets`, `reminder_style`, `buffer_multiplier`; giờ rảnh lưu riêng trong `Availability`. Các giá trị 25p làm/5p nghỉ là cấu hình minh họa cũ, không phải mặc định API đã được schema khóa. Quyết định tuần 2 nhận 1–3 mốc không trùng, mặc định `[900, 600, 300]`; giữ lựa chọn đã lưu. Code nền vẫn một offset `[900]`, cần cập nhật đồng bộ theo mục 8.2.
+  1. **Lựa chọn thông số:** Dùng `work_interval_seconds`, `rest_interval_seconds`, `micro_task_seconds`, `reminder_offsets`, `reminder_style`, `buffer_multiplier`; giờ chung lưu riêng trong `Availability`, giờ riêng theo yêu cầu nằm ở Draft. Thời lượng work/rest theo cấu hình hiệu lực của user. Backend hiện mặc định micro-task 120 giây và nhắc `[900, 600, 300]` cho user mới, nhận 1–3 mốc không âm/không trùng; giữ lựa chọn đã lưu.
   2. **Đánh giá tác động & Giữ nguyên phiên hiện tại:** Hệ thống kiểm tra điều kiện thay đổi; giữ nguyên cấu hình cho phiên đang chạy ở UF3. Nếu thay đổi làm lệch các phiên đã lên lịch trong tương lai (đổi thời lượng phiên/nghỉ), chuyển sang **UF6 (Phương án chờ)** để người dùng duyệt lại lịch.
   3. **Tách yêu cầu và hiệu lực:** `requested_changes/requested_revision` không thay ngay `effective_revision` khi đang chờ duyệt đổi lịch. Run hiện tại giữ `settings_snapshot`; thay đổi giọng/cách nhắc áp dụng cho phiên sau, thay đổi ảnh hưởng lịch đi qua change-request và UF6.
-  4. **Gợi ý hệ số đệm:** Luôn ưu tiên cấu hình user; không âm thầm ghi đè. Schema mới chỉ học từ Step đã hoàn tất cùng phạm vi và actual có nguồn; một Step nhiều phiên chỉ là một mẫu. `AdaptationSuggestion` giữ `sample_refs`, `sample_count`, `policy_revision`. Quy tắc cũ Moving Average 7–10 phiên, kiểm hằng tuần và ngưỡng 0.2 đang lệch cơ sở mẫu của schema; ghi tại mục 8.2 để chốt policy trước triển khai.
+  4. **Gợi ý hệ số đệm:** Luôn ưu tiên cấu hình user; không âm thầm ghi đè. A20 dùng trung vị actual/estimate gốc của Step hoàn tất cùng phạm vi, không đổi scope, có actual từ `timer_proxy`/`self_report`; một Step nhiều phiên chỉ là một mẫu. Kiểm số hữu hạn bằng Decimal, loại trùng/mẫu xung đột trước khi lấy cửa sổ. Mặc định thử nghiệm: ít nhất 5 mẫu, 15 Step gần nhất, làm tròn bước 0.05 theo `ROUND_HALF_UP`, miền `[1.0, 2.0]`, ngưỡng chênh tuyệt đối 0.2; không hiểu là lệch 20% tương đối. Cooldown cấu hình được, mặc định 0; không khẳng định lịch kiểm hằng tuần đã triển khai. Giữ `sample_refs`, `sample_count`, `policy_revision`; policy sản phẩm còn chờ chốt ở mục 8.2.
 
 ---
 
@@ -292,6 +302,7 @@ flowchart TD
      - *Ràng buộc thời gian:* `TimeConstraint.kind=deadline/window` có `start_at` và mốc cuối theo nhánh; giữ `input_timezone`, không dùng `timeframe` làm nhãn wire.
      - **Nguyên tắc:** Đánh dấu rõ các điểm thiếu, mơ hồ hoặc mâu thuẫn; **tuyệt đối không tự đoán dữ liệu**.
   3. **Gộp 1 vòng duy nhất (Single-Round Clarification):** Hiển thị bản tóm tắt trực quan kèm câu hỏi làm rõ tất cả các chỗ còn thiếu/mâu thuẫn trong **1 lần hiển thị duy nhất** (không hỏi lắt nhắt nhiều lượt). Người dùng bổ sung hoặc chỉnh sửa trực tiếp trên giao diện.
+     - Giữ các thông tin phạm vi user đã nêu rõ; thiếu giờ rảnh không phải lý do hỏi lại phạm vi hoặc tự bổ sung định dạng/đầu ra chưa được yêu cầu. Bỏ câu hỏi AI tự do trùng nguyên văn với câu hỏi có cấu trúc; vẫn giữ mọi vấn đề chặn cần người dùng xử lý.
   4. **Xác nhận & Chuyển luồng:** Khi đủ 4 nhóm thông tin, `can_plan=true` và user xác nhận đúng `summary_revision`, lưu `summary_confirmed_revision` rồi chuyển sang **UF2**. Đây là xác nhận đầu vào, **chưa tạo Task**, chưa duyệt lịch hay ghi Google Calendar.
 - **Xử lý ngoại lệ & Bảo toàn dữ liệu:**
   - Nếu thông tin chưa rõ/thiếu, hệ thống chỉ giữ ở bước 3, chưa chuyển sang UF2.
@@ -315,24 +326,26 @@ flowchart TD
 ---
 
 #### UF2 — Xem các bước & Chốt kế hoạch
-- **Mục tiêu & Điểm bắt đầu:** Từ Summary đã xác nhận, tạo `PlanCandidate` gồm Parts/Steps/Sessions, review và chốt kế hoạch đầu tiên. Không dùng `Task.status=confirmed` làm đầu vào UF2.
+- **Mục tiêu & Điểm bắt đầu:** Từ Summary đã xác nhận, tạo `PlanCandidate` gồm Steps/Sessions theo C01, review và chốt kế hoạch đầu tiên. Không dùng `Task.status=confirmed` làm đầu vào UF2.
 - **Luồng xử lý chính (5 bước):**
   1. **Đề xuất phân rã chủ động (Tránh Tê liệt khởi động):** Để giải quyết rào cản *Blank Canvas / ADHD Paralysis*, AI (Gemini Flash) **chủ động sinh sẵn một phương án chia bước chuẩn** (`Default Decomposition Proposal`) gồm danh sách các bước, thời lượng dự kiến và Micro-task khởi động 2 phút, kèm nút `"Tùy chỉnh theo ý tôi"` để người dùng tự điều chỉnh nếu muốn.
-  2. **Thuật toán Python xếp phiên & Kiểm tra khả thi:** `scheduler_engine.py` chia Step thành Session/segments, nhân buffer một lần lên làm chính và xếp vào giờ khả dụng. `planning_horizon` mặc định 14 ngày trong giới hạn đã xác nhận, tương ứng đầu khoảng Rolling Horizon 2–3 tuần. Giữ toàn bộ `PlanningPart`, kể cả `unexpanded_scope`; chưa biết estimate giữ null, không tạo Step/Session giả.
+  2. **Thuật toán Python xếp phiên & Kiểm tra khả thi:** `scheduler_engine.py` chia Step thành Session/segments, nhân buffer một lần lên làm chính và xếp vào giờ khả dụng. `planning_horizon` mặc định 14 ngày trong giới hạn đã xác nhận, tương ứng đầu khoảng Rolling Horizon 2–3 tuần. Giữ phần chưa chia ở `unexpanded_scope`/`decomposition_state` của Candidate/Task; không tạo Part, Step/Session giả hoặc gán thời lượng 0. `order_steps_by_priority` và `schedule_candidate_sessions` không nhận `planning_parts`. Chọn phạm vi bằng `selected_step_keys`, phải là dãy liên tiếp từ bước đầu theo thứ tự nguồn; report nêu rõ các Step đã kiểm qua `client_step_keys`.
   3. **Hiển thị Lịch tổng quan & Cảnh báo thiếu hụt:** Hiển thị phần đã chia/xếp và phần còn lại, kèm `FeasibilityReport.verification_scope` và một câu giải thích.
      - **Tổng thời lượng trong phạm vi đã ước lượng:**
        $$T_{\text{req}} = \sum_i (\text{work\_seconds}_i + \text{rest\_seconds}_i)$$
        `work_seconds` đã gồm buffer; không nhân lại, không cộng micro-task. Kiểm riêng gap 900 giây giữa các Session liên tiếp, không cộng gap vào mọi phiên.
      - **Cận dưới thiếu tổng thời lượng:**
        $$\Delta T_{\text{deficit}} = \max(0, T_{\text{req}} - T_{\text{free}})$$
-       `deficit_seconds=0` chưa bảo đảm xếp được: vẫn phải có lịch cụ thể thỏa giờ rảnh, thứ tự, collision, deadline và gap. `search_inconclusive` không có nghĩa đã chứng minh vô nghiệm; phần chưa ước lượng phải được liệt kê riêng.
+       `deficit_seconds=0` chưa bảo đảm xếp được: vẫn phải có lịch cụ thể thỏa giờ rảnh, thứ tự, collision, deadline và gap. `search_inconclusive` không có nghĩa đã chứng minh vô nghiệm; phần chưa chia giữ ở `unexpanded_scope`, các Step đã biết nhưng chưa xếp được liệt kê qua `unscheduled_step_keys`. Khi chưa xếp đầy đủ và chưa biết thời lượng nghỉ thực tế, `required_seconds` có thể null; không dùng ước lượng thiếu để tuyên bố toàn Task khả thi.
      - **Phạm vi dời lịch khác (Đã chốt):** **Tuyệt đối không tự động dời hoặc xáo trộn các Task khác đã chốt**. Hệ thống thông báo rõ $\Delta T_{\text{deficit}}$ và nguyên nhân để người dùng quyết định: mở rộng thêm giờ rảnh hoặc lùi deadline.
-  4. **Chỉnh sửa linh hoạt:** Người dùng sửa trực tiếp hoặc dùng giọng nói/văn bản. `user_step_proposal` tùy chọn giữ trên Draft và snapshot Candidate; người dùng có thể giao trợ lý đề xuất. Mỗi lần sửa phải kiểm revisions và tính lại khả thi/stale; quy tắc PATCH lồng còn cần khóa allowlist theo schema mục 9.
-  5. **Xác nhận & Đồng bộ Google Calendar:** Khi Candidate khả thi và đúng các revision đã xem, confirm nguyên tử tạo Task/Parts/Steps/Sessions, `ScheduleVersion`, receipt và outbox; trả `key_mapping`. Sau commit mới đồng bộ Google, tạo lời nhắc theo lịch chính thức. Lưu app thành công và sync Google thành công là hai trạng thái riêng.
+  4. **Chỉnh sửa linh hoạt:** Người dùng sửa trực tiếp hoặc dùng giọng nói/văn bản. `user_step_proposal` tùy chọn giữ trên Draft và snapshot Candidate. Nhánh keyed edit qua `adjust_candidate_by_nl` chỉ sửa `title`, `expected_output`, `estimated_base_seconds` gốc và `order_index` trên `client_step_key` đã có; không suy key theo vị trí/tên. Không áp một phần yêu cầu hỗn hợp chưa rõ/chưa hỗ trợ; hỏi gộp và giữ phương án hiện tại. Đổi giờ rảnh, timezone hoặc `TimeConstraint` phải quay lại Draft và xác nhận UF1. Mỗi lần sửa kiểm quyền/revisions/nguồn và tính lại lịch, feasibility/stale; không giữ transaction trong lúc chờ AI.
+  5. **Xác nhận & Đồng bộ Google Calendar:** Khi Candidate khả thi, chưa hết hạn và đúng các revision đã xem, confirm nguyên tử tạo Task/Steps/Sessions, `ScheduleVersion`, receipt và outbox; trả `key_mapping.steps/sessions`. Sau commit mới đồng bộ Google, tạo lời nhắc theo lịch chính thức. Lưu app thành công và sync Google thành công là hai trạng thái riêng; tích hợp Google thật vẫn là giai đoạn sau.
 - **Cơ chế Dự phòng Đa tầng khi AI lỗi (3-Tier Fallback):**
   - **Tầng 1:** `gemini-3.8-flash` (Primary) + `gemini-3.5-flash-lite` (Warm Backup chạy ngầm từ `3.1s`, ưu tiên Primary tới `5.4s`, ngắt cứng UF2 tại `6.0s`).
   - **Tầng 2:** Chuyển sang LLM dự phòng chéo hãng trên Groq Cloud (`qwen/qwen3.8-27b` $\rightarrow$ `openai/gpt-oss-20b` tại mốc `4.4s` hoặc ngay khi Google lỗi nhanh).
-  - **Tầng 3:** Nếu mất mạng toàn diện tới AI, Thuật toán Python tự động chia công việc thành các phiên cố định `20–25 phút` (theo cấu hình user) + `5 phút nghỉ`, không bao giờ trả về lỗi trắng.
+  - **Tầng 3 — sinh Candidate:** Nếu provider lỗi, hết thời gian hoặc trả phân rã không hợp lệ, dùng `_fallback_decompose_task` tạo đề xuất ba bước từ nội dung/phạm vi Summary và thời lượng tập trung user, kèm expected output/micro-task; scheduler chia phiên và kiểm khả thi. Work/rest dùng cấu hình user, không hard-code ví dụ 25/5. Đề xuất có `generation_tier=tier_3_rule_based`, vẫn phải review/xác nhận.
+  - **Lỗi khi chỉnh Candidate:** Giữ cách xử lý của backend: `adjust_candidate_by_nl` chuyển lỗi xử lý AI thành `TimeoutError`; `patch_candidate` bắt lỗi và trả `503 AI_UNAVAILABLE` với thông báo phương án cũ được giữ nguyên. Không chạy fallback phân rã, không tạo Candidate mới, không thay Steps/Sessions hoặc tăng review revision khi thao tác thất bại. Người dùng có thể thử lại hoặc chỉnh trực tiếp bằng keyed edits.
+  - **Trạng thái triển khai:** Tier 3 phân rã và keyed adjustment đều được giữ trong bản hợp nhất. Không bổ sung fallback phân rã cho chỉnh Candidate.
 
 ---
 
@@ -341,7 +354,7 @@ flowchart TD
 #### UF3 — Thông báo & Thực hiện phiên tập trung
 - **Mục tiêu & Điểm bắt đầu:** Đưa người dùng vào trạng thái làm việc đơn nhiệm, bảo vệ sự tập trung tối đa theo lịch đã chốt.
 - **Luồng xử lý chính (5 bước):**
-  1. **Thông báo nhắc trước giờ:** `Reminder` gắn Session, schedule revision và device, chống nhắc trùng qua `dedupe_key`. Quyết định tuần 2 mặc định ba mốc 15/10/5 phút, nhận 1–3 mốc hợp lệ; không phát nhắc thừa sau start hoặc phát dồn các mốc đã qua. Code nền hiện vẫn nhận một offset; việc mở rộng DTO/default/worker/adapter phải được ghép cùng nhau theo mục 8.2.
+  1. **Thông báo nhắc trước giờ:** `Reminder` gắn Session, schedule revision và device, chống nhắc trùng qua `dedupe_key`. Backend hiện nhận 1–3 mốc hợp lệ, mặc định user mới 15/10/5 phút; không phát nhắc thừa sau start hoặc phát dồn các mốc đã qua. Hỗ trợ DTO/default và tạo dữ liệu nhắc không tự chứng minh báo thức đã được phát đúng trên thiết bị.
   2. **Micro-task chuẩn bị:** Hiển thị gợi ý một việc siêu nhỏ (ví dụ: *"Mở sẵn tài liệu và đọc lướt mục lục"*) cùng lời nhắc. Không có timer riêng, không bắt buộc đánh dấu xong và không tự start Run. Đến `scheduled_start+900` chưa start thì `start_state=not_started`, hiển thị **Bắt đầu** hoặc **Hoãn lại**; không tạo Run/actual giả.
   3. **Kích hoạt Gộp 1 chạm (1-Tap Focus):** Người dùng bấm `"Bắt đầu đếm giờ [X]p"`; Backend kiểm quyền, schedule revision, lịch/giờ rảnh/thứ tự/gap và thiết bị trước khi chấp nhận `SessionRun`. Sau đó ứng dụng kích hoạt:
      - Bật **Chế độ Tập trung** và giữ sáng màn hình nhẹ (`wakelock_plus`).
@@ -420,9 +433,9 @@ flowchart TD
 - **Mục tiêu & Điểm bắt đầu:** Tái lập lịch không gây áp lực (*Guilt-free Adaptive Rescheduling*) khi người dùng trễ tiến độ, bận đột xuất, yêu cầu đổi lịch, hoặc muốn đôn việc làm tiếp từ UF5.
 - **Luồng xử lý chính (5 bước):**
   1. **Tiếp nhận lý do kích hoạt:** Nhận thông tin từ UF5 (chưa xong, bận, bỏ qua, làm sớm), từ UF7 (đổi thời lượng phiên/nghỉ), hoặc từ yêu cầu chỉnh sửa lịch thủ công của người dùng.
-  2. **Thuật toán đánh giá khối lượng & Tìm khe rảnh:** Dùng `target_task_id`, phạm vi user cho phép `allowed_task_ids` và `base_schedule_revision`; `affected_task_ids` phải là tập con của phạm vi được phép, không tự thêm Task khác. Kiểm nguồn giờ rảnh/Calendar, thứ tự, deadline và gap. Mở rộng horizon theo user yêu cầu giữ cùng Task/Part IDs; AI chia phần chưa phân tích trước khi Python xếp lịch.
+  2. **Thuật toán đánh giá khối lượng & Tìm khe rảnh:** Dùng `target_task_id`, phạm vi user cho phép `allowed_task_ids` và `base_schedule_revision`; `affected_task_ids` phải là tập con của phạm vi được phép, không tự thêm Task khác. Kiểm nguồn giờ rảnh/Calendar, thứ tự, deadline và gap. Khi triển khai mở rộng horizon, giữ cùng Task ID và Step IDs đã có, chia thêm Steps từ `unexpanded_scope` rồi để Python xếp lịch; không tạo Task mới cho mỗi horizon. API lập tiếp Task đã lưu chưa được coi là hoàn tất chỉ vì sinh Candidate đầu tiên đã có rolling horizon.
   3. **Sinh giải thích khích lệ:** LLM (Gemini Flash) sinh **1 câu giải thích ngắn gọn lý do đổi lịch** kèm lời động viên tinh thần, xóa bỏ cảm giác tự trách.
-  4. **Hiển thị & Duyệt phương án:** `RescheduleProposal.proposed_changes` thể hiện Parts/Steps/Sessions thêm/sửa/hủy/dời, có before/after đúng bản user xem. Chỉ một proposal hiện hành/user. Approve kiểm `expected_proposal_revision`, `expected_base_schedule_revision`, `expected_source_revisions` và tính khả thi; lưu `ScheduleVersion`, receipt/outbox nguyên tử, Google chạy sau commit. Không sửa Run đang active hoặc dữ liệu thực hiện đã hoàn tất.
+  4. **Hiển thị & Duyệt phương án:** `RescheduleProposal.proposed_changes` thể hiện Steps/Sessions thêm/sửa/hủy/dời và thay đổi phạm vi chưa chia khi được phép, có before/after đúng bản user xem. Chỉ một proposal hiện hành/user. Approve kiểm `expected_proposal_revision`, `expected_base_schedule_revision`, `expected_source_revisions` và tính khả thi; lưu `ScheduleVersion`, receipt/outbox nguyên tử, Google chạy sau commit. Không sửa Run đang active hoặc dữ liệu thực hiện đã hoàn tất.
   5. **Xử lý thoát App trước khi xác nhận (Quy tắc bảo vệ dữ liệu):**
      - Đóng app **KHÔNG** phải là đồng ý. Hệ thống **giữ nguyên lịch cũ đã xác nhận**.
      - Lưu `RescheduleProposal` đang chờ duyệt (ý nghĩa nghiệp vụ `pending_approval`), theo dõi `pending_notification_state/sent_at` cho một thông báo nhẹ; không suy đã đọc từ việc gửi và không nhắc lặp mặc định.
@@ -453,7 +466,7 @@ Bảng dưới đây là kim chỉ nam bắt buộc cho toàn bộ logic điều
 | :--- | :--- | :--- | :--- | :--- |
 | **UF7** | Mở Cài đặt / Lần đầu dùng app | `UserPreference` requested/effective và `Availability`; change-request nếu cần | **UF1** hoặc **UF6** | Run hiện tại giữ snapshot; thay đổi ảnh hưởng lịch phải được duyệt. Policy học buffer cần chốt theo mục 8.2. |
 | **UF1** | Nhập Voice/Text hoặc chuyển Thought sau phiên | `PlanningDraft` + Summary; ghi `summary_confirmed_revision` khi xác nhận | **UF2** khi `can_plan` và Summary được xác nhận | Hỏi gộp, auto-save; chưa tạo Task. Giờ rảnh user xác nhận, Calendar bổ sung bận. |
-| **UF2** | Draft có Summary đã xác nhận | `PlanCandidate` → confirm tạo Task/Parts/Steps/Sessions + `ScheduleVersion` | **UF3** | Kiểm mọi revision và feasibility theo phạm vi; trả key mapping; Google/outbox sau commit; không tự dời Task khác. |
+| **UF2** | Draft có Summary đã xác nhận | `PlanCandidate` → confirm tạo Task/Steps/Sessions + `ScheduleVersion` | **UF3** | C01 theo Step keys; kiểm revision, nguồn, thời gian và feasibility; Tier 3 khi phân rã, chỉnh sửa lỗi giữ nguyên Candidate; Google/outbox sau commit; không tự dời Task khác. |
 | **UF3** | Reminder & user bấm Bắt đầu | `SessionRun` được chấp nhận; timer/Focus/DND theo snapshot | **UF4**, **UF5**, **UF6** | Không tự start; quá grace chưa có Run là `not_started`; giữ 1-Step UI và timer offline của Run đã start. |
 | **UF4** | Giữ nút Cất suy nghĩ | File audio local + `Thought` metadata theo `capture_state` | **UF3** liên tục | Không STT/LLM; tổng cộng ba lượt thu/lưu, sau đó text fallback; chuyển Draft sau phiên, Task sau UF2. |
 | **UF5** | Check-in giữa Run / Run kết thúc / báo sớm | `CheckIn`, actual có nguồn; cuối Run không phản hồi → `response_state=no_respond` | **UF3** hoặc **UF6** | Không tự complete; Step/Task xác nhận riêng; ba chip Skip; timeout cuối tại `ended_at+300`, khôi phục DND đúng owner. |
@@ -474,23 +487,23 @@ Bảng này giữ các nguyên tắc nghiệp vụ và bổ sung cách thể hi�
 | **3. Trải nghiệm Phân rã Công việc (UF2)** | • Để tránh hội chứng **Tê liệt khởi động (ADHD Paralysis / Blank Canvas)**, khi vào UF2, AI **tự động sinh sẵn một phương án chia bước chuẩn (Default Proposal)** kèm các mốc thời lượng dự kiến và nút `"Tùy chỉnh theo ý tôi"` để người dùng nhanh chóng tinh chỉnh thay vì bắt đầu từ màn hình trống. |
 | **4. Focus Mode & DND (UF5)** | Giữ trong rest nội bộ Run và khi chờ check-in cuối; khôi phục khi user xác nhận nghỉ/kết thúc/bận/bỏ qua hoặc chậm nhất `ended_at+300` khi chưa trả lời. Thiết bị chỉ khôi phục phần app áp theo owner/snapshot, không tắt DND user đã bật. Wire không phản hồi là `CheckIn.response_state=no_respond`; handoff khi làm tiếp cần chốt ở mục 8.2. |
 | **5. Phân định 3 mức khi Bỏ qua (Skip ở UF5)** | • Khi người dùng nói hoặc bấm "Bỏ qua", giao diện hiển thị **3 chip lựa chọn rõ ràng**: `[Hoãn phiên này làm sau]`, `[Bỏ qua phiên này]`, `[Bỏ toàn bộ bước này]`, kèm Voice Check-in ngắn gọn và thanh `SnackBar` Hoàn tác trong 5 giây để tuân thủ nguyên tắc W3C COGA. |
-| **6. Phương án Dự phòng AI Đa tầng (Hedged 3-Tier Fallback)** | • **Tầng 1 (Primary + Warm Backup):** `gemini-3.8-flash` kết hợp `gemini-3.5-flash-lite` chạy ngầm giữ trong RAM (Khung A tương tác trực tiếp ngắt cứng `4.5s`; Khung B phân rã UF2 có *Breathing Circle* ngắt cứng `6.0s`).<br>• **Tầng 2 (Cross-Provider Groq):** Chuyển tức thì sang `qwen/qwen3.8-27b` (dự phòng phụ `openai/gpt-oss-20b`) qua Groq Cloud.<br>• **Tầng 3 (Deterministic Rule-based):** Logic Python chia bước/phiên cố định 20–25 phút theo cài đặt user và bảo toàn bản nháp để không bao giờ trả về lỗi trắng. |
+| **6. Phương án Dự phòng AI Đa tầng (Hedged 3-Tier Fallback)** | • **Tầng 1:** Primary Gemini + Warm Backup; Khung A tương tác trực tiếp ngắt cứng `4.5s`, Khung B phân rã UF2 `6.0s`.<br>• **Tầng 2:** Groq theo cấu hình provider/model hiệu lực.<br>• **Tầng 3 UF2:** Giữ Python fallback khi phân rã/sinh Candidate, scheduler kiểm lịch và user review/chốt. Chỉnh Candidate theo key khi AI lỗi trả `AI_UNAVAILABLE` và giữ nguyên phương án cũ; không dùng fallback phân rã thay yêu cầu chỉnh sửa. |
 | **7. Luồng Giọng nói (STT/TTS) & Hộp nháp UF4** | • **UF1, UF2, UF5, UF6:** Ưu tiên gọi **Groq Whisper (STT)** và **edge-tts (TTS)** qua Backend; tự động fallback về `speech_to_text` và `flutter_tts` trên thiết bị nếu mất mạng/timeout.<br>• **UF4 (Cất suy nghĩ):** Trong phiên chỉ lưu file ghi âm thô (`.m4a`/`.wav`) vào Hộp nháp cục bộ (thử lại 3 lần $\rightarrow$ mở ô nhập text). Sau phiên, người dùng bấm *"Tạo việc từ ghi âm này"* mới gọi STT và chuyển sang UF1. |
 | **8. Bảo toàn Lịch khi Đóng App (UF6)** | Đóng app không phải đồng ý. Giữ lịch đã chốt và `RescheduleProposal` chờ duyệt, một proposal hiện hành/user; mở lại kiểm thời gian và source/base/proposal revisions. Không duyệt bản stale hoặc đã bị thay thế; không tự mở rộng `allowed_task_ids`. |
 | **9. Tích hợp Google Calendar qua MCP & Strict Guardrails** | • **Đọc ngữ cảnh (UF1):** Google Calendar MCP chỉ cung cấp các khoảng thời gian bận ($T_{\text{busy}}$) làm tham số đầu vào cho thuật toán Python tính quỹ giờ rảnh ($T_{\text{free}}$). CẤM để LLM tự ý ước lượng hay gán đè lịch.<br>• **Ghi sự kiện (UF2/UF6):** Chỉ đồng bộ sự kiện Focus Sessions lên Google Calendar **SAU KHI** người dùng bấm **Xác nhận/Duyệt** (Human-in-the-loop). Tuyệt đối KHÔNG tự động ghi lên Google Calendar khi kế hoạch còn ở dạng nháp (`draft`) hay phương án chờ (`pending_approval`). |
 | **10. Ba mốc xác nhận & Tính nguyên tử** | UF1 xác nhận Summary; UF2 confirm lưu kế hoạch đầu tiên; UF6 approve thay đổi lịch đã có. Mỗi thao tác kiểm revision/quyền; lưu dữ liệu, receipt và outbox nguyên tử. Không gộp thành một `Task.status=confirmed`; retry không tạo Task/Run/lệnh Google trùng. |
-| **11. Rolling Horizon & Phạm vi chưa chia** | Horizon mặc định 14 ngày trong giới hạn xác nhận; giữ PlanningPart chưa chia với estimate null khi chưa biết. Mở rộng theo yêu cầu dùng cùng Task/Part IDs, không tạo Task mới cho mỗi horizon. Task có trạng thái thực hiện, trạng thái phân rã và trạng thái xếp lịch riêng. |
+| **11. Rolling Horizon & Phạm vi chưa chia** | Horizon mặc định 14 ngày trong giới hạn xác nhận; giữ `unexpanded_scope`/`decomposition_state` trên Candidate/Task, không tạo Part hoặc Step giả. Phân biệt phần chưa chia với Step đã biết chưa xếp được. Khi triển khai lập tiếp, giữ Task ID/Step IDs đã có; không tạo Task mới cho mỗi horizon. Task tách trạng thái thực hiện, phân rã và xếp lịch. |
 
 ### 8.2. Quyết định Tuần 2 và Chính sách còn Chờ
 
 > [!IMPORTANT]
-> Schema mới bổ sung hợp đồng dữ liệu nhưng có các đề xuất lệch `AGENTS.md` và quyết định cũ của Project. Bảng này ghi nhận rõ khác biệt, **không tự bãi bỏ guardrail**. Trước khi code hành vi phụ thuộc các dòng dưới, nhóm phải chốt và đồng bộ Project, AGENTS, schema, OpenAPI/fixtures cùng thay đổi; không tự chọn một phía rồi coi là đã thống nhất.
+> C01, Tier 3 cho phân rã và xử lý lỗi chỉnh Candidate giữ nguyên phương án cũ đã được ghi nhận tại mục 6, UF2 và mục 8.4. Bảng dưới tách trạng thái triển khai khỏi policy còn chờ; không tự bãi bỏ các guardrail khác. Khi triển khai policy chưa được chốt, nhóm cần thống nhất và đồng bộ Project, AGENTS, schema, OpenAPI/fixtures; không tự chọn một phía rồi coi là quyết định sản phẩm.
 
 | Nội dung | Quy tắc cũ / AGENTS | Schema hiện hành & Việc cần chốt |
 | :--- | :--- | :--- |
-| Nhắc trước phiên | Các mốc 15/10/5 phút. | Đã chốt trong kế hoạch tuần 2: mở rộng nhận 1–3 integer giây không âm, không trùng, thứ tự giảm dần; default mới `[900, 600, 300]`, giữ lựa chọn user đã lưu. Code nền hiện vẫn một offset; schema mô tả đích tuần 2: cần cập nhật đồng bộ input/output, default DB/service, capabilities liên quan, JSON mẫu và Mobile trước khi sử dụng. Kiểm tạo/hủy lời nhắc và khả năng phát từng mốc khi Doze; quyết định này chưa có nghĩa code đã hỗ trợ. |
-| Micro-task | Mục tiêu UX khởi động 2 phút; AI chủ động có đề xuất. | O09/O12 mô tả một gợi ý trước phiên, không timer/Run/segment riêng, `micro_task_seconds` có thể null; độ nhỏ cần nghiên cứu/policy. Không ép số 120 như ràng buộc API đã chốt; vẫn giữ đề xuất chủ động để tránh màn hình trống. |
-| Học buffer | Moving Average 7–10 phiên, gợi ý cuối tuần khi chênh >0.2; cấu hình minh họa buffer 1.2. | O19/mục 6 của schema chọn Step hoàn tất cùng phạm vi làm một mẫu, actual có nguồn. Miền k/cỡ mẫu/chu kỳ chưa khóa; cần chốt lại thuật toán, không dùng số phiên như số Step hoặc hard-code giá trị minh họa. Luôn tôn trọng cấu hình user. |
+| Nhắc trước phiên | Các mốc 15/10/5 phút. | Backend hiện nhận 1–3 integer giây không âm, không trùng, thứ tự giảm dần; mặc định user mới `[900, 600, 300]`, giữ lựa chọn đã lưu. Không còn mô tả backend chỉ nhận một offset. Việc phát/hủy báo thức thực tế cần bằng chứng riêng, không suy từ DTO hoặc bản ghi Reminder. |
+| Micro-task | Mục tiêu UX khởi động 2 phút; AI chủ động có đề xuất. | Backend mặc định 120 giây cho user mới; migration `20261107_01` chỉ backfill preferences còn null. Không sửa lịch/phiên cũ hoặc giả đây là ràng buộc non-null trên mọi DTO. Không có timer/Run/segment micro-task riêng, không cộng vào duration/actual. |
+| Học buffer | Moving Average 7–10 phiên, gợi ý cuối tuần khi chênh >0.2; cấu hình minh họa buffer 1.2. | Giữ A20 mới: trung vị theo Step sạch, Decimal, cửa sổ mặc định 15 Step sau lọc/loại trùng, bước làm tròn 0.05. Mặc định kỹ thuật thử nghiệm gồm tối thiểu 5 mẫu, miền `[1.0,2.0]`, ngưỡng chênh tuyệt đối 0.2, cooldown 0; chưa là policy sản phẩm/pilot được khóa. Cần chốt miền/cỡ mẫu/chu kỳ/cooldown trước áp dụng sản phẩm; luôn để user quyết định, không tự ghi đè buffer hiệu lực. |
 | DND khi làm tiếp | Giữ DND nếu user chọn làm tiếp ngay phiên sau. | Schema yêu cầu khôi phục khi xác nhận check-in cuối hoặc tới timeout, cùng gap 900 giây giữa Session. Cần chốt policy handoff/owner và UX làm tiếp; không bỏ kiểm gap hoặc để timeout cũ giải phóng DND của Run mới. |
 | Undo & Xóa | UI dùng Undo 5 giây thay hộp thoại xác nhận. | Đã chốt cho Thought tuần 2: cất mới lưu bền file/metadata tại thiết bị, outbox chờ 5 giây mới được gửi metadata; Undo hợp lệ hủy gói gửi nguyên tử rồi dọn file. Xóa bản có sẵn phải giữ khả năng khôi phục trong 5 giây trước khi thực hiện xóa. Lưu hạn/trạng thái/ID chống trùng, xử lý restart và tranh chấp gửi/hủy. Cần triển khai và kiểm thử; không suy mọi tài nguyên khác có cùng retention hoặc API Undo. Calendar preview/confirm vẫn là duyệt nội dung thay đổi. |
 
@@ -500,7 +513,30 @@ Bảng này giữ các nguyên tắc nghiệp vụ và bổ sung cách thể hi�
 
 ### 8.3. Phần Hợp đồng còn Thiếu Chi tiết
 
-Theo [schema mục 9](docs/backend/schema.md), các nội dung sau chưa được coi là khóa hoàn toàn: khác biệt TimeConstraint giữa Backend Docs và Sheet; enum đầy đủ và cấu trúc lỗi/ref; allowlist/merge semantics của Candidate PATCH; chọn CalendarContext lúc tạo Candidate; giới hạn/phân trang/TTL nguồn; Auth endpoints/session policy; miền policy trong capabilities và lưu trữ/retention. Ví dụ độc lập giữa endpoint không tự thành một chuỗi fixture nhất quán. Việc cập nhật Project không xác nhận các mục này đã được triển khai hoặc kiểm thử.
+DTO Backend C01 hiện đã có allowlist keyed edit, `calendar_context_ref` khi tạo Candidate và nhánh nguồn giờ riêng. Không tiếp tục ghi các phần này như chưa có hợp đồng. Các mục còn cần đối soát với nguồn ngoài/code triển khai gồm enum/lỗi đầy đủ, giới hạn/phân trang/TTL nguồn, Auth/session policy, policy sản phẩm cho adaptation và retention. Ví dụ độc lập giữa endpoint không tự thành một chuỗi fixture nhất quán. Thiết kế và test trước đó không thay cho bằng chứng nguồn AI/Calendar/PostgreSQL thật.
+
+### 8.4. Quyết định Tích hợp Backend và Điều kiện Kiểm chứng — 07/11/2026
+
+Mốc hợp nhất: remote backend `5e72054` và local backend `dc388e7`. Người dùng chọn giữ các commit remote và hợp nhất commit sửa, thay cho phương án thay remote bằng cây local. Không ghi đè storage/DeviceState, guardrails hay các regression remote; các sửa dở local không được đưa vào merge.
+
+| Phần | Quyết định tích hợp |
+| :--- | :--- |
+| `app/services/ai_service.py` | Giữ Tier 3 `_fallback_decompose_task` và `adjust_candidate_by_nl` theo key hiện đã có trên backend. Giữ xử lý lỗi chỉnh Candidate qua `TimeoutError` → `AI_UNAVAILABLE`, bảo toàn phương án cũ; không dùng fallback phân rã để thay yêu cầu chỉnh sửa và không thêm luồng fallback chỉnh mới. |
+| `app/services/draft_service.py` | Giữ cả Pydantic validation/model lồng, đọc nguồn availability legacy và dedup câu hỏi; không chọn một nửa rồi làm mất nửa còn lại. |
+| `app/services/plan_service.py` | Chọn bản backend làm nền C01 và batch loading; không ghép lại mapping qua Part từ dev. Tối ưu hiện là 5 nhóm batch, regression test đo **8 SELECT** cho trang 1/10/20 Task, không phải tổng 5 query. Truy vấn Task đầu còn tải toàn bộ của user trước khi phân trang trong bộ nhớ; tối ưu pagination DB là phần việc riêng. |
+| `app/services/planning/scheduling.py` | Dùng chữ ký C01 không có `planning_parts`; đồng bộ mọi caller/test theo Step keys và giữ kiểm gap/thứ tự/collision/phạm vi. |
+| `app/services/planning/adaptation.py` | Giữ bản backend với kiểm Decimal/mẫu sạch/cửa sổ/làm tròn; phân biệt mặc định thử nghiệm với policy sản phẩm ở mục 8.2. |
+| `app/models/`, `app/schemas/` | Giữ mô hình C01, `CandidateStepAdjustment`, provenance và nguồn Draft/Context. Không tái đưa `PlanningPart`/`CandidatePart` vào hợp đồng mới hoặc xóa dữ liệu legacy ngoài migration được review. |
+| `migrations/versions/` | Giữ đầy đủ C01, DeviceState, merge revision và focus defaults theo mục 6.7, cùng các sửa migration tiền nhiệm liên quan; không chỉ chép một file. |
+| Tests | Giữ `tests/test_ai_service.py`, `tests/test_week2_baseline.py` và coverage UF1/Tier 3. Tại mốc đối chiếu, backend đã có cả hai; baseline giống dev, AI tests đã có thay đổi. Chuyển scheduler tests theo chữ ký C01 và giữ `tests/test_list_tasks_batch.py`; review assertion bị lược bớt, không xóa coverage để suite xanh. |
+
+**Điều kiện kiểm chứng thay đổi tiếp theo:**
+
+- AI timeout/lỗi kết nối/kết quả phân rã sai phải có Tier 3 khi sinh Candidate; kiểm cấu hình thời lượng, expected output/micro-task và nhãn generation tier. Với chỉnh Candidate thất bại, kiểm lỗi `AI_UNAVAILABLE` có thông báo phù hợp, Steps/Sessions/review revision và lịch chính thức không đổi, không phát sinh Candidate thay thế.
+- PATCH Summary phải giữ model lồng sau cập nhật, đúng omitted/null và revision; câu hỏi AI trùng không lặp, vấn đề chặn khác không biến mất.
+- Chạy test scheduler C01, nguồn giờ riêng/Calendar coverage, stale/expired Candidate, confirm/idempotency và batch query count. Không coi 8 SELECT cố định là bằng chứng phân trang DB đã tối ưu.
+- Migration phải kiểm DB mới, dữ liệu trước C01, thứ tự Steps/phạm vi chưa chia/snapshot và đúng một head; không áp thử lên DB ứng dụng đang dùng. Bằng chứng PostgreSQL WASM/SQL export trước đó không thay cho chạy PostgreSQL server/asyncpg thực tế.
+- Bản hợp nhất được chạy lại suite backend độc lập, Ruff và ty trước khi push. Không dùng kết quả local cũ thay cho kiểm chứng merge; PostgreSQL server, provider/Calendar và Android thật vẫn cần kiểm riêng.
 
 ---
 
@@ -514,7 +550,7 @@ adhd-assistant/
 │   ├── app/
 │   │   ├── api/              # Các endpoints tương ứng UF1 - UF7
 │   │   ├── core/             # Config, JWT security, Database session
-│   │   ├── models/           # ORM: Draft/Candidate, Task/Part/Step/Session, Run/CheckIn, Thought...
+│   │   ├── models/           # ORM C01: Draft/Candidate, Task/Step/Session, Run/CheckIn, Thought...
 │   │   ├── schemas/          # Pydantic v2 schemas (Request/Response & Structured LLM Output)
 │   │   ├── services/
 │   │   │   ├── ai_service.py         # Gemini Flash + Groq Fallback + Prompt templates
@@ -573,7 +609,8 @@ Khi bất kỳ AI Agent nào được gọi để viết code, sửa lỗi, thi�
 5. **Tách biệt Rõ LLM và Thuật toán Thời gian:**
    - Không bao giờ để LLM tự cộng/trừ ngày giờ hoặc tự kiểm tra trùng lịch mà không qua lớp xác thực/tính toán của Python (`scheduler_engine.py`).
 6. **Đảm bảo Khả năng Chịu lỗi & Đa tầng Dự phòng:**
-   - Mọi lệnh gọi LLM ở Backend phải đi qua bộ điều phối **Quality-First Hedged 3-Tier Fallback** (`gemini-3.8-flash` + Warm Backup `gemini-3.5-flash-lite` $\rightarrow$ Groq `qwen/qwen3.8-27b` / `openai/gpt-oss-20b` $\rightarrow$ Python Rule-based Fallback) với trần ngắt cứng nghiêm ngặt (`4.5s` cho Khung A tương tác trực tiếp UF1/UF6, `6.0s` cho Khung B phân rã UF2).
+   - Mọi lệnh gọi LLM ở Backend phải đi qua bộ điều phối **Quality-First Hedged 3-Tier Fallback** (`gemini-3.8-flash` + Warm Backup `gemini-3.5-flash-lite` $\rightarrow$ Groq `qwen/qwen3.8-27b` / `openai/gpt-oss-20b` $\rightarrow$ Python Rule-based Fallback) với trần ngắt cứng nghiêm ngặt (`4.5s` cho Khung A tương tác trực tiếp UF1/UF2-Adjust/UF6, `6.0s` cho Khung B phân rã UF2).
+   - Giữ Tier 3 cho phân rã/sinh Candidate. Riêng chỉnh Candidate theo key, giữ xử lý `AI_UNAVAILABLE` có kiểm soát và phương án cũ khi AI thất bại; không tái phân rã hay tự tạo Candidate thay thế. Không bỏ scheduler/quyền/nguồn/revision hoặc tự chốt lịch; quyết định tích hợp tại mục 8.4.
    - Mọi tính năng cốt lõi trên Mobile (Timer, báo thức, xem lịch trong ngày, ghi âm UF4) phải chạy được khi **Offline**.
 7. **Tương thích Cơ sở dữ liệu Kép (SQLite & PostgreSQL):**
    - Toàn bộ truy vấn ở Backend phải viết qua **SQLAlchemy 2.0 ORM** chuẩn, tránh dùng cú pháp SQL đặc thù chỉ chạy được trên SQLite hoặc chỉ chạy được trên PostgreSQL.

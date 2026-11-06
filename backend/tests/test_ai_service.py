@@ -155,9 +155,34 @@ class TestAIService(unittest.TestCase):
                     )
                 )
                 self.assertEqual(result.generation_tier, "tier_3_rule_based")
+                self.assertEqual(result.task_title, "Viết báo cáo môn học")
+                self.assertEqual([step.order_index for step in result.steps], [1, 2, 3])
+                self.assertIn("Bản nháp gồm 5 trang", result.steps[1].title)
+                self.assertTrue(all(step.estimated_base_seconds == 1200 for step in result.steps))
+                self.assertTrue(all(step.micro_task_prompt.strip() for step in result.steps))
                 self.assertEqual(len(result.steps), 3)
                 self.assertTrue(all(step.estimated_minutes == 20 for step in result.steps))
                 self.assertTrue(all(step.expected_output for step in result.steps))
+
+    def test_uf2_missing_expected_output_uses_tier3(self) -> None:
+        payload = LLMTaskDecompositionPayload(
+            task_title="Báo cáo", reasoning="Đề xuất AI thiếu đầu ra",
+            steps=[StepPromptItem(
+                order_index=1, title="Viết", estimated_minutes=20,
+                expected_output="   ", micro_task_prompt="Mở tài liệu",
+            )],
+        )
+        with patch.object(ai_service, "_execute_hedged_structured", return_value=(payload, "tier_1_gemini")):
+            result = asyncio.run(ai_service.decompose_task(task_title="Báo cáo", user_focus_duration=20))
+        self.assertEqual(result.generation_tier, "tier_3_rule_based")
+        self.assertTrue(all(step.expected_output and step.expected_output.strip() for step in result.steps))
+
+
+    def test_uf2_fallback_accepts_long_scope(self) -> None:
+        result = ai_service._fallback_decompose_task("Báo cáo", scope="phạm vi " * 100)
+        self.assertEqual(result.generation_tier, "tier_3_rule_based")
+        self.assertTrue(all(len(step.title) <= 255 for step in result.steps))
+
 
     def test_tier3_fallback_uf6(self) -> None:
         """Kiểm tra Fallback Tầng 3 cho UF6: Lời khích lệ nhẹ nhàng (Guilt-free)."""
