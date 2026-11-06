@@ -2,16 +2,27 @@
 from datetime import datetime
 from typing import Annotated
 
-from fastapi import APIRouter, Query, Request
+from fastapi import APIRouter, Header, Query, Request
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import CurrentUserDep, DbSessionDep
 from app.core.errors import AppError
+from app.models.settings import SettingChangeRequest
+from app.models.task import Task as TaskRow
+from app.models.user import UserPreference as PreferenceRow
 from app.schemas.common import (
     ErrorEnvelope,
     SuccessEnvelope,
     build_response_meta,
 )
-from app.schemas.settings import Availability, UserPreference
+from app.schemas.settings import (
+    Availability,
+    SettingsChangeRequest,
+    SettingsChangeResult,
+    UserPreference,
+)
+from app.services.command_service import durable_command, owner_uuid
 from app.services.draft_service import get_user_availability
 from app.services.plan_service import get_preferences as load_preferences
 from app.services.scheduler_engine import compute_effective_free_intervals
@@ -57,7 +68,7 @@ async def get_preferences(
             "description": "Cặp tham số truy vấn from/to không hợp lệ",
         },
     },
-    summary="Đọc giờ rảnh đã xác nhận (Dòng 40 trên API Sheet)",
+    summary="Đọc nguồn giờ rảnh cũ; UF1 mới dùng summary.availability (Dòng 40)",
 )
 async def get_availability(
     request: Request,
@@ -78,7 +89,7 @@ async def get_availability(
         ),
     ] = None,
 ) -> SuccessEnvelope[Availability]:
-    """Trả về bộ giờ rảnh đã được người dùng xác nhận; triển khai effective_intervals khi gửi đủ cặp from/to."""
+    """Đọc nguồn cũ nếu tồn tại; không phải bước bắt buộc trước UF1 mới."""
     # Quy tắc hợp đồng Dòng 40 (T21, T24): from và to bắt buộc gửi cùng nhau hoặc cùng bỏ trống
     if (from_at is None) != (to_at is None):
         raise AppError(
@@ -101,8 +112,8 @@ async def get_availability(
         raise AppError(
             status_code=404,
             code="RESOURCE_NOT_FOUND",
-            message="Bạn chưa có bộ giờ rảnh. Hãy thiết lập và xác nhận giờ rảnh trước.",
-            next_action="configure_availability",
+            message="Không có nguồn giờ rảnh cũ. Hãy nhập giờ cùng yêu cầu tạo kế hoạch ở UF1.",
+            next_action="provide_draft_availability",
         )
     result_avail = base_avail
     if from_at is not None and to_at is not None:
@@ -118,3 +129,188 @@ async def get_availability(
         data=result_avail,
         meta=build_response_meta(request_id),
     )
+
+
+@durable_command("settings_change", SettingsChangeResult)
+async def apply_settings_change(
+    *, user_id: str, idempotency_key: str, payload: SettingsChangeRequest, db: AsyncSession
+):
+    from app.schemas.draft import UpdateDraftRequest
+    from app.services import draft_service
+
+    owner = owner_uuid(user_id)
+    preferences = await db.scalar(select(PreferenceRow).where(PreferenceRow.user_id == owner))
+    pref_revision = preferences.effective_revision if preferences else 0
+    if (
+        payload.expected_preferences_revision is not None
+        and payload.expected_preferences_revision != pref_revision
+    ):
+        raise AppError(
+            status_code=409,
+            code="REVISION_CONFLICT",
+            message="Cấu hình đã thay đổi.",
+            current_revisions={"preferences": pref_revision},
+            next_action="reload_and_review",
+        )
+    updated_draft = None
+    if payload.changes.availability is not None:
+        if payload.target_task_id is not None:
+            from app.services import plan_service
+
+            task = await plan_service.get_task_by_id(
+                user_id=user_id, task_id=payload.target_task_id, db=db
+            )
+            if task.revision != payload.expected_task_revision:
+                raise AppError(
+                    status_code=409,
+                    code="REVISION_CONFLICT",
+                    message="Task đã thay đổi.",
+                    next_action="reload_and_review",
+                )
+            raise AppError(
+                status_code=503,
+                code="POLICY_NOT_CONFIGURED",
+                message="Chỉnh giờ Task cần xem tác động/UF6; giờ và lịch hiện hành được giữ nguyên.",
+                next_action="wait_for_configuration",
+            )
+        if payload.target_draft_id is None or payload.expected_planning_input_revision is None:
+            raise AppError(
+                status_code=422,
+                code="VALIDATION_ERROR",
+                message="Cần Draft và revision để chỉnh giờ.",
+                next_action="fix_fields",
+            )
+        draft = await draft_service.get_draft_by_id(
+            user_id=user_id, draft_id=payload.target_draft_id, db=db
+        )
+        if draft.confirmed_task_id is not None:
+            raise AppError(
+                status_code=409,
+                code="PLAN_NOT_CONFIRMABLE",
+                message="Draft đã thành Task; cần chỉnh Task qua xem tác động.",
+                next_action="review_task",
+            )
+        updated_draft = await draft_service.patch_draft(
+            user_id=user_id,
+            draft_id=payload.target_draft_id,
+            idempotency_key=idempotency_key,
+            payload=UpdateDraftRequest(
+                expected_summary_revision=payload.expected_summary_revision,
+                expected_planning_input_revision=payload.expected_planning_input_revision,
+                changes={
+                    "summary": {
+                        "availability": payload.changes.availability.model_dump(mode="json")
+                    }
+                },
+            ),
+            db=db,
+        )
+    if payload.changes.preferences is not None:
+        values = payload.changes.preferences.model_dump(exclude_unset=True)
+        required = {
+            "work_interval_seconds",
+            "rest_interval_seconds",
+            "buffer_multiplier",
+            "reminder_offsets",
+            "reminder_style",
+        }
+        if preferences is None and not required.issubset(values):
+            raise AppError(
+                status_code=422,
+                code="VALIDATION_ERROR",
+                message="Lần đầu cần đủ cấu hình làm/nghỉ, buffer và nhắc.",
+                next_action="fix_fields",
+            )
+        work = values.get(
+            "work_interval_seconds", preferences.work_interval_seconds if preferences else 0
+        )
+        rest = values.get(
+            "rest_interval_seconds", preferences.rest_interval_seconds if preferences else 0
+        )
+        buffer = values.get(
+            "buffer_multiplier", preferences.buffer_multiplier if preferences else 0
+        )
+        offsets = values.get(
+            "reminder_offsets", preferences.reminder_offsets if preferences else []
+        )
+        style = values.get("reminder_style", preferences.reminder_style if preferences else "")
+        if (
+            work <= 0
+            or rest < 0
+            or buffer < 1
+            or len(offsets) != 1
+            or offsets[0] < 0
+            or not style.strip()
+        ):
+            raise AppError(
+                status_code=422,
+                code="VALIDATION_ERROR",
+                message="Cấu hình không hợp lệ.",
+                next_action="fix_fields",
+            )
+        has_tasks = await db.scalar(select(TaskRow.id).where(TaskRow.user_id == owner).limit(1))
+        if has_tasks is not None and any(
+            k != "reminder_style" and (preferences is None or getattr(preferences, k) != v)
+            for k, v in values.items()
+        ):
+            raise AppError(
+                status_code=503,
+                code="POLICY_NOT_CONFIGURED",
+                message="Thay cấu hình ảnh hưởng lịch/nhắc cần luồng xem tác động.",
+                next_action="wait_for_configuration",
+            )
+        if preferences is None:
+            preferences = PreferenceRow(
+                user_id=owner, effective_revision=1, micro_task_seconds=None, **values
+            )
+            db.add(preferences)
+        elif any(getattr(preferences, k) != v for k, v in values.items()):
+            for k, v in values.items():
+                setattr(preferences, k, v)
+            preferences.effective_revision += 1
+    await db.flush()
+    change = SettingChangeRequest(
+        user_id=owner,
+        application_state="applied_to_draft" if updated_draft else "effective_from_next_session",
+        effective_revision=preferences.effective_revision if preferences else 0,
+        effective_availability_revision=None,
+        requested_changes={
+            "target_draft_id": payload.target_draft_id,
+            "target_task_id": payload.target_task_id,
+            **payload.changes.model_dump(mode="json", exclude_unset=True),
+        },
+    )
+    db.add(change)
+    await db.flush()
+    return SettingsChangeResult(
+        change_request_id=str(change.id),
+        request_revision=change.revision,
+        application_state=change.application_state,
+        requested_revision=None,
+        effective_revision=change.effective_revision,
+        requested_availability_revision=None,
+        effective_availability_revision=None,
+        requested_changes=payload.changes,
+        pending_proposal_id=None,
+        target_draft_id=payload.target_draft_id,
+        target_task_id=payload.target_task_id,
+        summary_revision=updated_draft.summary_revision if updated_draft else None,
+        planning_input_revision=updated_draft.planning_input_revision if updated_draft else None,
+    )
+
+
+@router.post(
+    "/settings/change-requests",
+    response_model=SuccessEnvelope[SettingsChangeResult],
+    summary="Chỉnh cấu hình hoặc giờ đã khai báo của Draft/Task (Dòng 41)",
+)
+async def create_settings_change(
+    payload: SettingsChangeRequest,
+    current_user: CurrentUserDep,
+    db: DbSessionDep,
+    idempotency_key: Annotated[str, Header(alias="Idempotency-Key", min_length=1)],
+):
+    result = await apply_settings_change(
+        user_id=current_user.user_id, idempotency_key=idempotency_key, payload=payload, db=db
+    )
+    return SuccessEnvelope(data=result, meta=build_response_meta())

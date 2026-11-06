@@ -1,151 +1,89 @@
-# KẾ HOẠCH CHI TIẾT TUẦN 1 (NGÀY 1 – 7): NỀN TẢNG & CỤM UF1 + UF2 (PLANNING PHASE)
+# Kế hoạch tuần 1 — Nền tảng và UF1–UF2
 
-> **Dự án:** ProPlan VA — Trợ lý ảo AI hỗ trợ lập kế hoạch cho người ADHD-I  
-> **Mục tiêu tuần 1:** Hoàn thành hạ tầng cơ sở dữ liệu, bàn giao Mock API trong 48h, thông trọn vẹn luồng tiếp nhận công việc (**UF1**) và bẻ nhỏ việc kết hợp thuật toán xếp lịch Rolling Horizon (**UF2**) để có bản Demo Core Value ăn điểm ngay cuối Tuần 1.  
-> **Người phụ trách chính:** Minh Trung (`mt` - Git Manager, Lead BA & AI Lead), Quốc Hưng (`vqh` - Backend Lead), Thanh An (`tan` - Mobile Lead), Doãn Thành (`thành` - QA Lead).
+Cập nhật ngày 03/11/2026 theo Backend Docs thẻ 04/05 và code hiện tại. Tuần 1 là phạm vi công việc của nhóm; thẻ 04 còn dùng nhãn giai đoạn cũ “Tuần 4”. Trình tự dưới đây dùng Ngày 1–7, không tự đặt lại ngày hoặc hạn giao cho nhóm.
 
----
+## 1. Mục tiêu và trạng thái hiện tại
 
-## 🎯 1. MỤC TIÊU TỐI THƯỢNG & TIÊU CHUẨN NGHIỆM THU TUẦN 1 (MILESTONE 1 DOD)
+**Mục tiêu:** User nhập công việc, thời gian và giờ rảnh trong một yêu cầu voice/text → review/xác nhận tóm tắt UF1 → nhận phương án UF2 → review → xác nhận lưu kế hoạch.
 
-### Tiêu chuẩn Nghiệm thu Cuối Tuần 1 (Hạn chót: 18h00 Ngày 7):
-1. **Môi trường & Cơ sở Dữ liệu:**
-   - Chạy migration Alembic thành công tạo các bảng thực thể cốt lõi (`users`, `user_preferences`, `tasks`, `steps`, `sessions`) trên SQLite cục bộ và tương thích 100% với PostgreSQL.
-   - Gán sẵn cấu hình mặc định (Default User Preferences: 25p làm / 5p nghỉ / buffer 1.2 / giờ rảnh 08:00–18:00).
-2. **Luồng UF1 Hoàn chỉnh (End-to-End):**
-   - Người dùng nhập công việc bằng **Giọng nói** (Groq Whisper STT) hoặc **Gõ chữ**.
-   - Gemini 2.5 Flash trích xuất 4 trường bắt buộc (`Nội dung`, `Phạm vi`, `Khung giờ rảnh`, `Deadline`) với độ trễ $\le 2.0\text{s}$.
-   - Nếu thiếu hoặc mâu thuẫn: Hiển thị bản tóm tắt trực quan và **gộp tất cả câu hỏi làm rõ trong 1 màn hình duy nhất** (không hỏi lắt nhắt nhiều vòng, không tự đoán dữ liệu).
-   - Nếu người dùng ấn Back hoặc thoát app: Dữ liệu tự động lưu nháp (`status = 'draft'`) vào Hộp nháp.
-3. **Luồng UF2 Hoàn chỉnh (End-to-End):**
-   - AI (Gemini Flash) **chủ động sinh sẵn Default Decomposition Proposal** (2–5 bước, thời lượng dự kiến, gợi ý Micro-task 2 phút) kèm nút `"Tùy chỉnh theo ý tôi"` để giải phóng người dùng khỏi Tê liệt khởi động (ADHD Blank Canvas).
-   - Thuật toán Python (`scheduler_engine.py`) xếp các phiên vào các khe rảnh trống ($T_{\text{free}}$) trước Deadline trong cửa sổ Rolling Horizon (2–3 tuần), nhân hệ số đệm mặc định $k_{\text{buffer}} = 1.2$.
-   - Nếu $T_{\text{req}} > T_{\text{free}}$: Tính chính xác số phút thiếu hụt $\Delta T_{\text{deficit}} = T_{\text{req}} - T_{\text{free}}$ và thông báo rõ ràng; **tuyệt đối không tự ý dời các Task khác đã chốt**.
-   - Khi người dùng bấm **Xác nhận**: Ghi vào lịch chính thức (`Official Schedule`).
+**Hiện tại:** Code C01 đã nối giờ riêng Draft → Context → Candidate → Task và loại PlanningPart khỏi hợp đồng/runtime. Bộ kiểm mở rộng được duyệt ngày 03/11 đạt 41/41 (17 unit, 20 integration, 4 DTO có sẵn) với SQLite tạm/AI giả, gồm manual Steps/partial, keyed NL edits và migration DB mới/dữ liệu cũ. Chưa áp migration DB app hoặc chạy system test. Chưa nghiệm thu Mobile hoặc nguồn AI/STT thật; Google Calendar tích hợp sau.
 
----
-
-## 👥 2. MA TRẬN PHÂN CÔNG 7 THÀNH VIÊN TRONG TUẦN 1
-
-| Thành viên | Git Handle | Vai trò Tuần 1 | Phân hệ & Trách nhiệm Cụ thể |
-| :--- | :--- | :--- | :--- |
-| **Minh Trung** | `mt` | Git Manager, Lead BA & AI Lead | Thiết lập Git branching & PR template; viết System Prompt UF1 (trích xuất 4 trường gộp 1 vòng); viết System Prompt UF2 (Default Proposal + Micro-task 2p); bẫy Hallucination. |
-| **Quốc Hưng** | `vqh` | Backend Lead & Scheduler Co-Lead | Kiến trúc FastAPI, `database.py`, JWT Auth, xuất Mock API JSON cho Mobile trước 18h Ngày 2; phối hợp `qt` xây dựng lõi `scheduler_engine.py`. |
-| **Trang Tín** | `tn` & `kc` | Database Engineers | Thiết kế Schema SQLAlchemy 2.0 (`User`, `UserPreference`, `Task`, `Step`, `Session`), chạy Alembic migrations; CRUD API Tasks & Sessions. |
-| **Quang Khải** | `kai` | Voice & MCP Lead | Tích hợp Groq Whisper STT (`whisper-large-v3-turbo`) cho UF1; tích hợp Google Calendar MCP đọc sự kiện bận ($T_{\text{busy}}$). |
-| **Quốc Thịnh** | `qt` | Algorithm Engine Lead | Xây dựng module `free_time_calculator.py` và thuật toán kiểm tra khả thi $\Delta T_{\text{deficit}}$ trong `scheduler_engine.py` (không dời task khác). |
-| **Thanh An** | `tan` & `kc` | Mobile Lead & UI | Dựng base Flutter, Theme W3C COGA dịu mắt; Màn hình UF1 (gộp câu hỏi làm rõ, auto-save nháp); Màn hình UF2 (Xem lịch 2–3 tuần, cảnh báo thiếu giờ $\Delta T$, nút Tùy chỉnh). |
-| **Doãn Thành** | `thành` | QA / Test Lead | Xây dựng Test Matrix cho UF1 & UF2 (test thiếu giờ, test auto-save nháp, test mâu thuẫn thời gian); đo benchmark độ trễ LLM ($\le 2.5\text{s}$) và API CRUD ($\le 300\text{ms}$). |
-
----
-
-## 📅 3. KẾ HOẠCH HÀNH ĐỘNG CHI TIẾT TỪNG NGÀY (DAY 1 $\rightarrow$ DAY 7)
-
-```mermaid
-gantt
-    title Kế hoạch Tuần 1: Cụm UF1 & UF2 (Planning Phase)
-    dateFormat  YYYY-MM-DD
-    section Backend & DB
-    FastAPI Core & DB Setup          :active, b1, 2026-10-30, 1d
-    SQLAlchemy 2.0 Models & Alembic  :b2, 2026-10-31, 1d
-    Mock API cho Mobile (18h00)      :crit, b3, 2026-10-31, 1d
-    API UF1 Tasks & Auto-save        :b4, 2026-11-01, 2d
-    API UF2 Schedule Generation      :b5, 2026-11-03, 2d
-    section AI & Algorithm
-    Prompt UF1 Gemini Extraction     :a1, 2026-10-30, 2d
-    Groq Whisper STT Voice Pipeline  :a2, 2026-10-31, 2d
-    Google Calendar MCP (Đọc bận)   :a3, 2026-11-01, 2d
-    Prompt UF2 Default Proposal      :a4, 2026-11-02, 2d
-    Scheduler Engine Python (vqh, qt):a5, 2026-11-02, 3d
-    section Mobile (Flutter)
-    Base Flutter & Theme W3C COGA    :m1, 2026-10-30, 2d
-    UI UF1 (Voice/Text & Gộp hỏi)    :m2, 2026-11-01, 2d
-    UI UF2 (Review Task & Calendar)  :m3, 2026-11-03, 2d
-    Ghép API thật E2E UF1 -> UF2     :crit, m4, 2026-11-05, 1d
-    section QA
-    Test Matrix UF1 & UF2            :q1, 2026-10-30, 2d
-    Test Cases Biên & Benchmark      :q2, 2026-11-02, 3d
-    Nghiệm thu Milestone 1 (18h00)   :crit, q3, 2026-11-05, 1d
+```text
+Voice/text (công việc + thời gian + giờ rảnh)
+ → lưu Draft → AI trích xuất/hỏi rõ → user sửa/xác nhận UF1
+ → Context khóa đúng Draft + revision + khoảng thời gian
+ → AI chia Steps + giữ unexpanded_scope → Algorithm tính/xếp → user review
+ → confirm UF2 → lưu Task/Steps/Sessions/Version/Receipt
 ```
 
-### 📍 NGÀY 1 (Thứ Sáu): Khởi Động Hạ Tầng & Dựng Móng Kỹ Thuật
-* **Backend:**
-  - `vqh`: Viết file `backend/app/core/database.py` (AsyncEngine + SessionLocal + dependency `get_db()`) hỗ trợ cả SQLite và PostgreSQL. Viết `backend/app/main.py` bật CORSMiddleware.
-  - `tn`: Viết các ORM Models cốt lõi trong `backend/app/models/`: `User`, `UserPreference` (có default config), `Task`, `Step`, `Session` theo chuẩn SQLAlchemy 2.0.
-  - `mt`: Cấu hình file `backend/app/core/config.py` đọc các key `GEMINI_API_KEY`, `GROQ_API_KEY`. Cấu hình SDK `google-genai` gọi Gemini 2.5 Flash.
-  - `kai`: Cấu hình thư viện `groq` trên Backend, test thử nghiệm STT nhận diện file âm thanh mẫu cho UF1.
-* **Mobile:**
-  - `tan` & `kc`: Khởi tạo base Flutter project, cài đặt `provider`, `dio`, `record`, `table_calendar`, `flutter_secure_storage`. Thiết lập Theme chuẩn W3C COGA (bảng màu Pastel, font chữ dễ đọc, Dark mode dịu nhẹ).
-* **QA:**
-  - `thành`: Xây dựng tài liệu Test Matrix chi tiết, lập danh sách 15 ca kiểm thử biên cho UF1 và UF2.
+## 2. Nguồn tài liệu và quy tắc làm việc
 
-### 📍 NGÀY 2 (Thứ Bảy): Chạy Alembic Migration & Bàn Giao Mock API (MỐC CHỐT: 18h00)
-* **Backend:**
-  - `tn`: Chạy lệnh khởi tạo Alembic, sinh file migration `create_planning_tables`, chạy `alembic upgrade head` sinh file `proplan.db`.
-  - `vqh`: Viết các Mock Endpoints trong `backend/app/api/v1/tasks.py` và `schedule.py` trả về dữ liệu mẫu:
-    - `POST /api/v1/tasks/parse`: Trả về mẫu một Task trích xuất kèm câu hỏi làm rõ.
-    - `POST /api/v1/schedule/generate`: Trả về danh sách Steps và Sessions đã xếp mẫu kèm $\Delta T_{\text{deficit}}$.
-  - **⏰ Đúng 18h00:** `vqh` gửi tài liệu Swagger `http://localhost:8000/docs` và file JSON Contract cho `tan`.
-* **Mobile:**
-  - `tan`: Nạp Mock JSON vào `Dio` client, bắt đầu dựng màn hình UF1 và UF2 mà không cần đợi backend viết logic thật.
-* **Algorithm & MCP:**
-  - `kai`: Bắt đầu dựng service kết nối Google Calendar API qua MCP để đọc các khoảng thời gian bận ($T_{\text{busy}}$).
-  - `qt`: Bắt đầu dựng khung hàm tính $T_{\text{req}}$, $T_{\text{free}}$ và $\Delta T$ trong `scheduler_engine.py`.
+- [01–05 Backend Docs](https://docs.google.com/document/d/1X1zIWny1nOWCfkS4zLEdn71uZLhYLu5OkHlUPKcdoxE/edit), [schema local](backend/schema.md), [cấu trúc Backend](backend/backend_structure.md), [môi trường](backend/backend_testing_setup.md).
+- Mã P theo 05; mã A/I/V/C theo 04. Mỗi module có một role sở hữu; người thực hiện do nhóm phân công. Chưa có mã riêng thì không tự thêm mã mới.
+- Cập nhật code dev vào nhánh phụ trách backend/mobile, rồi tạo nhánh công việc. Không đưa thay đổi Mobile vào commit Backend.
+- Thay contract phải thống nhất trước khi code. Những phần contract bổ sung cần đồng bộ cả DTO/Docs/Sheet; không tự đổi endpoint trong từng nhánh.
 
-### 📍 NGÀY 3 & 4 (Chủ Nhật & Thứ Hai): Hiện Thực Hóa Luồng UF1 Thật (Gemini Flash & Voice STT)
-* **AI & Voice:**
-  - `mt`: Hoàn thiện hàm `extract_task_intent()` trong `ai_service.py`:
-    - Gửi prompt `UF1_EXTRACTION_SYSTEM_PROMPT` kèm chuỗi nhập liệu lên Gemini Flash.
-    - Ép kiểu trả về bằng Pydantic `TaskExtractionResult`.
-    - Bọc `asyncio.wait_for(timeout=2.5)`. Nếu timeout, kích hoạt cơ chế dự phòng.
-    - Bẫy lỗi: Đảm bảo Gemini không tự bịa deadline hoặc giờ rảnh.
-  - `kai`: Hoàn thiện hàm `transcribe_audio()` trong `voice_service.py` dùng Groq Whisper (`whisper-large-v3-turbo`), đảm bảo chuyển voice tiếng Việt thành text trong $\le 500\text{ms}$.
-* **Backend Core:**
-  - `vqh` & `tn`: Nối hàm của `mt` và `kai` vào API `POST /api/v1/tasks/parse`. Khi trích xuất xong, tự động lưu bản tóm tắt vào bảng `tasks` (`status='draft'`). Viết endpoint `POST /api/v1/tasks/draft` phục vụ auto-save khi thoát app.
-* **Mobile:**
-  - `tan`: Hoàn thành giao diện màn hình nhập việc UF1: nút giữ nói (Voice) và ô nhập Text; màn hình Tóm tắt gộp câu hỏi làm rõ trong **1 màn hình duy nhất**; bắt sự kiện nút Back để gọi auto-save draft.
+## 3. Công việc và đầu ra tuần 1
 
-### 📍 NGÀY 5 (Thứ Ba): Hiện Thực Hóa Luồng UF2 Thật (AI Phân Rã & Scheduler Engine)
-* **AI & Prompt:**
-  - `mt`: Hoàn thiện Prompt `UF2_DECOMPOSITION_SYSTEM_PROMPT` cho Gemini Flash:
-    - AI tự động sinh sẵn phương án chia bước chuẩn (**Default Proposal**) gồm 2–5 bước, thời lượng dự kiến và Micro-task khởi động 2 phút.
-    - Ép kiểu bằng Pydantic `TaskDecompositionProposal`.
-* **Thuật toán & Backend:**
-  - `qt` & `vqh`: Hoàn thiện module `scheduler_engine.py`:
-    - Đọc giờ bận từ `calendar_mcp_service.py` $\rightarrow$ xác định các khoảng rảnh ($T_{\text{free}}$).
-    - Cắt Steps thành Sessions, nhân hệ số $k_{\text{buffer}} = 1.2$, chèn thời gian nghỉ 5 phút.
-    - Kiểm tra khả thi: Nếu thiếu giờ, tính chính xác $\Delta T_{\text{deficit}} = T_{\text{req}} - T_{\text{free}}$ và trả về thông báo lý do; tuyệt đối không tự ý dời Task khác.
-  - `tn`: Viết API `POST /api/v1/schedule/confirm` lưu các Session chính thức vào Database.
-* **Mobile:**
-  - `tan` & `kc`: Dựng màn hình duyệt kế hoạch UF2: Thẻ hiển thị tổng quan cả dự án, danh sách chi tiết các phiên trong 2–3 tuần đầu, Thẻ cảnh báo thiếu giờ $\Delta T$, nút `"Tùy chỉnh theo ý tôi"` và nút `"Xác nhận lịch"`.
+| Mã | Role | Đầu ra cần bàn giao | Trạng thái/phần còn lại |
+|---|---|---|---|
+| P01/C01 | Backend Lead | Contract giờ riêng, revisions, khóa nguồn và retry | Code dùng Task–Steps–Sessions; nguồn riêng, manual Steps và PATCH edits/text đã có. Bộ41ca đạt trong phạm vi giả lập; cần ghép consumer và kiểm nguồn thật. |
+| P02 | Database | Model/migration, owner/FK/unique, snapshot giờ và dữ liệu cũ | Đã chuẩn bị migration mở rộng 20261103_01; đã kiểm trên SQLite tạm mới/có dữ liệu cũ, chưa áp DB app hoặc bản sao dữ liệu thực. Giữ Part cũ để đối chiếu. |
+| P03 | Backend | App, router, DB session, lỗi và môi trường cài lại từ lockfile | Đã có nền chạy được; giữ kiểm tra phù hợp, không dựng lại scaffold. |
+| P04/V01 | Voice | Audio do user chủ động gửi → text/lỗi rõ | API có; cần kiểm mic/STT thật và bàn giao interface cho Mobile. Provider theo cấu hình hiện hành, không cố định Groq Whisper từ kế hoạch cũ. |
+| P05/A01/A02.1 | AI + Prompt Engineer | Nội dung, mục tiêu, phạm vi, thời gian, giờ rảnh và câu hỏi đúng trường | Adapter/merge có; cần kiểm ngữ nghĩa tiếng Việt, thêm/thay/xóa giờ và nhiều lượt bằng provider thật. |
+| P05/A04 | AI + Prompt Engineer | Steps có đầu ra, thứ tự, ước lượng gốc; unexpanded_scope khi chưa chia hết | DTO/prompt đã đổi, không tạo một Part cho mỗi Step. Cần kiểm phân rã thực tế và giữ đầy đủ phạm vi. |
+| P06/A02.2/A05/A06/A08/A09/A10 | Algorithm | Kiểm đầu vào, quỹ rảnh, buffer, chia/xếp và report đúng Steps | Code nhận giờ riêng, không cần Part. Unit/integration mở rộng đã kiểm thứ tự, gap 14/15/20 phút và nguồn/partial; không coi là tối ưu toàn cục. |
+| P06/A07 | Algorithm | Ưu tiên ổn định theo deadline, importance và phụ thuộc | Đã có hàm ưu tiên trong nhánh backend; chưa mở scheduler nhiều Task. Không dời Task đã chốt ngoài quyền. |
+| A20 — thiết kế nghiên cứu | Algorithm | Nguồn bằng chứng, đề cương pilot, miền k và điều kiện lấy mẫu | Chưa đủ bằng chứng hoàn thành; không coi k=1.2 là kết luận khoa học. |
+| A22.1 | Backend tích hợp Calendar | Đọc bận thật có nguồn và đồng bộ Calendar | Hoãn tích hợp thật theo quyết định hiện tại. Context manual_only không chứng minh đã kiểm Google; không tạo event/job giả. |
+| P07/A03/I01 | Backend | Draft lưu/mở lại, merge, vấn đề làm rõ, revision và confirm UF1 | Đã sửa các lỗi issue, title dài, thời gian và giờ riêng; chưa đồng nghĩa giao diện đã nghiệm thu. |
+| P07/I02 | Backend | Điều phối AI → Algorithm → Candidate và giữ nguồn/phạm vi còn lại | Đã nối nguồn Draft, Context cố định, unexpanded_scope, manual Steps và keyed NL edits; bộ41ca đạt với AI giả. I03 lập tiếp Task chưa triển khai. |
+| P07/A18 — confirm UF2 | Backend | Lưu nguyên bộ, kiểm revisions và receipt chống trùng | Đã sửa confirm không Part và bộ đọc receipt cũ. Integration C01/rollback và hai ca migration SQLite tạm đã đạt; chưa kiểm PostgreSQL/DB app. |
+| P08 | Mobile | Nhập chung, hỏi rõ, sửa/xác nhận, bước 0, review lịch/phần chưa xếp | Cập nhật theo contract mới; kiểm thao tác cảm ứng và phục hồi trên thiết bị. Website test là công cụ riêng. |
+| Kiểm chứng tuần 1 | QA | Tình huống, bằng chứng và bước tái hiện theo task được kiểm | Tách fake/nguồn thật; kiểm xuyên luồng mới sau I02, không tự tạo mã A ngoài thẻ 04. |
 
-### 📍 NGÀY 6 (Thứ Tư): Viết Unit Test & Tối Ưu Hóa (Pytest & Dart Analyze)
-* **Backend:**
-  - `vqh`, `mt`, `qt`: Viết test suite `pytest` trong `backend/tests/`:
-    - Test trích xuất đầy đủ 4 trường $\rightarrow$ `is_complete == True`.
-    - Test trích xuất thiếu trường $\rightarrow$ `is_complete == False`, danh sách câu hỏi gộp đầy đủ.
-    - Test thuật toán xếp lịch: Trường hợp đủ giờ rảnh và trường hợp thiếu giờ rảnh báo đúng $\Delta T_{\text{deficit}}$.
-    - Test giả lập Gemini phản hồi chậm $> 2.5\text{s}$ xem cơ chế fallback có hoạt động không.
-* **Mobile:**
-  - `tan`: Chạy `dart analyze` dọn sạch 100% warnings và errors. Kiểm tra độ phản hồi giao diện không drop frame dưới 60 FPS.
-* **Ráp nối nội bộ:** Mobile chuyển cấu hình `baseUrl` từ Mock sang API thật trên máy Backend.
+## 4. Trình tự thực hiện Ngày 1–7
 
-### 📍 NGÀY 7 (Thứ Năm): Nghiệm Thu Toàn Diện Milestone 1 (End-to-End Planning Demo)
-* **Toàn đội ngũ:**
-  - Cầm máy thật Android cài bản build APK v0.1, kết nối server Backend qua mạng LAN.
-  - **Kịch bản nghiệm thu (UF1 $\rightarrow$ UF2):**
-    1. Bấm nút nói: *"Tuần này mình cần làm báo cáo môn Phân tích Dữ liệu nộp trước 5h chiều Chủ Nhật, tối thứ 6 và sáng thứ 7 mình rảnh"*.
-    2. Sau $\le 2\text{s}$, màn hình hiện bản tóm tắt đẹp mắt nhận diện đúng nội dung, deadline và giờ rảnh.
-    3. Bấm thoát app đột ngột $\rightarrow$ Mở lại app vẫn thấy thẻ nhắc nháp (Auto-save draft).
-    4. Bấm "Xác nhận tạo việc" $\rightarrow$ Màn hình UF2 lập tức hiển thị phương án chia 3 bước kèm việc khởi động 2 phút và lịch chi tiết từng phiên xếp vào tối thứ 6 và sáng thứ 7.
-    5. Bấm "Xác nhận lịch" $\rightarrow$ Kế hoạch được lưu chính thức vào DB.
-* **Ký duyệt Milestone 1:** `mt` (BA), `vqh` (BE Lead), `tan` (Mobile Lead) và `thành` (QA Lead) ký nghiệm thu Tuần 1, sẵn sàng cho Tuần 2 bước vào Thực thi tập trung (UF3 Focus Mode, DND, Báo thức Doze Mode và UF4 Cất suy nghĩ Raw Audio)!
+Đây là trình tự phụ thuộc; không mô tả tất cả bước dưới đây là chưa bắt đầu hoặc đã hoàn thành.
 
----
+| Mốc | Việc | Điều kiện chuyển tiếp |
+|---|---|---|
+| Ngày 1 | P01 chốt contract; P02/P03 xác nhận nền và dữ liệu mẫu | Hai phía đọc cùng schema; cài môi trường từ lockfile được. |
+| Ngày 2 | Voice/AI/Algorithm/Mobile làm song song theo mẫu đã chốt | Có input/output, nhánh lỗi và người sở hữu module. |
+| Ngày 3 | Ghép và kiểm UF1: giờ riêng, hỏi rõ, mở lại và confirm | User mới không cần Settings; không mất issue hoặc ghi đè chỉnh sửa. Phần Backend đã có bằng chứng nguồn giả. |
+| Ngày 4 | I02 nối nguồn Draft/Context, giữ điểm giao A22.1 | Context đúng Draft/revision; ghi rõ manual_only. Google thật làm sau. |
+| Ngày 5 | Kiểm A04/A07 và Candidate/confirm nguồn mới | Không mất scope, có lịch hợp lệ, nguồn thay đổi bị phát hiện. |
+| Ngày 6 | Review script rồi kiểm unit/integration; phối hợp Mobile/system | Tách AI/STT thật, giả và thiết bị; Google thật ngoài đợt này. |
+| Ngày 7 | Demo xuyên UF1–UF2, đối chiếu tồn đọng | Chỉ ghi Đạt cho phần có bằng chứng; nêu rõ nguồn hoặc tính năng còn giới hạn. |
 
-## 🔒 4. QUY TẮC BẤT BIẾN (STRICT GUARDRAILS) CẦN GIÁM SÁT TRONG TUẦN 1
+## 5. Quy tắc nghiệp vụ cần giữ
 
-1. **Ở UF1:** CẤM Gemini tự ý gán hạn chót hoặc giờ rảnh nếu người dùng chưa nói. BẮT BUỘC gộp toàn bộ câu hỏi thiếu vào **1 lần hiển thị duy nhất**. Tự động lưu nháp khi thoát app.
-2. **Ở UF2:** CẤM để LLM tự tính toán ngày giờ xếp lịch. Thuật toán Python đảm nhận 100% phép toán thời gian. **Tuyệt đối không tự ý dời các Task khác đã chốt**; nếu thiếu giờ rảnh, bắt buộc thông báo số phút thiếu hụt $\Delta T_{\text{deficit}}$ để người dùng tự quyết định.
-3. **Về Giao diện Mobile:** CẤM dùng `AlertDialog` hỏi xác nhận; mọi thông báo thành công dùng SnackBar nhẹ nhàng có nút Hoàn tác trong 5 giây.
-4. **Về Quản lý Git:** Mỗi PR phải có ít nhất 2 approvals (trong đó có `mt` review nghiệp vụ/guardrails). CẤM commit file `.env`, file `.db` hoặc file audio thử nghiệm lên Git.
+1. **UF1:** Nhập công việc, đầu ra, thời gian và giờ rảnh trong cùng voice/text. Chưa rõ thì hỏi trên bảng tóm tắt; không tự gán giờ 08–18 hoặc buộc vào Settings trước.
+2. **Giờ rảnh:** summary.availability theo yêu cầu hiện tại; ngày cụ thể thay quy tắc tuần của ngày đó. Giờ chung cũ không tự đè lên giờ riêng. Google chỉ bổ sung bận; chưa đọc Google không được hiểu là đã xác nhận không có bận.
+3. **Hai lần xác nhận:** UF1 chỉ xác nhận đầu vào, chưa có Task. UF2 confirm mới lưu Task/Steps/Sessions. Không dùng endpoint schedule/confirm cũ thay endpoint candidates/{candidate_id}/confirm hiện hành.
+4. **Chia việc:** User có thể nêu ý tưởng bước 0 hoặc để trợ lý đề xuất. AI trả đầu ra/ước lượng gốc, không tự tính lịch cuối cùng. Giữ phần chưa chia/chưa xếp.
+5. **Thời lượng:** Buffer phần làm chính đúng một lần; không nhân nghỉ hoặc micro-task. Session gồm các quãng work/rest theo cấu hình effective, không chốt cứng 25/5 cho mọi user. Micro-task không cộng duration; hoàn thiện A12.0 thuộc giai đoạn UF3.
+6. **Lịch:** Horizon chi tiết tối đa 14 ngày trong thời gian cho phép, không sửa deadline gốc. Giữ gap ít nhất 15 phút giữa hai Sessions kế tiếp, kể cả khác Task; không đòi xen Task khác.
+7. **Khả thi:** Chỉ feasible khi có lịch cụ thể cho verification_scope. deficit_seconds là cận dưới thiếu thời lượng làm chính; 0 không bảo đảm xếp được. search_inconclusive không có nghĩa đã chứng minh vô nghiệm.
+8. **Đồng thời/retry:** Nguồn/revision cũ phải được phát hiện; cùng mã/cùng payload không áp dụng trùng; cùng mã/khác payload bị từ chối. Mạng lỗi không có nghĩa chắc chắn thao tác chưa lưu.
+9. **Lưu nháp:** Backend giữ Draft bền vững. Autosave/phục hồi local và trạng thái đồng bộ là phần giao diện cần kiểm thực tế, không chỉ gọi request khi đóng app rồi coi đã chắc chắn lưu.
+10. **Phạm vi:** Không gộp I03 lập tiếp Task đã lưu, A12.0, timer/DND/Run, check-in hoặc toàn UF6–UF7 vào nghiệm thu tuần 1.
+
+## 6. Tiêu chí kiểm chứng và nghiệm thu
+
+- Nhập text/voice thật, kể cả ngày mơ hồ và nhiều khung; bổ sung mà không mất yêu cầu trước.
+- Mở lại Draft đúng dữ liệu; sửa trường khác không xóa câu hỏi chưa giải quyết; hạn đã qua bị chặn nhưng nháp còn nguyên.
+- Giữ/sửa giờ cũ đúng ý user; sửa sau confirm mất xác nhận cũ; Draft A không đổi giờ Draft B.
+- User chưa có giờ rảnh chung nhưng có preferences hiệu lực đi được từ UF1 đến Candidate và confirm nguồn mới; không chọn nhầm Context.
+- Task có nhiều Steps, unexpanded_scope không bị mất; AI lỗi không trả ba bước mẫu giả thành công. Đường manual_steps trên API tạo Candidate hiện có cho phép nhập bước khi AI lỗi trước Candidate đầu tiên.
+- Lịch nằm trong giờ khả dụng, đúng thứ tự/thời hạn/gap; phân biệt thiếu quỹ với chưa tìm được lời giải.
+- Confirm UF2 lưu nguyên bộ hoặc rollback; gửi lại không sinh trùng. Job pending không chứng minh Google đã có sự kiện.
+- Kiểm Google/STT/AI thật và Mobile cảm ứng riêng; ghi provider/cấu hình/mạng/thiết bị cùng kết quả. Ngưỡng độ trễ phải đo và thống nhất, không giữ cam kết 2 giây chưa được kiểm chứng.
+- Kiểm tra mới trong đợt này đặt ở `_temp` theo yêu cầu Quốc Hưng; không thêm vào thư mục tests chính. Giữ test đã có và không sửa cấu hình cảnh báo chỉ để làm báo cáo đẹp.
+
+**Kiểm chứng C01:** Các script review nằm trong `_temp/c01_tests`; 17 unit + 20 integration + 4 DTO có sẵn: 41/41 đạt trên SQLite tạm/AI giả; chưa system test hoặc áp migration DB app. Kết quả 175 ca ngày 02/11 là lịch sử trước thay contract. SQLite/AI giả, PostgreSQL, provider thật và cảm ứng Mobile là các phạm vi kiểm khác nhau.
+
+## 7. Bàn giao và Git
+
+Mỗi role bàn giao module, DTO/ví dụ, nhánh lỗi và bằng chứng trong phạm vi mình sở hữu. Commit tiếng Anh theo [COMMIT_CONVENTION.md](COMMIT_CONVENTION.md); không commit .env, credential, DB, audio hoặc _temp. Backend và Mobile tách thay đổi; đưa về dev theo quy trình PR của nhóm. Không ghi đã cập nhật Docs/Sheet online nếu mới sửa file local.

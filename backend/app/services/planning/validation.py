@@ -7,9 +7,9 @@ Kiểm tra 4 nhóm thông tin bắt buộc (Nội dung, Phạm vi, Ràng buộc 
 from __future__ import annotations
 
 import zoneinfo
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 
-from app.schemas.availability import Availability
+from app.schemas.availability import Availability, DraftAvailability
 from app.schemas.common import ClarificationIssue, TimeConstraint
 from app.schemas.draft import TaskSummary
 
@@ -34,9 +34,35 @@ def _get_time_constraint_endpoints(
     return start, end
 
 
+def _has_declared_time(availability: DraftAvailability, start: datetime, end: datetime) -> bool:
+    """Chỉ kiểm có khung được phép trong window; chưa trừ bận hoặc kết luận khả thi."""
+    tz = zoneinfo.ZoneInfo(availability.timezone)
+    first_day, last_day = start.astimezone(tz).date(), end.astimezone(tz).date()
+    overrides = {item.date: item.intervals for item in availability.date_overrides}
+
+    def overlaps(day, interval):
+        left = datetime.combine(day, interval.start_local, tzinfo=tz)
+        right = datetime.combine(day, interval.end_local, tzinfo=tz)
+        return left < end and right > start
+
+    if any(
+        first_day <= day <= last_day and any(overlaps(day, i) for i in intervals)
+        for day, intervals in overrides.items()
+    ):
+        return True
+    for rule in availability.weekly_rules:
+        day = first_day + timedelta(days=(rule.weekday - first_day.isoweekday()) % 7)
+        while day <= last_day:
+            if day not in overrides and overlaps(day, rule):
+                return True
+            day += timedelta(days=7)
+    return False
+
+
 def validate_planning_prerequisites(
     summary: TaskSummary,
-    availability: Availability | None,
+    availability: Availability | DraftAvailability | None,
+    reference_now: datetime | None = None,
 ) -> tuple[bool, list[ClarificationIssue]]:
     """Kiểm tra điều kiện tiên quyết để chuyển từ UF1 sang UF2 (A02.2).
 
@@ -122,9 +148,7 @@ def validate_planning_prerequisites(
             )
 
         start_dt, end_dt = _get_time_constraint_endpoints(tc)
-        field_end_name = (
-            "deadline_at" if tc.kind == "deadline" else "finish_by_at"
-        )
+        field_end_name = "deadline_at" if tc.kind == "deadline" else "finish_by_at"
 
         if start_dt is None:
             issues.append(
@@ -173,13 +197,26 @@ def validate_planning_prerequisites(
                         )
                     )
 
-    if summary.availability_ref is None:
+    if end_utc is not None and reference_now is not None and end_utc <= reference_now:
         issues.append(
             ClarificationIssue(
-                code="MISSING_AVAILABILITY_REF",
-                field_path="availability_ref",
-                message="Chưa chọn bộ khung giờ rảnh để xếp lịch.",
-                question="Bạn rảnh vào những khung giờ nào trong tuần để thực hiện việc này?",
+                code="END_TIME_PASSED",
+                field_path="time_constraint",
+                message="Mốc hoàn tất đã qua; bản nháp vẫn được giữ.",
+                question="Bạn muốn đổi thời gian hoàn tất thành khi nào?",
+                blocking=True,
+            )
+        )
+
+    if summary.availability is not None:
+        availability = summary.availability
+    if summary.availability is None and summary.availability_ref is None:
+        issues.append(
+            ClarificationIssue(
+                code="MISSING_AVAILABILITY",
+                field_path="availability",
+                message="Bạn chưa cung cấp giờ rảnh để thực hiện công việc này.",
+                question="Bạn có thể thực hiện công việc này vào những ngày và khung giờ nào?",
                 blocking=True,
             )
         )
@@ -194,7 +231,7 @@ def validate_planning_prerequisites(
             )
         )
     else:
-        if availability.confirmed_at is None:
+        if isinstance(availability, Availability) and availability.confirmed_at is None:
             issues.append(
                 ClarificationIssue(
                     code="AVAILABILITY_NOT_CONFIRMED",
@@ -252,7 +289,9 @@ def validate_planning_prerequisites(
                         )
                     )
 
-        has_rules = bool(availability.weekly_rules or availability.date_overrides)
+        has_rules = bool(
+            availability.weekly_rules or any(ov.intervals for ov in availability.date_overrides)
+        )
         if not has_rules:
             issues.append(
                 ClarificationIssue(
@@ -260,6 +299,21 @@ def validate_planning_prerequisites(
                     field_path="availability",
                     message="Bạn chưa có khung giờ rảnh nào được cài đặt.",
                     question="Vui lòng thiết lập ít nhất một khung giờ rảnh trong tuần để AI xếp lịch.",
+                    blocking=True,
+                )
+            )
+
+    if summary.availability is not None and start_utc is not None and end_utc is not None:
+        effective_start = max(start_utc, reference_now) if reference_now is not None else start_utc
+        if effective_start < end_utc and not _has_declared_time(
+            summary.availability, effective_start, end_utc
+        ):
+            issues.append(
+                ClarificationIssue(
+                    code="AVAILABILITY_OUTSIDE_TIME_CONSTRAINT",
+                    field_path="availability",
+                    message="Chưa có giờ rảnh nào nằm trong khoảng thời gian còn được phép thực hiện.",
+                    question="Bạn bổ sung giờ rảnh trong thời gian thực hiện hoặc điều chỉnh mốc thời gian nhé?",
                     blocking=True,
                 )
             )

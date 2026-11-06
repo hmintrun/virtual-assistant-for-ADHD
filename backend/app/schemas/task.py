@@ -8,9 +8,11 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from app.schemas.availability import DraftAvailability
 from app.schemas.common import (
     ApiModel,
     AvailabilityRef,
+    ClarificationIssue,
     SessionSegment,
     TimeConstraint,
 )
@@ -27,23 +29,9 @@ _LOCAL_TIME_HHMM_RE = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
 _LOCAL_DATE_YYYYMMDD_RE = re.compile(r"^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$")
 
 
-class PlanningPart(ApiModel):
-    planning_part_id: str = Field(min_length=1)
-    task_id: str = Field(min_length=1)
-    client_part_key: str = Field(min_length=1)
-    scope_description: str = Field(min_length=1)
-    order_index: int = Field(ge=0)
-    decomposition_state: Literal["not_started", "partial", "complete"]
-    scheduling_state: Literal["not_scheduled", "partial", "complete"]
-    unexpanded_scope: str | None = None
-    rough_estimate_seconds: int | None = Field(default=None, gt=0)
-    estimate_source: str | None = None
-
-
 class Step(ApiModel):
     step_id: str = Field(min_length=1)
     task_id: str = Field(min_length=1)
-    planning_part_id: str = Field(min_length=1)
     title: str = Field(min_length=1)
     expected_output: str = Field(min_length=1)
     order_index: int = Field(ge=0)
@@ -73,26 +61,15 @@ class Session(ApiModel):
 
     @model_validator(mode="after")
     def valid_durations(self):
-        if (
-            self.scheduled_start.utcoffset() is None
-            or self.scheduled_end.utcoffset() is None
-        ):
+        if self.scheduled_start.utcoffset() is None or self.scheduled_end.utcoffset() is None:
             raise ValueError("Giờ phiên phải có múi giờ")
         if self.duration_seconds != self.work_seconds + self.rest_seconds:
             raise ValueError("Thời lượng phiên không bằng làm chính cộng nghỉ")
-        if (
-            sum(x.duration_seconds for x in self.segments if x.kind == "work")
-            != self.work_seconds
-        ):
+        if sum(x.duration_seconds for x in self.segments if x.kind == "work") != self.work_seconds:
             raise ValueError("Các quãng làm chính không khớp")
-        if (
-            sum(x.duration_seconds for x in self.segments if x.kind == "rest")
-            != self.rest_seconds
-        ):
+        if sum(x.duration_seconds for x in self.segments if x.kind == "rest") != self.rest_seconds:
             raise ValueError("Các quãng nghỉ không khớp")
-        if (
-            self.scheduled_end - self.scheduled_start
-        ).total_seconds() != self.duration_seconds:
+        if (self.scheduled_end - self.scheduled_start).total_seconds() != self.duration_seconds:
             raise ValueError("Giờ kết thúc không khớp thời lượng phiên")
         if [x.order_index for x in self.segments] != list(range(len(self.segments))):
             raise ValueError("Thứ tự các quãng không liên tục")
@@ -111,8 +88,12 @@ class Task(ApiModel):
     source_draft_id: str = Field(min_length=1)
     decomposition_state: Literal["not_started", "partial", "complete"]
     scheduling_state: Literal["not_scheduled", "partial", "complete"]
-    availability_ref: AvailabilityRef
-    planning_parts: list[PlanningPart]
+    revision: int = Field(default=1, ge=1)
+    availability_ref: AvailabilityRef | None = None
+    availability: DraftAvailability | None = None
+    source_summary_revision: int | None = None
+    source_planning_input_revision: int | None = None
+    unexpanded_scope: str | None = None
     steps: list[Step]
     sessions: list[Session]
     source_summary: TaskSummary
@@ -312,6 +293,16 @@ class AvailabilitySchema(BaseModel):
     )
 
 
+class ExtractedTimeConstraint(BaseModel):
+    """Incomplete AI proposal; only a complete value becomes public TimeConstraint."""
+
+    kind: Literal["deadline", "window"] | None = None
+    start_at: datetime | None = None
+    deadline_at: datetime | None = None
+    finish_by_at: datetime | None = None
+    input_timezone: str | None = None
+
+
 class LLMTaskExtractionPayload(BaseModel):
     """Schema JSON ép kiểu trực tiếp cho LLM ở UF1 (không lộ trường nội bộ hệ thống)."""
 
@@ -320,6 +311,11 @@ class LLMTaskExtractionPayload(BaseModel):
         max_length=100,
         description="Tên ngắn gọn nhận diện công việc (tối đa 100 ký tự). Null nếu chưa rõ.",
     )
+    goal: str | None = None
+    time_constraint: ExtractedTimeConstraint | None = None
+    clarification_issues: list[ClarificationIssue] = Field(default_factory=list)
+    resolved_issue_keys: list[str] = Field(default_factory=list)
+    field_review_notes: dict[str, str] = Field(default_factory=dict)
     content: str | None = Field(
         default=None,
         description="Nội dung công việc cụ thể người dùng muốn thực hiện (Trường bắt buộc 1/4).",
@@ -337,6 +333,10 @@ class LLMTaskExtractionPayload(BaseModel):
             "Danh sách các khung giờ rảnh người dùng có thể làm việc dạng chữ thân thiện hiển thị UI "
             "(Trường bắt buộc 3/4). Bắt buộc để mảng rỗng [] nếu chưa có thông tin, CẤM tự bịa khung giờ."
         ),
+    )
+    availability_update_mode: Literal["merge", "replace"] = Field(
+        default="merge",
+        description="merge bổ sung/hoàn thiện giờ rảnh; replace chỉ khi user yêu cầu thay/xóa khung cũ.",
     )
     structured_free_windows: list[ExtractedFreeWindowSchema] = Field(
         default_factory=list,
@@ -432,7 +432,7 @@ class TaskExtractionResult(LLMTaskExtractionPayload):
                 f"Khung giờ {joined_phrases} bạn có thể làm từ mấy giờ đến mấy giờ cụ thể để mình xếp lịch chuẩn xác?"
             )
 
-        if self.deadline is None:
+        if self.deadline is None and self.time_constraint is None:
             missing_questions.append("Khi nào bạn cần hoàn thành xong công việc này (hạn chót)?")
 
         if missing_questions or self.has_conflict:
@@ -545,17 +545,22 @@ class StepPromptItem(BaseModel):
 class LLMTaskDecompositionPayload(BaseModel):
     """Schema JSON ép kiểu trực tiếp cho LLM khi sinh Default Decomposition Proposal ở UF2."""
 
+    unexpanded_scope: str | None = Field(
+        default=None, description="Phạm vi tổng quan chưa chia Steps trong lần lập phương án này."
+    )
+
     task_title: str = Field(
         ...,
         min_length=1,
         max_length=255,
         description="Tên công việc đã chuẩn hóa ngắn gọn.",
     )
+    requires_clarification: bool = False
+    clarification_question: str | None = Field(default=None, max_length=350)
     steps: list[StepPromptItem] = Field(
         ...,
-        min_length=1,
         max_length=7,
-        description="Danh sách các bước nhỏ tuần tự (khuyến nghị 2–5 bước vừa sức cho người ADHD).",
+        description="Danh sách Steps; chỉ để rỗng khi cần làm rõ ý tưởng chia bước.",
     )
     reasoning: str = Field(
         ...,
@@ -565,8 +570,19 @@ class LLMTaskDecompositionPayload(BaseModel):
 
     @model_validator(mode="after")
     def normalize_step_order_indices(self) -> LLMTaskDecompositionPayload:
-        """Đảm bảo order_index luôn liên tục 1..N dù LLM trả thứ tự nhảy cóc hoặc trùng nhau."""
-        self.steps = _normalize_sequential_steps(self.steps)
+        """Không sinh phương án khi ý tưởng còn cần làm rõ; giữ thứ tự 1..N."""
+        self.clarification_question = (self.clarification_question or "").strip() or None
+        if self.requires_clarification or self.clarification_question:
+            self.requires_clarification = True
+            self.clarification_question = self.clarification_question or (
+                "Bạn muốn điều chỉnh ý tưởng chia bước thế nào để phù hợp với phạm vi đã xác nhận?"
+            )
+            self.steps = []
+        else:
+            if not self.steps:
+                raise ValueError("Phương án đã rõ cần ít nhất một Step.")
+            self.steps = _normalize_sequential_steps(self.steps)
+        self.unexpanded_scope = (self.unexpanded_scope or "").strip() or None
         return self
 
 
@@ -583,6 +599,78 @@ class TaskDecompositionResult(LLMTaskDecompositionPayload):
 
 # Alias tương thích với tài liệu kế hoạch chi tiết tuần 1 (week1_detailed_plan.md)
 TaskDecompositionProposal = TaskDecompositionResult
+
+
+class CandidateStepAdjustment(ApiModel):
+    """Edit ngữ nghĩa trên một Step đã có; giữ nguyên client key của Candidate."""
+
+    client_step_key: str = Field(min_length=1)
+    title: str | None = Field(default=None, min_length=1, max_length=255)
+    expected_output: str | None = Field(default=None, min_length=1)
+    estimated_base_seconds: int | None = Field(default=None, gt=0)
+    order_index: int | None = Field(default=None, ge=0)
+
+    @model_validator(mode="after")
+    def valid_edit(self) -> CandidateStepAdjustment:
+        if not self.client_step_key.strip():
+            raise ValueError("Cần client_step_key của Step hiện có.")
+        for field in ("title", "expected_output"):
+            value = getattr(self, field)
+            if value is not None:
+                value = value.strip()
+                if not value:
+                    raise ValueError(f"{field} không được rỗng.")
+                setattr(self, field, value)
+        if all(
+            getattr(self, field) is None
+            for field in ("title", "expected_output", "estimated_base_seconds", "order_index")
+        ):
+            raise ValueError("Edit cần ít nhất một trường được hỗ trợ.")
+        return self
+
+
+class LLMCandidateAdjustmentPayload(ApiModel):
+    """Đề xuất có giới hạn; Backend kiểm nguồn và áp edit, AI không ghi lịch."""
+
+    step_edits: list[CandidateStepAdjustment]
+    requires_clarification: bool
+    clarification_question: str | None = Field(max_length=350)
+    requires_draft_update: bool
+    unsupported_changes: list[str]
+    assistant_note: str = Field(min_length=1, max_length=400)
+
+    @model_validator(mode="after")
+    def mark_blocked_request(self) -> LLMCandidateAdjustmentPayload:
+        self.clarification_question = (self.clarification_question or "").strip() or None
+        self.unsupported_changes = [item.strip() for item in self.unsupported_changes]
+        if any(not item for item in self.unsupported_changes):
+            raise ValueError("Thao tác chưa hỗ trợ cần được mô tả rõ.")
+        self.assistant_note = self.assistant_note.strip()
+        if not self.assistant_note:
+            raise ValueError("Cần phản hồi ngắn cho người dùng.")
+        if self.requires_draft_update or self.unsupported_changes or self.clarification_question:
+            self.requires_clarification = True
+        if self.requires_clarification or not self.step_edits:
+            self.requires_clarification = True
+            self.clarification_question = self.clarification_question or (
+                "Hãy sửa thời gian hoặc giờ rảnh trên bản tóm tắt rồi xác nhận lại UF1."
+                if self.requires_draft_update
+                else "Bạn muốn sửa tên, đầu ra, thời lượng hay thứ tự của bước nào?"
+            )
+            self.assistant_note = "Mình chưa thay đổi phương án hiện tại."
+        return self
+
+
+class CandidateAdjustmentResult(LLMCandidateAdjustmentPayload):
+    """Kết quả nội bộ; yêu cầu chưa rõ/ngoài phạm vi không chứa edit để áp."""
+
+    generation_tier: GenerationTier
+
+    @model_validator(mode="after")
+    def keep_blocked_request_atomic(self) -> CandidateAdjustmentResult:
+        if self.requires_clarification:
+            self.step_edits = []
+        return self
 
 
 class LLMPlanAdjustmentPayload(BaseModel):

@@ -7,26 +7,25 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import create_engine, inspect, select
-from sqlalchemy.exc import IntegrityError
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import Session as DBSession
-from test_models import make_plan
-
 from app.core.database import make_engine
 from app.models import (
     Base,
     CheckIn,
     CommandReceipt,
     PlanningDraft,
-    PlanningPart,
     RescheduleProposal,
     SessionRun,
+    Step,
     Task,
     Thought,
     User,
 )
 from app.services.task_state_service import get_task_planning_states
+from sqlalchemy import create_engine, inspect, select
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import Session as DBSession
+from test_models import make_plan
 
 
 def run_for(session, user_id, **kwargs):
@@ -199,48 +198,55 @@ async def test_batched_task_derived_states_and_owner_filter():
             user = User(email="states@test.example", display_name="TN")
             db.add(user)
             await db.flush()
-            task = Task(user_id=user.id, title="Task", time_constraint={})
+            task = Task(
+                user_id=user.id, title="Task", time_constraint={}, decomposition_state="not_started"
+            )
             db.add(task)
             await db.flush()
             task_id, user_id = task.id, user.id
             result = await get_task_planning_states(db, user_id, [task_id])
             assert result[task_id].decomposition_state == "not_started"
-            first = PlanningPart(
+            first = Step(
                 user_id=user_id,
                 task_id=task_id,
-                client_part_key="first",
-                scope_description="Đầu",
+                title="Đầu",
                 order_index=0,
-                decomposition_state="complete",
-                scheduling_state="complete",
+                estimated_base_seconds=1500,
+                remaining_base_seconds=0,
+                buffer_multiplier=1.0,
+                estimate_source="user_confirmed",
             )
-            second = PlanningPart(
+            second = Step(
                 user_id=user_id,
                 task_id=task_id,
-                client_part_key="second",
-                scope_description="Sau",
+                title="Sau",
                 order_index=1,
-                decomposition_state="not_started",
-                scheduling_state="not_scheduled",
+                estimated_base_seconds=1500,
+                remaining_base_seconds=0,
+                buffer_multiplier=1.0,
+                estimate_source="user_confirmed",
             )
+            task.decomposition_state = "partial"
+            task.unexpanded_scope = "Phần còn lại chưa chia"
             db.add_all([first, second])
             await db.flush()
             result = await get_task_planning_states(db, user_id, [task_id])
             assert result[task_id].decomposition_state == "partial"
-            assert result[task_id].scheduling_state == "partial"
-            second.decomposition_state = "complete"
-            second.scheduling_state = "complete"
+            assert result[task_id].scheduling_state == "not_scheduled"
+            task.decomposition_state = "complete"
+            task.unexpanded_scope = None
             await db.flush()
             result = await get_task_planning_states(db, user_id, [task_id])
             assert result[task_id].decomposition_state == "complete"
             assert result[task_id].scheduling_state == "complete"
             assert await get_task_planning_states(db, uuid4(), [task_id]) == {}
-            assert "decomposition_state" not in Task.__table__.c
+            assert "decomposition_state" in Task.__table__.c
+            assert "planning_parts" not in Base.metadata.tables
     finally:
         await engine.dispose()
 
 
-def test_sqlite_migration_upgrade_check_downgrade(tmp_path):
+def test_sqlite_migration_preserves_legacy_and_requires_reviewed_downgrade(tmp_path):
     url = "sqlite+aiosqlite:///" + (tmp_path / "migration.db").as_posix()
     env = {**os.environ, "DATABASE_URL": url}
     cwd = Path(__file__).resolve().parents[1]
@@ -260,12 +266,32 @@ def test_sqlite_migration_upgrade_check_downgrade(tmp_path):
     engine = create_engine(url.replace("+aiosqlite", ""))
     with engine.connect() as connection:
         assert set(inspect(connection).get_table_names()) == set(Base.metadata.tables) | {
-            "alembic_version"
+            "alembic_version",
+            "planning_parts",
+        }
+        assert {c["name"] for c in inspect(connection).get_columns("tasks")} >= {
+            "availability",
+            "decomposition_state",
+            "unexpanded_scope",
+            "source_summary_revision",
+            "source_planning_input_revision",
         }
         assert connection.exec_driver_sql("PRAGMA foreign_key_check").all() == []
+    with DBSession(engine) as db:
+        _, _, task, step, session = make_plan(db)
+        assert step.task_id == task.id
+        assert session.step_id == step.id
     engine.dispose()
-    alembic("check")
-    alembic("downgrade", "base")
+    # C01 chủ động giữ cột/bảng legacy và từ chối downgrade mất nguồn gốc.
+    downgrade = subprocess.run(
+        [sys.executable, "-m", "alembic", "downgrade", "base"],
+        cwd=cwd,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert downgrade.returncode != 0
+    assert "C01 downgrade requires an explicit snapshot/data recovery plan" in downgrade.stderr
     alembic("upgrade", "head")
 
 
@@ -283,24 +309,16 @@ def test_postgresql_offline_migration_contains_deferred_fks():
     assert "CREATE UNIQUE INDEX uq_user_live_run" in result.stdout
 
 
-def test_part_cannot_belong_to_another_task_of_same_user(engine):
+def test_step_cannot_reference_task_of_another_user(engine):
     with DBSession(engine) as db:
         user, _, task, step, _ = make_plan(db)
-        other = Task(user_id=user.id, title="Other task", time_constraint={})
+        other_user = User(email="other-owner@example.test", display_name="Other")
+        db.add(other_user)
+        db.flush()
+        other = Task(user_id=other_user.id, title="Other task", time_constraint={})
         db.add(other)
         db.flush()
-        part = PlanningPart(
-            user_id=user.id,
-            task_id=other.id,
-            client_part_key="part",
-            scope_description="Part",
-            order_index=0,
-            decomposition_state="complete",
-            scheduling_state="complete",
-        )
-        db.add(part)
-        db.flush()
-        step.planning_part_id = part.id
+        step.task_id = other.id
         with pytest.raises(IntegrityError):
             db.commit()
 

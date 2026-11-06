@@ -12,27 +12,25 @@ Kiểm tra từng hàm tác vụ độc lập:
 
 from __future__ import annotations
 
-import math
-from datetime import UTC, datetime, time, timedelta, timezone
-import pytest
+from datetime import UTC, datetime, timedelta, timezone
+from unittest.mock import patch
 
+import pytest
 from app.core.config import Settings
-from app.schemas.availability import Availability, DateOverride, WeeklyRule
+from app.schemas.availability import Availability, WeeklyRule
 from app.schemas.calendar import (
     BusyInterval,
     BusyIntervalSource,
     CalendarContext,
-    ManualBusyInterval,
 )
 from app.schemas.common import AvailabilityRef, SessionSegment, TimeConstraint, TimeInterval
-from app.schemas.planning import CandidatePart, CandidateStep
+from app.schemas.planning import CandidateStep
 from app.schemas.settings import UserPreference
 from app.schemas.task import Session, StepPromptItem
 from app.services.ai_service import AIService
 from app.services.planning.adaptation import evaluate_buffer_adaptation
 from app.services.planning.availability import (
     _merge_intervals,
-    _parse_time_str,
     _subtract_intervals,
     compute_effective_free_intervals,
 )
@@ -43,7 +41,6 @@ from app.services.planning.durations import (
 )
 from app.services.planning.rescheduling import shift_elapsed_sessions
 from app.services.planning.scheduling import schedule_candidate_sessions
-
 
 # ==============================================================================
 # PHẦN 1: DURATIONS - HỆ SỐ ĐỆM & CẤU TRÚC PHIÊN LÀM/NGHỈ
@@ -246,7 +243,9 @@ class TestAvailabilityDeepScenarios:
                     end_at=t_end,
                 ),
                 BusyInterval(
-                    source=BusyIntervalSource(kind="calendar_event", google_event_id="external_meeting_999"),
+                    source=BusyIntervalSource(
+                        kind="calendar_event", google_event_id="external_meeting_999"
+                    ),
                     start_at=t_start,
                     end_at=t_end,
                 ),
@@ -262,7 +261,7 @@ class TestAvailabilityDeepScenarios:
         )
 
         for interval in free_intervals:
-            assert not (interval.start_at >= t_start and interval.end_at <= t_end)
+            assert interval.end_at <= t_start or interval.start_at >= t_end
 
 
 # ==============================================================================
@@ -292,19 +291,9 @@ class TestSchedulingDeepScenarios:
             reminder_offsets=[15],
             reminder_style="balanced",
         )
-        parts = [
-            CandidatePart(
-                client_part_key="p1",
-                scope_description="P1",
-                order_index=0,
-                decomposition_state="complete",
-                scheduling_state="not_scheduled",
-            )
-        ]
 
         step_exact = CandidateStep(
             client_step_key="s1",
-            client_part_key="p1",
             title="Vừa khít",
             expected_output="Done",
             order_index=0,
@@ -320,7 +309,6 @@ class TestSchedulingDeepScenarios:
             fixed_sessions=[],
             time_constraint=tc,
             pref=pref,
-            planning_parts=parts,
         )
         assert report.status == "feasible"
         assert report.fully_scheduled is True
@@ -328,7 +316,6 @@ class TestSchedulingDeepScenarios:
 
         step_exceed = CandidateStep(
             client_step_key="s2",
-            client_part_key="p1",
             title="Thừa 1s",
             expected_output="Done",
             order_index=0,
@@ -344,7 +331,6 @@ class TestSchedulingDeepScenarios:
             fixed_sessions=[],
             time_constraint=tc,
             pref=pref,
-            planning_parts=parts,
         )
         assert report_exc.status == "infeasible"
         assert report_exc.fully_scheduled is False
@@ -369,18 +355,8 @@ class TestSchedulingDeepScenarios:
             reminder_offsets=[15],
             reminder_style="balanced",
         )
-        parts = [
-            CandidatePart(
-                client_part_key="p1",
-                scope_description="P1",
-                order_index=0,
-                decomposition_state="complete",
-                scheduling_state="not_scheduled",
-            )
-        ]
         step1 = CandidateStep(
             client_step_key="s1",
-            client_part_key="p1",
             title="B1",
             expected_output="Done",
             order_index=0,
@@ -392,7 +368,6 @@ class TestSchedulingDeepScenarios:
         )
         step2 = CandidateStep(
             client_step_key="s2",
-            client_part_key="p1",
             title="B2",
             expected_output="Done",
             order_index=1,
@@ -409,7 +384,6 @@ class TestSchedulingDeepScenarios:
             fixed_sessions=[],
             time_constraint=tc,
             pref=pref,
-            planning_parts=parts,
             min_gap_seconds=900,
         )
         assert len(sessions) == 2
@@ -429,11 +403,46 @@ class TestAdaptationDeepScenarios:
         """Người dùng ADHD có ngày siêu tập trung (hyperfocus 0.1) và ngày phân tâm nặng (5.0).
         Trung vị (Median) loại bỏ các ngày đột biến này."""
         samples = [
-            {"step_id": "s_hyp", "status": "completed", "estimated_base_seconds": 3000, "actual_work_seconds": 300, "scope_modified": False},
-            {"step_id": "s_norm1", "status": "completed", "estimated_base_seconds": 2000, "actual_work_seconds": 2700, "scope_modified": False},
-            {"step_id": "s_norm2", "status": "completed", "estimated_base_seconds": 2000, "actual_work_seconds": 2700, "scope_modified": False},
-            {"step_id": "s_norm3", "status": "completed", "estimated_base_seconds": 2000, "actual_work_seconds": 2700, "scope_modified": False},
-            {"step_id": "s_dist", "status": "completed", "estimated_base_seconds": 1000, "actual_work_seconds": 5000, "scope_modified": False},
+            {
+                "step_id": "s_hyp",
+                "status": "completed",
+                "estimated_base_seconds": 3000,
+                "actual_work_seconds": 300,
+                "scope_modified": False,
+                "actual_source": "self_report",
+            },
+            {
+                "step_id": "s_norm1",
+                "status": "completed",
+                "estimated_base_seconds": 2000,
+                "actual_work_seconds": 2700,
+                "scope_modified": False,
+                "actual_source": "self_report",
+            },
+            {
+                "step_id": "s_norm2",
+                "status": "completed",
+                "estimated_base_seconds": 2000,
+                "actual_work_seconds": 2700,
+                "scope_modified": False,
+                "actual_source": "self_report",
+            },
+            {
+                "step_id": "s_norm3",
+                "status": "completed",
+                "estimated_base_seconds": 2000,
+                "actual_work_seconds": 2700,
+                "scope_modified": False,
+                "actual_source": "self_report",
+            },
+            {
+                "step_id": "s_dist",
+                "status": "completed",
+                "estimated_base_seconds": 1000,
+                "actual_work_seconds": 5000,
+                "scope_modified": False,
+                "actual_source": "self_report",
+            },
         ]
 
         suggestion = evaluate_buffer_adaptation(
@@ -449,13 +458,60 @@ class TestAdaptationDeepScenarios:
     def test_evaluate_buffer_adaptation_sample_filtering_and_clamping(self):
         """Bỏ qua bước chưa xong hoặc bị sửa scope, và kẹp policy [1.0, 2.0]."""
         samples = [
-            {"step_id": "s1", "status": "completed", "estimated_base_seconds": 1000, "actual_work_seconds": 3500, "scope_modified": False},
-            {"step_id": "s2", "status": "completed", "estimated_base_seconds": 1000, "actual_work_seconds": 3500, "scope_modified": False},
-            {"step_id": "s3", "status": "completed", "estimated_base_seconds": 1000, "actual_work_seconds": 3500, "scope_modified": False},
-            {"step_id": "s4", "status": "completed", "estimated_base_seconds": 1000, "actual_work_seconds": 3500, "scope_modified": False},
-            {"step_id": "s5", "status": "completed", "estimated_base_seconds": 1000, "actual_work_seconds": 3500, "scope_modified": False},
-            {"step_id": "s_incomp", "status": "in_progress", "estimated_base_seconds": 1000, "actual_work_seconds": 3500},
-            {"step_id": "s_mod", "status": "completed", "estimated_base_seconds": 1000, "actual_work_seconds": 3500, "scope_modified": True},
+            {
+                "step_id": "s1",
+                "status": "completed",
+                "estimated_base_seconds": 1000,
+                "actual_work_seconds": 3500,
+                "scope_modified": False,
+                "actual_source": "self_report",
+            },
+            {
+                "step_id": "s2",
+                "status": "completed",
+                "estimated_base_seconds": 1000,
+                "actual_work_seconds": 3500,
+                "scope_modified": False,
+                "actual_source": "self_report",
+            },
+            {
+                "step_id": "s3",
+                "status": "completed",
+                "estimated_base_seconds": 1000,
+                "actual_work_seconds": 3500,
+                "scope_modified": False,
+                "actual_source": "self_report",
+            },
+            {
+                "step_id": "s4",
+                "status": "completed",
+                "estimated_base_seconds": 1000,
+                "actual_work_seconds": 3500,
+                "scope_modified": False,
+                "actual_source": "self_report",
+            },
+            {
+                "step_id": "s5",
+                "status": "completed",
+                "estimated_base_seconds": 1000,
+                "actual_work_seconds": 3500,
+                "scope_modified": False,
+                "actual_source": "self_report",
+            },
+            {
+                "step_id": "s_incomp",
+                "status": "in_progress",
+                "estimated_base_seconds": 1000,
+                "actual_work_seconds": 3500,
+            },
+            {
+                "step_id": "s_mod",
+                "status": "completed",
+                "estimated_base_seconds": 1000,
+                "actual_work_seconds": 3500,
+                "scope_modified": True,
+                "actual_source": "self_report",
+            },
         ]
 
         suggestion = evaluate_buffer_adaptation(
@@ -573,8 +629,8 @@ class TestAIServiceDeepScenarios:
 
     @pytest.mark.asyncio
     async def test_decompose_task_tier3_micro_task_generation(self, svc: AIService):
-        """Tier 3 Fallback phân rã công việc: bắt buộc sinh đủ 3 bước chuẩn kèm Micro-task khởi động."""
-        decomp = await svc.decompose_task(
+        """Helper Tier 3 sinh 3 bước; public decompose_task không tự gọi helper khi lỗi provider."""
+        decomp = svc._fallback_decompose_task(
             task_title="Ôn tập cấu trúc dữ liệu và giải thuật",
             user_focus_duration=25,
             scope="3 chương đầu",
@@ -588,11 +644,32 @@ class TestAIServiceDeepScenarios:
             assert step.estimated_minutes == 25
 
     @pytest.mark.asyncio
+    async def test_public_decomposition_provider_failure_requires_retry(self, svc: AIService):
+        """Public UF2 không tự đổi sang helper ba bước khi provider không trả kết quả."""
+        with patch.object(
+            svc, "_execute_hedged_structured", side_effect=RuntimeError("provider disabled")
+        ):
+            with pytest.raises(TimeoutError, match="keep the draft"):
+                await svc.decompose_task(task_title="Báo cáo", scope="1 trang")
+
+    @pytest.mark.asyncio
     async def test_adjust_candidate_plan_tier3_safe_preservation(self, svc: AIService):
         """Tier 3 Fallback điều chỉnh: bảo toàn nguyên vẹn danh sách bước của người dùng."""
         original_steps = [
-            StepPromptItem(order_index=1, title="Bước 1", expected_output="Out 1", estimated_minutes=20, micro_task_prompt="Bắt đầu 2 phút xem lại dàn ý"),
-            StepPromptItem(order_index=2, title="Bước 2", expected_output="Out 2", estimated_minutes=30, micro_task_prompt="Bắt đầu 2 phút mở tài liệu ra"),
+            StepPromptItem(
+                order_index=1,
+                title="Bước 1",
+                expected_output="Out 1",
+                estimated_minutes=20,
+                micro_task_prompt="Bắt đầu 2 phút xem lại dàn ý",
+            ),
+            StepPromptItem(
+                order_index=2,
+                title="Bước 2",
+                expected_output="Out 2",
+                estimated_minutes=30,
+                micro_task_prompt="Bắt đầu 2 phút mở tài liệu ra",
+            ),
         ]
 
         adj = await svc.adjust_plan_by_nl(

@@ -1,5 +1,7 @@
 # Tài Liệu Lý Thuyết FastAPI & Hướng Dẫn Từng API UF1–UF2 Cho Mobile
 
+> **Cập nhật C01 — 03/11/2026:** UF1 nhận `summary.availability` cùng input voice/text; thiếu thì hỏi lại. UF2 dùng đúng nguồn Draft/Context rồi lưu Task → Steps → Sessions, không còn PlanningPart. Context theo Draft nhận source_draft_id + expected_summary_revision; Candidate giữ ref của Context. SourceRevisions.availability=null cho giờ riêng. Settings chỉ chỉnh giờ của Draft/Task cụ thể; Task đã có lịch chờ UF6. Google thật làm sau; confirm trả not_integrated. Bộ kiểm mở rộng 41/41 đạt trên SQLite tạm/AI giả; migration mới/cũ chỉ kiểm ở DB tạm. Chưa system test hoặc áp migration DB app. Phần Mobile đã tạm dừng ở checkpoint triển khai dở để nhóm tự xử lý; chưa analyze/compile hoặc nghiệm thu trên điện thoại.
+
 **Người lập & bàn giao:** Quốc Hưng (Backend Lead)  
 **Phạm vi:** Lý thuyết kiến trúc FastAPI (từ kế hoạch triển khai) + Hướng dẫn chi tiết từng API trong **20 Endpoints UF1–UF2** cho Mobile (Flutter).
 
@@ -82,8 +84,8 @@ Khi ứng dụng Mobile (Flutter) gửi một yêu cầu HTTP lên Backend, dữ
   * Khi gửi lệnh sửa/xác nhận, nếu số `expected_*_revision` Mobile gửi lên khác với số hiện tại trên Server, Server trả về `409 REVISION_CONFLICT` hoặc `409 SOURCE_CHANGED` để bảo vệ dữ liệu.
 
 ### 2.5. Cơ chế Khóa tạm (`client_*_key`) $\rightarrow$ Khóa thật (`key_mapping`) ở UF2
-* Khi đang xem và chỉnh sửa phương án lịch nháp (`PlanCandidate`), dữ liệu **chưa phải là Task chính thức** nên các phần việc, bước và phiên sử dụng mã tạm: `client_part_key`, `client_step_key`, `client_session_key`.
-* Chỉ khi người dùng bấm **Chốt kế hoạch (`POST /candidates/{id}/confirm`)**, Backend mới lưu nguyên tử (`Transaction`) vào bảng `tasks`, `planning_parts`, `steps`, `sessions` và trả về bảng ánh xạ `key_mapping` để đổi toàn bộ mã tạm sang ID chính thức (`task_1`, `part_1`, `step_1`, `session_1`).
+* Khi đang xem và chỉnh sửa phương án lịch nháp (`PlanCandidate`), dữ liệu **chưa phải là Task chính thức** nên các bước và phiên sử dụng mã tạm: `client_step_key`, `client_session_key`.
+* Chỉ khi người dùng bấm **Chốt kế hoạch (`POST /candidates/{id}/confirm`)**, Backend mới lưu nguyên tử (`Transaction`) vào `tasks`, `steps`, `sessions` cùng Version/Receipt; `key_mapping.steps/sessions` đổi mã tạm sang ID chính thức. task_id trả ở Task, không có Part.
 
 ---
 
@@ -103,9 +105,9 @@ Dưới đây là giải thích chi tiết từng API trong 20 Endpoints (chia t
     * `client_draft_id` *(string, bắt buộc)*: Mã nháp do máy Mobile tự sinh (ví dụ `"draft_may_1"`). Nếu gửi lại cùng `client_draft_id`, Server trả lại đúng bản nháp đó chứ không tạo trùng.
     * `input_source` *(string, bắt buộc)*: `"text"`, `"voice"`, hoặc `"thought"`.
     * `raw_input` *(string | null)*: Câu yêu cầu gốc của người dùng.
-    * `summary` *(object | null)*: Các trường tóm tắt nếu người dùng nhập form trực tiếp (`title`, `description`, `goal`, `scope`, `extra_requirements`, `time_constraint`, `availability_ref`, `importance`). *Không gửi `can_plan` hay `clarification_issues`.*
+    * `summary` *(object | null)*: Các trường tóm tắt nếu người dùng nhập form trực tiếp (`title`, `description`, `goal`, `scope`, `extra_requirements`, `time_constraint`, `availability`, `availability_ref` (nguồn cũ), `importance`). *Không gửi `can_plan` hay `clarification_issues`.*
     * `source_thought_id` *(string | null)*: Mã ghi âm UF4 nếu tạo việc từ Hộp nháp.
-* **Đầu ra (`201 Created`):** Đối tượng `PlanningDraft` đầy đủ (xem mẫu `_temp/fixtures_uf1_uf2/01_draft_incomplete.json`).
+* **Đầu ra (`201 Created`):** Đối tượng `PlanningDraft` đầy đủ (xem mẫu `_temp/fixtures/fixtures_uf1_uf2/01_draft_incomplete.json`).
 * **Cách Mobile xử lý:** Lưu lại `draft_id`, `summary_revision` (=1), `planning_input_revision` (=1) để dùng cho các bước tiếp theo.
 
 ---
@@ -121,7 +123,7 @@ Dưới đây là giải thích chi tiết từng API trong 20 Endpoints (chia t
 ### API 3 (Dòng 4): `GET /api/v1/drafts/{draft_id}` — Mở lại chi tiết 1 bản nháp
 * **Khi nào Mobile gọi?** Khi người dùng bấm vào một bản nháp cũ hoặc mở lại App sau khi bị gián đoạn.
 * **Đầu vào:** **Path Param:** `draft_id` (ví dụ `/api/v1/drafts/draft_025`).
-* **Đầu ra (`200 OK`):** Đối tượng `PlanningDraft` (mẫu tại `_temp/fixtures_uf1_uf2/02_draft_complete.json`). Nếu không tồn tại hoặc thuộc user khác $\rightarrow$ `404 RESOURCE_NOT_FOUND`.
+* **Đầu ra (`200 OK`):** Đối tượng `PlanningDraft` (mẫu tại `_temp/fixtures/fixtures_uf1_uf2/02_draft_complete.json`). Nếu không tồn tại hoặc thuộc user khác $\rightarrow$ `404 RESOURCE_NOT_FOUND`.
 
 ---
 
@@ -136,7 +138,7 @@ Dưới đây là giải thích chi tiết từng API trong 20 Endpoints (chia t
     * `raw_input` *(string | null)* hoặc `message` *(string | null)*: Ít nhất 1 trong 2 trường phải có mặt.
 * **Đầu ra (`200 OK`):** `PlanningDraft` đã được cập nhật bảng `summary`, tăng `summary_revision` và `planning_input_revision`.
 * **Cách Mobile xử lý trên UI:**
-  * Hiển thị bảng tóm tắt (`title`, `scope`, `time_constraint`, `availability_ref`).
+  * Hiển thị bảng tóm tắt (`title`, `scope`, `time_constraint`, `availability`).
   * Nếu `summary.can_plan == false`: Hiển thị **toàn bộ câu hỏi trong `summary.clarification_issues[]` trong 1 lần duy nhất** để người dùng bổ sung.
   * Nếu `summary.can_plan == true`: Bật sáng nút **"Xác nhận thông tin công việc"**.
 
@@ -144,7 +146,7 @@ Dưới đây là giải thích chi tiết từng API trong 20 Endpoints (chia t
 
 ### API 5 (Dòng 6): `PATCH /api/v1/drafts/{draft_id}` — Sửa trực tiếp bảng tóm tắt hoặc lưu ý tưởng chia bước
 * **Khi nào Mobile gọi?**
-  1. **Ở UF1:** Khi người dùng sửa tay các ô trên Bảng tóm tắt (`title`, `scope`, chọn `time_constraint` hoặc `availability_ref`).
+  1. **Ở UF1:** Khi người dùng sửa tay các ô trên Bảng tóm tắt (`title`, `scope`, chọn `time_constraint` hoặc sửa `availability`).
   2. **Ở Bước 0 của UF2:** Khi người dùng nhập ý tưởng chia bước riêng vào `user_step_proposal` trước khi gọi tạo Candidate.
 * **Đầu vào:**
   * **Path Param:** `draft_id`
@@ -197,15 +199,16 @@ Dưới đây là giải thích chi tiết từng API trong 20 Endpoints (chia t
   * **JSON Body (`GenerateCandidateRequest`):**
     * `source_summary_revision` *(int, bắt buộc)*: Số `summary_revision` của Draft (ví dụ `5`).
     * `source_planning_input_revision` *(int, bắt buộc)*: Số `planning_input_revision` của Draft (ví dụ `5`).
-    * `selected_part_keys` *(list[str] | null, tùy chọn)*: Để `null` ở lần tạo đầu tiên.
-    * `planning_horizon` *(TimeInterval | null, tùy chọn)*: Khoảng 2–3 tuần cần xếp lịch chi tiết (Rolling Horizon).
-* **Đầu ra (`201 Created` — `PlanCandidate`):** Xem mẫu đầy đủ tại `_temp/fixtures_uf1_uf2/04_candidate_feasible.json`. Gồm:
+    * `selected_step_keys` *(list[str] | null, tùy chọn)*: Để `null` ở lần tạo đầu tiên.
+    * `planning_horizon` *(TimeInterval | null, tùy chọn)*: Tối đa 14 ngày chi tiết trong thời gian được phép.
+    * `calendar_context_ref` *(object | null, tùy chọn)*: Context đã chuẩn bị đúng Draft/revision/range; giữ ref này khi kiểm và confirm.
+* **Đầu ra (`201 Created` — `PlanCandidate`):** Xem đầy đủ trong API Sheet dòng 9–11. Gồm:
   * `candidate_id`, `review_revision` (=1), `stale` (=false).
-  * `planning_parts[]`: Các phần của dự án (phần trong 2–3 tuần đầu có `decomposition_state="complete"`, phần xa hơn giữ ở `"not_started"` để tránh ngợp).
+  * `decomposition_state` và `unexpanded_scope`: partial khi còn phạm vi tổng quan chưa chia; không tạo Steps giả cho phần này.
   * `steps[]`: Danh sách bước cụ thể kèm thời lượng gốc `estimated_base_seconds` và hệ số đệm `buffer_multiplier`.
   * `sessions[]`: Các phiên tập trung dự kiến (`scheduled_start`, `scheduled_end`, `micro_task_text` khởi động nhẹ nhàng, `work_seconds`, `rest_seconds`, `segments[]`, `duration_seconds = work_seconds + rest_seconds`).
   * `feasibility`: Kết quả kiểm tra khả thi trước Deadline:
-    * Nếu `feasibility.status == "feasible"`: Cho phép bấm nút **"Chốt kế hoạch"**.
+    * Chỉ cho bấm **"Chốt kế hoạch"** khi feasible, fully_scheduled=true trong phạm vi kiểm, stale=false và đúng revisions. Phạm vi chưa chia không được coi là đã có lịch.
     * Nếu `feasibility.status == "infeasible"`: Hiển thị số giây thiếu hụt `feasibility.deficit_seconds` và `blocking_reasons` để người dùng mở thêm giờ rảnh hoặc nới hạn chót.
 
 ---
@@ -225,8 +228,7 @@ Dưới đây là giải thích chi tiết từng API trong 20 Endpoints (chia t
   * **Header:** `Idempotency-Key`
   * **JSON Body (`UpdateCandidateRequest`):**
     * `expected_review_revision` *(int, bắt buộc)*: Số `review_revision` đang hiển thị trên màn hình.
-    * `edits`: Chứa ít nhất 1 trong 3 danh sách chỉnh sửa theo khóa tạm:
-      * `planning_parts`: `[{ "client_part_key": "...", "scope_description": "...", "rough_estimate_seconds": 3000 }]`
+    * `edits`: Chứa ít nhất một trong hai danh sách chỉnh sửa theo khóa tạm:
       * `steps`: `[{ "client_step_key": "step-research", "title": "...", "expected_output": "...", "estimated_base_seconds": 3000, "order_index": 0 }]`
       * `sessions`: `[{ "client_session_key": "session-research", "scheduled_start": "...", "scheduled_end": "...", "micro_task_text": "..." }]`
 * **Đầu ra (`200 OK`):** `PlanCandidate` đã cập nhật và tăng `review_revision` lên +1.
@@ -245,10 +247,10 @@ Dưới đây là giải thích chi tiết từng API trong 20 Endpoints (chia t
     * `expected_source_revisions`: Đối tượng `source_revisions` nằm trong Candidate (`availability`, `preferences`, `schedule`, `calendar_context`).
 * **Đầu ra (`201 Created` — `ConfirmCandidateResult`):**
   * `app_save_state`: `"saved"` (Đã lưu thành công vào App DB).
-  * `task`: Toàn bộ cây phân cấp 3 tầng chính thức (`Task` $\rightarrow$ `PlanningParts` $\rightarrow$ `Steps` $\rightarrow$ `Sessions`).
-  * `key_mapping`: Bảng ánh xạ từ `client_*_key` sang ID thật trên Server (`task_1`, `part_1`, `step_1`, `session_1`).
+  * `task`: Toàn bộ cây phân cấp 3 tầng chính thức (`Task` $\rightarrow$ `Steps` $\rightarrow$ `Sessions`).
+  * `key_mapping`: Hai map steps/sessions từ client key sang step_id/session_id; task_id nằm trong Task.
   * `schedule_version`: Thông tin phiên bản lịch mới (ví dụ tăng từ `7` lên `8`).
-  * `alarm_sync_state`: `"pending"` & `calendar_sync_summary`: `"pending"` (Trạng thái đồng bộ báo thức và Google Calendar tách biệt với trạng thái lưu App).
+  * `alarm_sync_state`: `"pending"`; `calendar_sync_summary`: `"not_integrated"`. Đã lưu app không có nghĩa đã xuất Google.
 
 ---
 
@@ -265,7 +267,7 @@ Dưới đây là giải thích chi tiết từng API trong 20 Endpoints (chia t
 ### API 13 (Dòng 14): `GET /api/v1/tasks/{task_id}` — Đọc chi tiết 1 công việc chính thức
 * **Khi nào Mobile gọi?** Khi người dùng bấm vào xem chi tiết một công việc (`task_1`).
 * **Đầu vào:** **Path Param:** `task_id`
-* **Đầu ra (`200 OK`):** Đối tượng `Task` kèm đầy đủ `planning_parts[]`, `steps[]`, `sessions[]` và `source_summary`.
+* **Đầu ra (`200 OK`):** Task kèm steps, sessions, source_summary, availability, revision, source revisions của Draft và unexpanded_scope; không có planning_parts.
 
 ---
 
@@ -285,7 +287,7 @@ Dưới đây là giải thích chi tiết từng API trong 20 Endpoints (chia t
 
 ### API 15 (Dòng 39): `GET /api/v1/preferences` — Đọc cài đặt trợ lý hiện tại
 * **Khi nào Mobile gọi?** Khi mở App hoặc vào màn hình Cài đặt.
-* **Đầu ra (`200 OK` — `UserPreference`):** Xem mẫu `_temp/fixtures_uf1_uf2/06_preferences.json`.
+* **Đầu ra (`200 OK` — `UserPreference`):** Xem mẫu `_temp/fixtures/fixtures_uf1_uf2/06_preferences.json`.
   * Cung cấp `work_interval_seconds` (`1500` = 25p), `rest_interval_seconds` (`300` = 5p), `buffer_multiplier` (`1.2`), `reminder_offsets` (`[900]`), `reminder_style` (`"gentle"`), và số `revision` (`4`).
 
 ---
@@ -296,13 +298,13 @@ Dưới đây là giải thích chi tiết từng API trong 20 Endpoints (chia t
   * Cách 1 — **Không truyền `from` và `to`:** Trả về cấu hình quy tắc hàng tuần (`weekly_rules`) và `effective_intervals: null`.
   * Cách 2 — **Truyền đủ cả `from` và `to` (có múi giờ, `from < to`):** Server bung quy tắc hàng tuần thành danh sách các khoảng ngày giờ rảnh thực tế trong `effective_intervals[]`.
   * *(Nếu chỉ gửi `from` mà thiếu `to` hoặc ngược lại $\rightarrow$ trả lỗi `422 VALIDATION_ERROR`: `"Cần gửi cặp from/to hợp lệ."`).*
-* **Đầu ra (`200 OK` — `Availability`):** Xem mẫu `_temp/fixtures_uf1_uf2/07_availability.json`.
+* **Đầu ra (`200 OK` — `Availability`):** Xem mẫu `_temp/fixtures/fixtures_uf1_uf2/07_availability.json`.
 
 ---
 
 ### API 17 (Dòng 60): `GET /api/v1/capabilities` — Đọc khả năng & hằng số vận hành của hệ thống
 * **Khi nào Mobile gọi?** Ngay khi mở App để đồng bộ các ngưỡng thời gian với Backend mà không cần hardcode trên Mobile.
-* **Đầu ra (`200 OK` — `CapabilitiesData`):** Xem mẫu `_temp/fixtures_uf1_uf2/08_capabilities.json`.
+* **Đầu ra (`200 OK` — `CapabilitiesData`):** Xem mẫu `_temp/fixtures/fixtures_uf1_uf2/08_capabilities.json`.
   * `contract_version`: `"v1"`
   * `configured_parameters`:
     * `default_reminder_offset_seconds`: `900` (nhắc trước phiên 15 phút).
@@ -317,12 +319,13 @@ Dưới đây là giải thích chi tiết từng API trong 20 Endpoints (chia t
 * **Đầu vào:**
   * **Header:** `Idempotency-Key`
   * **JSON Body (`PlanningContextCreateRequest`):**
-    * `availability_ref`: `{ "availability_id": "availability_1", "revision": 2 }`
+    * Nguồn mới: `source_draft_id` và `expected_summary_revision`; không đồng thời gửi `availability_ref`. Response chụp `availability_snapshot`, trả `source_draft_id` và `source_summary_revision`.
+    * Nguồn cũ chỉ dùng `availability_ref` nếu nháp thực sự chọn bộ giờ cũ.
     * `from`, `to`: Khoảng thời gian cần lấy lịch bận (có múi giờ, `from < to`).
     * `selected_calendar_sources`: Danh sách cặp `{ "connection_id": "...", "google_calendar_id": "..." }`.
     * `manual_busy_intervals`: Danh sách khoảng bận nhập tay `[{ "client_interval_id": "...", "start_at": "...", "end_at": "..." }]`.
     * `excluded_sources`: Danh sách nguồn Google Calendar bị lỗi mà người dùng chủ động xác nhận bỏ qua.
-* **Đầu ra (`201 Created` — `CalendarContext`):** Xem mẫu `_temp/fixtures_uf1_uf2/09_planning_context.json`.
+* **Đầu ra (`201 Created` — `CalendarContext`):** Xem mẫu `_temp/fixtures/fixtures_uf1_uf2/09_planning_context.json`.
   * Nếu có `excluded_sources`, trường `coverage_state` sẽ là `"manual_fallback"` (chứ không báo `"complete"` giả tạo).
 
 ---
@@ -337,9 +340,58 @@ Dưới đây là giải thích chi tiết từng API trong 20 Endpoints (chia t
 ### API 20 (Dòng 63): `GET /api/v1/commands/{command_id}` — Tra cứu biên lai kết quả lệnh khi rớt mạng
 * **Khi nào Mobile gọi?** Khi Mobile gửi một lệnh quan trọng (như `POST /candidates/{id}/confirm` với `Idempotency-Key: lenh_confirm_1`) nhưng bị mất kết nối mạng trước khi nhận được HTTP Response.
 * **Đầu vào:** **Path Param:** `command_id` (chính là chuỗi `Idempotency-Key` đã gửi, ví dụ `/api/v1/commands/lenh_confirm_1`).
-* **Đầu ra (`200 OK` — `CommandResult`):** Xem mẫu `_temp/fixtures_uf1_uf2/10_command_result.json`.
+* **Đầu ra (`200 OK` — `CommandResult`):** Xem mẫu `_temp/fixtures/fixtures_uf1_uf2/10_command_result.json`.
   * `{ "command_id": "lenh_confirm_1", "command_type": "confirm_candidate", "state": "applied", "result_reference": { "task_id": "task_1" }, "applied_at": "..." }`
 * **Cách Mobile xử lý:**
   * Nếu nhận `200 OK` với `state == "applied"`: Lệnh đã được Server thực thi thành công $\rightarrow$ lấy `result_reference.task_id` để mở thẳng màn hình công việc mới mà không cần gửi lại.
   * Nếu nhận `404 RESOURCE_NOT_FOUND`: Server chưa ghi nhận lệnh đó $\rightarrow$ Mobile gửi lại lệnh `POST` với **giữ nguyên `Idempotency-Key` cũ**.
 
+
+## Bổ sung hợp đồng và triển khai ngày 02/11/2026
+
+1. Analyze title >100 ký tự trả 422 VALIDATION_ERROR tại summary.title; raw_input và nháp giữ nguyên.
+2. PATCH giữ issue chưa xử lý. Mobile gửi đúng trường user sửa; full form không tự xác nhận trường không đổi. Giữ giá trị cũ có thể gửi PATCH chỉ trường review cùng giá trị. User vẫn phải xử lý các lỗi bắt buộc; không mở UF2 nếu còn blocking.
+3. AI có thể điền goal và cả hai nhánh thời gian. AI đang có thông tin thời gian chưa đủ thì API time_constraint vẫn null, issue yêu cầu bổ sung; snapshot nội bộ được phục hồi trên server.
+4. UF1/Voice đã có receipt DB. Retry cùng key/payload trả kết quả cũ cả sau restart; nội dung/operation/resource khác dùng mã mới. GET commands không trả _response.
+5. Schedule trả calendar_event_link_id nhất quán với Task; có link pending không có nghĩa Google đã đồng bộ.
+
+### API bổ sung — Dòng 41: POST /api/v1/settings/change-requests
+
+Settings chỉnh giờ đã khai báo của một Draft/Task, không khởi tạo giờ cố định cho mọi kế hoạch. Ví dụ sửa Draft (lấy ID và revisions từ response hiện tại):
+
+```json
+{
+  "target_draft_id": "draft_1",
+  "expected_summary_revision": 5,
+  "expected_planning_input_revision": 6,
+  "changes": {
+    "availability": {
+      "timezone": "Asia/Ho_Chi_Minh",
+      "weekly_rules": [{"weekday": 1, "start_local": "19:00", "end_local": "21:00"}],
+      "date_overrides": []
+    }
+  }
+}
+```
+
+Header Idempotency-Key bắt buộc. availability thay toàn bộ giờ của Draft; không gửi expected_availability_revision. Dữ liệu thực sự đổi làm tăng revisions và hủy xác nhận UF1; đọc Draft lại trước xác nhận. Task đã lưu dùng target_task_id + expected_task_revision, hiện trả 503 POLICY_NOT_CONFIGURED và giữ lịch/giờ cũ cho tới khi UF6 sẵn sàng.
+
+Cấu hình quãng làm/nghỉ, buffer và nhắc thuộc changes.preferences, cần expected_preferences_revision; lần đầu dùng 0 và gửi đủ giá trị. Không dùng việc tạo preferences để buộc nhập bộ giờ rảnh chung. Ví dụ đầy đủ request/success/fail tại API Sheet dòng 41.
+
+## Chuyển Mobile sang hợp đồng C01
+
+- Bỏ client_part_key/planning_part_id/planning_parts và key_mapping.planning_parts. Duyệt Steps trực tiếp; đọc unexpanded_scope để hiển thị phần còn tổng quan.
+- Tạo Context theo Draft và revision; gửi calendar_context_ref khi tạo Candidate nếu đã chuẩn bị Context có bận nhập tay. Không dùng Context của Draft khác.
+- SourceRevisions.availability có thể null; không tự thay bằng 0 hoặc summary_revision. Confirm dùng nguyên revisions/ref từ Candidate mới nhất.
+- Candidate cũ stale phải tạo lại; không tự retry confirm bằng dữ liệu cũ. Lệnh retry cùng payload dùng lại Idempotency-Key.
+- Sửa giờ Draft trong Settings cần target_draft_id và hai revisions; sau đổi phải đọc lại Draft/xác nhận UF1. Task đã lưu chưa tự đổi giờ/lịch khi UF6 chưa triển khai.
+- Đây là bàn giao contract, chưa chứng minh Mobile đã tương thích; cần system test cảm ứng riêng.
+
+
+## UF2 bổ sung: bước thủ công và chỉnh bằng text — 03/11/2026
+
+- Tạo Candidate có thể gửi manual_steps:[{order_index,title,expected_output,estimated_base_seconds}] và unexpanded_scope nếu còn phạm vi chưa chia. Thứ tự liên tục từ 0; không gửi selected_step_keys cùng nguồn thủ công. Giữ hai source revisions và Context ref như nhánh AI. Không nhân buffer ở client.
+- PATCH Candidate nhận đúng một trong edits hoặc user_instruction, kèm expected_review_revision. Kết quả thành công vẫn là Candidate/review_revision mới; không thêm endpoint.
+- Text chỉ sửa title/output/ước lượng gốc/thứ tự Step đã có theo client_step_key. Session vẫn sửa qua edits.sessions. Đổi giờ rảnh/hạn phải sửa Draft, xác nhận UF1 và tạo lại phương án.
+- Hiển thị câu hỏi/lỗi DECOMPOSITION_REQUIRES_CLARIFICATION, ADJUSTMENT_REQUIRES_CLARIFICATION, DRAFT_UPDATE_REQUIRED, UNSUPPORTED_CANDIDATE_CHANGE; giữ dữ liệu đang xem. AI lỗi hoặc cần hỏi lại không có nghĩa phương án đã đổi.
+- Nếu app/network mất response, retry cùng body/key hoặc tra receipt. Không đổi key rồi tạo Task mới chỉ vì chưa thấy kết quả.

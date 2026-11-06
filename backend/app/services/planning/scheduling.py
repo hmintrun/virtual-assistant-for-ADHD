@@ -1,16 +1,15 @@
 """A07/A09/A10: xếp tuần tự theo khe rảnh, bảo toàn gap và phạm vi kiểm.
 
-Greedy theo Part/Step; một Step có thể gồm nhiều Sessions. Không di chuyển
+Greedy theo Step; một Step có thể gồm nhiều Sessions. Không di chuyển
 phiên cố định, không chứng minh vô nghiệm chỉ từ việc greedy chưa tìm đủ lịch.
 """
 
 from __future__ import annotations
 
-from datetime import UTC, timedelta
+from datetime import UTC, datetime, timedelta
 
 from app.schemas.common import BlockingReason, TimeConstraint, TimeInterval
 from app.schemas.planning import (
-    CandidatePart,
     CandidateSession,
     CandidateStep,
     CandidateVerificationScope,
@@ -22,15 +21,81 @@ from app.services.planning.availability import _merge_intervals, _subtract_inter
 from app.services.planning.durations import calculate_buffered_work, fit_session_to_slot
 
 
+def compute_task_priority_key(
+    time_constraint: TimeConstraint,
+    importance: int | None = None,
+    created_at: datetime | None = None,
+    task_id: str = "",
+) -> tuple[datetime, int, datetime, tuple[datetime, str]]:
+    """Tính khóa ưu tiên PriorityKey(T) của một Task theo đặc tả [A07].
+
+    Quy tắc từ điển tăng dần:
+    1. finish_by_at / deadline_at (UTC): Hạn sớm hơn đứng trước (EDF).
+    2. -importance: Độ quan trọng cao hơn đứng trước (null -> 0).
+    3. start_at (UTC): Mốc cho phép bắt đầu sớm hơn đứng trước.
+    4. stable_tie_breaker: (created_at_utc, task_id) đảm bảo tính tất định.
+    """
+    task_end = (
+        time_constraint.deadline_at
+        if time_constraint.kind == "deadline"
+        else time_constraint.finish_by_at
+    )
+    if time_constraint.start_at is None or task_end is None:
+        raise ValueError("time_constraint cần đủ mốc bắt đầu và kết thúc.")
+    if time_constraint.start_at.utcoffset() is None or task_end.utcoffset() is None:
+        raise ValueError("Mốc thời gian phải có offset.")
+
+    end_utc = task_end.astimezone(UTC)
+    start_utc = time_constraint.start_at.astimezone(UTC)
+    imp_score = -(importance if importance is not None else 0)
+    created_utc = (
+        created_at.astimezone(UTC) if created_at is not None else datetime.min.replace(tzinfo=UTC)
+    )
+
+    return (end_utc, imp_score, start_utc, (created_utc, task_id))
+
+
+def order_steps_by_priority(
+    steps: list[CandidateStep],
+    task_priority_map: dict[str, tuple] | None = None,
+    step_to_task_map: dict[str, str] | None = None,
+) -> list[CandidateStep]:
+    """Sắp xếp chuỗi Steps cần lên lịch tuân thủ 2 tầng phân cấp của [A07]:
+
+    1. Cấp Task: Thứ tự ưu tiên giữa các Task theo PriorityKey(T) (Deadline -> Importance -> StartAt -> TieBreaker).
+    2. Cấp Step: Phụ thuộc nội bộ trong từng Task theo Step.order_index.
+    """
+    if len({s.client_step_key for s in steps}) != len(steps):
+        raise ValueError("Client Step key bị trùng.")
+
+    default_task_key = (
+        datetime.max.replace(tzinfo=UTC),
+        0,
+        datetime.max.replace(tzinfo=UTC),
+        (datetime.max.replace(tzinfo=UTC), ""),
+    )
+
+    def sort_key(step: CandidateStep) -> tuple:
+        task_id = step_to_task_map.get(step.client_step_key, "") if step_to_task_map else ""
+        task_prio = task_priority_map.get(task_id, default_task_key) if task_priority_map else (0,)
+        return (task_prio, step.order_index, step.client_step_key)
+
+    return sorted(steps, key=sort_key)
+
+
 def schedule_candidate_sessions(
     steps: list[CandidateStep],
     effective_intervals: list[TimeInterval],
     fixed_sessions: list[Session],
     time_constraint: TimeConstraint,
     pref: UserPreference,
-    planning_parts: list[CandidatePart],
     horizon_days: int = 14,
     min_gap_seconds: int = 900,
+    importance: int | None = None,
+    task_id: str = "",
+    created_at: datetime | None = None,
+    task_priority_map: dict[str, tuple] | None = None,
+    step_to_task_map: dict[str, str] | None = None,
 ) -> tuple[list[CandidateSession], FeasibilityReport]:
     """Trả lịch cụ thể và report cho các phần có Steps được đưa vào lần tính.
 
@@ -39,6 +104,8 @@ def schedule_candidate_sessions(
     là cận dưới thiếu work; required_seconds=null vì nghỉ nội bộ phụ thuộc
     cách chia các Sessions chưa biết. Khi khả thi, required là duration thực.
     """
+    if task_priority_map and len(task_priority_map) > 1:
+        raise ValueError("Scheduler này chỉ có ràng buộc thời gian cho một Task")
     task_end = (
         time_constraint.deadline_at
         if time_constraint.kind == "deadline"
@@ -74,10 +141,21 @@ def schedule_candidate_sessions(
     ]
     free = _subtract_intervals(_merge_intervals(free), _merge_intervals(protected))
     available = int(sum((b - a).total_seconds() for a, b in free))
-    part_order = {p.client_part_key: p.order_index for p in planning_parts}
-    if len({s.client_step_key for s in steps}) != len(steps):
-        raise ValueError("Client Step key bị trùng.")
-    ordered = sorted(steps, key=lambda s: (part_order.get(s.client_part_key, 0), s.order_index))
+
+    if task_priority_map is None and task_id:
+        task_prio_map = {
+            task_id: compute_task_priority_key(time_constraint, importance, created_at, task_id)
+        }
+        s_to_t_map = step_to_task_map or {s.client_step_key: task_id for s in steps}
+    else:
+        task_prio_map = task_priority_map
+        s_to_t_map = step_to_task_map
+
+    ordered = order_steps_by_priority(
+        steps=steps,
+        task_priority_map=task_prio_map,
+        step_to_task_map=s_to_t_map,
+    )
     remaining = {
         s.client_step_key: calculate_buffered_work(s.remaining_base_seconds, s.buffer_multiplier)
         if s.remaining_base_seconds
@@ -132,17 +210,6 @@ def schedule_candidate_sessions(
     fully_scheduled = bool(steps) and unscheduled == 0
     deficit = max(0, total_work - available)
     status = "feasible" if fully_scheduled else "infeasible" if deficit else "search_inconclusive"
-    selected_parts = list(dict.fromkeys(s.client_part_key for s in ordered))
-    scope_keys = selected_parts or [p.client_part_key for p in planning_parts] or ["part_default"]
-    unplanned = []
-    for part in planning_parts:
-        children = [s for s in ordered if s.client_part_key == part.client_part_key]
-        if (
-            part.decomposition_state != "complete"
-            or not children
-            or any(remaining[s.client_step_key] for s in children)
-        ):
-            unplanned.append(part.client_part_key)
     reasons = (
         []
         if fully_scheduled
@@ -162,15 +229,10 @@ def schedule_candidate_sessions(
         unscheduled_seconds=unscheduled,
         deficit_seconds=deficit,
         verification_scope=CandidateVerificationScope(
-            scope_type="candidate_parts", client_part_keys=scope_keys, planning_horizon=horizon
+            client_step_keys=[s.client_step_key for s in ordered], planning_horizon=horizon
         ),
         fully_scheduled=fully_scheduled,
         blocking_reasons=reasons,
-        unestimated_part_ids=[
-            p.client_part_key
-            for p in planning_parts
-            if p.rough_estimate_seconds is None and p.decomposition_state != "complete"
-        ],
-        unplanned_part_ids=unplanned,
+        unscheduled_step_keys=[s.client_step_key for s in ordered if remaining[s.client_step_key]],
         extension_candidate_at=None,
     )

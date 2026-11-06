@@ -1,6 +1,7 @@
 """Confirmed availability used by UF1 and UF2."""
 
 from datetime import date, datetime, time
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import Field, model_validator
 
@@ -25,6 +26,25 @@ class WeeklyRule(LocalInterval):
 class DateOverride(ApiModel):
     date: date
     intervals: list[LocalInterval]
+
+
+class DraftAvailability(ApiModel):
+    """Giờ user khai báo cho riêng yêu cầu UF1; xác nhận cùng summary."""
+
+    timezone: str = Field(min_length=1)
+    weekly_rules: list[WeeklyRule] = Field(default_factory=list)
+    date_overrides: list[DateOverride] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def valid_rules(self):
+        try:
+            ZoneInfo(self.timezone)
+        except (ZoneInfoNotFoundError, ValueError) as exc:
+            raise ValueError("Múi giờ IANA không hợp lệ") from exc
+        dates = [item.date for item in self.date_overrides]
+        if len(dates) != len(set(dates)):
+            raise ValueError("Ngày ngoại lệ bị trùng")
+        return self
 
 
 class TaskAvailabilityLimit(ApiModel):

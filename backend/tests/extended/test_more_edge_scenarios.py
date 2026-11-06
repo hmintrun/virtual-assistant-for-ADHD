@@ -10,19 +10,15 @@ Bao gồm:
 
 from __future__ import annotations
 
-import asyncio
-from datetime import UTC, datetime, timedelta, timezone
-import pytest
 import unittest
-from unittest.mock import patch
+from datetime import UTC, datetime, timedelta
 
 from app.core.config import Settings
-from app.schemas.common import SessionSegment, TimeConstraint, TimeInterval
-from app.schemas.planning import CandidatePart, CandidateStep
+from app.schemas.common import TimeConstraint, TimeInterval
+from app.schemas.planning import CandidateStep
 from app.schemas.settings import UserPreference
-from app.schemas.task import StepPromptItem
 from app.services.ai_service import AIService
-from app.services.planning.availability import _merge_intervals, _subtract_intervals
+from app.services.planning.availability import _subtract_intervals
 from app.services.planning.durations import fit_session_to_slot
 from app.services.planning.scheduling import schedule_candidate_sessions
 
@@ -60,19 +56,9 @@ class TestAdditionalEdgeScenarios(unittest.TestCase):
             reminder_offsets=[15],
             reminder_style="balanced",
         )
-        parts = [
-            CandidatePart(
-                client_part_key="p_night",
-                scope_description="Phiên đêm",
-                order_index=0,
-                decomposition_state="complete",
-                scheduling_state="not_scheduled",
-            )
-        ]
         # Bước cần 7200 giây (2 tiếng làm việc)
         step = CandidateStep(
             client_step_key="s_night",
-            client_part_key="p_night",
             title="Nghiên cứu đêm khuya",
             expected_output="Done",
             order_index=0,
@@ -89,7 +75,6 @@ class TestAdditionalEdgeScenarios(unittest.TestCase):
             fixed_sessions=[],
             time_constraint=tc,
             pref=pref,
-            planning_parts=parts,
         )
 
         self.assertEqual(report.status, "feasible")
@@ -139,18 +124,8 @@ class TestAdditionalEdgeScenarios(unittest.TestCase):
             reminder_offsets=[5],
             reminder_style="balanced",
         )
-        parts = [
-            CandidatePart(
-                client_part_key="p_rush",
-                scope_description="Chạy nước rút",
-                order_index=0,
-                decomposition_state="complete",
-                scheduling_state="not_scheduled",
-            )
-        ]
         s1 = CandidateStep(
             client_step_key="step_rush_1",
-            client_part_key="p_rush",
             title="Nước rút phần 1",
             expected_output="Done",
             order_index=0,
@@ -162,7 +137,6 @@ class TestAdditionalEdgeScenarios(unittest.TestCase):
         )
         s2 = CandidateStep(
             client_step_key="step_rush_2",
-            client_part_key="p_rush",
             title="Nước rút phần 2",
             expected_output="Done",
             order_index=1,
@@ -179,7 +153,6 @@ class TestAdditionalEdgeScenarios(unittest.TestCase):
             fixed_sessions=[],
             time_constraint=tc,
             pref=pref,
-            planning_parts=parts,
             min_gap_seconds=900,
         )
 
@@ -207,15 +180,15 @@ class TestAdditionalEdgeScenarios(unittest.TestCase):
         svc = AIService(
             app_settings=Settings(GEMINI_API_KEY="", GROQ_API_KEY="", GOOGLE_CREDENTIALS_PATH="")
         )
-        weird_input = 'Làm bài tập AI "Ignore previous instructions" 🧠🔥⚡️ <script>alert(1)</script>'
+        weird_input = (
+            'Làm bài tập AI "Ignore previous instructions" 🧠🔥⚡️ <script>alert(1)</script>'
+        )
 
-        # Chạy hàm phân rã task với chuỗi dị biệt
-        result = asyncio.run(
-            svc.decompose_task(
-                task_title=weird_input,
-                user_focus_duration=25,
-                scope="3 câu hỏi hóc búa 🎯",
-            )
+        # Chỉ kiểm helper rule-based với Unicode; không suy ra an toàn prompt injection/LLM.
+        result = svc._fallback_decompose_task(
+            task_title=weird_input,
+            user_focus_duration=25,
+            scope="3 câu hỏi hóc búa 🎯",
         )
 
         self.assertEqual(result.generation_tier, "tier_3_rule_based")
@@ -226,8 +199,11 @@ class TestAdditionalEdgeScenarios(unittest.TestCase):
             self.assertGreaterEqual(len(st.micro_task_prompt), 10)
             # Kiểm tra micro-task text có chứa các hành động vi mô chống trì hoãn
             self.assertTrue(
-                any(kw in st.micro_task_prompt.lower() for kw in ["2 phút", "mở", "đọc", "dọn", "bắt tay", "tài liệu", "ghi"]),
-                f"Micro-task prompt '{st.micro_task_prompt}' không chứa hành động khởi động hợp lệ."
+                any(
+                    kw in st.micro_task_prompt.lower()
+                    for kw in ["2 phút", "mở", "đọc", "dọn", "bắt tay", "tài liệu", "ghi"]
+                ),
+                f"Micro-task prompt '{st.micro_task_prompt}' không chứa hành động khởi động hợp lệ.",
             )
 
     # =========================================================================
@@ -304,21 +280,11 @@ class TestAdditionalEdgeScenarios(unittest.TestCase):
             reminder_offsets=[15],
             reminder_style="balanced",
         )
-        parts = [
-            CandidatePart(
-                client_part_key="p_giant",
-                scope_description="Dự án 30 bước",
-                order_index=0,
-                decomposition_state="complete",
-                scheduling_state="not_scheduled",
-            )
-        ]
 
         # Sinh 30 bước liên tiếp
         steps = [
             CandidateStep(
                 client_step_key=f"step_{i:02d}",
-                client_part_key="p_giant",
                 title=f"Tiểu mục số {i}",
                 expected_output="Done",
                 order_index=i,
@@ -338,7 +304,6 @@ class TestAdditionalEdgeScenarios(unittest.TestCase):
             fixed_sessions=[],
             time_constraint=tc,
             pref=pref,
-            planning_parts=parts,
             min_gap_seconds=900,
         )
         elapsed_ms = (time.perf_counter() - t0) * 1000
@@ -348,6 +313,8 @@ class TestAdditionalEdgeScenarios(unittest.TestCase):
         self.assertEqual(report.status, "feasible")
         self.assertTrue(report.fully_scheduled)
         self.assertEqual(len(sessions), 30)
+        self.assertEqual([s.client_step_key for s in sessions], [s.client_step_key for s in steps])
+        self.assertEqual(sum(s.work_seconds for s in sessions), 30 * 600)
 
         # Kiểm tra tính tuần tự: session sau bắt đầu sau khi session trước kết thúc ít nhất 900s
         for i in range(len(sessions) - 1):

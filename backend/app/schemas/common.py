@@ -84,7 +84,7 @@ class CandidateRef(ApiModel):
 
 
 class SourceRevisions(ApiModel):
-    availability: int = Field(ge=0)
+    availability: int | None = Field(default=None, ge=0)
     preferences: int = Field(ge=0)
     schedule: int = Field(ge=0)
     calendar_context: CalendarContextRef | None = None
@@ -166,4 +166,3 @@ class CommandResult(ApiModel):
     state: str = Field(min_length=1)
     result_reference: dict[str, str] | None = None
     applied_at: datetime | None = None
-
