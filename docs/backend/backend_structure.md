@@ -6,7 +6,7 @@ Cách cài môi trường và chạy kiểm thử **sau khi code xong** xem [Hư
 
 ## 1. Hiện trạng và hướng tổ chức
 
-Backend đã có FastAPI app/router, SQLAlchemy models, migration và xử lý UF1–UF2. UF1 mới lưu giờ riêng trong JSON summary của Draft; không cần bảng/migration mới cho đợt sửa này. Lõi tạo/xác nhận UF2 đã có với nguồn cũ nhưng nguồn giờ riêng từ Draft đang bị chặn cho đến khi I02 nối đúng nguồn. Cấu trúc mục tiêu ở phần 2 còn chứa module dự kiến; không coi mọi file hoặc worker trong cây đã hoạt động.
+Backend đã có FastAPI app/router, SQLAlchemy models, migration và xử lý UF1–UF2. C01 nối giờ riêng trong summary của Draft qua Context đúng nguồn/revision đến Candidate và Task. Runtime mới dùng Task → Steps → Sessions; migration mở rộng 20261103_01 giữ bảng/cột Part cũ để đối chiếu. I02 đã hỗ trợ nguồn riêng, không còn guard chặn nguồn này. Cấu trúc mục tiêu ở phần 2 còn chứa module dự kiến; không coi mọi file hoặc worker trong cây đã hoạt động.
 
 Môi trường dùng cấu hình `backend/pyproject.toml`, `uv.lock` và Python 3.12.15. Kiểm tra môi trường không thay kiểm chứng nghiệp vụ. Auth đang dùng user phát triển; Google Sign-In production và bộ đọc/đồng bộ Google Calendar thật chưa hoàn thiện.
 
@@ -22,7 +22,7 @@ Mobile → API router → service điều phối → SQLAlchemy/database
                            └─ DB outbox → worker → Google Calendar [mục tiêu; chưa ghép thật]
 ```
 
-Router không tự tính lại lịch; Algorithm không tự commit DB; AI không xác nhận thay user. Theo kiến trúc đích, thao tác ghi Google thực hiện sau transaction lưu kế hoạch và outbox thành công; hiện có bản ghi/job chờ, chưa có bằng chứng đồng bộ Google thật. Khi gọi AI/Google hoặc chạy tìm kiếm lịch lâu, không giữ một transaction DB mở suốt thời gian chờ; tới lúc ghi phải kiểm lại revision/ràng buộc.
+Router không tự tính lại lịch; Algorithm không tự commit DB; AI không xác nhận thay user. Theo kiến trúc đích, thao tác ghi Google thực hiện sau transaction lưu kế hoạch và outbox thành công; Google thật hiện chưa ghép; confirm trả not_integrated, không tạo job/event giả. Worker/outbox Google trong sơ đồ là mục tiêu cho đợt tích hợp sau. Khi gọi AI/Google hoặc chạy tìm kiếm lịch lâu, không giữ một transaction DB mở suốt thời gian chờ; tới lúc ghi phải kiểm lại revision/ràng buộc.
 
 ## 2. Cấu trúc Backend mục tiêu
 
@@ -77,7 +77,6 @@ backend/
 │   │   ├── user.py
 │   │   ├── planning.py         Draft, Candidate, phần việc và snapshot cần lưu
 │   │   ├── task.py             Task; giữ file từ khung cũ
-│   │   ├── planning_part.py    Phần đã chia/chưa chia của Task
 │   │   ├── step.py             Giữ file Step từ khung cũ
 │   │   ├── session.py          Giữ file Session từ khung cũ
 │   │   ├── execution.py        Run, CheckIn và actual history
@@ -132,7 +131,7 @@ Các package cần `__init__.py` phù hợp. Các file schema không import ORM 
 
 1. **P01 chốt điểm giao:** đồng bộ schema API, revision và nguồn xác thực; phân người sở hữu file. Hợp đồng được review không có nghĩa endpoint đã có code.
 2. **P02/P03 dựng nền:** model/migration và app/settings/DB/router chạy được trên môi trường cài lại từ lockfile. Database và Backend là hai đầu việc có giao diện rõ.
-3. **Nối UF1–UF2 theo nguồn mới:** Draft có summary.availability → confirm summary → bước 0 → Context đúng nguồn → Candidate → confirm. UF1 đã có; I02 chưa nối nguồn mới. Chỉ bỏ guard sau khi đọc đúng giờ Draft, kiểm revision và lưu được nguồn. Luồng nguồn cũ tiếp tục tương thích; AI và Algorithm làm song song theo DTO đã chốt.
+3. **Nối UF1–UF2 theo nguồn mới:** Draft có summary.availability → confirm summary → bước 0 → Context đúng nguồn → Candidate → confirm. Code I02 đã nối nguồn riêng và lưu snapshot/revisions; unit 10/10 và integration 10/10 đã đạt trên SQLite tạm/AI giả; migration chỉ chạy ở DB tạm. Luồng nguồn cũ tiếp tục tương thích; AI và Algorithm dùng DTO không Part.
 4. **Có UF6 tối thiểu trước luồng phụ thuộc:** I03 lập phần tiếp và Calendar có tác động lịch cần create/view/approve Proposal; không đợi toàn bộ tuần 6 mới chốt interface của UF6.
 5. **Ghép UF3–UF5 và UF4:** start hợp lệ mới tạo Run; timer/actual dừng đúng ended_at; not_started không có Run giả; check-in và DND theo mốc đã thống nhất.
 6. **Ghép Calendar/cá nhân hóa:** outbox sau commit; job retry/etag và preview; requested/effective; dùng fake adapter trước, kiểm Google thật riêng.
@@ -150,9 +149,16 @@ Các package cần `__init__.py` phù hợp. Các file schema không import ORM 
 - `jobs/` xử lý công việc đã được lưu; worker cũ không được ghi đè một schedule revision mới hoặc tạo lại Session đã hủy.
 - Mỗi task có một người sở hữu phần code cụ thể. Thay schema dùng chung, migration hoặc điểm import phải phối hợp trước; không tạo hai module làm cùng trách nhiệm.
 - Nguồn xác thực phải được chốt: API đang giả định có user đã đăng nhập. Calendar OAuth cấp quyền lịch, không thay phần đăng nhập app.
-- Giữ phần chưa chia/chưa xếp trong `PlanningPart`; tách Session dự kiến với Run thực tế. Chưa confirm không tạo lịch vận hành, chưa approve Proposal không đổi lịch đã xác nhận.
+- Task sở hữu trực tiếp Steps; phần chưa chia nằm trong `Task/PlanCandidate.unexpanded_scope`, không tạo PlanningPart. Tách Session dự kiến với Run thực tế. Chưa confirm không tạo lịch vận hành, chưa approve Proposal không đổi lịch đã xác nhận.
 
 Tên module có thể được điều chỉnh khi triển khai nhưng ranh giới trách nhiệm và hợp đồng API phải giữ thống nhất. Chỉ tạo file khi có nhiệm vụ cần thực hiện; không dựng toàn bộ cây thành các file rỗng rồi đánh dấu hoàn thành.
+
+### Điểm giao bổ sung UF2 — 03/11/2026
+
+- `schemas/planning.py`: ManualStepInput cho bước user tự nhập; GenerateCandidateRequest nhận manual_steps và unexpanded_scope; UpdateCandidateRequest nhận đúng một trong edits hoặc user_instruction.
+- `services/ai_service.py` + `schemas/task.py`: adapter chỉnh Step theo client_step_key, không ghép bằng vị trí. A04 có nhánh cần làm rõ bước 0; không tạo Steps giả khi câu trả lời chưa rõ.
+- `services/plan_service.py`: tái dùng pipeline tạo/kiểm Candidate cho nguồn thủ công; gọi AI chỉnh ngoài transaction, rồi khóa/kiểm lại nguồn và revision trước áp edit. Giữ nguyên Candidate khi cần làm rõ hoặc đổi constraint Draft.
+- Không thêm HTTP endpoint, bảng hoặc service/framework mới cho phần bổ sung. Đổi giờ rảnh/deadline đi qua Draft và xác nhận UF1 lại; không bypass bằng PATCH Candidate.
 
 ## Tài liệu kỹ thuật
 
@@ -161,7 +167,7 @@ Tên module có thể được điều chỉnh khi triển khai nhưng ranh gi�
 
 ### Phần đã triển khai bổ sung 02/11/2026
 
-`app/services/command_service.py` quản lý hash/replay/ghi CommandReceipt và transaction của lệnh UF1; Voice dùng các helper này. Thuộc vị trí command_service đã có trong khung. `api/v1/settings.py` hiện có nhánh bootstrap Settings theo schema; chưa tách settings_service hoặc triển khai UF7 đầy đủ. Không tạo thêm production module ngoài command_service cho gói sửa này.
+`app/services/command_service.py` quản lý hash/replay/ghi CommandReceipt và transaction; Voice/Settings dùng cùng cơ chế. Settings chỉnh giờ Draft gọi lại PATCH UF1 trong transaction cha, không ghi hai receipt. `api/v1/settings.py` chưa tách settings_service hoặc triển khai UF7 đầy đủ. Không tạo thêm module production cho C01; migration mở rộng nằm trong `migrations/versions/20261103_01_c01_sources.py`.
 
 
 ### Điểm giao giờ rảnh UF1 và giới hạn hiện tại
@@ -171,8 +177,9 @@ Tên module có thể được điều chỉnh khi triển khai nhưng ranh gi�
 | schemas/availability.py, schemas/draft.py | DraftAvailability chứa timezone, weekly_rules, date_overrides; nguồn riêng của yêu cầu, không tự đổi Settings chung. |
 | services/draft_service.py | Ghép kết quả AI, giữ phần chưa rõ, bảo vệ chỉnh sửa user, lưu JSON Draft và xác nhận giờ cùng summary. |
 | services/planning/validation.py | Kiểm đầu vào UF1 và giao với thời gian còn lại; không kết luận lịch khả thi. |
-| services/plan_service.py | Còn đọc nguồn chung cho UF2. Guard nguồn mới trả 409 PLAN_NOT_CONFIRMABLE/next_action=wait_for_configuration; không tự xếp bằng ref cũ. |
-| AI/Algorithm/Database | AI trả khung giờ/Parts/Steps theo contract; Algorithm nhận nguồn do Backend cấp; Database review liên kết/snapshot khi I02 cần đổi mô hình. Không tạo lớp hoặc bảng mới chỉ để bỏ guard. |
+| services/plan_service.py | Đọc giờ riêng đã xác nhận, khóa Context đúng Draft/revision/range, điều phối Candidate và confirm Task/Steps/Sessions. Nguồn cũ chỉ dùng khi Draft thực sự chọn ref cũ. |
+| AI/Algorithm/Database | AI trả Steps/ước lượng gốc và unexpanded_scope; Algorithm xếp Steps trực tiếp. Database giữ snapshot giờ/revisions và dữ liệu cũ để đối chiếu; không còn ORM PlanningPart. |
+| api/v1/settings.py | Sửa giờ Draft bằng target và hai revisions; Task đã lưu cần UF6 nên chưa áp dụng thay đổi ảnh hưởng lịch. Không tạo giờ rảnh chung mặc định. |
 | Calendar | Nguồn lịch bận riêng có nguồn gốc và thời điểm lấy. Kết nối/đọc thật A22.1 chưa hoàn thiện; lỗi nguồn không được coi là lịch trống. |
 
-Dữ liệu và quy tắc chi tiết theo [schema.md — TaskSummary](schema.md#o04-tasksummary). Nguồn mới đã lưu không có nghĩa UF2 hoặc Mobile đã được ghép. Kiểm tra gần nhất gồm 175 ca với nguồn giả/DB tạm ngày 02/11/2026; các test mới theo yêu cầu đặt ở `_temp`, không tạo thêm test vào thư mục chính trong đợt sửa này.
+Dữ liệu và quy tắc chi tiết theo [schema.md](schema.md). Ngày 03/11, bộ kiểm mở rộng được user duyệt đã đạt 41/41: 17 unit, 20 integration trong `_temp/c01_tests` và 4 ca DTO có sẵn. Gồm nguồn riêng, manual Steps/partial, keyed NL edits, clarification/AI lỗi giữ phương án, revision đổi khi AI chờ, Context hết hạn/sai range, gap và migration mới/cũ trên SQLite tạm/AI giả. Chưa áp migration DB app hoặc system test. Kết quả 175 ca ngày 02/11/2026 có trước thay đổi này. Không coi lint/type là nghiệm thu Mobile hoặc nguồn AI/Google thật.

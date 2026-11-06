@@ -52,7 +52,9 @@ class PlanCandidate(OwnedMixin, RecordMixin, Base):
     source_summary_revision: Mapped[int]
     source_planning_input_revision: Mapped[int]
     review_revision: Mapped[int] = mapped_column(default=1)
-    planning_parts: Mapped[list[dict[str, Any]]] = mapped_column(JSON)
+    decomposition_state: Mapped[str] = mapped_column(String(32), default="complete")
+    unexpanded_scope: Mapped[str | None] = mapped_column(Text)
+    schema_version: Mapped[int] = mapped_column(default=2)
     steps: Mapped[list[dict[str, Any]]] = mapped_column(JSON)
     sessions: Mapped[list[dict[str, Any]]] = mapped_column(JSON)
     planning_horizon: Mapped[dict[str, Any]] = mapped_column(JSON)
@@ -62,27 +64,6 @@ class PlanCandidate(OwnedMixin, RecordMixin, Base):
     generation_tier: Mapped[str | None] = mapped_column(String(32))
     user_step_proposal: Mapped[str | None] = mapped_column(Text)
     # stale được so sánh với revision nguồn khi đọc, không lưu boolean dễ lỗi thời.
-
-
-class PlanningPart(OwnedMixin, RecordMixin, Base):
-    __tablename__ = "planning_parts"
-    __table_args__ = (
-        UniqueConstraint("task_id", "client_part_key", name="uq_planning_parts_task_client_key"),
-        UniqueConstraint("task_id", "order_index", name="uq_planning_parts_task_order"),
-        CheckConstraint("order_index >= 0", name="order_nonnegative"),
-        CheckConstraint(
-            "rough_estimate_seconds IS NULL OR rough_estimate_seconds > 0", name="estimate_positive"
-        ),
-    )
-    task_id: Mapped[UUID] = mapped_column(ForeignKey("tasks.id", ondelete="RESTRICT"), index=True)
-    client_part_key: Mapped[str] = mapped_column(String(128))
-    scope_description: Mapped[str] = mapped_column(Text)
-    order_index: Mapped[int]
-    decomposition_state: Mapped[str] = mapped_column(String(32))
-    scheduling_state: Mapped[str] = mapped_column(String(32))
-    unexpanded_scope: Mapped[str | None] = mapped_column(Text)
-    rough_estimate_seconds: Mapped[int | None]
-    estimate_source: Mapped[str | None] = mapped_column(String(32))
 
 
 class ScheduleVersion(OwnedMixin, RecordMixin, Base):

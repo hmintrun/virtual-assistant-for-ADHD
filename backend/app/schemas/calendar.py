@@ -2,8 +2,9 @@
 from datetime import datetime
 from typing import Literal
 
-from pydantic import ConfigDict, Field
+from pydantic import ConfigDict, Field, model_validator
 
+from app.schemas.availability import DraftAvailability
 from app.schemas.common import AvailabilityRef, StrictSchema, TimeInterval
 
 
@@ -77,12 +78,23 @@ class PlanningContextCreateRequest(StrictSchema):
 
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
-    availability_ref: AvailabilityRef
+    availability_ref: AvailabilityRef | None = None
+    source_draft_id: str | None = Field(default=None, min_length=1)
+    expected_summary_revision: int | None = Field(default=None, ge=1)
     from_at: datetime = Field(alias="from")
     to_at: datetime = Field(alias="to")
     selected_calendar_sources: list[CalendarSource] = Field(default_factory=list)
     manual_busy_intervals: list[ManualBusyInterval] = Field(default_factory=list)
     excluded_sources: list[ExcludedCalendarSource] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def valid_source(self):
+        if (self.availability_ref is None) == (self.source_draft_id is None):
+            raise ValueError("Chỉ chọn một nguồn: Draft hoặc Availability cũ")
+        if (self.source_draft_id is None) != (self.expected_summary_revision is None):
+            raise ValueError("Nguồn Draft cần expected_summary_revision")
+        TimeInterval(start_at=self.from_at, end_at=self.to_at)
+        return self
 
 
 class CalendarContext(StrictSchema):
@@ -90,7 +102,10 @@ class CalendarContext(StrictSchema):
 
     context_id: str = Field(min_length=1)
     revision: int = Field(ge=0)
-    availability_ref: AvailabilityRef
+    availability_ref: AvailabilityRef | None = None
+    source_draft_id: str | None = None
+    source_summary_revision: int | None = None
+    availability_snapshot: DraftAvailability | None = None
     selected_calendar_ids: list[str] = Field(default_factory=list)
     query_start_end: TimeInterval
     busy_intervals: list[BusyInterval] = Field(default_factory=list)
@@ -102,4 +117,3 @@ class CalendarContext(StrictSchema):
     manual_busy_intervals: list[ManualBusyInterval] = Field(default_factory=list)
     excluded_sources: list[ExcludedCalendarSource] = Field(default_factory=list)
     selected_calendar_sources: list[CalendarSource] = Field(default_factory=list)
-
