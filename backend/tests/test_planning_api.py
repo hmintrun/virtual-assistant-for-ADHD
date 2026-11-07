@@ -9,12 +9,12 @@ from sqlalchemy import func, select
 from app.api.deps import get_db
 from app.core.database import make_engine, session_factory
 from app.main import app
-from app.models import Base, CommandReceipt, Reminder, Task
+from app.models import Base, CommandReceipt, PlanningDraft, Reminder, Task
 from app.models.settings import Availability as AvailabilityRow
 from app.schemas.task import LLMTaskDecompositionPayload, LLMTaskExtractionPayload, StepPromptItem
 from app.services import plan_service
-from app.services.ai_service import ai_service
-from app.services.draft_service import resolve_user_uuid
+from app.services.ai_service import UF1_FALLBACK_NOTICE, UF1_FALLBACK_QUESTIONS, ai_service
+from app.services.draft_service import resolve_draft_uuid, resolve_user_uuid
 
 
 @pytest.fixture
@@ -120,6 +120,127 @@ async def test_first_request_can_create_draft(api):
     )
     assert response.status_code == 201, response.text
     assert response.json()["data"]["stage"] == "collecting"
+
+
+@pytest.mark.parametrize("has_availability", [False, True])
+async def test_uf1_can_confirm_after_fallback_analysis(api, has_availability):
+    client, _ = api
+    details = summary()
+    availability = details.pop("availability")
+    if has_availability:
+        details["availability"] = availability
+    created = await post(
+        client,
+        "/drafts",
+        "create",
+        {
+            "client_draft_id": "fallback",
+            "input_source": "text",
+            "raw_input": "Viết báo cáo môn học",
+            "summary": details,
+        },
+    )
+    assert created.status_code == 201, created.text
+    draft = created.json()["data"]
+    route = f"/drafts/{draft['draft_id']}"
+    analyzed = await post(
+        client,
+        route + "/analyze",
+        "analyze",
+        {
+            "expected_summary_revision": draft["summary_revision"],
+            "expected_planning_input_revision": draft["planning_input_revision"],
+            "raw_input": draft["raw_input"],
+        },
+    )
+    assert analyzed.status_code == 200, analyzed.text
+    draft = analyzed.json()["data"]
+    issues = draft["summary"]["clarification_issues"]
+    assert [i["code"] for i in issues if not i["blocking"]] == ["AI_FALLBACK_NOTICE"]
+    assert draft["summary"]["can_plan"] is has_availability
+    if not has_availability:
+        blocking = [i for i in issues if i["blocking"]]
+        assert len(blocking) == 1
+        assert blocking[0]["field_path"].split(".")[0] in {"availability", "availability_ref"}
+        patched = await client.patch(
+            "/api/v1" + route,
+            headers={"Idempotency-Key": "choose-availability"},
+            json={
+                "expected_summary_revision": draft["summary_revision"],
+                "expected_planning_input_revision": draft["planning_input_revision"],
+                "changes": {
+                    "summary": {
+                        "title": details["title"],
+                        "scope": details["scope"],
+                        "availability": availability,
+                    }
+                },
+            },
+        )
+        assert patched.status_code == 200, patched.text
+        draft = patched.json()["data"]
+        assert draft["summary"]["can_plan"] is True
+        assert not any(i["blocking"] for i in draft["summary"]["clarification_issues"])
+
+    result = await post(
+        client,
+        route + "/confirm-summary",
+        "confirm",
+        {
+            "expected_summary_revision": draft["summary_revision"],
+        },
+    )
+    assert result.status_code == 200, result.text
+
+
+@pytest.mark.parametrize("unrelated_blocker", [False, True])
+async def test_uf1_restores_legacy_fallback_issues(api, unrelated_blocker):
+    client, factory = api
+    created = await post(
+        client,
+        "/drafts",
+        "legacy-create",
+        {"client_draft_id": "legacy", "input_source": "text", "summary": summary()},
+    )
+    assert created.status_code == 201, created.text
+    draft = created.json()["data"]
+    questions = [UF1_FALLBACK_QUESTIONS["availability"], UF1_FALLBACK_NOTICE]
+    if unrelated_blocker:
+        questions.append("Báo cáo cần dùng bộ dữ liệu nào?")
+    async with factory() as db:
+        row = await db.get(PlanningDraft, resolve_draft_uuid(draft["draft_id"]))
+        row.stage = "collecting"
+        row.summary = {
+            **row.summary,
+            "can_plan": False,
+            "clarification_issues": [
+                {
+                    "code": "AI_CLARIFICATION",
+                    "field_path": f"clarification_questions[{index}]",
+                    "message": question,
+                    "question": question,
+                    "blocking": True,
+                }
+                for index, question in enumerate(questions)
+            ],
+        }
+        await db.commit()
+
+    route = f"/drafts/{draft['draft_id']}"
+    restored = (await client.get("/api/v1" + route)).json()["data"]
+    assert restored["summary"]["can_plan"] is not unrelated_blocker
+    assert [
+        i["question"] for i in restored["summary"]["clarification_issues"] if i["blocking"]
+    ] == (questions[-1:] if unrelated_blocker else [])
+    confirmed = await post(
+        client,
+        route + "/confirm-summary",
+        "legacy-confirm",
+        {
+            "expected_summary_revision": restored["summary_revision"],
+        },
+    )
+    assert confirmed.status_code == (422 if unrelated_blocker else 200), confirmed.text
 
 
 async def test_draft_availability_offline_plan_confirm_and_replay(api):

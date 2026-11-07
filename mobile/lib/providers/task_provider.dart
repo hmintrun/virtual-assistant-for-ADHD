@@ -329,6 +329,7 @@ class TaskProvider extends ChangeNotifier {
       );
     if (!draft.canPlan) {
       final questions = draft.clarificationIssues
+          .where((issue) => issue['blocking'] == true)
           .map((i) => i['question'] ?? i['message'])
           .whereType<String>();
       throw ApiException(

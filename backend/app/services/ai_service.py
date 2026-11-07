@@ -46,6 +46,15 @@ SchemaT = TypeVar("SchemaT", bound=BaseModel)
 _CLOUD_PLATFORM_SCOPES = ["https://www.googleapis.com/auth/cloud-platform"]
 
 
+UF1_FALLBACK_QUESTIONS = {
+    "description": "Bạn muốn thực hiện công việc cụ thể nào?",
+    "scope": "Phạm vi hoặc kết quả đầu ra mong muốn của việc này là gì (ví dụ: số trang, số phần cần hoàn thiện)?",
+    "availability": "Bạn có những khung giờ rảnh cụ thể nào (từ mấy giờ đến mấy giờ) để mình sắp xếp các phiên tập trung?",
+    "time_constraint": "Hạn chót (ngày và giờ) bạn cần hoàn thành xong công việc này là khi nào?",
+}
+UF1_FALLBACK_NOTICE = "Hệ thống AI đang tạm gián đoạn nên chưa phân tích được ghi chú bổ sung vừa rồi, bạn kiểm tra và xác nhận trực tiếp trên biểu mẫu giúp mình nhé?"
+
+
 class ExecutionTimingProfile(NamedTuple):
     """Cấu hình các mốc thời gian (giây) cho bộ điều phối Quality-First Hedged Execution."""
 
@@ -687,23 +696,15 @@ class AIService:
 
         questions: list[str] = []
         if not content_val:
-            questions.append("Bạn muốn thực hiện công việc cụ thể nào?")
+            questions.append(UF1_FALLBACK_QUESTIONS["description"])
         if not prev_scope:
-            questions.append(
-                "Phạm vi hoặc kết quả đầu ra mong muốn của việc này là gì (ví dụ: số trang, số phần cần hoàn thiện)?"
-            )
+            questions.append(UF1_FALLBACK_QUESTIONS["scope"])
         if not prev_slots and not prev_windows:
-            questions.append(
-                "Bạn có những khung giờ rảnh cụ thể nào (từ mấy giờ đến mấy giờ) để mình sắp xếp các phiên tập trung?"
-            )
+            questions.append(UF1_FALLBACK_QUESTIONS["availability"])
         if prev_deadline is None:
-            questions.append(
-                "Hạn chót (ngày và giờ) bạn cần hoàn thành xong công việc này là khi nào?"
-            )
+            questions.append(UF1_FALLBACK_QUESTIONS["time_constraint"])
         if not questions:
-            questions.append(
-                "Hệ thống AI đang tạm gián đoạn nên chưa phân tích được ghi chú bổ sung vừa rồi, bạn kiểm tra và xác nhận trực tiếp trên biểu mẫu giúp mình nhé?"
-            )
+            questions.append(UF1_FALLBACK_NOTICE)
 
         summary_text = (
             f"Đã ghi nhận công việc: '{content_val}'. Mình cần bạn bổ sung/xác nhận thêm thông tin bên dưới để lên lịch chuẩn xác nhé."

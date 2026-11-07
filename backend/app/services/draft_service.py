@@ -42,7 +42,7 @@ from app.schemas.task import (
     LLMTaskExtractionPayload,
     TaskExtractionResult,
 )
-from app.services.ai_service import ai_service
+from app.services.ai_service import UF1_FALLBACK_NOTICE, UF1_FALLBACK_QUESTIONS, ai_service
 from app.services.command_service import durable_command, lock_owner
 from app.services.scheduler_engine import validate_planning_prerequisites
 
@@ -170,6 +170,40 @@ def _serialize_summary_payload(draft: PlanningDraft) -> dict[str, Any]:
     return summary_dict
 
 
+def _fallback_notice() -> ClarificationIssue:
+    return ClarificationIssue(
+        code="AI_FALLBACK_NOTICE",
+        field_path="summary",
+        message="AI đang tạm gián đoạn. Bạn vẫn có thể kiểm tra và xác nhận trên biểu mẫu.",
+        question=UF1_FALLBACK_NOTICE,
+        blocking=False,
+    )
+
+
+def _restore_summary(raw_summary: dict[str, Any]) -> TaskSummary:
+    summary = TaskSummary.model_validate(raw_summary)
+    issues: list[ClarificationIssue] = []
+    restored = False
+    for issue in summary.clarification_issues:
+        if issue.code == "AI_CLARIFICATION" and issue.field_path.startswith(
+            "clarification_questions["
+        ):
+            if issue.question in UF1_FALLBACK_QUESTIONS.values():
+                # Các câu hỏi này đã có bản tương ứng do validator UF1 tạo.
+                restored = True
+                continue
+            if issue.question == UF1_FALLBACK_NOTICE:
+                issue = _fallback_notice()
+                restored = True
+        if issue not in issues:
+            issues.append(issue)
+    if restored:
+        return summary.model_copy(
+            update={"clarification_issues": issues, "can_plan": not any(i.blocking for i in issues)}
+        )
+    return summary
+
+
 def _row_to_schema(row: PlanningDraftModel, fallback_draft_id: str | None = None) -> PlanningDraft:
     """Chuyển dòng SQLAlchemy PlanningDraftModel thành DTO PlanningDraft chuẩn hợp đồng."""
     raw_summary = dict(row.summary or {})
@@ -190,7 +224,7 @@ def _row_to_schema(row: PlanningDraftModel, fallback_draft_id: str | None = None
         stage=row.stage,
         raw_input=row.raw_input,
         input_source=cast(Literal["text", "voice", "thought"], row.input_source),
-        summary=TaskSummary.model_validate(raw_summary),
+        summary=_restore_summary(raw_summary),
         summary_revision=row.summary_revision,
         summary_confirmed_revision=row.summary_confirmed_revision,
         candidate_ref=cand_ref,
@@ -1145,6 +1179,7 @@ async def confirm_draft_summary(
                     message=issue.message,
                 )
                 for issue in issues
+                if issue.blocking
             ],
             next_action="fix_fields",
         )
@@ -1307,7 +1342,11 @@ async def analyze_draft(
             if tc
             else snapshot_draft.ai_context.get("time_constraint") or {}
         ),
-        clarification_issues=[i for i in summary.clarification_issues if i.code.startswith("AI_")],
+        clarification_issues=[
+            i
+            for i in summary.clarification_issues
+            if i.code.startswith("AI_") and i.code != "AI_FALLBACK_NOTICE"
+        ],
         content=summary.description,
         scope=summary.scope,
         deadline=(tc.deadline_at if tc.kind == "deadline" else tc.finish_by_at) if tc else None,
@@ -1551,7 +1590,14 @@ async def analyze_draft(
         + ", ".join(f"'{phrase}'" for phrase in ambiguous_phrases)
         + " bạn có thể làm từ mấy giờ đến mấy giờ cụ thể để mình xếp lịch chuẩn xác?",
     }
+    if extracted.generation_tier == "tier_3_rule_based":
+        ai_issues.append(_fallback_notice())
     for index, question in enumerate(dict.fromkeys(extracted.clarification_questions)):
+        if extracted.generation_tier == "tier_3_rule_based" and (
+            question in UF1_FALLBACK_QUESTIONS.values() or question == UF1_FALLBACK_NOTICE
+        ):
+            # Validator UF1 hỏi đúng trường còn thiếu sau khi đã hợp nhất bản tóm tắt.
+            continue
         if any(issue.question == question for issue in ai_issues):
             continue
         if question in generated_availability_questions:
@@ -1589,7 +1635,7 @@ async def analyze_draft(
     active_keys = {
         f"{i.code}|{i.field_path}|{i.question}": i
         for i in current_draft.summary.clarification_issues
-        if i.code.startswith("AI_")
+        if i.code.startswith("AI_") and i.code != "AI_FALLBACK_NOTICE"
     }
     for key, issue in active_keys.items():
         if (

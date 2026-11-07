@@ -98,6 +98,7 @@ class _TaskSummaryScreenState extends State<TaskSummaryScreen> {
       if (!mounted) return;
       if (!task.canPlan) {
         final questions = task.draft?.clarificationIssues
+            .where((issue) => issue['blocking'] == true)
             .map((i) => i['question'] ?? i['message'])
             .whereType<String>()
             .join('\n');
@@ -416,6 +417,16 @@ class _TaskSummaryScreenState extends State<TaskSummaryScreen> {
               ),
             ),
             const SizedBox(height: 16),
+
+            for (final issue in task.draft?.clarificationIssues ?? const [])
+              if (issue['code'] == 'AI_FALLBACK_NOTICE')
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 16),
+                  child: Text(
+                    issue['message'] as String,
+                    style: const TextStyle(color: MelbelColors.kOnSurfaceVariant),
+                  ),
+                ),
 
             // Section 3: Scope Input Box (Bổ sung phạm vi)
             Container(
