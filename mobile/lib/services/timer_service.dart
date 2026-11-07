@@ -49,15 +49,18 @@ class FocusTimerService extends ChangeNotifier {
   int _durationSeconds = 0;
   bool _isRunning = false;
   bool _isPaused = false;
+  bool _isCompleted = false;
   int _pausedRemainingSeconds = 0;
 
   DateTime? get endsAt => _endsAt;
   int get durationSeconds => _durationSeconds;
   bool get isRunning => _isRunning;
   bool get isPaused => _isPaused;
+  bool get isCompleted => _isCompleted;
   Clock get clock => _clock;
 
   int get remainingSeconds {
+    if (_isCompleted) return 0;
     if (_isPaused) return _pausedRemainingSeconds;
     final target = _endsAt;
     if (!_isRunning || target == null) return _durationSeconds;
@@ -67,11 +70,13 @@ class FocusTimerService extends ChangeNotifier {
 
   int get elapsedSeconds {
     if (_durationSeconds <= 0) return 0;
+    if (_isCompleted) return _durationSeconds;
     return (_durationSeconds - remainingSeconds).clamp(0, _durationSeconds);
   }
 
   double get progress {
     if (_durationSeconds <= 0) return 0.0;
+    if (_isCompleted) return 1.0;
     return (1.0 - remainingSeconds / _durationSeconds).clamp(0.0, 1.0).toDouble();
   }
 
@@ -81,6 +86,7 @@ class FocusTimerService extends ChangeNotifier {
   void start(int seconds, {DateTime? deadline}) {
     _durationSeconds = seconds < 1 ? 1 : seconds;
     _isPaused = false;
+    _isCompleted = false;
     _pausedRemainingSeconds = 0;
     _endsAt = deadline ?? _clock.now().add(Duration(seconds: _durationSeconds));
     _isRunning = true;
@@ -93,18 +99,19 @@ class FocusTimerService extends ChangeNotifier {
 
   /// Kích hoạt cập nhật đồng hồ (dùng cho cả Timer định kỳ và FakeClock test).
   void tick() {
-    if (!_isRunning || _isPaused) return;
+    if (!_isRunning || _isPaused || _isCompleted) return;
     notifyListeners();
     onTick?.call();
     if (remainingSeconds == 0) {
       _ticker?.cancel();
       _isRunning = false;
+      _isCompleted = true;
       onElapsed?.call();
     }
   }
 
   void pause() {
-    if (!_isRunning || _isPaused) return;
+    if (!_isRunning || _isPaused || _isCompleted) return;
     _pausedRemainingSeconds = remainingSeconds;
     _isPaused = true;
     _ticker?.cancel();
@@ -112,7 +119,7 @@ class FocusTimerService extends ChangeNotifier {
   }
 
   void resume() {
-    if (!_isRunning || !_isPaused) return;
+    if (!_isRunning || !_isPaused || _isCompleted) return;
     _endsAt = _clock.now().add(Duration(seconds: _pausedRemainingSeconds));
     _isPaused = false;
     _pausedRemainingSeconds = 0;
@@ -131,10 +138,12 @@ class FocusTimerService extends ChangeNotifier {
     if (remaining <= 0) {
       _endsAt = deadline;
       _isRunning = false;
+      _isCompleted = true;
       onElapsed?.call();
       notifyListeners();
       return;
     }
+    _isCompleted = false;
     start(remaining, deadline: deadline);
     _durationSeconds = originalDurationSeconds;
   }
@@ -144,6 +153,7 @@ class FocusTimerService extends ChangeNotifier {
     _ticker = null;
     _isRunning = false;
     _isPaused = false;
+    _isCompleted = false;
     _endsAt = null;
     _durationSeconds = 0;
     _pausedRemainingSeconds = 0;

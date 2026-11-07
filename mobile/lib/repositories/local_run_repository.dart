@@ -1,8 +1,33 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
 import '../providers/focus_provider.dart' show ThoughtRecord;
+
+/// Khóa bất đồng bộ (Async Mutex) tuần tự hóa các tác vụ Read-Modify-Write trên kho lưu trữ.
+class _AsyncLock {
+  Future<void>? _last;
+
+  Future<T> synchronized<T>(Future<T> Function() action) {
+    final prev = _last;
+    final completer = Completer<void>();
+    _last = completer.future;
+
+    return Future(() async {
+      if (prev != null) {
+        try {
+          await prev;
+        } catch (_) {}
+      }
+      try {
+        return await action();
+      } finally {
+        completer.complete();
+      }
+    });
+  }
+}
 
 /// Interface chung cho tầng lưu trữ cục bộ trạng thái phiên tập trung (UF3) và suy nghĩ (UF4).
 ///
@@ -23,9 +48,10 @@ abstract class LocalRunRepository {
   Future<void> clearAllThoughts();
 }
 
-/// Triển khai lưu bền bằng FlutterSecureStorage cho thiết bị thật.
+/// Triển khai lưu bền bằng FlutterSecureStorage cho thiết bị thật,
+/// được bảo vệ bằng AsyncLock chống Race Condition khi đọc-ghi đồng thời.
 class SecureStorageRunRepository extends LocalRunRepository {
-  const SecureStorageRunRepository({
+  SecureStorageRunRepository({
     FlutterSecureStorage? storage,
     this.runKey = 'proplan.uf3.active_run.v1',
     this.thoughtsKey = 'proplan.uf4.local_thoughts.v1',
@@ -34,93 +60,131 @@ class SecureStorageRunRepository extends LocalRunRepository {
   final FlutterSecureStorage _storage;
   final String runKey;
   final String thoughtsKey;
+  final _AsyncLock _thoughtsLock = _AsyncLock();
+  final _AsyncLock _runLock = _AsyncLock();
 
   @override
-  Future<void> saveActiveRun(Map<String, dynamic> runData) async {
-    await _storage.write(key: runKey, value: jsonEncode(runData));
-  }
+  Future<void> saveActiveRun(Map<String, dynamic> runData) =>
+      _runLock.synchronized(() async {
+        await _storage.write(key: runKey, value: jsonEncode(runData));
+      });
 
   @override
-  Future<Map<String, dynamic>?> loadActiveRun() async {
-    final raw = await _storage.read(key: runKey);
-    if (raw == null) return null;
-    try {
-      return jsonDecode(raw) as Map<String, dynamic>;
-    } catch (_) {
-      await clearActiveRun();
-      return null;
-    }
-  }
+  Future<Map<String, dynamic>?> loadActiveRun() =>
+      _runLock.synchronized(() async {
+        final raw = await _storage.read(key: runKey);
+        if (raw == null) return null;
+        try {
+          return jsonDecode(raw) as Map<String, dynamic>;
+        } catch (_) {
+          await _storage.delete(key: runKey);
+          return null;
+        }
+      });
 
   @override
-  Future<void> clearActiveRun() async {
-    await _storage.delete(key: runKey);
-  }
+  Future<void> clearActiveRun() =>
+      _runLock.synchronized(() async {
+        await _storage.delete(key: runKey);
+      });
 
   @override
-  Future<void> saveThoughts(List<ThoughtRecord> thoughts) async {
-    final list = thoughts.map((t) => t.toJson()).toList();
-    await _storage.write(key: thoughtsKey, value: jsonEncode(list));
-  }
+  Future<void> saveThoughts(List<ThoughtRecord> thoughts) =>
+      _thoughtsLock.synchronized(() async {
+        final list = thoughts.map((t) => t.toJson()).toList();
+        await _storage.write(key: thoughtsKey, value: jsonEncode(list));
+      });
 
   @override
-  Future<List<ThoughtRecord>> loadThoughts() async {
-    final raw = await _storage.read(key: thoughtsKey);
-    if (raw == null) return [];
-    try {
-      final decoded = jsonDecode(raw) as List<dynamic>;
-      return decoded
-          .whereType<Map<String, dynamic>>()
-          .map(ThoughtRecord.fromJson)
-          .toList();
-    } catch (_) {
-      await clearAllThoughts();
-      return [];
-    }
-  }
+  Future<List<ThoughtRecord>> loadThoughts() =>
+      _thoughtsLock.synchronized(() async {
+        final raw = await _storage.read(key: thoughtsKey);
+        if (raw == null) return [];
+        try {
+          final decoded = jsonDecode(raw) as List<dynamic>;
+          return decoded
+              .whereType<Map<String, dynamic>>()
+              .map(ThoughtRecord.fromJson)
+              .toList();
+        } catch (_) {
+          await _storage.delete(key: thoughtsKey);
+          return [];
+        }
+      });
 
   @override
-  Future<void> queueThought(ThoughtRecord thought) async {
-    final existing = await loadThoughts();
-    existing.removeWhere((item) => item.id == thought.id);
-    existing.insert(0, thought);
-    await saveThoughts(existing);
-  }
+  Future<void> queueThought(ThoughtRecord thought) =>
+      _thoughtsLock.synchronized(() async {
+        final raw = await _storage.read(key: thoughtsKey);
+        List<ThoughtRecord> existing = [];
+        if (raw != null) {
+          try {
+            existing = (jsonDecode(raw) as List<dynamic>)
+                .whereType<Map<String, dynamic>>()
+                .map(ThoughtRecord.fromJson)
+                .toList();
+          } catch (_) {}
+        }
+        existing.removeWhere((item) => item.clientThoughtId == thought.clientThoughtId);
+        existing.insert(0, thought);
+        final list = existing.map((t) => t.toJson()).toList();
+        await _storage.write(key: thoughtsKey, value: jsonEncode(list));
+      });
 
   @override
-  Future<void> markThoughtSynced(String thoughtId) async {
-    final existing = await loadThoughts();
-    final index = existing.indexWhere((item) => item.id == thoughtId);
-    if (index >= 0) {
-      final item = existing[index];
-      existing[index] = ThoughtRecord(
-        id: item.id,
-        createdAt: item.createdAt,
-        audioPath: item.audioPath,
-        text: item.text,
-        isPendingSync: false,
-      );
-      await saveThoughts(existing);
-    }
-  }
+  Future<void> markThoughtSynced(String thoughtId) =>
+      _thoughtsLock.synchronized(() async {
+        final raw = await _storage.read(key: thoughtsKey);
+        if (raw == null) return;
+        List<ThoughtRecord> existing = [];
+        try {
+          existing = (jsonDecode(raw) as List<dynamic>)
+              .whereType<Map<String, dynamic>>()
+              .map(ThoughtRecord.fromJson)
+              .toList();
+        } catch (_) {
+          return;
+        }
+        final index = existing.indexWhere((item) => item.clientThoughtId == thoughtId);
+        if (index >= 0) {
+          existing[index] = existing[index].copyWith(isPendingSync: false);
+          final list = existing.map((t) => t.toJson()).toList();
+          await _storage.write(key: thoughtsKey, value: jsonEncode(list));
+        }
+      });
 
   @override
-  Future<void> deleteThought(String thoughtId) async {
-    final existing = await loadThoughts();
-    existing.removeWhere((item) => item.id == thoughtId);
-    await saveThoughts(existing);
-  }
+  Future<void> deleteThought(String thoughtId) =>
+      _thoughtsLock.synchronized(() async {
+        final raw = await _storage.read(key: thoughtsKey);
+        if (raw == null) return;
+        List<ThoughtRecord> existing = [];
+        try {
+          existing = (jsonDecode(raw) as List<dynamic>)
+              .whereType<Map<String, dynamic>>()
+              .map(ThoughtRecord.fromJson)
+              .toList();
+        } catch (_) {
+          return;
+        }
+        existing.removeWhere((item) => item.clientThoughtId == thoughtId);
+        final list = existing.map((t) => t.toJson()).toList();
+        await _storage.write(key: thoughtsKey, value: jsonEncode(list));
+      });
 
   @override
-  Future<void> clearAllThoughts() async {
-    await _storage.delete(key: thoughtsKey);
-  }
+  Future<void> clearAllThoughts() =>
+      _thoughtsLock.synchronized(() async {
+        await _storage.delete(key: thoughtsKey);
+      });
 }
 
-/// Triển khai lưu trữ trên bộ nhớ (In-Memory) phục vụ Unit Test và mocking nhanh.
+/// Triển khai lưu trữ trên bộ nhớ (In-Memory) phục vụ Unit Test và mocking nhanh,
+/// cũng được serialize để an toàn tuyệt đối trước async concurrency.
 class InMemoryRunRepository extends LocalRunRepository {
   Map<String, dynamic>? _activeRun;
   final List<ThoughtRecord> _thoughts = [];
+  final _AsyncLock _thoughtsLock = _AsyncLock();
 
   @override
   Future<void> saveActiveRun(Map<String, dynamic> runData) async {
@@ -139,45 +203,42 @@ class InMemoryRunRepository extends LocalRunRepository {
   }
 
   @override
-  Future<void> saveThoughts(List<ThoughtRecord> thoughts) async {
-    _thoughts
-      ..clear()
-      ..addAll(thoughts);
-  }
+  Future<void> saveThoughts(List<ThoughtRecord> thoughts) =>
+      _thoughtsLock.synchronized(() async {
+        _thoughts
+          ..clear()
+          ..addAll(thoughts);
+      });
 
   @override
-  Future<List<ThoughtRecord>> loadThoughts() async {
-    return List<ThoughtRecord>.from(_thoughts);
-  }
+  Future<List<ThoughtRecord>> loadThoughts() =>
+      _thoughtsLock.synchronized(() async => List<ThoughtRecord>.from(_thoughts));
 
   @override
-  Future<void> queueThought(ThoughtRecord thought) async {
-    _thoughts.removeWhere((item) => item.id == thought.id);
-    _thoughts.insert(0, thought);
-  }
+  Future<void> queueThought(ThoughtRecord thought) =>
+      _thoughtsLock.synchronized(() async {
+        _thoughts.removeWhere((item) => item.clientThoughtId == thought.clientThoughtId);
+        _thoughts.insert(0, thought);
+      });
 
   @override
-  Future<void> markThoughtSynced(String thoughtId) async {
-    final index = _thoughts.indexWhere((item) => item.id == thoughtId);
-    if (index >= 0) {
-      final item = _thoughts[index];
-      _thoughts[index] = ThoughtRecord(
-        id: item.id,
-        createdAt: item.createdAt,
-        audioPath: item.audioPath,
-        text: item.text,
-        isPendingSync: false,
-      );
-    }
-  }
+  Future<void> markThoughtSynced(String thoughtId) =>
+      _thoughtsLock.synchronized(() async {
+        final index = _thoughts.indexWhere((item) => item.clientThoughtId == thoughtId);
+        if (index >= 0) {
+          _thoughts[index] = _thoughts[index].copyWith(isPendingSync: false);
+        }
+      });
 
   @override
-  Future<void> deleteThought(String thoughtId) async {
-    _thoughts.removeWhere((item) => item.id == thoughtId);
-  }
+  Future<void> deleteThought(String thoughtId) =>
+      _thoughtsLock.synchronized(() async {
+        _thoughts.removeWhere((item) => item.clientThoughtId == thoughtId);
+      });
 
   @override
-  Future<void> clearAllThoughts() async {
-    _thoughts.clear();
-  }
+  Future<void> clearAllThoughts() =>
+      _thoughtsLock.synchronized(() async {
+        _thoughts.clear();
+      });
 }

@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
@@ -30,33 +29,90 @@ enum FocusStage {
 
 class ThoughtRecord {
   const ThoughtRecord({
-    required this.id,
+    required this.clientThoughtId,
     required this.createdAt,
-    this.audioPath,
-    this.text,
+    required this.undoDeadlineAt,
+    this.sourceRunId,
+    this.inputType = 'text',
+    this.textContent,
+    this.localAudioPath,
+    this.attemptCount = 1,
+    this.captureState = 'saved',
     this.isPendingSync = true,
+    this.serverThoughtId,
   });
 
-  final String id;
+  // Kháº£ nÄƒng tÆ°Æ¡ng thÃ­ch ngÆ°á»£c cho cÃ¡c getter cÅ© (F3 & UI binding)
+  String get id => clientThoughtId;
+  String? get text => textContent;
+  String? get audioPath => localAudioPath;
+
+  final String clientThoughtId;
   final DateTime createdAt;
-  final String? audioPath;
-  final String? text;
+  final DateTime undoDeadlineAt;
+  final String? sourceRunId;
+  final String inputType;
+  final String? textContent;
+  final String? localAudioPath;
+  final int attemptCount;
+  final String captureState;
   final bool isPendingSync;
+  final String? serverThoughtId;
 
   Map<String, dynamic> toJson() => {
-        'id': id,
+        'client_thought_id': clientThoughtId,
         'created_at': createdAt.toIso8601String(),
-        if (audioPath != null) 'audio_path': audioPath,
-        if (text != null) 'text': text,
+        'undo_deadline_at': undoDeadlineAt.toIso8601String(),
+        if (sourceRunId != null) 'source_run_id': sourceRunId,
+        'input_type': inputType,
+        if (textContent != null) 'text_content': textContent,
+        if (localAudioPath != null) 'local_audio_path': localAudioPath,
+        'attempt_count': attemptCount,
+        'capture_state': captureState,
         'pending_sync': isPendingSync,
+        if (serverThoughtId != null) 'server_thought_id': serverThoughtId,
       };
 
-  factory ThoughtRecord.fromJson(Map<String, dynamic> json) => ThoughtRecord(
-        id: json['id'] as String,
-        createdAt: DateTime.parse(json['created_at'] as String),
-        audioPath: json['audio_path'] as String?,
-        text: json['text'] as String?,
-        isPendingSync: json['pending_sync'] as bool? ?? true,
+  factory ThoughtRecord.fromJson(Map<String, dynamic> json) {
+    final created = DateTime.parse(json['created_at'] as String);
+    final deadline = json['undo_deadline_at'] != null
+        ? DateTime.parse(json['undo_deadline_at'] as String)
+        : created.add(const Duration(seconds: 5));
+    return ThoughtRecord(
+      clientThoughtId: (json['client_thought_id'] ?? json['id']) as String,
+      createdAt: created,
+      undoDeadlineAt: deadline,
+      sourceRunId: json['source_run_id'] as String?,
+      inputType: json['input_type'] as String? ?? (json['audio_path'] != null ? 'raw_audio' : 'text'),
+      textContent: (json['text_content'] ?? json['text']) as String?,
+      localAudioPath: (json['local_audio_path'] ?? json['audio_path']) as String?,
+      attemptCount: json['attempt_count'] as int? ?? 1,
+      captureState: json['capture_state'] as String? ?? 'saved',
+      isPendingSync: json['pending_sync'] as bool? ?? true,
+      serverThoughtId: json['server_thought_id'] as String?,
+    );
+  }
+
+  ThoughtRecord copyWith({
+    bool? isPendingSync,
+    String? serverThoughtId,
+    int? attemptCount,
+    String? captureState,
+    String? textContent,
+    String? localAudioPath,
+  }) =>
+      ThoughtRecord(
+        clientThoughtId: clientThoughtId,
+        createdAt: createdAt,
+        undoDeadlineAt: undoDeadlineAt,
+        sourceRunId: sourceRunId,
+        inputType: inputType,
+        textContent: textContent ?? this.textContent,
+        localAudioPath: localAudioPath ?? this.localAudioPath,
+        attemptCount: attemptCount ?? this.attemptCount,
+        captureState: captureState ?? this.captureState,
+        isPendingSync: isPendingSync ?? this.isPendingSync,
+        serverThoughtId: serverThoughtId ?? this.serverThoughtId,
       );
 }
 
@@ -79,7 +135,7 @@ class FocusProvider extends ChangeNotifier {
         _repository = repository ??
             (storage != null
                 ? SecureStorageRunRepository(storage: storage)
-                : const SecureStorageRunRepository()) {
+                : SecureStorageRunRepository()) {
     this.timer.onElapsed = _onSegmentElapsed;
     this.timer.addListener(_onTimerChanged);
     this.microTaskTimer.onElapsed = _onMicroTaskElapsed;
@@ -219,9 +275,9 @@ class FocusProvider extends ChangeNotifier {
     _notify();
   }
 
-  /// Bắt đầu phiên tập trung với cơ chế kiểm tra Feasibility Grace Window của A12.1:
-  /// Nếu đến trước hoặc trễ trong vòng 15 phút (<= 15m), cho phép bắt đầu phiên bình thường.
-  /// Nếu trễ quá 15 phút (> 15m), chuyển sang trạng thái lateStart để người dùng xác nhận.
+  /// Báº¯t Ä‘áº§u phiÃªn táº­p trung vá»›i cÆ¡ cháº¿ kiá»ƒm tra Feasibility Grace Window cá»§a A12.1:
+  /// Náº¿u Ä‘áº¿n trÆ°á»›c hoáº·c trá»… trong vÃ²ng 15 phÃºt (<= 15m), cho phÃ©p báº¯t Ä‘áº§u phiÃªn bÃ¬nh thÆ°á»ng.
+  /// Náº¿u trá»… quÃ¡ 15 phÃºt (> 15m), chuyá»ƒn sang tráº¡ng thÃ¡i lateStart Ä‘á»ƒ ngÆ°á»i dÃ¹ng xÃ¡c nháº­n.
   Future<void> startRun() async {
     final session = _session;
     if (session == null) return;
@@ -283,8 +339,8 @@ class FocusProvider extends ChangeNotifier {
     if (!isActiveRun) return;
     final segment = currentSegment;
     if (segment != null && segment.kind == 'work') {
-      // Chỉ cộng dồn thời gian của các segment loại work vào actualWorkSeconds
-      // Micro-task 2 phút và thời gian nghỉ (rest) hoàn toàn không được tính.
+      // Chá»‰ cá»™ng dá»“n thá»i gian cá»§a cÃ¡c segment loáº¡i work vÃ o actualWorkSeconds
+      // Micro-task 2 phÃºt vÃ  thá»i gian nghá»‰ (rest) hoÃ n toÃ n khÃ´ng Ä‘Æ°á»£c tÃ­nh.
       _actualWorkSeconds += segment.durationSeconds;
     }
     _segmentIndex++;
@@ -300,7 +356,7 @@ class FocusProvider extends ChangeNotifier {
     _stopOfflineProbe();
     await _restoreFocusMode();
     _stage = FocusStage.ended;
-    // Kết thúc đếm giờ cục bộ KHÔNG tự động đánh dấu hoàn thành Session/Step/Task (UF5).
+    // Káº¿t thÃºc Ä‘áº¿m giá» cá»¥c bá»™ KHÃ”NG tá»± Ä‘á»™ng Ä‘Ã¡nh dáº¥u hoÃ n thÃ nh Session/Step/Task (UF5).
     await _repository.clearActiveRun();
     _notify();
   }
@@ -372,10 +428,16 @@ class FocusProvider extends ChangeNotifier {
       final savedPath = await recorder.stopAndValidate(path);
       _isRecording = false;
       _recordingPath = null;
+      final now = _clock.now();
       final thought = ThoughtRecord(
-        id: _clock.now().microsecondsSinceEpoch.toString(),
-        createdAt: _clock.now(),
-        audioPath: savedPath,
+        clientThoughtId: now.microsecondsSinceEpoch.toString(),
+        createdAt: now,
+        undoDeadlineAt: now.add(const Duration(seconds: 5)),
+        sourceRunId: _session?.id,
+        inputType: 'raw_audio',
+        localAudioPath: savedPath,
+        attemptCount: (_recordingAttempts + 1).clamp(1, 3),
+        captureState: 'raw_saved',
         isPendingSync: true,
       );
       await _saveThought(thought);
@@ -437,10 +499,16 @@ class FocusProvider extends ChangeNotifier {
   Future<void> saveTextThought(String text) async {
     final normalized = text.trim();
     if (normalized.isEmpty) return;
+    final now = _clock.now();
     final thought = ThoughtRecord(
-      id: _clock.now().microsecondsSinceEpoch.toString(),
-      createdAt: _clock.now(),
-      text: normalized,
+      clientThoughtId: now.microsecondsSinceEpoch.toString(),
+      createdAt: now,
+      undoDeadlineAt: now.add(const Duration(seconds: 5)),
+      sourceRunId: _session?.id,
+      inputType: 'text',
+      textContent: normalized,
+      attemptCount: 1,
+      captureState: 'saved',
       isPendingSync: true,
     );
     await _saveThought(thought);
@@ -490,39 +558,63 @@ class FocusProvider extends ChangeNotifier {
     _thoughts
       ..clear()
       ..addAll(loaded);
+
+    // Kiá»ƒm tra vÃ  khÃ´i phá»¥c cÃ¡c Thought chÆ°a Ä‘á»“ng bá»™ khi khá»Ÿi Ä‘á»™ng láº¡i
+    final now = _clock.now();
+    final hasExpiredPending = _thoughts.any((t) => t.isPendingSync && !now.isBefore(t.undoDeadlineAt));
+    if (hasExpiredPending) {
+      unawaited(flushOutbox());
+    } else {
+      final stillPending = _thoughts.where((t) => t.isPendingSync && now.isBefore(t.undoDeadlineAt)).toList();
+      if (stillPending.isNotEmpty) {
+        final earliest = stillPending.map((t) => t.undoDeadlineAt).reduce((a, b) => a.isBefore(b) ? a : b);
+        final delay = earliest.difference(now);
+        _undoExpiry?.cancel();
+        _undoExpiry = Timer(delay, () {
+          _canUndoThought = false;
+          _notify();
+          unawaited(flushOutbox());
+        });
+      }
+    }
   }
 
-  /// Đồng bộ hàng đợi Outbox lên Backend khi có kết nối mạng:
-  /// Áp dụng cơ chế Idempotency dựa trên `thought.id` để không bao giờ tạo trùng trên server.
+  /// Äá»“ng bá»™ hÃ ng Ä‘á»£i Outbox lÃªn Backend khi cÃ³ káº¿t ná»‘i máº¡ng:
+  /// - CHá»ˆ claim vÃ  gá»­i cÃ¡c Thought Ä‘Ã£ trÃ´i qua háº¡n HoÃ n tÃ¡c (Undo 5 giÃ¢y).
+  /// - Chuáº©n hÃ³a 100% Payload metadata theo Ä‘Ãºng Backend Contract (F3).
+  /// - Ãp dá»¥ng cÆ¡ cháº¿ Idempotency dá»±a trÃªn `clientThoughtId` Ä‘á»ƒ khÃ´ng táº¡o trÃ¹ng.
   Future<void> flushOutbox() async {
     if (_isOffline) return;
-    final pending = _thoughts.where((t) => t.isPendingSync).toList();
-    for (final thought in pending) {
+    final now = _clock.now();
+    // Cháº·n gá»­i sá»›m: chá»‰ láº¥y nhá»¯ng báº£n ghi Ä‘Ã£ háº¿t háº¡n Undo
+    final readyToSync = _thoughts.where((t) => t.isPendingSync && !now.isBefore(t.undoDeadlineAt)).toList();
+    for (final thought in readyToSync) {
       try {
-        await _api.postData(
+        final payload = {
+          'client_thought_id': thought.clientThoughtId,
+          if (thought.sourceRunId != null) 'source_run_id': thought.sourceRunId,
+          'input_type': thought.inputType,
+          if (thought.textContent != null) 'text_content': thought.textContent,
+          'attempt_count': thought.attemptCount,
+          'capture_state': thought.captureState,
+        };
+        final response = await _api.postData(
           '/thoughts',
-          data: {
-            'client_thought_id': thought.id,
-            'created_at': thought.createdAt.toIso8601String(),
-            'text': thought.text,
-            'audio_path': thought.audioPath,
-          },
-          idempotencyKey: thought.id,
+          data: payload,
+          idempotencyKey: thought.clientThoughtId,
         );
-        await _repository.markThoughtSynced(thought.id);
-        final index = _thoughts.indexWhere((t) => t.id == thought.id);
+        final data = response['data'] as Map<String, dynamic>?;
+        final serverId = data?['thought_id'] as String?;
+        await _repository.markThoughtSynced(thought.clientThoughtId);
+        final index = _thoughts.indexWhere((t) => t.clientThoughtId == thought.clientThoughtId);
         if (index >= 0) {
-          final old = _thoughts[index];
-          _thoughts[index] = ThoughtRecord(
-            id: old.id,
-            createdAt: old.createdAt,
-            audioPath: old.audioPath,
-            text: old.text,
+          _thoughts[index] = _thoughts[index].copyWith(
             isPendingSync: false,
+            serverThoughtId: serverId,
           );
         }
       } catch (_) {
-        // Mạng gián đoạn hoặc server bận: giữ nguyên isPendingSync để thử lại lần sau.
+        // Máº¡ng giÃ¡n Ä‘oáº¡n hoáº·c server báº­n: giá»¯ nguyÃªn isPendingSync Ä‘á»ƒ thá»­ láº¡i láº§n sau.
       }
     }
     _notify();
