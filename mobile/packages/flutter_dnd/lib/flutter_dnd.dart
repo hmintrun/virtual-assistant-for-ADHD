@@ -36,6 +36,27 @@ class FlutterDnd {
     return await _channel.invokeMethod('setInterruptionFilter', filter);
   }
 
+  // ProPlan VA patch — NotificationManager.Policy constants.
+  static const int PRIORITY_CATEGORY_CALLS = 8;
+  static const int PRIORITY_CATEGORY_REPEAT_CALLERS = 16;
+  static const int PRIORITY_CATEGORY_ALARMS = 32;
+  static const int PRIORITY_SENDERS_ANY = 0;
+
+  /// ProPlan VA patch. Android 15+ only: sets the policy of the DND rule this
+  /// app creates (which calls/alarms may pass). Returns false (no-op) below
+  /// Android 15 so the user's global DND policy is never overwritten.
+  static Future<bool?> setAppNotificationPolicy({
+    required int priorityCategories,
+    int priorityCallSenders = PRIORITY_SENDERS_ANY,
+    int priorityMessageSenders = PRIORITY_SENDERS_ANY,
+  }) async {
+    return await _channel.invokeMethod('setAppNotificationPolicy', {
+      'priorityCategories': priorityCategories,
+      'priorityCallSenders': priorityCallSenders,
+      'priorityMessageSenders': priorityMessageSenders,
+    });
+  }
+
   /// Returns currently applied notification [filter]
   static Future<int?> getCurrentInterruptionFilter() async {
     return await _channel.invokeMethod('getCurrentInterruptionFilter');

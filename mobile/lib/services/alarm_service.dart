@@ -33,8 +33,25 @@ class AlarmService {
     return notificationsOk && exactOk;
   }
 
-  Future<void> scheduleEnd(DateTime endsAt, {required String stepTitle}) async {
-    final when = tz.TZDateTime.from(endsAt.toUtc(), tz.UTC);
+  /// Làm tròn LÊN giây chẵn kế tiếp (14:58:00.900 → 14:58:01.000).
+  ///
+  /// flutter_local_notifications chỉ gửi giờ xuống Android ở dạng
+  /// `yyyy-mm-dd hh:mm:ss` (cắt bỏ mili-giây) → nếu không làm tròn, chuông có
+  /// thể kêu SỚM tới ~1 giây so với đồng hồ trên màn hình. Nơi tạo phiên phải
+  /// dùng cùng mốc đã làm tròn này cho cả đồng hồ hiển thị và chuông.
+  static DateTime alignToSecond(DateTime time) {
+    final extraMicros = time.millisecond * 1000 + time.microsecond;
+    if (extraMicros == 0) return time;
+    return time.add(Duration(microseconds: 1000000 - extraMicros));
+  }
+
+  /// Đặt chuông kết thúc phiên. Trả về mốc thực sự đã đặt (đã làm tròn giây).
+  Future<DateTime> scheduleEnd(
+    DateTime endsAt, {
+    required String stepTitle,
+  }) async {
+    final aligned = alignToSecond(endsAt);
+    final when = tz.TZDateTime.from(aligned.toUtc(), tz.UTC);
 
     await _plugin.zonedSchedule(
       _endAlarmId,
@@ -56,6 +73,7 @@ class AlarmService {
       uiLocalNotificationDateInterpretation:
           UILocalNotificationDateInterpretation.absoluteTime,
     );
+    return aligned;
   }
 
   Future<void> cancelEnd() => _plugin.cancel(_endAlarmId);
