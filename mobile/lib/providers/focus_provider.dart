@@ -78,16 +78,22 @@ class ThoughtRecord {
     final deadline = json['undo_deadline_at'] != null
         ? DateTime.parse(json['undo_deadline_at'] as String)
         : created.add(const Duration(seconds: 5));
+    final rawType = json['input_type'] as String?;
+    final normalizedType = (rawType == 'raw_audio' || (rawType == null && (json['local_audio_path'] != null || json['audio_path'] != null)))
+        ? 'audio'
+        : (rawType ?? 'text');
+    final rawState = json['capture_state'] as String?;
+    final normalizedState = rawState == 'raw_saved' ? 'saved' : (rawState ?? 'saved');
     return ThoughtRecord(
       clientThoughtId: (json['client_thought_id'] ?? json['id']) as String,
       createdAt: created,
       undoDeadlineAt: deadline,
       sourceRunId: json['source_run_id'] as String?,
-      inputType: json['input_type'] as String? ?? (json['audio_path'] != null ? 'raw_audio' : 'text'),
+      inputType: normalizedType,
       textContent: (json['text_content'] ?? json['text']) as String?,
       localAudioPath: (json['local_audio_path'] ?? json['audio_path']) as String?,
       attemptCount: json['attempt_count'] as int? ?? 1,
-      captureState: json['capture_state'] as String? ?? 'saved',
+      captureState: normalizedState,
       isPendingSync: json['pending_sync'] as bool? ?? true,
       serverThoughtId: json['server_thought_id'] as String?,
     );
@@ -162,13 +168,14 @@ class FocusProvider extends ChangeNotifier {
   bool _dndApplied = false;
   bool _isOffline = false;
   bool _isRecording = false;
-  bool _canUndoThought = false;
   int _recordingAttempts = 0;
   String? _recordingPath;
   String? _lastError;
   Timer? _offlineProbe;
   Timer? _undoExpiry;
   Timer? _toastExpiry;
+  bool _isFlushingOutbox = false;
+  final Set<String> _undoneThoughtIds = {};
   bool _disposed = false;
 
   FocusSessionInfo? get session => _session;
@@ -185,7 +192,14 @@ class FocusProvider extends ChangeNotifier {
   bool get dndApplied => _dndApplied;
   bool get isOffline => _isOffline;
   bool get isRecording => _isRecording;
-  bool get canUndoThought => _canUndoThought;
+  bool get canUndoThought {
+    if (_thoughts.isEmpty) return false;
+    final now = _clock.now();
+    final latest = _thoughts.first;
+    return latest.isPendingSync &&
+        !_undoneThoughtIds.contains(latest.clientThoughtId) &&
+        now.isBefore(latest.undoDeadlineAt);
+  }
   int get recordingAttempts => _recordingAttempts;
   String? get lastError => _lastError;
   int get segmentIndex => _segmentIndex;
@@ -228,8 +242,18 @@ class FocusProvider extends ChangeNotifier {
       final deadline =
           DateTime.tryParse(json['timer_deadline'] as String? ?? '');
       final duration = json['timer_duration'] as int? ?? 0;
-      if (deadline != null && duration > 0) timer.restore(deadline, duration);
-      _stage = FocusStage.recovery;
+      if (deadline != null && duration > 0) {
+        final remainingMs = deadline.difference(_clock.now()).inMilliseconds;
+        if (remainingMs <= 0) {
+          // Phiên đã hết hạn trong lúc app đóng: bảo lưu dữ liệu để kích hoạt UF5 Check-in, không tự xóa run
+          _actualWorkSeconds += duration;
+          _stage = FocusStage.ended;
+          _notify();
+          return;
+        }
+        timer.restorePaused(deadline, duration);
+        _stage = FocusStage.recovery;
+      }
       await _refreshDndPermission();
       _startOfflineProbe();
       _notify();
@@ -372,7 +396,9 @@ class FocusProvider extends ChangeNotifier {
 
   Future<void> resumeRecoveredRun() async {
     _stage = _resumeStage;
-    if (!timer.isRunning && currentSegment != null) {
+    if (timer.isPaused) {
+      timer.resume();
+    } else if (!timer.isRunning && currentSegment != null) {
       await _startCurrentSegment();
     }
     _startOfflineProbe();
@@ -434,26 +460,23 @@ class FocusProvider extends ChangeNotifier {
         createdAt: now,
         undoDeadlineAt: now.add(const Duration(seconds: 5)),
         sourceRunId: _session?.id,
-        inputType: 'raw_audio',
+        inputType: 'audio',
         localAudioPath: savedPath,
         attemptCount: (_recordingAttempts + 1).clamp(1, 3),
-        captureState: 'raw_saved',
+        captureState: 'saved',
         isPendingSync: true,
       );
       await _saveThought(thought);
-      _canUndoThought = true;
+      if (_stage != FocusStage.thoughtSaved) {
+        _resumeStage = _stage;
+      }
       _stage = FocusStage.thoughtSaved;
-      _undoExpiry?.cancel();
       _toastExpiry?.cancel();
-      _undoExpiry = Timer(const Duration(seconds: 5), () {
-        _canUndoThought = false;
-        _notify();
-        unawaited(flushOutbox());
-      });
       _toastExpiry = Timer(const Duration(seconds: 5), () {
-        if (_stage == FocusStage.thoughtSaved) _stage = FocusStage.active;
+        if (_stage == FocusStage.thoughtSaved) _stage = _resumeStage;
         _notify();
       });
+      _scheduleOutboxFlush();
       await _persistRun();
       _notify();
     } catch (error) {
@@ -512,45 +535,81 @@ class FocusProvider extends ChangeNotifier {
       isPendingSync: true,
     );
     await _saveThought(thought);
-    _canUndoThought = true;
+    if (_stage != FocusStage.thoughtSaved) {
+      _resumeStage = _stage;
+    }
     _stage = FocusStage.thoughtSaved;
-    _undoExpiry?.cancel();
     _toastExpiry?.cancel();
-    _undoExpiry = Timer(const Duration(seconds: 5), () {
-      _canUndoThought = false;
-      _notify();
-      unawaited(flushOutbox());
-    });
     _toastExpiry = Timer(const Duration(seconds: 5), () {
-      if (_stage == FocusStage.thoughtSaved) _stage = FocusStage.active;
+      if (_stage == FocusStage.thoughtSaved) _stage = _resumeStage;
       _notify();
     });
+    _scheduleOutboxFlush();
     await _persistRun();
     _notify();
   }
 
   Future<void> undoLastThought() async {
-    if (!_canUndoThought || _thoughts.isEmpty) return;
+    if (!canUndoThought || _thoughts.isEmpty) return;
     _undoExpiry?.cancel();
+    _toastExpiry?.cancel();
     final thought = _thoughts.removeAt(0);
-    if (thought.audioPath != null) await recorder.delete(thought.audioPath!);
-    await _repository.deleteThought(thought.id);
-    _canUndoThought = false;
-    if (_stage == FocusStage.thoughtSaved) _stage = FocusStage.active;
+    _undoneThoughtIds.add(thought.clientThoughtId);
+    if (thought.localAudioPath != null) {
+      try {
+        await recorder.delete(thought.localAudioPath!);
+      } catch (_) {}
+    }
+    await _repository.deleteThought(thought.clientThoughtId);
+    if (_stage == FocusStage.thoughtSaved) _stage = _resumeStage;
+    _scheduleOutboxFlush();
     await _persistRun();
     _notify();
   }
 
   Future<void> _saveThought(ThoughtRecord thought) async {
-    _thoughts.insert(0, thought);
     await _repository.queueThought(thought);
+    _thoughts.insert(0, thought);
   }
 
   Future<void> deleteThought(ThoughtRecord thought) async {
-    _thoughts.removeWhere((item) => item.id == thought.id);
-    if (thought.audioPath != null) await recorder.delete(thought.audioPath!);
-    await _repository.deleteThought(thought.id);
+    _thoughts.removeWhere((item) => item.clientThoughtId == thought.clientThoughtId);
+    _undoneThoughtIds.add(thought.clientThoughtId);
+    if (thought.localAudioPath != null) {
+      try {
+        await recorder.delete(thought.localAudioPath!);
+      } catch (_) {}
+    }
+    await _repository.deleteThought(thought.clientThoughtId);
+    _scheduleOutboxFlush();
     _notify();
+  }
+
+  void _scheduleOutboxFlush() {
+    final now = _clock.now();
+    final pending = _thoughts
+        .where((t) => t.isPendingSync && !_undoneThoughtIds.contains(t.clientThoughtId))
+        .toList();
+    if (pending.isEmpty) {
+      _undoExpiry?.cancel();
+      return;
+    }
+
+    final nextReady = pending.where((t) => t.undoDeadlineAt.isAfter(now)).toList();
+    if (nextReady.isEmpty) {
+      unawaited(flushOutbox());
+      return;
+    }
+
+    nextReady.sort((a, b) => a.undoDeadlineAt.compareTo(b.undoDeadlineAt));
+    final delay = nextReady.first.undoDeadlineAt.difference(now);
+
+    _undoExpiry?.cancel();
+    _undoExpiry = Timer(delay, () {
+      _notify();
+      unawaited(flushOutbox());
+      _scheduleOutboxFlush();
+    });
   }
 
   Future<void> _loadThoughts() async {
@@ -558,66 +617,60 @@ class FocusProvider extends ChangeNotifier {
     _thoughts
       ..clear()
       ..addAll(loaded);
-
-    // Kiá»ƒm tra vÃ  khÃ´i phá»¥c cÃ¡c Thought chÆ°a Ä‘á»“ng bá»™ khi khá»Ÿi Ä‘á»™ng láº¡i
-    final now = _clock.now();
-    final hasExpiredPending = _thoughts.any((t) => t.isPendingSync && !now.isBefore(t.undoDeadlineAt));
-    if (hasExpiredPending) {
-      unawaited(flushOutbox());
-    } else {
-      final stillPending = _thoughts.where((t) => t.isPendingSync && now.isBefore(t.undoDeadlineAt)).toList();
-      if (stillPending.isNotEmpty) {
-        final earliest = stillPending.map((t) => t.undoDeadlineAt).reduce((a, b) => a.isBefore(b) ? a : b);
-        final delay = earliest.difference(now);
-        _undoExpiry?.cancel();
-        _undoExpiry = Timer(delay, () {
-          _canUndoThought = false;
-          _notify();
-          unawaited(flushOutbox());
-        });
-      }
-    }
+    _scheduleOutboxFlush();
   }
 
-  /// Äá»“ng bá»™ hÃ ng Ä‘á»£i Outbox lÃªn Backend khi cÃ³ káº¿t ná»‘i máº¡ng:
-  /// - CHá»ˆ claim vÃ  gá»­i cÃ¡c Thought Ä‘Ã£ trÃ´i qua háº¡n HoÃ n tÃ¡c (Undo 5 giÃ¢y).
-  /// - Chuáº©n hÃ³a 100% Payload metadata theo Ä‘Ãºng Backend Contract (F3).
-  /// - Ãp dá»¥ng cÆ¡ cháº¿ Idempotency dá»±a trÃªn `clientThoughtId` Ä‘á»ƒ khÃ´ng táº¡o trÃ¹ng.
+  /// Đồng bộ hàng đợi Outbox lên Backend khi có kết nối mạng:
+  /// - Khóa Re-entrancy _isFlushingOutbox chống gửi song song và race condition (BUG-05).
+  /// - CHỈ claim và gửi các Thought đã trôi qua hạn Hoàn tác (Undo 5 giây).
+  /// - Kiểm tra _undoneThoughtIds để không bao giờ gửi bản ghi đã bấm Hoàn tác (Zombie Upload BUG-07).
+  /// - Chuẩn hóa 100% Payload metadata theo đúng Backend Contract (F3, BUG-10, BUG-11, BUG-12).
   Future<void> flushOutbox() async {
-    if (_isOffline) return;
-    final now = _clock.now();
-    // Cháº·n gá»­i sá»›m: chá»‰ láº¥y nhá»¯ng báº£n ghi Ä‘Ã£ háº¿t háº¡n Undo
-    final readyToSync = _thoughts.where((t) => t.isPendingSync && !now.isBefore(t.undoDeadlineAt)).toList();
-    for (final thought in readyToSync) {
-      try {
-        final payload = {
-          'client_thought_id': thought.clientThoughtId,
-          if (thought.sourceRunId != null) 'source_run_id': thought.sourceRunId,
-          'input_type': thought.inputType,
-          if (thought.textContent != null) 'text_content': thought.textContent,
-          'attempt_count': thought.attemptCount,
-          'capture_state': thought.captureState,
-        };
-        final response = await _api.postData(
-          '/thoughts',
-          data: payload,
-          idempotencyKey: thought.clientThoughtId,
-        );
-        final data = response['data'] as Map<String, dynamic>?;
-        final serverId = data?['thought_id'] as String?;
-        await _repository.markThoughtSynced(thought.clientThoughtId);
-        final index = _thoughts.indexWhere((t) => t.clientThoughtId == thought.clientThoughtId);
-        if (index >= 0) {
-          _thoughts[index] = _thoughts[index].copyWith(
-            isPendingSync: false,
-            serverThoughtId: serverId,
+    if (_isOffline || _isFlushingOutbox) return;
+    _isFlushingOutbox = true;
+    try {
+      final now = _clock.now();
+      final readyToSync = _thoughts
+          .where((t) =>
+              t.isPendingSync &&
+              !_undoneThoughtIds.contains(t.clientThoughtId) &&
+              !now.isBefore(t.undoDeadlineAt))
+          .toList();
+      for (final thought in readyToSync) {
+        if (_undoneThoughtIds.contains(thought.clientThoughtId)) continue;
+        try {
+          final payload = {
+            'client_thought_id': thought.clientThoughtId,
+            if (thought.sourceRunId != null) 'source_run_id': thought.sourceRunId,
+            'input_type': thought.inputType,
+            if (thought.textContent != null) 'text_content': thought.textContent,
+            'attempt_count': thought.attemptCount,
+            'capture_state': thought.captureState,
+          };
+          final response = await _api.postData(
+            '/thoughts',
+            data: payload,
+            idempotencyKey: thought.clientThoughtId,
           );
+          if (_undoneThoughtIds.contains(thought.clientThoughtId)) continue;
+          final data = response['data'] as Map<String, dynamic>?;
+          final serverId = data?['thought_id'] as String?;
+          await _repository.markThoughtSynced(thought.clientThoughtId);
+          final index = _thoughts.indexWhere((t) => t.clientThoughtId == thought.clientThoughtId);
+          if (index >= 0) {
+            _thoughts[index] = _thoughts[index].copyWith(
+              isPendingSync: false,
+              serverThoughtId: serverId,
+            );
+          }
+        } catch (_) {
+          // Mạng gián đoạn hoặc server bận: giữ nguyên isPendingSync để thử lại lần sau.
         }
-      } catch (_) {
-        // Máº¡ng giÃ¡n Ä‘oáº¡n hoáº·c server báº­n: giá»¯ nguyÃªn isPendingSync Ä‘á»ƒ thá»­ láº¡i láº§n sau.
       }
+      _notify();
+    } finally {
+      _isFlushingOutbox = false;
     }
-    _notify();
   }
 
   Future<void> _persistRun() async {

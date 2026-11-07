@@ -107,7 +107,7 @@ class SecureStorageRunRepository extends LocalRunRepository {
               .map(ThoughtRecord.fromJson)
               .toList();
         } catch (_) {
-          await _storage.delete(key: thoughtsKey);
+          // KHÔNG XÓA KEY: Bảo toàn dữ liệu thô trên thiết bị khi gặp lỗi giải mã tạm thời
           return [];
         }
       });
@@ -117,13 +117,16 @@ class SecureStorageRunRepository extends LocalRunRepository {
       _thoughtsLock.synchronized(() async {
         final raw = await _storage.read(key: thoughtsKey);
         List<ThoughtRecord> existing = [];
-        if (raw != null) {
+        if (raw != null && raw.isNotEmpty) {
           try {
             existing = (jsonDecode(raw) as List<dynamic>)
                 .whereType<Map<String, dynamic>>()
                 .map(ThoughtRecord.fromJson)
                 .toList();
-          } catch (_) {}
+          } catch (_) {
+            await _storage.write(key: '${thoughtsKey}.corrupted_backup', value: raw);
+            existing = [];
+          }
         }
         existing.removeWhere((item) => item.clientThoughtId == thought.clientThoughtId);
         existing.insert(0, thought);

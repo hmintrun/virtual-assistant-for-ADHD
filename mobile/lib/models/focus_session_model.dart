@@ -15,6 +15,7 @@ class FocusSessionInfo {
   });
 
   final String sessionId;
+  String get id => sessionId;
   final String taskTitle;
   final String stepTitle;
   final DateTime scheduledStart;

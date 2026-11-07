@@ -64,8 +64,9 @@ class FocusTimerService extends ChangeNotifier {
     if (_isPaused) return _pausedRemainingSeconds;
     final target = _endsAt;
     if (!_isRunning || target == null) return _durationSeconds;
-    final difference = target.difference(_clock.now()).inSeconds;
-    return difference < 0 ? 0 : difference;
+    final diffMs = target.difference(_clock.now()).inMilliseconds;
+    if (diffMs <= 0) return 0;
+    return ((diffMs / 1000).ceil()).clamp(0, _durationSeconds);
   }
 
   int get elapsedSeconds {
@@ -100,14 +101,17 @@ class FocusTimerService extends ChangeNotifier {
   /// Kích hoạt cập nhật đồng hồ (dùng cho cả Timer định kỳ và FakeClock test).
   void tick() {
     if (!_isRunning || _isPaused || _isCompleted) return;
-    notifyListeners();
-    onTick?.call();
     if (remainingSeconds == 0) {
       _ticker?.cancel();
       _isRunning = false;
       _isCompleted = true;
+      notifyListeners();
+      onTick?.call();
       onElapsed?.call();
+      return;
     }
+    notifyListeners();
+    onTick?.call();
   }
 
   void pause() {
@@ -131,21 +135,35 @@ class FocusTimerService extends ChangeNotifier {
   }
 
   void restore(DateTime deadline, int originalDurationSeconds) {
-    final remaining = deadline.difference(_clock.now()).inSeconds;
+    final diffMs = deadline.difference(_clock.now()).inMilliseconds;
     _durationSeconds = originalDurationSeconds;
     _isPaused = false;
     _pausedRemainingSeconds = 0;
-    if (remaining <= 0) {
+    if (diffMs <= 0) {
       _endsAt = deadline;
       _isRunning = false;
       _isCompleted = true;
-      onElapsed?.call();
       notifyListeners();
+      onElapsed?.call();
       return;
     }
     _isCompleted = false;
+    final remaining = (diffMs / 1000).ceil();
     start(remaining, deadline: deadline);
     _durationSeconds = originalDurationSeconds;
+  }
+
+  void restorePaused(DateTime deadline, int originalDurationSeconds) {
+    final diffMs = deadline.difference(_clock.now()).inMilliseconds;
+    _durationSeconds = originalDurationSeconds;
+    _endsAt = deadline;
+    _isPaused = true;
+    _isRunning = true;
+    _isCompleted = diffMs <= 0;
+    _pausedRemainingSeconds =
+        diffMs <= 0 ? 0 : ((diffMs / 1000).ceil()).clamp(0, originalDurationSeconds);
+    _ticker?.cancel();
+    notifyListeners();
   }
 
   void stop() {
