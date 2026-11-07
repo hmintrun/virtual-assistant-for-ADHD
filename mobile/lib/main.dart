@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
@@ -16,8 +17,10 @@ import 'services/focus_native_controller.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  await AlarmService.instance.init();
-  await FocusNativeController.instance.init();
+  if (!kIsWeb && defaultTargetPlatform == TargetPlatform.android) {
+    await AlarmService.instance.init();
+    await FocusNativeController.instance.init();
+  }
   final taskProvider = TaskProvider();
   final focusProvider = FocusProvider();
   final themeProvider = ThemeProvider();

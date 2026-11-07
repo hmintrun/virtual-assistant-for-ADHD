@@ -80,7 +80,7 @@ Future<void> releaseDndAfterCheckInTimeout(
   DartPluginRegistrant.ensureInitialized();
   final runId = params['run_id'] as String?;
   if (runId == null) return;
-  await DndService.instance.restore(runId: runId);
+  await DndService.instance.restoreForRun(runId: runId);
 }
 
 /// Gộp chuông + DND + Wakelock + ghi âm thành vài thao tác cho UI.
@@ -159,7 +159,7 @@ class FocusNativeController {
       await _alarm.cancelEnd();
       await AndroidAlarmManager.cancel(_checkInTimeoutAlarmId);
     }
-    await _dnd.restore(runId: runId);
+    await _dnd.restoreForRun(runId: runId);
     if (isActiveRun) {
       await _setWakelock(false);
       await _clearActiveRun();
@@ -178,7 +178,7 @@ class FocusNativeController {
       await _alarm.cancelEnd();
       await AndroidAlarmManager.cancel(_checkInTimeoutAlarmId);
       final staleOwner = await _dnd.pendingOwnerRunId();
-      if (staleOwner != null) await _dnd.restore(runId: staleOwner);
+      if (staleOwner != null) await _dnd.restoreForRun(runId: staleOwner);
       return const FocusRecovery(FocusRecoveryState.none);
     }
 
@@ -226,7 +226,7 @@ class FocusNativeController {
 
     // Chuông trước tiên: quan trọng nhất cho độ chính xác ≤1s.
     final alarmScheduled = await _scheduleAlarms(runId, endsAt, stepTitle);
-    final dndApplied = dndAlreadyHeld || await _dnd.enable(runId: runId);
+    final dndApplied = dndAlreadyHeld || await _dnd.enableForRun(runId: runId);
     final wakelockOn = await _setWakelock(true);
 
     return FocusStartResult(

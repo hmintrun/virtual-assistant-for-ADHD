@@ -9,7 +9,9 @@ import '../models/focus_session_model.dart';
 import '../models/task_model.dart';
 import '../repositories/local_run_repository.dart';
 import '../services/audio_recorder_service.dart';
+import '../services/alarm_service.dart';
 import '../services/dnd_service.dart';
+import '../services/focus_native_controller.dart';
 import '../services/timer_service.dart';
 
 enum FocusStage {
@@ -79,11 +81,15 @@ class ThoughtRecord {
         ? DateTime.parse(json['undo_deadline_at'] as String)
         : created.add(const Duration(seconds: 5));
     final rawType = json['input_type'] as String?;
-    final normalizedType = (rawType == 'raw_audio' || (rawType == null && (json['local_audio_path'] != null || json['audio_path'] != null)))
+    final normalizedType = (rawType == 'raw_audio' ||
+            (rawType == null &&
+                (json['local_audio_path'] != null ||
+                    json['audio_path'] != null)))
         ? 'audio'
         : (rawType ?? 'text');
     final rawState = json['capture_state'] as String?;
-    final normalizedState = rawState == 'raw_saved' ? 'saved' : (rawState ?? 'saved');
+    final normalizedState =
+        rawState == 'raw_saved' ? 'saved' : (rawState ?? 'saved');
     return ThoughtRecord(
       clientThoughtId: (json['client_thought_id'] ?? json['id']) as String,
       createdAt: created,
@@ -91,7 +97,8 @@ class ThoughtRecord {
       sourceRunId: json['source_run_id'] as String?,
       inputType: normalizedType,
       textContent: (json['text_content'] ?? json['text']) as String?,
-      localAudioPath: (json['local_audio_path'] ?? json['audio_path']) as String?,
+      localAudioPath:
+          (json['local_audio_path'] ?? json['audio_path']) as String?,
       attemptCount: json['attempt_count'] as int? ?? 1,
       captureState: normalizedState,
       isPendingSync: json['pending_sync'] as bool? ?? true,
@@ -146,6 +153,15 @@ class FocusProvider extends ChangeNotifier {
     this.timer.addListener(_onTimerChanged);
     this.microTaskTimer.onElapsed = _onMicroTaskElapsed;
     this.microTaskTimer.addListener(_onTimerChanged);
+    this.recorder.onAutoStopped = (recording) {
+      unawaited(_onAutoRecordingSaved(recording));
+    };
+    this.recorder.onAutoStopFailed = (error) {
+      _isRecording = false;
+      _recordingPath = null;
+      _lastError = error.message;
+      unawaited(_recordingFailed());
+    };
   }
 
   final Clock _clock;
@@ -158,6 +174,7 @@ class FocusProvider extends ChangeNotifier {
   final List<ThoughtRecord> _thoughts = [];
 
   FocusSessionInfo? _session;
+  DateTime? _runEndsAt;
   FocusStage _stage = FocusStage.ended;
   FocusStage _resumeStage = FocusStage.active;
   DndSnapshot? _dndSnapshot;
@@ -166,6 +183,7 @@ class FocusProvider extends ChangeNotifier {
   int _actualWorkSeconds = 0;
   bool _dndPermission = false;
   bool _dndApplied = false;
+  bool? _alarmScheduled;
   bool _isOffline = false;
   bool _isRecording = false;
   int _recordingAttempts = 0;
@@ -173,9 +191,11 @@ class FocusProvider extends ChangeNotifier {
   String? _lastError;
   Timer? _offlineProbe;
   Timer? _undoExpiry;
+  Timer? _deleteUndoExpiry;
   Timer? _toastExpiry;
   bool _isFlushingOutbox = false;
   final Set<String> _undoneThoughtIds = {};
+  ThoughtRecord? _pendingDeletedThought;
   bool _disposed = false;
 
   FocusSessionInfo? get session => _session;
@@ -190,8 +210,12 @@ class FocusProvider extends ChangeNotifier {
   bool get timerRunning => timer.isRunning;
   bool get dndPermission => _dndPermission;
   bool get dndApplied => _dndApplied;
+  bool? get alarmScheduled => _alarmScheduled;
   bool get isOffline => _isOffline;
   bool get isRecording => _isRecording;
+  bool get canUndoDeletedThought => _pendingDeletedThought != null;
+  bool get _usesNativeFocus =>
+      !kIsWeb && defaultTargetPlatform == TargetPlatform.android;
   bool get canUndoThought {
     if (_thoughts.isEmpty) return false;
     final now = _clock.now();
@@ -200,6 +224,7 @@ class FocusProvider extends ChangeNotifier {
         !_undoneThoughtIds.contains(latest.clientThoughtId) &&
         now.isBefore(latest.undoDeadlineAt);
   }
+
   int get recordingAttempts => _recordingAttempts;
   String? get lastError => _lastError;
   int get segmentIndex => _segmentIndex;
@@ -219,6 +244,9 @@ class FocusProvider extends ChangeNotifier {
 
   Future<void> restore() async {
     await _loadThoughts();
+    final nativeRecovery = _usesNativeFocus
+        ? await FocusNativeController.instance.recoverOnAppStart()
+        : null;
     final json = await _repository.loadActiveRun();
     if (json == null) return;
     try {
@@ -230,6 +258,8 @@ class FocusProvider extends ChangeNotifier {
           .map(SessionSegmentModel.fromJson)
           .toList(growable: false);
       _segmentIndex = json['segment_index'] as int? ?? 0;
+      _runEndsAt = DateTime.tryParse(json['run_ends_at'] as String? ?? '');
+      _runEndsAt = nativeRecovery?.endsAt ?? _runEndsAt;
       _actualWorkSeconds = json['actual_work_seconds'] as int? ?? 0;
       _resumeStage = FocusStage.values.firstWhere(
         (stage) => stage.name == json['stage'],
@@ -237,22 +267,46 @@ class FocusProvider extends ChangeNotifier {
       );
       final dndJson = json['dnd_snapshot'] as Map<String, dynamic>?;
       _dndSnapshot = dndJson == null ? null : DndSnapshot.fromJson(dndJson);
-      _dndApplied = _dndSnapshot?.appApplied ?? false;
+      _dndApplied = nativeRecovery == null
+          ? _dndSnapshot?.appApplied ?? false
+          : nativeRecovery.state == FocusRecoveryState.running ||
+              nativeRecovery.state == FocusRecoveryState.awaitingCheckIn;
       _stage = _resumeStage;
       final deadline =
           DateTime.tryParse(json['timer_deadline'] as String? ?? '');
       final duration = json['timer_duration'] as int? ?? 0;
+      if (_runEndsAt == null && deadline != null) {
+        final secondsAfterCurrent = _segments
+            .skip(_segmentIndex + 1)
+            .fold<int>(0, (total, segment) => total + segment.durationSeconds);
+        _runEndsAt = deadline.add(Duration(seconds: secondsAfterCurrent));
+      }
       if (deadline != null && duration > 0) {
         final remainingMs = deadline.difference(_clock.now()).inMilliseconds;
         if (remainingMs <= 0) {
-          // Phiên đã hết hạn trong lúc app đóng: bảo lưu dữ liệu để kích hoạt UF5 Check-in, không tự xóa run
-          _actualWorkSeconds += duration;
-          _stage = FocusStage.ended;
-          _notify();
-          return;
+          if (nativeRecovery?.state == FocusRecoveryState.checkInExpired) {
+            _stage = FocusStage.ended;
+            _dndApplied = false;
+            await _repository.clearActiveRun();
+            _notify();
+            return;
+          }
+          if (nativeRecovery?.state == FocusRecoveryState.awaitingCheckIn) {
+            if (currentSegment?.kind == 'work') {
+              _actualWorkSeconds += duration;
+            }
+            _stage = FocusStage.ended;
+            _notify();
+            return;
+          }
+          // Segment có thể đã hết khi app đóng nhưng còn segment kế tiếp.
+          // Khôi phục theo deadline tuyệt đối để timer tự chuyển tiếp.
+          _stage = FocusStage.recovery;
+          timer.restore(deadline, duration);
+        } else {
+          timer.restorePaused(deadline, duration);
+          _stage = FocusStage.recovery;
         }
-        timer.restorePaused(deadline, duration);
-        _stage = FocusStage.recovery;
       }
       await _refreshDndPermission();
       _startOfflineProbe();
@@ -265,6 +319,7 @@ class FocusProvider extends ChangeNotifier {
   Future<void> startSession(FocusSessionInfo session) async {
     microTaskTimer.stop();
     _session = session;
+    _runEndsAt = null;
     _segments = session.effectiveSegments
         .where((segment) => segment.durationSeconds > 0)
         .toList(growable: false);
@@ -274,6 +329,7 @@ class FocusProvider extends ChangeNotifier {
     _resumeStage = FocusStage.reminder;
     _recordingAttempts = 0;
     _lastError = null;
+    _alarmScheduled = null;
     await _refreshDndPermission();
     _notify();
   }
@@ -306,7 +362,8 @@ class FocusProvider extends ChangeNotifier {
     final session = _session;
     if (session == null) return;
     final now = _clock.now();
-    final graceDeadline = session.scheduledStart.add(const Duration(minutes: 15));
+    final graceDeadline =
+        session.scheduledStart.add(const Duration(minutes: 15));
     if (now.isAfter(graceDeadline)) {
       _setStage(FocusStage.lateStart);
       return;
@@ -319,17 +376,48 @@ class FocusProvider extends ChangeNotifier {
   Future<void> _beginRun() async {
     _lastError = null;
     await _refreshDndPermission();
-    try {
-      _dndSnapshot = await dnd.enable();
-      _dndApplied = _dndSnapshot?.appApplied ?? false;
-    } catch (_) {
-      _dndSnapshot = const DndSnapshot(previousFilter: null, appApplied: false);
-      _dndApplied = false;
-    }
-    try {
-      await WakelockPlus.enable();
-    } catch (_) {
-      // The timer remains usable if a device does not support wakelock.
+    if (_usesNativeFocus && _session != null) {
+      final totalSeconds = _segments
+          .skip(_firstWorkIndex)
+          .fold<int>(0, (total, segment) => total + segment.durationSeconds);
+      _runEndsAt = _clock.now().add(Duration(seconds: totalSeconds));
+      try {
+        try {
+          await AlarmService.instance.requestPermissions();
+        } catch (_) {
+          // Timer vẫn chạy nếu alarm permission chưa được cấp.
+        }
+        final result = await FocusNativeController.instance.start(
+          runId: _session!.sessionId,
+          duration: Duration(seconds: totalSeconds),
+          stepTitle: _session!.stepTitle,
+        );
+        _runEndsAt = result.endsAt;
+        _dndApplied = result.dndApplied;
+        _alarmScheduled = result.alarmScheduled;
+        _dndSnapshot = null;
+      } catch (_) {
+        _dndApplied = false;
+        _alarmScheduled = false;
+      }
+    } else {
+      final totalSeconds = _segments
+          .skip(_firstWorkIndex)
+          .fold<int>(0, (total, segment) => total + segment.durationSeconds);
+      _runEndsAt = _clock.now().add(Duration(seconds: totalSeconds));
+      try {
+        _dndSnapshot = await dnd.enable();
+        _dndApplied = _dndSnapshot?.appApplied ?? false;
+      } catch (_) {
+        _dndSnapshot =
+            const DndSnapshot(previousFilter: null, appApplied: false);
+        _dndApplied = false;
+      }
+      try {
+        await WakelockPlus.enable();
+      } catch (_) {
+        // The timer remains usable if a device does not support wakelock.
+      }
     }
     _segmentIndex = _firstWorkIndex;
     await _startCurrentSegment();
@@ -351,7 +439,13 @@ class FocusProvider extends ChangeNotifier {
     }
     _setStage(
         segment.kind == 'rest' ? FocusStage.breakTime : FocusStage.active);
-    timer.start(segment.durationSeconds);
+    final secondsAfterCurrent = _segments
+        .skip(_segmentIndex + 1)
+        .fold<int>(0, (total, item) => total + item.durationSeconds);
+    final segmentDeadline = _runEndsAt?.subtract(
+      Duration(seconds: secondsAfterCurrent),
+    );
+    timer.start(segment.durationSeconds, deadline: segmentDeadline);
     await _persistRun();
   }
 
@@ -369,24 +463,38 @@ class FocusProvider extends ChangeNotifier {
     }
     _segmentIndex++;
     if (_segmentIndex >= _segments.length) {
-      await _finishLocalRun();
+      await _finishLocalRun(awaitCheckIn: true);
       return;
     }
     await _startCurrentSegment();
   }
 
-  Future<void> _finishLocalRun() async {
+  Future<void> _finishLocalRun({bool awaitCheckIn = false}) async {
     timer.stop();
     _stopOfflineProbe();
-    await _restoreFocusMode();
+    if (awaitCheckIn && _usesNativeFocus && _isRecording) {
+      try {
+        final saved = await recorder.stopAndFinalize();
+        _isRecording = false;
+        _recordingPath = null;
+        await _saveFinalizedRecording(saved);
+      } catch (error) {
+        _isRecording = false;
+        _recordingPath = null;
+        _lastError = error.toString();
+      }
+    }
+    await _restoreFocusMode(preserveCheckIn: awaitCheckIn);
     _stage = FocusStage.ended;
+    _runEndsAt = null;
     // Káº¿t thÃºc Ä‘áº¿m giá» cá»¥c bá»™ KHÃ”NG tá»± Ä‘á»™ng Ä‘Ã¡nh dáº¥u hoÃ n thÃ nh Session/Step/Task (UF5).
-    await _repository.clearActiveRun();
+    if (!(awaitCheckIn && _usesNativeFocus)) {
+      await _repository.clearActiveRun();
+    }
     _notify();
   }
 
   Future<void> endEarly() async {
-    if (_isRecording) await cancelRecording();
     final segment = currentSegment;
     if (segment != null && segment.kind == 'work') {
       _actualWorkSeconds += timer.elapsedSeconds;
@@ -397,7 +505,12 @@ class FocusProvider extends ChangeNotifier {
   Future<void> resumeRecoveredRun() async {
     _stage = _resumeStage;
     if (timer.isPaused) {
-      timer.resume();
+      final deadline = timer.endsAt;
+      if (deadline != null) {
+        timer.restore(deadline, timer.durationSeconds);
+      } else {
+        timer.resume();
+      }
     } else if (!timer.isRunning && currentSegment != null) {
       await _startCurrentSegment();
     }
@@ -436,7 +549,7 @@ class FocusProvider extends ChangeNotifier {
     String? path;
     try {
       path = await recorder.createRecordingPath();
-      await recorder.start(path);
+      await recorder.start(path: path);
       _recordingPath = path;
       _isRecording = true;
       _notify();
@@ -451,32 +564,10 @@ class FocusProvider extends ChangeNotifier {
     final path = _recordingPath;
     if (!_isRecording || path == null) return;
     try {
-      final savedPath = await recorder.stopAndValidate(path);
+      final recording = await recorder.stopAndFinalize();
       _isRecording = false;
       _recordingPath = null;
-      final now = _clock.now();
-      final thought = ThoughtRecord(
-        clientThoughtId: now.microsecondsSinceEpoch.toString(),
-        createdAt: now,
-        undoDeadlineAt: now.add(const Duration(seconds: 5)),
-        sourceRunId: _session?.id,
-        inputType: 'audio',
-        localAudioPath: savedPath,
-        attemptCount: (_recordingAttempts + 1).clamp(1, 3),
-        captureState: 'saved',
-        isPendingSync: true,
-      );
-      await _saveThought(thought);
-      if (_stage != FocusStage.thoughtSaved) {
-        _resumeStage = _stage;
-      }
-      _stage = FocusStage.thoughtSaved;
-      _toastExpiry?.cancel();
-      _toastExpiry = Timer(const Duration(seconds: 5), () {
-        if (_stage == FocusStage.thoughtSaved) _stage = _resumeStage;
-        _notify();
-      });
-      _scheduleOutboxFlush();
+      await _saveAudioThought(recording);
       await _persistRun();
       _notify();
     } catch (error) {
@@ -486,8 +577,45 @@ class FocusProvider extends ChangeNotifier {
         await recorder.delete(path);
       } catch (_) {}
       _lastError = error.toString();
-      await _recordingFailed();
+      if (error is! RecorderException || error.countsAsFailure) {
+        await _recordingFailed();
+      } else {
+        _stage = FocusStage.active;
+        _notify();
+      }
     }
+  }
+
+  Future<void> _saveAudioThought(ThoughtRecording recording) async {
+    final now = _clock.now();
+    final thought = ThoughtRecord(
+      clientThoughtId: now.microsecondsSinceEpoch.toString(),
+      createdAt: now,
+      undoDeadlineAt: now.add(const Duration(seconds: 5)),
+      sourceRunId: _session?.sessionId,
+      inputType: 'audio',
+      localAudioPath: recording.path,
+      attemptCount: (_recordingAttempts + 1).clamp(1, 3),
+      captureState: 'saved',
+      isPendingSync: true,
+    );
+    await _saveThought(thought);
+    if (_stage != FocusStage.thoughtSaved) _resumeStage = _stage;
+    _stage = FocusStage.thoughtSaved;
+    _toastExpiry?.cancel();
+    _toastExpiry = Timer(const Duration(seconds: 5), () {
+      if (_stage == FocusStage.thoughtSaved) _stage = _resumeStage;
+      _notify();
+    });
+    _scheduleOutboxFlush();
+  }
+
+  Future<void> _onAutoRecordingSaved(ThoughtRecording recording) async {
+    _isRecording = false;
+    _recordingPath = null;
+    await _saveAudioThought(recording);
+    await _persistRun();
+    _notify();
   }
 
   Future<void> cancelRecording() async {
@@ -573,14 +701,49 @@ class FocusProvider extends ChangeNotifier {
   }
 
   Future<void> deleteThought(ThoughtRecord thought) async {
-    _thoughts.removeWhere((item) => item.clientThoughtId == thought.clientThoughtId);
-    _undoneThoughtIds.add(thought.clientThoughtId);
+    if (_pendingDeletedThought != null) {
+      await _finalizePendingThoughtDeletion();
+    }
+    final index = _thoughts.indexWhere(
+      (item) => item.clientThoughtId == thought.clientThoughtId,
+    );
+    if (index < 0) return;
+    final removed = _thoughts.removeAt(index);
+    _pendingDeletedThought = removed;
+    _undoneThoughtIds.add(removed.clientThoughtId);
+    _deleteUndoExpiry?.cancel();
+    _deleteUndoExpiry = Timer(const Duration(seconds: 5), () {
+      unawaited(_finalizePendingThoughtDeletion());
+    });
+    _scheduleOutboxFlush();
+    _notify();
+  }
+
+  Future<void> undoDeletedThought() async {
+    final thought = _pendingDeletedThought;
+    if (thought == null) return;
+    _deleteUndoExpiry?.cancel();
+    _deleteUndoExpiry = null;
+    _pendingDeletedThought = null;
+    _undoneThoughtIds.remove(thought.clientThoughtId);
+    _thoughts.insert(0, thought);
+    await _repository.queueThought(thought);
+    _scheduleOutboxFlush();
+    _notify();
+  }
+
+  Future<void> _finalizePendingThoughtDeletion() async {
+    final thought = _pendingDeletedThought;
+    _pendingDeletedThought = null;
+    _deleteUndoExpiry?.cancel();
+    _deleteUndoExpiry = null;
+    if (thought == null) return;
+    await _repository.deleteThought(thought.clientThoughtId);
     if (thought.localAudioPath != null) {
       try {
         await recorder.delete(thought.localAudioPath!);
       } catch (_) {}
     }
-    await _repository.deleteThought(thought.clientThoughtId);
     _scheduleOutboxFlush();
     _notify();
   }
@@ -588,14 +751,16 @@ class FocusProvider extends ChangeNotifier {
   void _scheduleOutboxFlush() {
     final now = _clock.now();
     final pending = _thoughts
-        .where((t) => t.isPendingSync && !_undoneThoughtIds.contains(t.clientThoughtId))
+        .where((t) =>
+            t.isPendingSync && !_undoneThoughtIds.contains(t.clientThoughtId))
         .toList();
     if (pending.isEmpty) {
       _undoExpiry?.cancel();
       return;
     }
 
-    final nextReady = pending.where((t) => t.undoDeadlineAt.isAfter(now)).toList();
+    final nextReady =
+        pending.where((t) => t.undoDeadlineAt.isAfter(now)).toList();
     if (nextReady.isEmpty) {
       unawaited(flushOutbox());
       return;
@@ -641,9 +806,11 @@ class FocusProvider extends ChangeNotifier {
         try {
           final payload = {
             'client_thought_id': thought.clientThoughtId,
-            if (thought.sourceRunId != null) 'source_run_id': thought.sourceRunId,
+            if (thought.sourceRunId != null)
+              'source_run_id': thought.sourceRunId,
             'input_type': thought.inputType,
-            if (thought.textContent != null) 'text_content': thought.textContent,
+            if (thought.textContent != null)
+              'text_content': thought.textContent,
             'attempt_count': thought.attemptCount,
             'capture_state': thought.captureState,
           };
@@ -656,7 +823,8 @@ class FocusProvider extends ChangeNotifier {
           final data = response['data'] as Map<String, dynamic>?;
           final serverId = data?['thought_id'] as String?;
           await _repository.markThoughtSynced(thought.clientThoughtId);
-          final index = _thoughts.indexWhere((t) => t.clientThoughtId == thought.clientThoughtId);
+          final index = _thoughts
+              .indexWhere((t) => t.clientThoughtId == thought.clientThoughtId);
           if (index >= 0) {
             _thoughts[index] = _thoughts[index].copyWith(
               isPendingSync: false,
@@ -678,6 +846,7 @@ class FocusProvider extends ChangeNotifier {
     if (session == null || !isActiveRun) return;
     await _repository.saveActiveRun({
       'session': session.toJson(),
+      if (_runEndsAt != null) 'run_ends_at': _runEndsAt!.toIso8601String(),
       'segments': _segments.map((segment) => segment.toJson()).toList(),
       'segment_index': _segmentIndex,
       'actual_work_seconds': _actualWorkSeconds,
@@ -717,15 +886,47 @@ class FocusProvider extends ChangeNotifier {
     _offlineProbe = null;
   }
 
-  Future<void> _restoreFocusMode() async {
-    try {
-      await dnd.restore(_dndSnapshot);
-    } catch (_) {}
-    try {
-      await WakelockPlus.disable();
-    } catch (_) {}
+  Future<void> _restoreFocusMode({bool preserveCheckIn = false}) async {
+    final session = _session;
+    if (_usesNativeFocus && session != null) {
+      if (preserveCheckIn) return;
+      try {
+        final result = await FocusNativeController.instance.stop(
+          runId: session.sessionId,
+        );
+        final saved = result.savedRecording;
+        if (saved != null) {
+          _isRecording = false;
+          _recordingPath = null;
+          await _saveFinalizedRecording(saved);
+        }
+      } catch (_) {}
+    } else {
+      try {
+        await dnd.restore(_dndSnapshot);
+      } catch (_) {}
+      try {
+        await WakelockPlus.disable();
+      } catch (_) {}
+    }
     _dndSnapshot = null;
     _dndApplied = false;
+  }
+
+  Future<void> _saveFinalizedRecording(ThoughtRecording recording) async {
+    final now = _clock.now();
+    await _saveThought(ThoughtRecord(
+      clientThoughtId: now.microsecondsSinceEpoch.toString(),
+      createdAt: now,
+      undoDeadlineAt: now.add(const Duration(seconds: 5)),
+      sourceRunId: _session?.sessionId,
+      inputType: 'audio',
+      localAudioPath: recording.path,
+      attemptCount: (_recordingAttempts + 1).clamp(1, 3),
+      captureState: 'saved',
+      isPendingSync: true,
+    ));
+    _scheduleOutboxFlush();
   }
 
   void _setStage(FocusStage stage) {
@@ -746,7 +947,10 @@ class FocusProvider extends ChangeNotifier {
     _disposed = true;
     _stopOfflineProbe();
     _undoExpiry?.cancel();
+    _deleteUndoExpiry?.cancel();
     _toastExpiry?.cancel();
+    recorder.onAutoStopped = null;
+    recorder.onAutoStopFailed = null;
     timer.removeListener(_onTimerChanged);
     microTaskTimer.removeListener(_onTimerChanged);
     timer.dispose();

@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
@@ -469,6 +471,16 @@ class _FocusScreenState extends State<FocusScreen> with WidgetsBindingObserver {
         remaining: focus.remainingSeconds,
         progress: focus.progress,
       ),
+      if (focus.alarmScheduled == false) ...[
+        const SizedBox(height: 12),
+        _InfoCard(
+          icon: Icons.notifications_off_outlined,
+          title: 'Chưa đặt được chuông kết thúc',
+          subtitle:
+              'Đồng hồ vẫn chạy. Kiểm tra quyền thông báo và báo thức chính xác trong Cài đặt Android.',
+          accent: MelbelColors.kAmber,
+        ),
+      ],
       const SizedBox(height: 20),
       Center(
         child: Text(
@@ -859,10 +871,20 @@ class _FocusScreenState extends State<FocusScreen> with WidgetsBindingObserver {
                                 onDelete: () async {
                                   await focus.deleteThought(thought);
                                   if (sheetContext.mounted) {
-                                    ScaffoldMessenger.of(context).showSnackBar(
-                                      const SnackBar(
-                                          content: Text(
-                                              'Đã xóa ghi chú khỏi thiết bị.')),
+                                    ScaffoldMessenger.of(sheetContext)
+                                        .showSnackBar(
+                                      SnackBar(
+                                        content: const Text('Đã xóa ghi chú'),
+                                        duration: const Duration(seconds: 5),
+                                        action: SnackBarAction(
+                                          label: 'Hoàn tác',
+                                          onPressed: () {
+                                            unawaited(
+                                              focus.undoDeletedThought(),
+                                            );
+                                          },
+                                        ),
+                                      ),
                                     );
                                   }
                                 },

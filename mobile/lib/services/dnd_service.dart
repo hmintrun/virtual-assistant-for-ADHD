@@ -13,6 +13,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 class DndService {
   DndService._();
   static final DndService instance = DndService._();
+  factory DndService() => instance;
 
   static const String _snapshotKey = 'dnd_snapshot';
 
@@ -35,7 +36,7 @@ class DndService {
   ///
   /// Trả về false (phiên vẫn chạy bình thường, chỉ không có DND) khi: thiếu
   /// quyền, máy không hỗ trợ, hoặc người dùng đã tự bật Priority từ trước.
-  Future<bool> enable({required String runId}) async {
+  Future<bool> enableForRun({required String runId}) async {
     try {
       if (!await hasPermission) return false;
       final previous = await FlutterDnd.getCurrentInterruptionFilter();
@@ -68,7 +69,7 @@ class DndService {
 
   /// Trả lại DND khi phiên `runId` kết thúc. Gọi nhiều lần vẫn an toàn
   /// (idempotent): lần sau không còn snapshot nên thoát ngay.
-  Future<void> restore({required String runId}) async {
+  Future<void> restoreForRun({required String runId}) async {
     final prefs = await SharedPreferences.getInstance();
     final raw = prefs.getString(_snapshotKey);
     if (raw == null) return; // app không bật gì → không đụng
@@ -131,4 +132,60 @@ class DndService {
     if (raw == null) return null;
     return (jsonDecode(raw) as Map<String, dynamic>)['run_id'] as String?;
   }
+
+  /// Legacy adapter used by FocusProvider until native-controller migration.
+  Future<DndSnapshot> enable() async {
+    try {
+      final previous = await FlutterDnd.getCurrentInterruptionFilter();
+      if (!await hasPermission || previous == _focusFilter) {
+        return DndSnapshot(previousFilter: previous, appApplied: false);
+      }
+      await FlutterDnd.setAppNotificationPolicy(
+        priorityCategories: FlutterDnd.PRIORITY_CATEGORY_CALLS |
+            FlutterDnd.PRIORITY_CATEGORY_REPEAT_CALLERS |
+            FlutterDnd.PRIORITY_CATEGORY_ALARMS,
+        priorityCallSenders: FlutterDnd.PRIORITY_SENDERS_ANY,
+      );
+      final applied = await FlutterDnd.setInterruptionFilter(_focusFilter);
+      return DndSnapshot(
+        previousFilter: previous,
+        appApplied: applied == true,
+      );
+    } on PlatformException {
+      return const DndSnapshot(previousFilter: null, appApplied: false);
+    }
+  }
+
+  Future<void> restore(DndSnapshot? snapshot) async {
+    if (snapshot == null || !snapshot.appApplied) return;
+    try {
+      final current = await FlutterDnd.getCurrentInterruptionFilter();
+      if (current != _focusFilter) return;
+      final previous = snapshot.previousFilter;
+      final target =
+          previous == null || previous == FlutterDnd.INTERRUPTION_FILTER_UNKNOWN
+              ? FlutterDnd.INTERRUPTION_FILTER_ALL
+              : previous;
+      await FlutterDnd.setInterruptionFilter(target);
+    } on PlatformException {
+      // Permission may be revoked during a focus run.
+    }
+  }
+}
+
+class DndSnapshot {
+  const DndSnapshot({required this.previousFilter, required this.appApplied});
+
+  final int? previousFilter;
+  final bool appApplied;
+
+  Map<String, dynamic> toJson() => {
+        'previous_filter': previousFilter,
+        'app_applied': appApplied,
+      };
+
+  factory DndSnapshot.fromJson(Map<String, dynamic> json) => DndSnapshot(
+        previousFilter: json['previous_filter'] as int?,
+        appApplied: json['app_applied'] as bool? ?? false,
+      );
 }
