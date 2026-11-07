@@ -36,7 +36,7 @@ Tài liệu này giúp Tân ghép phần native (chuông hết phiên, Không l�
 | `mobile/pubspec.yaml` | Thêm `timezone`, `path_provider`, `shared_preferences`, `android_alarm_manager_plus` |
 | `mobile/test/alarm_service_test.dart` | Unit test làm tròn giây (4/4 đạt) |
 
-> ⚠️ **Tránh conflict:** nhánh `feat/tan-w2-mobile` của Tân cũng có `dnd_service.dart` và `audio_recorder_service.dart`. Hai file này thuộc phần của Kai theo kế hoạch tuần 2 → **Tân dùng bản của Kai**, bỏ bản của Tân khỏi PR. `pubspec.yaml` / `pubspec.lock` có thể conflict nhẹ (cùng thêm `path_provider`) → giữ cả hai rồi chạy `flutter pub get`.
+> ⚠️ **Tránh conflict:** nhánh `feat/tan-w2-mobile` của Tân cũng có `dnd_service.dart` và `audio_recorder_service.dart`. Hai file này thuộc phần của Kai theo kế hoạch tuần 2 → **Tân dùng bản của Kai**, bỏ bản cũ của Tân khỏi PR. `pubspec.yaml` / `pubspec.lock` có thể cùng thêm dependency như `path_provider`: gộp danh sách dependency nhưng chỉ giữ **một khai báo cho mỗi key** trong YAML, sau đó chạy `flutter pub get`. Không giữ hai dòng `path_provider` vì YAML trùng key sẽ làm Flutter dừng ngay khi đọc manifest.
 
 ---
 
