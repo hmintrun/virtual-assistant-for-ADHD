@@ -31,6 +31,53 @@ class _TaskSummaryScreenState extends State<TaskSummaryScreen> {
     super.dispose();
   }
 
+  Future<void> _pickAvailability(TaskProvider task) async {
+    final now = DateTime.now().toUtc().add(const Duration(hours: 7));
+    final today = DateTime(now.year, now.month, now.day);
+    final date = await showDatePicker(
+      context: context,
+      helpText: 'Chọn ngày bạn rảnh',
+      firstDate: today,
+      lastDate: DateTime(today.year + 2, today.month, today.day),
+      initialDate: today,
+    );
+    if (date == null || !mounted) return;
+    final start = await showTimePicker(
+      context: context,
+      helpText: 'Giờ bắt đầu (giờ Việt Nam)',
+      initialTime: const TimeOfDay(hour: 18, minute: 0),
+    );
+    if (start == null || !mounted) return;
+    final end = await showTimePicker(
+      context: context,
+      helpText: 'Giờ kết thúc (giờ Việt Nam)',
+      initialTime: start,
+    );
+    if (end == null || !mounted) return;
+
+    DateTime instant(TimeOfDay time) => DateTime.utc(
+      date.year,
+      date.month,
+      date.day,
+      time.hour - 7,
+      time.minute,
+    );
+    final from = instant(start);
+    final to = instant(end);
+    final deadline = task.deadline;
+    if (!to.isAfter(from) ||
+        !to.isAfter(DateTime.now()) ||
+        (deadline != null && to.isAfter(deadline))) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Chọn giờ kết thúc sau giờ bắt đầu và trước hạn chót.'),
+        ),
+      );
+      return;
+    }
+    task.setAvailability(AvailabilitySlot(start: from, end: to));
+  }
+
   Future<void> _continue() async {
     if (_isSubmitting) return;
     final task = context.read<TaskProvider>();
@@ -298,7 +345,7 @@ class _TaskSummaryScreenState extends State<TaskSummaryScreen> {
                         const SizedBox(width: 8),
                         Expanded(
                             child: Text(
-                          'Giờ rảnh theo cài đặt: ${task.serverAvailabilitySummary}',
+                          'Giờ rảnh: ${task.availabilitySummary}',
                           style: const TextStyle(
                             fontFamily: 'Be Vietnam Pro',
                             fontSize: 13,
@@ -326,8 +373,6 @@ class _TaskSummaryScreenState extends State<TaskSummaryScreen> {
             ),
             const SizedBox(height: 16),
 
-            // Availability is read from the confirmed backend profile; this screen
-            // does not invent a local-only time window.
             Container(
               padding: const EdgeInsets.all(16),
               decoration: BoxDecoration(
@@ -339,7 +384,7 @@ class _TaskSummaryScreenState extends State<TaskSummaryScreen> {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   const Text(
-                    'Giờ rảnh đã xác nhận',
+                    'Giờ rảnh cho công việc này',
                     style: TextStyle(
                       fontFamily: 'Be Vietnam Pro',
                       fontSize: 16,
@@ -349,7 +394,7 @@ class _TaskSummaryScreenState extends State<TaskSummaryScreen> {
                   ),
                   const SizedBox(height: 10),
                   Text(
-                    task.serverAvailabilitySummary,
+                    task.availabilitySummary,
                     style: const TextStyle(
                       fontFamily: 'Be Vietnam Pro',
                       fontSize: 14,
@@ -357,12 +402,14 @@ class _TaskSummaryScreenState extends State<TaskSummaryScreen> {
                     ),
                   ),
                   const SizedBox(height: 8),
-                  const Text(
-                    'Muốn đổi giờ rảnh, cập nhật trong Cài đặt trước khi lập lịch.',
-                    style: TextStyle(
-                      fontFamily: 'Be Vietnam Pro',
-                      fontSize: 12,
-                      color: MelbelColors.kOnSurfaceVariant,
+                  TextButton(
+                    onPressed: _isSubmitting || task.isApiBusy
+                        ? null
+                        : () => _pickAvailability(task),
+                    child: Text(
+                      task.draft?.summary['availability'] != null
+                          ? 'Thay bằng một khung giờ khác'
+                          : 'Chọn ngày và giờ rảnh',
                     ),
                   ),
                 ],

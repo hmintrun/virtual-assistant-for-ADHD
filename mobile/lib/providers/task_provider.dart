@@ -16,12 +16,16 @@ class AvailabilitySlot {
   final DateTime end;
 
   String get label {
-    final date = _dayLabel(start);
-    return date + ', ' + _time(start) + '–' + _time(end);
+    final localStart = _inVietnam(start);
+    final localEnd = _inVietnam(end);
+    return '${_dayLabel(localStart)}, ${_time(localStart)}–${_time(localEnd)}';
   }
 
+  static DateTime _inVietnam(DateTime value) =>
+      value.toUtc().add(const Duration(hours: 7));
+
   static String _dayLabel(DateTime value) {
-    final today = DateTime.now();
+    final today = _inVietnam(DateTime.now());
     final date = DateTime(value.year, value.month, value.day);
     final todayDate = DateTime(today.year, today.month, today.day);
     if (date == todayDate) return 'Hôm nay';
@@ -66,7 +70,6 @@ class TaskProvider extends ChangeNotifier {
   bool _planSavedForLater = false;
   PlanningDraftModel? _draft;
   PlanCandidateModel? _candidate;
-  AvailabilityModel? _serverAvailability;
   TaskModel? _confirmedTask;
   bool _isApiBusy = false;
   String? _apiError;
@@ -95,26 +98,58 @@ class TaskProvider extends ChangeNotifier {
   bool get isApiBusy => _isApiBusy;
   String? get apiError => _apiError;
   bool get canPlan => _draft?.canPlan ?? false;
-  String get serverAvailabilitySummary {
-    final availability = _serverAvailability;
-    if (availability == null) return 'Chưa tải được giờ rảnh từ máy chủ.';
-    const weekdays = {
-      1: 'Thứ 2',
-      2: 'Thứ 3',
-      3: 'Thứ 4',
-      4: 'Thứ 5',
-      5: 'Thứ 6',
-      6: 'Thứ 7',
-      7: 'Chủ nhật',
+  String get availabilitySummary {
+    final selected = _availability;
+    if (selected != null) return selected.label;
+    final summary = _draft?.summary;
+    final availability = summary?['availability'] as JsonMap?;
+    if (availability != null) {
+      final weekly = (availability['weekly_rules'] as List?) ?? const [];
+      final overrides = (availability['date_overrides'] as List?) ?? const [];
+      final labels = [
+        for (final rule in weekly.whereType<JsonMap>())
+          '${_weekdayLabel(rule['weekday'])} ${_intervalLabel(rule)}',
+        for (final day in overrides.whereType<JsonMap>())
+          for (final interval
+              in (day['intervals'] as List).whereType<JsonMap>())
+            '${day['date']} ${_intervalLabel(interval)}',
+      ];
+      if (labels.isNotEmpty) return labels.join(' · ');
+    }
+    if (summary?['availability_ref'] != null) {
+      return 'Dùng giờ rảnh đã xác nhận trước đây.';
+    }
+    return 'Chưa chọn khung giờ rảnh cho công việc này.';
+  }
+
+  static String _weekdayLabel(Object? weekday) =>
+      weekday == 7 ? 'Chủ nhật' : 'Thứ ${(weekday as int) + 1}';
+
+  static String _intervalLabel(JsonMap interval) =>
+      '${interval['start_local']}–${interval['end_local']}';
+
+  JsonMap? get _pendingAvailability {
+    final slot = _availability;
+    if (slot == null) return null;
+    final start = AvailabilitySlot._inVietnam(slot.start);
+    final end = AvailabilitySlot._inVietnam(slot.end);
+    String two(int value) => value.toString().padLeft(2, '0');
+    String date(DateTime value) =>
+        '${value.year}-${two(value.month)}-${two(value.day)}';
+    return {
+      'timezone': PlanningApi.defaultTimezone,
+      'date_overrides': [
+        {
+          'date': date(start),
+          'intervals': [
+            {
+              'start_local': AvailabilitySlot._time(start),
+              'end_local': AvailabilitySlot._time(end),
+            },
+          ],
+        },
+      ],
     };
-    final rules =
-        availability.raw['weekly_rules'] as List<dynamic>? ?? const [];
-    final labels = rules.whereType<Map<String, dynamic>>().map((rule) {
-      final day = weekdays[rule['weekday'] as int?] ?? 'Ngày khác';
-      return '$day ${rule['start_local']}–${rule['end_local']}';
-    }).toList();
-    if (labels.isEmpty) return 'Chưa có khung giờ định kỳ đã xác nhận.';
-    return '${labels.join(' · ')} (${availability.timezone})';
   }
 
   Future<void> restoreCurrentDraft() async {
@@ -139,10 +174,6 @@ class TaskProvider extends ChangeNotifier {
       final draftId = data['backend_draft_id'] as String? ?? _draft?.draftId;
       final candidateId = data['backend_candidate_id'] as String?;
       if (draftId == null) return;
-      _serverAvailability = await _accept(
-        _planningApi.getAvailability(),
-        revision,
-      );
       _draft = await _accept(_planningApi.getDraft(draftId), revision);
       _applyDraftSummary();
       // Local storage is only a cache. Re-read any confirmed Task from the API
@@ -214,11 +245,7 @@ class TaskProvider extends ChangeNotifier {
     final input = inputText.trim();
     final deadline = _deadline;
     final existing = _draft;
-    final availability = await _accept(
-      _planningApi.getAvailability(),
-      revision,
-    );
-    _serverAvailability = availability;
+    final availability = _pendingAvailability;
     PlanningDraftModel current;
     if (existing == null || existing.rawInput != input) {
       if (existing != null) {
@@ -250,12 +277,13 @@ class TaskProvider extends ChangeNotifier {
           title: title,
           scope: scope,
           deadline: deadline,
-          timezone: availability.timezone,
+          availability: availability,
         ),
         revision,
       );
     }
     _draft = current;
+    _availability = null;
     _candidate = null;
     await _persist();
     return current;
@@ -271,8 +299,8 @@ class TaskProvider extends ChangeNotifier {
 
   Future<void> updateDraftOnBackend() async {
     final draft = _draft;
-    final availability = _serverAvailability;
-    if (draft == null || availability == null)
+    final availability = _pendingAvailability;
+    if (draft == null)
       throw const ApiException('Chưa có bản nháp trên máy chủ.');
     await _runApi((revision) async {
       final current = await _accept(
@@ -281,11 +309,12 @@ class TaskProvider extends ChangeNotifier {
           title: _title.trim(),
           scope: _scope.trim(),
           deadline: _deadline,
-          timezone: availability.timezone,
+          availability: availability,
         ),
         revision,
       );
       _draft = current;
+      _availability = null;
       _applyDraftSummary();
       _candidate = null;
       await _persist();
@@ -452,8 +481,12 @@ class TaskProvider extends ChangeNotifier {
   }
 
   void _ensureClientDraftId() {
-    final fingerprint =
-        '${_title.trim()}|${_scope.trim()}|${_deadline?.toIso8601String()}';
+    final fingerprint = jsonEncode([
+      _title.trim(),
+      _scope.trim(),
+      _deadline?.toIso8601String(),
+      _pendingAvailability,
+    ]);
     if (_clientDraftId == null || _clientDraftFingerprint != fingerprint) {
       _clientDraftId = ApiClient.newIdempotencyKey('draft');
       _clientDraftFingerprint = fingerprint;
@@ -615,6 +648,7 @@ class TaskProvider extends ChangeNotifier {
 
   void setAvailability(AvailabilitySlot value) {
     _availability = value;
+    _candidate = null;
     _confirmed = false;
     _changed();
   }
@@ -729,7 +763,6 @@ class TaskProvider extends ChangeNotifier {
     _draft = null;
     _candidate = null;
     _confirmedTask = null;
-    _serverAvailability = null;
     _planLocked = false;
     _planSavedForLater = false;
     unawaited(_deleteDraft());
