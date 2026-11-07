@@ -8,6 +8,7 @@ import 'package:wakelock_plus/wakelock_plus.dart';
 import '../core/api_client.dart';
 import '../models/focus_session_model.dart';
 import '../models/task_model.dart';
+import '../repositories/local_run_repository.dart';
 import '../services/audio_recorder_service.dart';
 import '../services/dnd_service.dart';
 import '../services/timer_service.dart';
@@ -66,28 +67,32 @@ class FocusProvider extends ChangeNotifier {
     AudioRecorderService? recorder,
     DndService? dnd,
     ApiClient? api,
+    LocalRunRepository? repository,
+    Clock? clock,
     FlutterSecureStorage? storage,
-  })  : timer = timer ?? FocusTimerService(),
-        microTaskTimer = microTaskTimer ?? FocusTimerService(),
+  })  : _clock = clock ?? const SystemClock(),
+        timer = timer ?? FocusTimerService(clock: clock),
+        microTaskTimer = microTaskTimer ?? FocusTimerService(clock: clock),
         recorder = recorder ?? AudioRecorderService(),
         dnd = dnd ?? DndService(),
         _api = api ?? ApiClient(),
-        _storage = storage ?? const FlutterSecureStorage() {
+        _repository = repository ??
+            (storage != null
+                ? SecureStorageRunRepository(storage: storage)
+                : const SecureStorageRunRepository()) {
     this.timer.onElapsed = _onSegmentElapsed;
     this.timer.addListener(_onTimerChanged);
     this.microTaskTimer.onElapsed = _onMicroTaskElapsed;
     this.microTaskTimer.addListener(_onTimerChanged);
   }
 
-  static const _runKey = 'proplan.uf3.active_run.v1';
-  static const _thoughtsKey = 'proplan.uf4.local_thoughts.v1';
-
+  final Clock _clock;
   final FocusTimerService timer;
   final FocusTimerService microTaskTimer;
   final AudioRecorderService recorder;
   final DndService dnd;
   final ApiClient _api;
-  final FlutterSecureStorage _storage;
+  final LocalRunRepository _repository;
   final List<ThoughtRecord> _thoughts = [];
 
   FocusSessionInfo? _session;
@@ -96,6 +101,7 @@ class FocusProvider extends ChangeNotifier {
   DndSnapshot? _dndSnapshot;
   List<SessionSegmentModel> _segments = const [];
   int _segmentIndex = 0;
+  int _actualWorkSeconds = 0;
   bool _dndPermission = false;
   bool _dndApplied = false;
   bool _isOffline = false;
@@ -127,9 +133,11 @@ class FocusProvider extends ChangeNotifier {
   int get recordingAttempts => _recordingAttempts;
   String? get lastError => _lastError;
   int get segmentIndex => _segmentIndex;
+  int get actualWorkSeconds => _actualWorkSeconds;
   List<SessionSegmentModel> get segments => _segments;
   SessionSegmentModel? get currentSegment =>
       _segmentIndex < _segments.length ? _segments[_segmentIndex] : null;
+
   bool get isActiveRun =>
       _session != null &&
       (_stage == FocusStage.active ||
@@ -141,10 +149,9 @@ class FocusProvider extends ChangeNotifier {
 
   Future<void> restore() async {
     await _loadThoughts();
-    final stored = await _storage.read(key: _runKey);
-    if (stored == null) return;
+    final json = await _repository.loadActiveRun();
+    if (json == null) return;
     try {
-      final json = jsonDecode(stored) as Map<String, dynamic>;
       _session = FocusSessionInfo.fromJson(
         Map<String, dynamic>.from(json['session'] as Map),
       );
@@ -153,6 +160,7 @@ class FocusProvider extends ChangeNotifier {
           .map(SessionSegmentModel.fromJson)
           .toList(growable: false);
       _segmentIndex = json['segment_index'] as int? ?? 0;
+      _actualWorkSeconds = json['actual_work_seconds'] as int? ?? 0;
       _resumeStage = FocusStage.values.firstWhere(
         (stage) => stage.name == json['stage'],
         orElse: () => FocusStage.active,
@@ -170,7 +178,7 @@ class FocusProvider extends ChangeNotifier {
       _startOfflineProbe();
       _notify();
     } catch (_) {
-      await _storage.delete(key: _runKey);
+      await _repository.clearActiveRun();
     }
   }
 
@@ -181,6 +189,7 @@ class FocusProvider extends ChangeNotifier {
         .where((segment) => segment.durationSeconds > 0)
         .toList(growable: false);
     _segmentIndex = 0;
+    _actualWorkSeconds = 0;
     _stage = FocusStage.reminder;
     _resumeStage = FocusStage.reminder;
     _recordingAttempts = 0;
@@ -210,11 +219,15 @@ class FocusProvider extends ChangeNotifier {
     _notify();
   }
 
+  /// Bắt đầu phiên tập trung với cơ chế kiểm tra Feasibility Grace Window của A12.1:
+  /// Nếu đến trước hoặc trễ trong vòng 15 phút (<= 15m), cho phép bắt đầu phiên bình thường.
+  /// Nếu trễ quá 15 phút (> 15m), chuyển sang trạng thái lateStart để người dùng xác nhận.
   Future<void> startRun() async {
     final session = _session;
     if (session == null) return;
-    final startDelay = DateTime.now().difference(session.scheduledStart);
-    if (startDelay.inSeconds > 0) {
+    final now = _clock.now();
+    final graceDeadline = session.scheduledStart.add(const Duration(minutes: 15));
+    if (now.isAfter(graceDeadline)) {
       _setStage(FocusStage.lateStart);
       return;
     }
@@ -268,6 +281,12 @@ class FocusProvider extends ChangeNotifier {
 
   Future<void> _advanceSegment() async {
     if (!isActiveRun) return;
+    final segment = currentSegment;
+    if (segment != null && segment.kind == 'work') {
+      // Chỉ cộng dồn thời gian của các segment loại work vào actualWorkSeconds
+      // Micro-task 2 phút và thời gian nghỉ (rest) hoàn toàn không được tính.
+      _actualWorkSeconds += segment.durationSeconds;
+    }
     _segmentIndex++;
     if (_segmentIndex >= _segments.length) {
       await _finishLocalRun();
@@ -281,13 +300,17 @@ class FocusProvider extends ChangeNotifier {
     _stopOfflineProbe();
     await _restoreFocusMode();
     _stage = FocusStage.ended;
-    // Ending a local timer does not mark Session, Step, or Task complete.
-    await _storage.delete(key: _runKey);
+    // Kết thúc đếm giờ cục bộ KHÔNG tự động đánh dấu hoàn thành Session/Step/Task (UF5).
+    await _repository.clearActiveRun();
     _notify();
   }
 
   Future<void> endEarly() async {
     if (_isRecording) await cancelRecording();
+    final segment = currentSegment;
+    if (segment != null && segment.kind == 'work') {
+      _actualWorkSeconds += timer.elapsedSeconds;
+    }
     await _finishLocalRun();
   }
 
@@ -350,9 +373,10 @@ class FocusProvider extends ChangeNotifier {
       _isRecording = false;
       _recordingPath = null;
       final thought = ThoughtRecord(
-        id: DateTime.now().microsecondsSinceEpoch.toString(),
-        createdAt: DateTime.now(),
+        id: _clock.now().microsecondsSinceEpoch.toString(),
+        createdAt: _clock.now(),
         audioPath: savedPath,
+        isPendingSync: true,
       );
       await _saveThought(thought);
       _canUndoThought = true;
@@ -362,6 +386,7 @@ class FocusProvider extends ChangeNotifier {
       _undoExpiry = Timer(const Duration(seconds: 5), () {
         _canUndoThought = false;
         _notify();
+        unawaited(flushOutbox());
       });
       _toastExpiry = Timer(const Duration(seconds: 5), () {
         if (_stage == FocusStage.thoughtSaved) _stage = FocusStage.active;
@@ -412,11 +437,13 @@ class FocusProvider extends ChangeNotifier {
   Future<void> saveTextThought(String text) async {
     final normalized = text.trim();
     if (normalized.isEmpty) return;
-    await _saveThought(ThoughtRecord(
-      id: DateTime.now().microsecondsSinceEpoch.toString(),
-      createdAt: DateTime.now(),
+    final thought = ThoughtRecord(
+      id: _clock.now().microsecondsSinceEpoch.toString(),
+      createdAt: _clock.now(),
       text: normalized,
-    ));
+      isPendingSync: true,
+    );
+    await _saveThought(thought);
     _canUndoThought = true;
     _stage = FocusStage.thoughtSaved;
     _undoExpiry?.cancel();
@@ -424,6 +451,7 @@ class FocusProvider extends ChangeNotifier {
     _undoExpiry = Timer(const Duration(seconds: 5), () {
       _canUndoThought = false;
       _notify();
+      unawaited(flushOutbox());
     });
     _toastExpiry = Timer(const Duration(seconds: 5), () {
       if (_stage == FocusStage.thoughtSaved) _stage = FocusStage.active;
@@ -438,61 +466,81 @@ class FocusProvider extends ChangeNotifier {
     _undoExpiry?.cancel();
     final thought = _thoughts.removeAt(0);
     if (thought.audioPath != null) await recorder.delete(thought.audioPath!);
+    await _repository.deleteThought(thought.id);
     _canUndoThought = false;
     if (_stage == FocusStage.thoughtSaved) _stage = FocusStage.active;
-    await _persistThoughts();
     await _persistRun();
     _notify();
   }
 
   Future<void> _saveThought(ThoughtRecord thought) async {
     _thoughts.insert(0, thought);
-    await _persistThoughts();
+    await _repository.queueThought(thought);
   }
 
   Future<void> deleteThought(ThoughtRecord thought) async {
     _thoughts.removeWhere((item) => item.id == thought.id);
     if (thought.audioPath != null) await recorder.delete(thought.audioPath!);
-    await _persistThoughts();
+    await _repository.deleteThought(thought.id);
     _notify();
   }
 
   Future<void> _loadThoughts() async {
-    final raw = await _storage.read(key: _thoughtsKey);
-    if (raw == null) return;
-    try {
-      final decoded = jsonDecode(raw) as List<dynamic>;
-      _thoughts
-        ..clear()
-        ..addAll(decoded
-            .whereType<Map<String, dynamic>>()
-            .map(ThoughtRecord.fromJson));
-    } catch (_) {
-      await _storage.delete(key: _thoughtsKey);
-    }
+    final loaded = await _repository.loadThoughts();
+    _thoughts
+      ..clear()
+      ..addAll(loaded);
   }
 
-  Future<void> _persistThoughts() => _storage.write(
-        key: _thoughtsKey,
-        value:
-            jsonEncode(_thoughts.map((thought) => thought.toJson()).toList()),
-      );
+  /// Đồng bộ hàng đợi Outbox lên Backend khi có kết nối mạng:
+  /// Áp dụng cơ chế Idempotency dựa trên `thought.id` để không bao giờ tạo trùng trên server.
+  Future<void> flushOutbox() async {
+    if (_isOffline) return;
+    final pending = _thoughts.where((t) => t.isPendingSync).toList();
+    for (final thought in pending) {
+      try {
+        await _api.postData(
+          '/thoughts',
+          data: {
+            'client_thought_id': thought.id,
+            'created_at': thought.createdAt.toIso8601String(),
+            'text': thought.text,
+            'audio_path': thought.audioPath,
+          },
+          idempotencyKey: thought.id,
+        );
+        await _repository.markThoughtSynced(thought.id);
+        final index = _thoughts.indexWhere((t) => t.id == thought.id);
+        if (index >= 0) {
+          final old = _thoughts[index];
+          _thoughts[index] = ThoughtRecord(
+            id: old.id,
+            createdAt: old.createdAt,
+            audioPath: old.audioPath,
+            text: old.text,
+            isPendingSync: false,
+          );
+        }
+      } catch (_) {
+        // Mạng gián đoạn hoặc server bận: giữ nguyên isPendingSync để thử lại lần sau.
+      }
+    }
+    _notify();
+  }
 
   Future<void> _persistRun() async {
     final session = _session;
     if (session == null || !isActiveRun) return;
-    await _storage.write(
-      key: _runKey,
-      value: jsonEncode({
-        'session': session.toJson(),
-        'segments': _segments.map((segment) => segment.toJson()).toList(),
-        'segment_index': _segmentIndex,
-        'stage': _stage.name,
-        'timer_deadline': timer.endsAt?.toIso8601String(),
-        'timer_duration': timer.durationSeconds,
-        'dnd_snapshot': _dndSnapshot?.toJson(),
-      }),
-    );
+    await _repository.saveActiveRun({
+      'session': session.toJson(),
+      'segments': _segments.map((segment) => segment.toJson()).toList(),
+      'segment_index': _segmentIndex,
+      'actual_work_seconds': _actualWorkSeconds,
+      'stage': _stage.name,
+      'timer_deadline': timer.endsAt?.toIso8601String(),
+      'timer_duration': timer.durationSeconds,
+      'dnd_snapshot': _dndSnapshot?.toJson(),
+    });
   }
 
   void _startOfflineProbe() {
@@ -508,6 +556,7 @@ class FocusProvider extends ChangeNotifier {
       await _api.dio.get<Map<String, dynamic>>('/capabilities');
       if (_isOffline) {
         _isOffline = false;
+        unawaited(flushOutbox());
         _notify();
       }
     } catch (_) {
