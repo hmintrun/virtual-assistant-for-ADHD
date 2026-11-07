@@ -195,3 +195,17 @@ Auth, API nghiệp vụ, migration, worker, Google Calendar và chất lượng 
 
 - [uv: làm việc với project và lockfile](https://docs.astral.sh/uv/guides/projects/)
 - [uv: quản lý Python](https://docs.astral.sh/uv/guides/install-python/)
+
+## C01 — kiểm chứng sau khi bỏ PlanningPart
+
+Code mới cần migration `20261103_01_c01_sources.py`; migration đã kiểm trên SQLite tạm, chưa áp DB app. Sao lưu và review script kiểm migration trên DB bản sao trước khi nâng DB app. Không dùng `create_all` để kết luận upgrade dữ liệu cũ đúng.
+
+Script ở `_temp/c01_tests`: conftest.py, test_unit.py, test_integration.py và system_test.md. User đã duyệt chạy ngày 03/11/2026: unit 10/10, integration 10/10 đạt, gồm hai ca migration trên SQLite tạm. System chưa chạy. Các lệnh dưới dùng từ thư mục gốc repo; chọn thư mục tạm mới cho lần chạy tiếp:
+
+```powershell
+$env:PYTHONPATH = "$PWD\backend"
+uv run --project backend --frozen --no-sync pytest -c backend/pyproject.toml _temp/c01_tests/test_unit.py -q -p no:cacheprovider --basetemp=_temp/c01_unit_run
+uv run --project backend --frozen --no-sync pytest -c backend/pyproject.toml _temp/c01_tests/test_integration.py -q -p no:cacheprovider --basetemp=_temp/c01_integration_run
+```
+
+Unit kiểm quy tắc thuần. Integration dùng DB tạm và AI giả, không trỏ DB app hoặc Google. System theo system_test.md phải thao tác app/thiết bị; gọi ASGI không thay system. Suite cũ còn fixture PlanningPart cần cập nhật theo contract, chưa được coi là đã chạy đạt. Không thêm test vào thư mục chính trong đợt này.

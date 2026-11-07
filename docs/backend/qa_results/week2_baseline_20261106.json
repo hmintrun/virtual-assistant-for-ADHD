@@ -1,0 +1,1259 @@
+{
+  "date": "2026-11-06",
+  "timezone": "Asia/Saigon",
+  "tested_commit": "58ddf8a8dac513a3a67d39fc272c82f3d2d6e1f6",
+  "command": "pytest -c pyproject.toml tests -q -s -p no:cacheprovider",
+  "pytest_summary": {
+    "passed": 171,
+    "failed": 1,
+    "skipped": 6,
+    "xfailed": 4,
+    "subtests_passed": 2
+  },
+  "junit": {
+    "name": "pytest",
+    "errors": "0",
+    "failures": "1",
+    "skipped": "10",
+    "tests": "184",
+    "time": "89.722",
+    "timestamp": "2026-11-06T19:42:33.282758+07:00",
+    "hostname": "QuocHung"
+  },
+  "smoke": {
+    "migration_head": "20261106_01 (head)",
+    "rounds": [
+      {
+        "run": 1,
+        "statuses": {
+          "/openapi.json": 200,
+          "/docs": 200,
+          "/api/v1/capabilities": 200,
+          "/api/v1/drafts": 200,
+          "/api/v1/tasks": 200
+        },
+        "draft_count": 2
+      },
+      {
+        "run": 2,
+        "statuses": {
+          "/openapi.json": 200,
+          "/docs": 200,
+          "/api/v1/capabilities": 200,
+          "/api/v1/drafts": 200,
+          "/api/v1/tasks": 200
+        },
+        "draft_count": 2
+      }
+    ],
+    "restart_preserved_drafts": true
+  },
+  "source_hashes": {
+    "backend/app/__init__.py": "3516b3fbe9896c02b91e97d4e7750187982c53639df7c630bbb8d60ee8a35459",
+    "backend/app/api/__init__.py": "77b5cc12c7bac30b4b391aab4269e168a308f0a3379494b345513b1d5b24ab5c",
+    "backend/app/api/deps.py": "4549867c29ff1d037916a7237f1374daf8e3c327b277d8614cc3b63a8b7a19f5",
+    "backend/app/api/v1/__init__.py": "d70858dfed821b67252f3884cea4c026c9ec5788080699069004d1fba5a1a3e2",
+    "backend/app/api/v1/checkin.py": "483f07d00e90851aafbe95751eb0214ae49859892d3070dc78754dbe77e9fe68",
+    "backend/app/api/v1/drafts.py": "d982eb627d14537867d72a8dc3ceaba218a317a82ab70d0fcfefb9cf157fbdaa",
+    "backend/app/api/v1/focus.py": "5ba187e85dbc5073edda59b6ed498cbfca45b46951d0f234dc4156f2f9728e38",
+    "backend/app/api/v1/planning.py": "8621c1090166f2fb7095fb4ec73b35aade36abedbb31fdc184ab89226e07a15a",
+    "backend/app/api/v1/reschedule.py": "043273795305d1f9fd6082376e1f526d580d315aca7af412808d1a80f7fc1f73",
+    "backend/app/api/v1/router.py": "4c059b85b867cbca7cbfe09a15eae597e68506ab1149207d69f97161fcdf95d1",
+    "backend/app/api/v1/schedule.py": "d881a2d77e9409f885dde514dcdd0529de0a8cc23a9da3defd9a3522125313f4",
+    "backend/app/api/v1/settings.py": "83dace1b792b10a8a23b5f24e29e621661f9bc987dfa44307b75b200c257fdd3",
+    "backend/app/api/v1/system.py": "95bb2a809bd207eb9d837f4011877e2a6d0951927f4916dd8fca65c933fa9218",
+    "backend/app/api/v1/tasks.py": "47239c78d3ca70c3ddd4cc057f98bfd6cc284fc453cfe2e686eca48b7b22ef5b",
+    "backend/app/api/v1/thoughts.py": "1bbda34f91d70b0d79b683689818ae2350ffa168fd1739825bb41bcf4227c621",
+    "backend/app/api/v1/voice.py": "990073d69ddd557500f960677a5ac310edf82ca60af7c9e53302ca470ac397de",
+    "backend/app/core/__init__.py": "3d8fc503c38c548cbca93791cafeb62e30133a7f11dd6b317feec4e0cd9e9944",
+    "backend/app/core/config.py": "55b539c81e9876528ce6e29fe164a5877f9aae05420b11a157bd23906f59c471",
+    "backend/app/core/database.py": "3ffed758827a8d111d4ce4fe7be77465e7a0afe2bd96d18cab86a81f58a5f242",
+    "backend/app/core/errors.py": "55c9edbf4a84dc971878f22e42073afb16bdf592c2fb38ebf7461afa1ffef578",
+    "backend/app/core/security.py": "d5b1a69a44c49ae58ecbf79535fa46cbbbee4da211c7b8d475fc96981095cc74",
+    "backend/app/main.py": "baf7713d9d2cea61139435f42b7ed83c474fe7c9b96b83ac20cd736cc3b81af2",
+    "backend/app/models/__init__.py": "0fd3a856d89ecac6190fca0f932363a6ab5e78f8499c81efe122ac9e7a900dd3",
+    "backend/app/models/base.py": "505d5cf728b9f726456b66ec4ffa0335f65a9b9307f9507971fff667d4b48428",
+    "backend/app/models/calendar.py": "5e36a3afff8ee76ab2e93c54308ea0ee5e0177c8cb457fd99febc33ddc8f1eb4",
+    "backend/app/models/device.py": "63e37ccd691497dcbb39ae6ba66ce4041796f0fd44c0603e55345d635a43f00d",
+    "backend/app/models/execution.py": "0e4c08d39fce394aa260d9de5c23ec178435d6bddce417db4881e512d6feb622",
+    "backend/app/models/integrity.py": "4c831eab5a98d22f22d4000fa42c387e8f4873fa00521011b15dc88b0beccc4a",
+    "backend/app/models/planning.py": "7f91bd699690c78028eb29add741e5f7edbee34fea255bb6475cd1a4e14523f9",
+    "backend/app/models/schedule_proposal.py": "45b930a25ff72e7b49de2fd5194b601f5646e890d14d20443ada351e6050110f",
+    "backend/app/models/session.py": "cabd578f1863aed5c6d10dbb5dcd561eb56724f92b17e6cda7e513a9e8ab8810",
+    "backend/app/models/settings.py": "14112ee6bd68066717107433b5038756f52528b3fa9ee5c018981e1bb4749df5",
+    "backend/app/models/step.py": "6ee694df20b94e3f5333a1c46ac9800c6cbc31b8356e5acc70d5d0d84d447735",
+    "backend/app/models/system.py": "291369d704e80f96822dd65b04945da5a8a9e150d07d396a2126afc4c94e9161",
+    "backend/app/models/task.py": "8e55998a573d4cfd02a8424c8d04da83a9cc5b5a73ffc82e1bf380a26ee77908",
+    "backend/app/models/thought.py": "a2c17b412c8b3725adc488f5217aeb97b9eb827d5a4d1138f318018d434e9687",
+    "backend/app/models/user.py": "3c0c62218c5ce01d29d7c19dd3bccf961fa7052330405d20c8794c1175bf4718",
+    "backend/app/repositories/__init__.py": "528936426ac9affad3791218ee646740e4ce347a4e8dea2a7cbf815b3cc6b814",
+    "backend/app/repositories/device_repository.py": "b6bf9aaab7081bfdb55395d4b9b2964d7a6d13a9fc5d82e77204fc040c766842",
+    "backend/app/repositories/run_repository.py": "0998e7a0d70dc4b68911f82c2a9fb2fb2e27fcaec416f115a39ca1bdfe0cbe1e",
+    "backend/app/repositories/thought_repository.py": "f5b06a9e5b1201a3f526aa16a4c01dd8624aa9c756316a8d8801802b04093e7d",
+    "backend/app/schemas/__init__.py": "69a5535330a9051ed23c0b12a8e70219ef66ffaa84f068dc2055654f062dd758",
+    "backend/app/schemas/availability.py": "3b68420e664087214a063badffe2bd18a95bb3e66b9696f2968d43631b77a5e7",
+    "backend/app/schemas/calendar.py": "b8881224756f761cc7bcb9dfb1748430ea8c49eb34e1d59d9c1a3d91789e7506",
+    "backend/app/schemas/common.py": "8a673d7e01b6985f02d4c5b07e532de3caa87a66f80be382e445a19b70e7383a",
+    "backend/app/schemas/draft.py": "14a328fb9594e0417a035c1fd757bf2a419911b9e7ef7f320b0170a8f22ed2ef",
+    "backend/app/schemas/planning.py": "af39cedbf4da966e77a05b61cd4342df99415b103dbba4bbffce8ed46de8b21a",
+    "backend/app/schemas/schedule.py": "71e8834e693b672d23cf8e2e5e1200cdcf6129773a33685ed9fed068e5795fbf",
+    "backend/app/schemas/settings.py": "8ab5ab1a545a9100ceaf9e89a99c417f016874f1303397cab8fe415d01d2f770",
+    "backend/app/schemas/task.py": "382fc0608239637e630d85723c178b1e5f3b30a26540dbebc87835b1423d6ccb",
+    "backend/app/schemas/thought.py": "3ea80fd7203053feac4bbf4b7bdfa6be5b503eaee6277e755f4d1a245ca9b774",
+    "backend/app/schemas/user.py": "3ea7f1ea6ac37f4aca67abe84176a4c96c0e2b1b9d318d21b121b5169b8500fd",
+    "backend/app/schemas/voice.py": "319a580c5998d3a3aa669bc20212b0c7d2f2c6d3e35dd54916de4de4557c3694",
+    "backend/app/services/__init__.py": "feb005d1bfc448e9ca3523514c3801b6fe43ea4f2559fc0a9ce7c7d3fdda388c",
+    "backend/app/services/ai_service.py": "b0f6226929f86028fefc510f74eb15be7af7942d5d0a8c9d08e0813bd416972b",
+    "backend/app/services/command_service.py": "3b1928f37f00869f3395977a910a4067b2c0ed6717fbe101acc7c1768e81e20a",
+    "backend/app/services/draft_service.py": "6d13e5c8a02553dbbbf5cd0125e0dfdcd3e40d8efd07c5c433b42c8a4af25dad",
+    "backend/app/services/plan_service.py": "3659366582ccba325ecd4ad7ceae51eff00da411c8636e3e861dc1819f531a73",
+    "backend/app/services/planning/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "backend/app/services/planning/adaptation.py": "2f3163871e22f83bf2c9bbf9ef51fd115a94bf80b5dded7c4c4869cd12c80d1f",
+    "backend/app/services/planning/availability.py": "5985497d5c4526c4fc438c2e8c1baf239b9a97ecebf9b1b771a30ed56432899d",
+    "backend/app/services/planning/durations.py": "b09c94e8217b6901fdc2bf345f87dc48ccbb853214f322831712e7d0fba79095",
+    "backend/app/services/planning/rescheduling.py": "b3ca4b0e6e8d46793fc7ecf20e981fbf73eda345411f85887e41aa043aababf9",
+    "backend/app/services/planning/scheduling.py": "83170be8145cd5ecee695cc2772cce9f2f6d05d580672ed04ba79c5d3d558e23",
+    "backend/app/services/planning/validation.py": "e4c0d430e9e234197fa91bf9817011b65cc2508d07110565cc9005602e505e7d",
+    "backend/app/services/scheduler_engine.py": "03f47097ed8a949d4337b8779486115355361c81b853b1851c6a83299891fa96",
+    "backend/app/services/task_state_service.py": "a9cd63aa14eca96eb986261660f16ff2f0a6fd801aa796aa3d59ffe55f17d2cf",
+    "backend/app/services/voice_service.py": "55e6e9c6782cdd4cbb5f30427726d8c9b7b1859881f4ffc9350dac2ee8571867",
+    "backend/migrations/env.py": "0ecba772ce5428f116d8deb595fb09d0acbe5ba9b7e4f35d093b5afb7dbce1f7",
+    "backend/migrations/script.py.mako": "ee5ce9bd4b586f64d463dc228b24a9c949b0e265674c918b5435492edf1d754a",
+    "backend/migrations/versions/0ece3b500cfe_align_planning_schema.py": "20743a847fb9ae5bf628931eee9667100edc2802141ca27f28740a0e5a8cc51f",
+    "backend/migrations/versions/20261030_01_initial_database.py": "184e9531bce4afc395695dcb491a69ddfd4b4f63e5f987ffab933cfd63e31007",
+    "backend/migrations/versions/20261101_01_distinct_planning_part_constraints.py": "57b716a2c743e7410a6be91d8bf45bccd029b206863f416429f10ab4de52fff1",
+    "backend/migrations/versions/20261103_01_c01_sources.py": "36b04ad1a2845e5d3186568e4994965ad84160f0959ca9ec805902e1bb3f775d",
+    "backend/migrations/versions/20261105_01_device_state.py": "fd936060f040be65876307e225ec88b9f08cbba23aac7d67fd5b37faf727c9ae",
+    "backend/migrations/versions/20261106_01_merge_c01_device_state.py": "fb788048d99cc19dc3dde7fccd428b232e5b4def5fe6784e1cbc6c10ac2096a5",
+    "backend/pyproject.toml": "80aa9b3be896d0af5133179d05e5c0404ca1e17f29704a727b3a82503904e2dc",
+    "backend/tests/__init__.py": "c6ab093d3d504764c7ff91982bcb621e9f8b6f6f5c8711acaf5e3b316a0b019c",
+    "backend/tests/conftest.py": "1edce5de099d15d27c37db95e51706659c68de87089d7e4828a5c2efc2e3db97",
+    "backend/tests/extended/test_deep_chained_pipeline.py": "b3de6919752ed4c2e1b8439492bd0520d591b75314ed44ddd381be4f656c3fd7",
+    "backend/tests/extended/test_deep_unit_functions.py": "fc0dc695df445dea224c72c443de1bd21e7f45cc1b5aa5c579f49d72bbe355ee",
+    "backend/tests/extended/test_more_edge_scenarios.py": "7f95b26675fc63d71b0c637945d56d73286b34493a65931cf29b00e066f614a6",
+    "backend/tests/extended/test_requirement_gaps_and_scenarios.py": "3d5ab734172a7c9ab97e4a9a2cce833acc2e4275e433a15c6e7d413fcb38c173",
+    "backend/tests/extended/test_unimplemented_and_failing_gaps.py": "181b3a6320404dfcb56da40d0ceca2d4eff51f468e8cf3b489c759b5067e2249",
+    "backend/tests/test_ai_service.py": "20d115041b662b8a41c3c0be4f645b2410b3b9afd73e977bbc361828e525c032",
+    "backend/tests/test_database.py": "42ec81d06ff2d85473bae99c12ae13aa9cfadce74b8bf8c2f1749e84cf65efd9",
+    "backend/tests/test_durable_receipts.py": "053489f2fe5afcd4120c77653ac6224274cc314f475dea20be6458a551f66d3e",
+    "backend/tests/test_list_tasks_batch.py": "1626e7f3bf050d25b1167192a08b6309b7672975255e1d51b5c3dad00b83dd76",
+    "backend/tests/test_models.py": "da505be38d1ae1cddd0c6810219e28e6c14c801f19047e6f1791a2e6d3305ca8",
+    "backend/tests/test_planning_dto.py": "e9b73674405ac3fefa54d898216077f9b5c794fa3528310bae018baa03d9b8f9",
+    "backend/tests/test_uf1_uf2_matrix.py": "641faccb01fbb23f908da2daa2b2d1882dce440eebb2973aa12f1fbe58f4102b",
+    "backend/tests/test_week2_baseline.py": "d1035d8f92d5604e9b1f0658a616230f22de50eb1358bbe4c91fe4c853fe4889",
+    "backend/tests/test_week2_storage.py": "833d69e4570a1527a0cd131e9ed24ce377e58f4695aab60f0fc478a799f9ff2a",
+    "backend/tests/unit/test_scheduler_engine.py": "adb06b566c7dbaff2dd30610f4fda62c8cd30b5cca95b0bb2108c1c13de5d065",
+    "backend/uv.lock": "b0a85d5b54f77ea71ffbd0b49454e058dcabd10cb15ef3a19e5cc4da74b8a41e"
+  },
+  "tests": [
+    {
+      "name": "test_pipeline_1_happy_path_end_to_end",
+      "class": "tests.extended.test_deep_chained_pipeline.TestDeepChainedPipeline",
+      "seconds": 0.211,
+      "status": "passed"
+    },
+    {
+      "name": "test_pipeline_2_clarification_loop_convergence",
+      "class": "tests.extended.test_deep_chained_pipeline.TestDeepChainedPipeline",
+      "seconds": 0.146,
+      "status": "passed"
+    },
+    {
+      "name": "test_pipeline_3_infeasible_deficit_and_adjustment",
+      "class": "tests.extended.test_deep_chained_pipeline.TestDeepChainedPipeline",
+      "seconds": 0.292,
+      "status": "passed"
+    },
+    {
+      "name": "test_pipeline_4_disruption_recovery_and_rescheduling",
+      "class": "tests.extended.test_deep_chained_pipeline.TestDeepChainedPipeline",
+      "seconds": 0.007,
+      "status": "passed"
+    },
+    {
+      "name": "test_pipeline_5_adaptive_buffer_learning_loop",
+      "class": "tests.extended.test_deep_chained_pipeline.TestDeepChainedPipeline",
+      "seconds": 0.001,
+      "status": "passed"
+    },
+    {
+      "name": "test_pipeline_6_ai_unavailable_keeps_confirmed_draft",
+      "class": "tests.extended.test_deep_chained_pipeline.TestDeepChainedPipeline",
+      "seconds": 0.18,
+      "status": "passed"
+    },
+    {
+      "name": "test_calculate_buffered_work_edge_multipliers",
+      "class": "tests.extended.test_deep_unit_functions.TestDurationsDeepScenarios",
+      "seconds": 0.001,
+      "status": "passed"
+    },
+    {
+      "name": "test_calculate_buffered_work_invalid_inputs",
+      "class": "tests.extended.test_deep_unit_functions.TestDurationsDeepScenarios",
+      "seconds": 0.001,
+      "status": "passed"
+    },
+    {
+      "name": "test_build_session_segments_single_short_chunk",
+      "class": "tests.extended.test_deep_unit_functions.TestDurationsDeepScenarios",
+      "seconds": 0.001,
+      "status": "passed"
+    },
+    {
+      "name": "test_build_session_segments_exact_multiple_no_trailing_rest",
+      "class": "tests.extended.test_deep_unit_functions.TestDurationsDeepScenarios",
+      "seconds": 0.001,
+      "status": "passed"
+    },
+    {
+      "name": "test_build_session_segments_exceed_by_one_second",
+      "class": "tests.extended.test_deep_unit_functions.TestDurationsDeepScenarios",
+      "seconds": 0.001,
+      "status": "passed"
+    },
+    {
+      "name": "test_fit_session_to_slot_boundary_scenarios",
+      "class": "tests.extended.test_deep_unit_functions.TestDurationsDeepScenarios",
+      "seconds": 0.001,
+      "status": "passed"
+    },
+    {
+      "name": "test_merge_intervals_disjoint_and_touching",
+      "class": "tests.extended.test_deep_unit_functions.TestAvailabilityDeepScenarios",
+      "seconds": 0.0,
+      "status": "passed"
+    },
+    {
+      "name": "test_subtract_intervals_swiss_cheese",
+      "class": "tests.extended.test_deep_unit_functions.TestAvailabilityDeepScenarios",
+      "seconds": 0.0,
+      "status": "passed"
+    },
+    {
+      "name": "test_subtract_intervals_busy_covers_everything",
+      "class": "tests.extended.test_deep_unit_functions.TestAvailabilityDeepScenarios",
+      "seconds": 0.0,
+      "status": "passed"
+    },
+    {
+      "name": "test_compute_effective_free_intervals_own_event_protection",
+      "class": "tests.extended.test_deep_unit_functions.TestAvailabilityDeepScenarios",
+      "seconds": 0.001,
+      "status": "passed"
+    },
+    {
+      "name": "test_schedule_exact_fit_vs_short_one_second",
+      "class": "tests.extended.test_deep_unit_functions.TestSchedulingDeepScenarios",
+      "seconds": 0.001,
+      "status": "passed"
+    },
+    {
+      "name": "test_schedule_enforces_minimum_gap_900s",
+      "class": "tests.extended.test_deep_unit_functions.TestSchedulingDeepScenarios",
+      "seconds": 0.001,
+      "status": "passed"
+    },
+    {
+      "name": "test_evaluate_buffer_adaptation_extreme_adhd_outliers",
+      "class": "tests.extended.test_deep_unit_functions.TestAdaptationDeepScenarios",
+      "seconds": 0.001,
+      "status": "passed"
+    },
+    {
+      "name": "test_evaluate_buffer_adaptation_sample_filtering_and_clamping",
+      "class": "tests.extended.test_deep_unit_functions.TestAdaptationDeepScenarios",
+      "seconds": 0.001,
+      "status": "passed"
+    },
+    {
+      "name": "test_shift_elapsed_sessions_isolation",
+      "class": "tests.extended.test_deep_unit_functions.TestReschedulingDeepScenarios",
+      "seconds": 0.001,
+      "status": "passed"
+    },
+    {
+      "name": "test_extract_intent_tier3_rambling_adhd_input",
+      "class": "tests.extended.test_deep_unit_functions.TestAIServiceDeepScenarios",
+      "seconds": 0.026,
+      "status": "passed"
+    },
+    {
+      "name": "test_decompose_task_tier3_micro_task_generation",
+      "class": "tests.extended.test_deep_unit_functions.TestAIServiceDeepScenarios",
+      "seconds": 0.015,
+      "status": "passed"
+    },
+    {
+      "name": "test_public_decomposition_provider_failure_requires_retry",
+      "class": "tests.extended.test_deep_unit_functions.TestAIServiceDeepScenarios",
+      "seconds": 0.005,
+      "status": "passed"
+    },
+    {
+      "name": "test_adjust_candidate_plan_tier3_safe_preservation",
+      "class": "tests.extended.test_deep_unit_functions.TestAIServiceDeepScenarios",
+      "seconds": 0.003,
+      "status": "passed"
+    },
+    {
+      "name": "test_generate_reschedule_empathy_guilt_free",
+      "class": "tests.extended.test_deep_unit_functions.TestAIServiceDeepScenarios",
+      "seconds": 0.003,
+      "status": "passed"
+    },
+    {
+      "name": "test_comb_shaped_time_fragmentation_sub_pomodoro",
+      "class": "tests.extended.test_more_edge_scenarios.TestAdditionalEdgeScenarios",
+      "seconds": 0.001,
+      "status": "passed"
+    },
+    {
+      "name": "test_deadline_panic_surge_exact_100_percent_utilization",
+      "class": "tests.extended.test_more_edge_scenarios.TestAdditionalEdgeScenarios",
+      "seconds": 0.001,
+      "status": "passed"
+    },
+    {
+      "name": "test_hyper_optimistic_large_step_scale_performance",
+      "class": "tests.extended.test_more_edge_scenarios.TestAdditionalEdgeScenarios",
+      "seconds": 0.001,
+      "status": "passed"
+    },
+    {
+      "name": "test_micro_task_prompt_injection_and_multibyte_emoji",
+      "class": "tests.extended.test_more_edge_scenarios.TestAdditionalEdgeScenarios",
+      "seconds": 0.002,
+      "status": "passed"
+    },
+    {
+      "name": "test_night_owl_midnight_cross_boundary",
+      "class": "tests.extended.test_more_edge_scenarios.TestAdditionalEdgeScenarios",
+      "seconds": 0.001,
+      "status": "passed"
+    },
+    {
+      "name": "test_gap_1_draft_candidate_when_missing_deadline",
+      "class": "tests.extended.test_requirement_gaps_and_scenarios.TestRequirementGapsAndADHDScenarios",
+      "seconds": 0.271,
+      "status": "passed"
+    },
+    {
+      "name": "test_gap_2_task_limits_per_day_ignored_by_scheduler",
+      "class": "tests.extended.test_requirement_gaps_and_scenarios.TestRequirementGapsAndADHDScenarios",
+      "seconds": 0.0,
+      "status": "skipped",
+      "reason": "Chưa chốt contract max_tasks/ngày; task_limits hiện hành là khoảng thời gian của từng Task."
+    },
+    {
+      "name": "test_gap_3_past_session_stale_candidate_rejection",
+      "class": "tests.extended.test_requirement_gaps_and_scenarios.TestRequirementGapsAndADHDScenarios",
+      "seconds": 0.203,
+      "status": "passed"
+    },
+    {
+      "name": "test_gap_4_chronic_task_avoidance_escalation",
+      "class": "tests.extended.test_requirement_gaps_and_scenarios.TestRequirementGapsAndADHDScenarios",
+      "seconds": 0.0,
+      "status": "skipped",
+      "reason": "Chưa có contract đầu vào avoidance_count và đầu ra can thiệp; schedule_revision không phải số lần hoãn."
+    },
+    {
+      "name": "test_gap_5_rolling_horizon_continuation_missing",
+      "class": "tests.extended.test_requirement_gaps_and_scenarios.TestRequirementGapsAndADHDScenarios",
+      "seconds": 0.0,
+      "status": "skipped",
+      "reason": "Chưa có API/contract tiếp tục chặng Rolling Horizon; cần test chuyển chặng thực, không kiểm tên hàm."
+    },
+    {
+      "name": "test_gap_6_zero_rest_burnout_prevention",
+      "class": "tests.extended.test_requirement_gaps_and_scenarios.TestRequirementGapsAndADHDScenarios",
+      "seconds": 0.0,
+      "status": "skipped",
+      "reason": "Quy tắc ép nghỉ sau 90 phút chưa chốt; contract durations hiện hành cho phép rest_interval_seconds=0."
+    },
+    {
+      "name": "test_gap_in_memory_idempotency_dict_vulnerability",
+      "class": "tests.extended.test_unimplemented_and_failing_gaps.TestUnimplementedAndHiddenGaps",
+      "seconds": 0.0,
+      "status": "skipped",
+      "reason": "Ca isinstance(dict) cũ không chứng minh mất idempotency. Được thay bằng regression receipt lưu DB/reopen/retry ở suite tích hợp mới."
+    },
+    {
+      "name": "test_gap_missing_draft_deletion_api",
+      "class": "tests.extended.test_unimplemented_and_failing_gaps.TestUnimplementedAndHiddenGaps",
+      "seconds": 0.36,
+      "status": "xfailed",
+      "reason": "DELETE /drafts/{id} chưa triển khai (HTTP 405)."
+    },
+    {
+      "name": "test_gap_missing_preferences_update_api",
+      "class": "tests.extended.test_unimplemented_and_failing_gaps.TestUnimplementedAndHiddenGaps",
+      "seconds": 0.147,
+      "status": "passed"
+    },
+    {
+      "name": "test_gap_missing_session_execution_apis",
+      "class": "tests.extended.test_unimplemented_and_failing_gaps.TestUnimplementedAndHiddenGaps",
+      "seconds": 0.007,
+      "status": "xfailed",
+      "reason": "POST /sessions/{id}/start chưa triển khai (HTTP 404). Ngoài phạm vi UF1–UF2."
+    },
+    {
+      "name": "test_gap_missing_thoughts_inbox_api",
+      "class": "tests.extended.test_unimplemented_and_failing_gaps.TestUnimplementedAndHiddenGaps",
+      "seconds": 0.007,
+      "status": "xfailed",
+      "reason": "POST /thoughts chưa triển khai (HTTP 404). Ngoài phạm vi UF1–UF2."
+    },
+    {
+      "name": "test_gap_reminder_offsets_multi_memos_blocked",
+      "class": "tests.extended.test_unimplemented_and_failing_gaps.TestUnimplementedAndHiddenGaps",
+      "seconds": 0.001,
+      "status": "xfailed",
+      "reason": "Giới hạn hiện hành: UserPreference chỉ cho một mốc reminder; hỗ trợ nhiều mốc chưa triển khai."
+    },
+    {
+      "name": "test_fast_fail_cascades_immediately_to_groq",
+      "class": "tests.test_ai_service.TestAIService",
+      "seconds": 0.005,
+      "status": "passed"
+    },
+    {
+      "name": "test_feasibility_deficit_formula",
+      "class": "tests.test_ai_service.TestAIService",
+      "seconds": 0.001,
+      "status": "passed"
+    },
+    {
+      "name": "test_groq_secondary_fallback_when_primary_groq_rate_limited",
+      "class": "tests.test_ai_service.TestAIService",
+      "seconds": 0.005,
+      "status": "passed"
+    },
+    {
+      "name": "test_primary_preferred_over_faster_warm_backup",
+      "class": "tests.test_ai_service.TestAIService",
+      "seconds": 0.106,
+      "status": "passed"
+    },
+    {
+      "name": "test_proposed_session_excludes_micro_task_from_duration",
+      "class": "tests.test_ai_service.TestAIService",
+      "seconds": 0.001,
+      "status": "passed"
+    },
+    {
+      "name": "test_schema_serialization",
+      "class": "tests.test_ai_service.TestAIService",
+      "seconds": 0.001,
+      "status": "passed"
+    },
+    {
+      "name": "test_settings_secret_redaction",
+      "class": "tests.test_ai_service.TestAIService",
+      "seconds": 0.002,
+      "status": "passed"
+    },
+    {
+      "name": "test_tier3_fallback_uf1",
+      "class": "tests.test_ai_service.TestAIService",
+      "seconds": 0.001,
+      "status": "passed"
+    },
+    {
+      "name": "test_tier3_fallback_uf2",
+      "class": "tests.test_ai_service.TestAIService",
+      "seconds": 0.001,
+      "status": "passed"
+    },
+    {
+      "name": "test_tier3_fallback_uf6",
+      "class": "tests.test_ai_service.TestAIService",
+      "seconds": 0.001,
+      "status": "passed"
+    },
+    {
+      "name": "test_timeout_graceful_degradation",
+      "class": "tests.test_ai_service.TestAIService",
+      "seconds": 0.084,
+      "status": "passed"
+    },
+    {
+      "name": "test_uf1_ambiguous_free_window_blocks_completion",
+      "class": "tests.test_ai_service.TestAIService",
+      "seconds": 0.001,
+      "status": "passed"
+    },
+    {
+      "name": "test_uf1_anti_hallucination_guardrail",
+      "class": "tests.test_ai_service.TestAIService",
+      "seconds": 0.001,
+      "status": "passed"
+    },
+    {
+      "name": "test_uf1_python_catches_past_deadline_and_merges_previous_draft",
+      "class": "tests.test_ai_service.TestAIService",
+      "seconds": 0.004,
+      "status": "passed"
+    },
+    {
+      "name": "test_uf2_provider_failure_requires_retry",
+      "class": "tests.test_ai_service.TestAIService",
+      "seconds": 0.006,
+      "status": "passed"
+    },
+    {
+      "name": "test_uf2_step_order_normalization_and_nl_plan_adjustment",
+      "class": "tests.test_ai_service.TestAIService",
+      "seconds": 0.004,
+      "status": "passed"
+    },
+    {
+      "name": "test_warm_backup_returned_for_giant_task_past_priority_window",
+      "class": "tests.test_ai_service.TestAIService",
+      "seconds": 0.119,
+      "status": "passed"
+    },
+    {
+      "name": "test_cross_user_step_and_preference_proposal_rejected",
+      "class": "tests.test_database",
+      "seconds": 0.038,
+      "status": "passed"
+    },
+    {
+      "name": "test_pending_proposal_keeps_official_schedule_and_is_unique",
+      "class": "tests.test_database",
+      "seconds": 0.037,
+      "status": "passed"
+    },
+    {
+      "name": "test_run_ended_does_not_complete_task_and_late_checkin_same_row",
+      "class": "tests.test_database",
+      "seconds": 0.054,
+      "status": "passed"
+    },
+    {
+      "name": "test_duplicate_active_run_and_final_checkin_rejected[running]",
+      "class": "tests.test_database",
+      "seconds": 0.041,
+      "status": "passed"
+    },
+    {
+      "name": "test_duplicate_active_run_and_final_checkin_rejected[awaiting_checkin]",
+      "class": "tests.test_database",
+      "seconds": 0.042,
+      "status": "passed"
+    },
+    {
+      "name": "test_thought_draft_task_forward_references",
+      "class": "tests.test_database",
+      "seconds": 0.046,
+      "status": "passed"
+    },
+    {
+      "name": "test_command_id_is_scoped_and_deduplicated",
+      "class": "tests.test_database",
+      "seconds": 0.035,
+      "status": "passed"
+    },
+    {
+      "name": "test_batched_task_derived_states_and_owner_filter",
+      "class": "tests.test_database",
+      "seconds": 0.1,
+      "status": "passed"
+    },
+    {
+      "name": "test_sqlite_migration_preserves_legacy_and_requires_reviewed_downgrade",
+      "class": "tests.test_database",
+      "seconds": 4.567,
+      "status": "passed"
+    },
+    {
+      "name": "test_migrated_thought_link_enforces_owner_and_concurrent_uniqueness",
+      "class": "tests.test_database",
+      "seconds": 2.139,
+      "status": "passed"
+    },
+    {
+      "name": "test_reminder_offsets_storage_preserves_existing_preferences",
+      "class": "tests.test_database",
+      "seconds": 0.041,
+      "status": "passed"
+    },
+    {
+      "name": "test_run_end_event_checkin_and_receipt_survive_reopen",
+      "class": "tests.test_database",
+      "seconds": 2.338,
+      "status": "passed"
+    },
+    {
+      "name": "test_postgresql_offline_migration_contains_deferred_fks",
+      "class": "tests.test_database",
+      "seconds": 1.371,
+      "status": "failed",
+      "reason": "AssertionError: Traceback (most recent call last):"
+    },
+    {
+      "name": "test_step_cannot_reference_task_of_another_user",
+      "class": "tests.test_database",
+      "seconds": 0.033,
+      "status": "passed"
+    },
+    {
+      "name": "test_calendar_outbox_rollback",
+      "class": "tests.test_database",
+      "seconds": 0.04,
+      "status": "passed"
+    },
+    {
+      "name": "test_json_suggestion_supports_array_and_context_unknown",
+      "class": "tests.test_database",
+      "seconds": 0.035,
+      "status": "passed"
+    },
+    {
+      "name": "test_draft_receipt_survives_process_restart",
+      "class": "tests.test_durable_receipts",
+      "seconds": 7.159,
+      "status": "passed"
+    },
+    {
+      "name": "test_voice_receipt_survives_process_restart_without_provider_retry",
+      "class": "tests.test_durable_receipts",
+      "seconds": 5.001,
+      "status": "passed"
+    },
+    {
+      "name": "test_results_match_detail_and_preserve_owner_source_states_and_order",
+      "class": "tests.test_list_tasks_batch",
+      "seconds": 0.565,
+      "status": "passed"
+    },
+    {
+      "name": "test_query_count_stays_constant_when_page_grows",
+      "class": "tests.test_list_tasks_batch",
+      "seconds": 0.285,
+      "status": "passed"
+    },
+    {
+      "name": "test_pagination_and_empty_page",
+      "class": "tests.test_list_tasks_batch",
+      "seconds": 0.317,
+      "status": "passed"
+    },
+    {
+      "name": "test_cursor_from_other_owner_is_rejected",
+      "class": "tests.test_list_tasks_batch",
+      "seconds": 0.262,
+      "status": "passed"
+    },
+    {
+      "name": "test_missing_source_keeps_409[source_draft_id]",
+      "class": "tests.test_list_tasks_batch",
+      "seconds": 0.241,
+      "status": "passed"
+    },
+    {
+      "name": "test_missing_source_keeps_409[source_summary]",
+      "class": "tests.test_list_tasks_batch",
+      "seconds": 0.244,
+      "status": "passed"
+    },
+    {
+      "name": "test_unavailable_linked_draft_keeps_404[missing]",
+      "class": "tests.test_list_tasks_batch",
+      "seconds": 0.262,
+      "status": "passed"
+    },
+    {
+      "name": "test_unavailable_linked_draft_keeps_404[other_owner]",
+      "class": "tests.test_list_tasks_batch",
+      "seconds": 0.263,
+      "status": "passed"
+    },
+    {
+      "name": "test_task_identity_map_is_refreshed",
+      "class": "tests.test_list_tasks_batch",
+      "seconds": 0.248,
+      "status": "passed"
+    },
+    {
+      "name": "test_csv_values_and_roundtrip",
+      "class": "tests.test_models",
+      "seconds": 0.037,
+      "status": "passed"
+    },
+    {
+      "name": "test_foreign_key_and_no_cascade_delete",
+      "class": "tests.test_models",
+      "seconds": 0.036,
+      "status": "passed"
+    },
+    {
+      "name": "test_one_preference_per_user",
+      "class": "tests.test_models",
+      "seconds": 0.033,
+      "status": "passed"
+    },
+    {
+      "name": "test_stale_write_rejected",
+      "class": "tests.test_models",
+      "seconds": 0.036,
+      "status": "passed"
+    },
+    {
+      "name": "test_invalid_session_rejected[duration_seconds-1]",
+      "class": "tests.test_models",
+      "seconds": 0.035,
+      "status": "passed"
+    },
+    {
+      "name": "test_invalid_session_rejected[rest_seconds--1]",
+      "class": "tests.test_models",
+      "seconds": 0.036,
+      "status": "passed"
+    },
+    {
+      "name": "test_invalid_session_rejected[schedule_revision-0]",
+      "class": "tests.test_models",
+      "seconds": 0.034,
+      "status": "passed"
+    },
+    {
+      "name": "test_naive_timestamp_rejected",
+      "class": "tests.test_models",
+      "seconds": 0.033,
+      "status": "passed"
+    },
+    {
+      "name": "test_postgresql_ddl_compiles",
+      "class": "tests.test_models",
+      "seconds": 0.016,
+      "status": "passed"
+    },
+    {
+      "name": "test_candidate_keeps_client_keys_and_micro_outside_duration",
+      "class": "tests.test_planning_dto",
+      "seconds": 0.001,
+      "status": "passed"
+    },
+    {
+      "name": "test_candidate_rejects_missing_parent_and_wrong_duration",
+      "class": "tests.test_planning_dto",
+      "seconds": 0.001,
+      "status": "passed"
+    },
+    {
+      "name": "test_time_constraint_requires_one_aware_end",
+      "class": "tests.test_planning_dto",
+      "seconds": 0.001,
+      "status": "passed"
+    },
+    {
+      "name": "test_availability_rejects_overnight_rule",
+      "class": "tests.test_planning_dto",
+      "seconds": 0.001,
+      "status": "passed"
+    },
+    {
+      "name": "test_TC_UF1_01_full_text_input_complete",
+      "class": "tests.test_uf1_uf2_matrix.TestUF1HappyPath",
+      "seconds": 0.125,
+      "status": "passed"
+    },
+    {
+      "name": "test_TC_UF1_02_voice_stt_full_input_complete",
+      "class": "tests.test_uf1_uf2_matrix.TestUF1HappyPath",
+      "seconds": 0.017,
+      "status": "passed"
+    },
+    {
+      "name": "test_TC_UF1_03_summary_contains_key_fields",
+      "class": "tests.test_uf1_uf2_matrix.TestUF1HappyPath",
+      "seconds": 0.001,
+      "status": "passed"
+    },
+    {
+      "name": "test_TC_UF1_04_multiple_valid_free_windows",
+      "class": "tests.test_uf1_uf2_matrix.TestUF1HappyPath",
+      "seconds": 0.001,
+      "status": "passed"
+    },
+    {
+      "name": "test_TC_UF1_05_all_fields_missing_single_round",
+      "class": "tests.test_uf1_uf2_matrix.TestUF1SingleRoundClarification",
+      "seconds": 0.001,
+      "status": "passed"
+    },
+    {
+      "name": "test_TC_UF1_06_missing_free_time_and_deadline",
+      "class": "tests.test_uf1_uf2_matrix.TestUF1SingleRoundClarification",
+      "seconds": 0.001,
+      "status": "passed"
+    },
+    {
+      "name": "test_TC_UF1_07_previous_draft_merging",
+      "class": "tests.test_uf1_uf2_matrix.TestUF1SingleRoundClarification",
+      "seconds": 0.017,
+      "status": "passed"
+    },
+    {
+      "name": "test_TC_UF1_08_user_overrides_previous_scope",
+      "class": "tests.test_uf1_uf2_matrix.TestUF1SingleRoundClarification",
+      "seconds": 0.018,
+      "status": "passed"
+    },
+    {
+      "name": "test_TC_UF1_09_ambiguous_free_window_blocks_complete",
+      "class": "tests.test_uf1_uf2_matrix.TestUF1SingleRoundClarification",
+      "seconds": 0.001,
+      "status": "passed"
+    },
+    {
+      "name": "test_TC_UF1_10_past_deadline_detected_as_conflict",
+      "class": "tests.test_uf1_uf2_matrix.TestUF1StrictGuardrails",
+      "seconds": 0.017,
+      "status": "passed"
+    },
+    {
+      "name": "test_TC_UF1_11_anti_hallucination_scope_none_deadline_none",
+      "class": "tests.test_uf1_uf2_matrix.TestUF1StrictGuardrails",
+      "seconds": 0.001,
+      "status": "passed"
+    },
+    {
+      "name": "test_TC_UF1_12_vague_time_phrase_not_auto_filled",
+      "class": "tests.test_uf1_uf2_matrix.TestUF1StrictGuardrails",
+      "seconds": 0.001,
+      "status": "passed"
+    },
+    {
+      "name": "test_TC_UF1_13_tier3_fallback_produces_incomplete_draft",
+      "class": "tests.test_uf1_uf2_matrix.TestUF1StrictGuardrails",
+      "seconds": 0.001,
+      "status": "passed"
+    },
+    {
+      "name": "test_TC_UF1_14_free_window_fully_busy_conflict",
+      "class": "tests.test_uf1_uf2_matrix.TestUF1StrictGuardrails",
+      "seconds": 0.001,
+      "status": "passed"
+    },
+    {
+      "name": "test_TC_UF1_15_tier3_latency_under_2500ms",
+      "class": "tests.test_uf1_uf2_matrix.TestUF1StrictGuardrails",
+      "seconds": 0.001,
+      "status": "passed"
+    },
+    {
+      "name": "test_TC_UF2_01_default_proposal_2_to_5_steps_with_micro_task",
+      "class": "tests.test_uf1_uf2_matrix.TestUF2DefaultProposal",
+      "seconds": 0.027,
+      "status": "passed"
+    },
+    {
+      "name": "test_TC_UF2_02_step_order_normalization",
+      "class": "tests.test_uf1_uf2_matrix.TestUF2DefaultProposal",
+      "seconds": 0.001,
+      "status": "passed"
+    },
+    {
+      "name": "test_TC_UF2_03_estimated_minutes_is_raw_not_buffered",
+      "class": "tests.test_uf1_uf2_matrix.TestUF2DefaultProposal",
+      "seconds": 0.001,
+      "status": "passed"
+    },
+    {
+      "name": "test_TC_UF2_04_tier3_fallback_generates_micro_task_per_step",
+      "class": "tests.test_uf1_uf2_matrix.TestUF2DefaultProposal",
+      "seconds": 0.001,
+      "status": "passed"
+    },
+    {
+      "name": "test_TC_UF2_05_sufficient_free_time_feasible",
+      "class": "tests.test_uf1_uf2_matrix.TestUF2FeasibilityCheck",
+      "seconds": 0.001,
+      "status": "passed"
+    },
+    {
+      "name": "test_TC_UF2_06_deficit_computed_correctly",
+      "class": "tests.test_uf1_uf2_matrix.TestUF2FeasibilityCheck",
+      "seconds": 0.001,
+      "status": "passed"
+    },
+    {
+      "name": "test_TC_UF2_07_exact_fit_is_valid",
+      "class": "tests.test_uf1_uf2_matrix.TestUF2FeasibilityCheck",
+      "seconds": 0.001,
+      "status": "passed"
+    },
+    {
+      "name": "test_TC_UF2_08_adjustment_payload_cannot_move_other_tasks",
+      "class": "tests.test_uf1_uf2_matrix.TestUF2FeasibilityCheck",
+      "seconds": 0.001,
+      "status": "passed"
+    },
+    {
+      "name": "test_TC_UF2_09_merge_steps_via_nl",
+      "class": "tests.test_uf1_uf2_matrix.TestUF2NLAdjustment",
+      "seconds": 0.017,
+      "status": "passed"
+    },
+    {
+      "name": "test_TC_UF2_10_add_clear_free_window",
+      "class": "tests.test_uf1_uf2_matrix.TestUF2NLAdjustment",
+      "seconds": 0.001,
+      "status": "passed"
+    },
+    {
+      "name": "test_TC_UF2_11_ambiguous_added_window_triggers_clarification",
+      "class": "tests.test_uf1_uf2_matrix.TestUF2NLAdjustment",
+      "seconds": 0.001,
+      "status": "passed"
+    },
+    {
+      "name": "test_TC_UF2_12_update_deadline_via_nl",
+      "class": "tests.test_uf1_uf2_matrix.TestUF2NLAdjustment",
+      "seconds": 0.001,
+      "status": "passed"
+    },
+    {
+      "name": "test_TC_UF2_12b_deadline_null_when_not_mentioned",
+      "class": "tests.test_uf1_uf2_matrix.TestUF2NLAdjustment",
+      "seconds": 0.001,
+      "status": "passed"
+    },
+    {
+      "name": "test_TC_UF2_13_schedule_requires_explicit_user_confirmation",
+      "class": "tests.test_uf1_uf2_matrix.TestUF2ScheduleConfirmation",
+      "seconds": 0.001,
+      "status": "passed"
+    },
+    {
+      "name": "test_TC_UF2_14_llm_payload_has_no_session_schedule_fields",
+      "class": "tests.test_uf1_uf2_matrix.TestUF2ScheduleConfirmation",
+      "seconds": 0.001,
+      "status": "passed"
+    },
+    {
+      "name": "test_TC_UF2_15_tier3_decompose_latency_under_2500ms",
+      "class": "tests.test_uf1_uf2_matrix.TestUF2ScheduleConfirmation",
+      "seconds": 0.001,
+      "status": "passed"
+    },
+    {
+      "name": "test_TC_E2E_01_complete_uf1_then_decompose_uf2",
+      "class": "tests.test_uf1_uf2_matrix.TestE2EUF1ToUF2",
+      "seconds": 0.02,
+      "status": "passed"
+    },
+    {
+      "name": "test_TC_E2E_02_incomplete_uf1_blocks_uf2",
+      "class": "tests.test_uf1_uf2_matrix.TestE2EUF1ToUF2",
+      "seconds": 0.001,
+      "status": "passed"
+    },
+    {
+      "name": "test_TC_UF1_05b_confirm_summary_persists_confirmation",
+      "class": "tests.test_uf1_uf2_matrix.TestUF1UF2PDFAlignment",
+      "seconds": 0.171,
+      "status": "passed"
+    },
+    {
+      "name": "test_TC_UF1_06b_edit_rebumps_revision_and_revalidates",
+      "class": "tests.test_uf1_uf2_matrix.TestUF1UF2PDFAlignment",
+      "seconds": 0.187,
+      "status": "passed"
+    },
+    {
+      "name": "test_TC_UF1_08b_no_task_after_confirm_summary",
+      "class": "tests.test_uf1_uf2_matrix.TestUF1UF2PDFAlignment",
+      "seconds": 0.163,
+      "status": "passed"
+    },
+    {
+      "name": "test_TC_UF2_11b_confirm_blocked_when_infeasible",
+      "class": "tests.test_uf1_uf2_matrix.TestUF1UF2PDFAlignment",
+      "seconds": 0.22,
+      "status": "passed"
+    },
+    {
+      "name": "test_TC_UF2_12b_confirm_creates_full_aggregate_atomically",
+      "class": "tests.test_uf1_uf2_matrix.TestUF1UF2PDFAlignment",
+      "seconds": 0.244,
+      "status": "passed"
+    },
+    {
+      "name": "test_TC_UF2_19b_rolling_horizon_at_most_14_days",
+      "class": "tests.test_uf1_uf2_matrix.TestUF1UF2PDFAlignment",
+      "seconds": 0.001,
+      "status": "passed"
+    },
+    {
+      "name": "test_TC_UF2_21b_patch_candidate_direct_edit",
+      "class": "tests.test_uf1_uf2_matrix.TestUF1UF2PDFAlignment",
+      "seconds": 0.359,
+      "status": "passed"
+    },
+    {
+      "name": "test_TC_UF1_10_missing_info_keeps_draft_and_blocks_confirmation",
+      "class": "tests.test_uf1_uf2_matrix.TestUF1UF2PDFGaps",
+      "seconds": 0.149,
+      "status": "passed"
+    },
+    {
+      "name": "test_TC_UF2_04_unconfirmed_draft_cannot_create_candidate",
+      "class": "tests.test_uf1_uf2_matrix.TestUF1UF2PDFGaps",
+      "seconds": 0.134,
+      "status": "passed"
+    },
+    {
+      "name": "test_TC_UF2_20_rolling_horizon_continuation",
+      "class": "tests.test_uf1_uf2_matrix.TestUF1UF2PDFGaps",
+      "seconds": 0.001,
+      "status": "skipped",
+      "reason": "Chưa có API chuyển chặng; theo dõi trong báo cáo, không kiểm bằng tên hàm"
+    },
+    {
+      "name": "test_patch_nested_summary_preserves_models_and_clears_legacy_source[False]",
+      "class": "tests.test_week2_baseline",
+      "seconds": 0.187,
+      "status": "passed"
+    },
+    {
+      "name": "test_patch_nested_summary_preserves_models_and_clears_legacy_source[True]",
+      "class": "tests.test_week2_baseline",
+      "seconds": 0.201,
+      "status": "passed"
+    },
+    {
+      "name": "test_conversion_rollback_receipt_reopen_and_forward_links",
+      "class": "tests.test_week2_storage",
+      "seconds": 2.219,
+      "status": "passed"
+    },
+    {
+      "name": "test_concurrent_conversion_replays_one_receipt",
+      "class": "tests.test_week2_storage",
+      "seconds": 2.263,
+      "status": "passed"
+    },
+    {
+      "name": "test_thought_delete_rollback_stale_revision_and_owner",
+      "class": "tests.test_week2_storage",
+      "seconds": 2.271,
+      "status": "passed"
+    },
+    {
+      "name": "test_legacy_links_are_batched_and_prevent_second_draft[canonical]",
+      "class": "tests.test_week2_storage",
+      "seconds": 2.451,
+      "status": "passed"
+    },
+    {
+      "name": "test_legacy_links_are_batched_and_prevent_second_draft[hex]",
+      "class": "tests.test_week2_storage",
+      "seconds": 2.398,
+      "status": "passed"
+    },
+    {
+      "name": "test_legacy_links_are_batched_and_prevent_second_draft[uppercase]",
+      "class": "tests.test_week2_storage",
+      "seconds": 2.432,
+      "status": "passed"
+    },
+    {
+      "name": "test_legacy_links_are_batched_and_prevent_second_draft[braces]",
+      "class": "tests.test_week2_storage",
+      "seconds": 2.591,
+      "status": "passed"
+    },
+    {
+      "name": "test_legacy_links_are_batched_and_prevent_second_draft[urn]",
+      "class": "tests.test_week2_storage",
+      "seconds": 2.371,
+      "status": "passed"
+    },
+    {
+      "name": "test_device_reports_keep_latest_owner_and_rollback",
+      "class": "tests.test_week2_storage",
+      "seconds": 2.473,
+      "status": "passed"
+    },
+    {
+      "name": "test_concurrent_device_reports_keep_highest_revision",
+      "class": "tests.test_week2_storage",
+      "seconds": 2.437,
+      "status": "passed"
+    },
+    {
+      "name": "test_run_checkin_revision_conflict_and_event_scope",
+      "class": "tests.test_week2_storage",
+      "seconds": 2.377,
+      "status": "passed"
+    },
+    {
+      "name": "test_multiple_reminders_and_revision_cancellation_rollback",
+      "class": "tests.test_week2_storage",
+      "seconds": 2.211,
+      "status": "passed"
+    },
+    {
+      "name": "test_http_create_draft_persists_fk_and_receipt_and_promotes_legacy",
+      "class": "tests.test_week2_storage",
+      "seconds": 2.874,
+      "status": "passed"
+    },
+    {
+      "name": "test_http_rejects_invalid_thought_source_without_writing[wrong_owner]",
+      "class": "tests.test_week2_storage",
+      "seconds": 2.211,
+      "status": "passed"
+    },
+    {
+      "name": "test_http_rejects_invalid_thought_source_without_writing[missing]",
+      "class": "tests.test_week2_storage",
+      "seconds": 2.367,
+      "status": "passed"
+    },
+    {
+      "name": "test_http_rejects_invalid_thought_source_without_writing[running]",
+      "class": "tests.test_week2_storage",
+      "seconds": 2.498,
+      "status": "passed"
+    },
+    {
+      "name": "test_http_concurrent_draft_creation_keeps_one_source_link",
+      "class": "tests.test_week2_storage",
+      "seconds": 2.585,
+      "status": "passed"
+    },
+    {
+      "name": "test_voice_retry_uses_durable_receipt_after_memory_cache_is_lost",
+      "class": "tests.test_week2_storage",
+      "seconds": 2.492,
+      "status": "passed"
+    },
+    {
+      "name": "test_analysis_blocks_live_source_before_provider",
+      "class": "tests.test_week2_storage",
+      "seconds": 2.563,
+      "status": "passed"
+    },
+    {
+      "name": "test_device_migration_preserves_populated_database",
+      "class": "tests.test_week2_storage",
+      "seconds": 5.569,
+      "status": "passed"
+    },
+    {
+      "name": "test_merge_preserves_existing_device_branch",
+      "class": "tests.test_week2_storage",
+      "seconds": 5.176,
+      "status": "passed"
+    },
+    {
+      "name": "test_calculate_buffered_work_basic",
+      "class": "tests.unit.test_scheduler_engine",
+      "seconds": 0.001,
+      "status": "passed"
+    },
+    {
+      "name": "test_build_session_segments_k03",
+      "class": "tests.unit.test_scheduler_engine",
+      "seconds": 0.001,
+      "status": "passed"
+    },
+    {
+      "name": "test_build_session_segments_zero_rest",
+      "class": "tests.unit.test_scheduler_engine",
+      "seconds": 0.001,
+      "status": "passed"
+    },
+    {
+      "name": "test_validation_success",
+      "class": "tests.unit.test_scheduler_engine",
+      "seconds": 0.001,
+      "status": "passed"
+    },
+    {
+      "name": "test_validation_missing_fields",
+      "class": "tests.unit.test_scheduler_engine",
+      "seconds": 0.001,
+      "status": "passed"
+    },
+    {
+      "name": "test_validation_unconfirmed_availability",
+      "class": "tests.unit.test_scheduler_engine",
+      "seconds": 0.001,
+      "status": "passed"
+    },
+    {
+      "name": "test_compute_effective_free_intervals_basic",
+      "class": "tests.unit.test_scheduler_engine",
+      "seconds": 0.001,
+      "status": "passed"
+    },
+    {
+      "name": "test_own_event_protection",
+      "class": "tests.unit.test_scheduler_engine",
+      "seconds": 0.001,
+      "status": "passed"
+    },
+    {
+      "name": "test_schedule_sessions_feasible",
+      "class": "tests.unit.test_scheduler_engine",
+      "seconds": 0.001,
+      "status": "passed"
+    },
+    {
+      "name": "test_schedule_sessions_deficit",
+      "class": "tests.unit.test_scheduler_engine",
+      "seconds": 0.001,
+      "status": "passed"
+    },
+    {
+      "name": "test_compute_task_priority_key_rules",
+      "class": "tests.unit.test_scheduler_engine",
+      "seconds": 0.001,
+      "status": "passed"
+    },
+    {
+      "name": "test_order_steps_by_priority_multitask",
+      "class": "tests.unit.test_scheduler_engine",
+      "seconds": 0.001,
+      "status": "passed"
+    },
+    {
+      "name": "test_shift_elapsed_sessions",
+      "class": "tests.unit.test_scheduler_engine",
+      "seconds": 0.001,
+      "status": "passed"
+    },
+    {
+      "name": "test_evaluate_buffer_adaptation_median",
+      "class": "tests.unit.test_scheduler_engine",
+      "seconds": 0.001,
+      "status": "passed"
+    },
+    {
+      "name": "test_TC_UF2_04_empty_intervals_returns_not_feasible",
+      "class": "tests.unit.test_scheduler_engine",
+      "seconds": 0.001,
+      "status": "passed"
+    },
+    {
+      "name": "test_TC_UF2_18_scheduler_does_not_modify_time_constraint",
+      "class": "tests.unit.test_scheduler_engine",
+      "seconds": 0.001,
+      "status": "passed"
+    }
+  ],
+  "case_statuses": {
+    "passed": 171,
+    "skipped": 6,
+    "xfailed": 4,
+    "failed": 1
+  }
+}

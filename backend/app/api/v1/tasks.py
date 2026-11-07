@@ -46,7 +46,7 @@ async def get_task(
     current_user: CurrentUserDep,
     db: DbSessionDep,
 ) -> SuccessEnvelope[Task]:
-    """Dòng 14 trên API Sheet: Xem chi tiết công việc chính thức kèm PlanningParts, Steps và Sessions."""
+    """Dòng 14: Xem công việc chính thức cùng Steps và Sessions, không có tầng Part."""
     task = await plan_service.get_task_by_id(
         user_id=current_user.user_id,
         db=db,

@@ -3,30 +3,38 @@
 import os
 import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor
+from datetime import timedelta
 from pathlib import Path
+from threading import Barrier
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import create_engine, inspect, select
+from pydantic import BaseModel
+from sqlalchemy import create_engine, event, inspect, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session as DBSession
-from test_models import make_plan
 
-from app.core.database import make_engine
+from app.core.database import make_engine, session_factory
 from app.models import (
     Base,
     CheckIn,
     CommandReceipt,
     PlanningDraft,
-    PlanningPart,
     RescheduleProposal,
+    RunEvent,
     SessionRun,
+    Step,
     Task,
     Thought,
     User,
+    UserPreference,
 )
+from app.services import command_service
+from app.services.plan_service import get_command_result
 from app.services.task_state_service import get_task_planning_states
+from tests.test_models import make_plan
 
 
 def run_for(session, user_id, **kwargs):
@@ -113,10 +121,11 @@ def test_run_ended_does_not_complete_task_and_late_checkin_same_row(engine):
         assert run.ended_at == session.scheduled_end
 
 
-def test_duplicate_active_run_and_final_checkin_rejected(engine):
+@pytest.mark.parametrize("run_state", ["running", "awaiting_checkin"])
+def test_duplicate_active_run_and_final_checkin_rejected(engine, run_state):
     with DBSession(engine) as db:
         user, _, _, _, session = make_plan(db)
-        run = run_for(session, user.id)
+        run = run_for(session, user.id, run_state=run_state)
         db.add(run)
         db.commit()
         db.add(run_for(session, user.id))
@@ -199,48 +208,55 @@ async def test_batched_task_derived_states_and_owner_filter():
             user = User(email="states@test.example", display_name="TN")
             db.add(user)
             await db.flush()
-            task = Task(user_id=user.id, title="Task", time_constraint={})
+            task = Task(
+                user_id=user.id, title="Task", time_constraint={}, decomposition_state="not_started"
+            )
             db.add(task)
             await db.flush()
             task_id, user_id = task.id, user.id
             result = await get_task_planning_states(db, user_id, [task_id])
             assert result[task_id].decomposition_state == "not_started"
-            first = PlanningPart(
+            first = Step(
                 user_id=user_id,
                 task_id=task_id,
-                client_part_key="first",
-                scope_description="Đầu",
+                title="Đầu",
                 order_index=0,
-                decomposition_state="complete",
-                scheduling_state="complete",
+                estimated_base_seconds=1500,
+                remaining_base_seconds=0,
+                buffer_multiplier=1.0,
+                estimate_source="user_confirmed",
             )
-            second = PlanningPart(
+            second = Step(
                 user_id=user_id,
                 task_id=task_id,
-                client_part_key="second",
-                scope_description="Sau",
+                title="Sau",
                 order_index=1,
-                decomposition_state="not_started",
-                scheduling_state="not_scheduled",
+                estimated_base_seconds=1500,
+                remaining_base_seconds=0,
+                buffer_multiplier=1.0,
+                estimate_source="user_confirmed",
             )
+            task.decomposition_state = "partial"
+            task.unexpanded_scope = "Phần còn lại chưa chia"
             db.add_all([first, second])
             await db.flush()
             result = await get_task_planning_states(db, user_id, [task_id])
             assert result[task_id].decomposition_state == "partial"
-            assert result[task_id].scheduling_state == "partial"
-            second.decomposition_state = "complete"
-            second.scheduling_state = "complete"
+            assert result[task_id].scheduling_state == "not_scheduled"
+            task.decomposition_state = "complete"
+            task.unexpanded_scope = None
             await db.flush()
             result = await get_task_planning_states(db, user_id, [task_id])
             assert result[task_id].decomposition_state == "complete"
             assert result[task_id].scheduling_state == "complete"
             assert await get_task_planning_states(db, uuid4(), [task_id]) == {}
-            assert "decomposition_state" not in Task.__table__.c
+            assert "decomposition_state" in Task.__table__.c
+            assert "planning_parts" not in Base.metadata.tables
     finally:
         await engine.dispose()
 
 
-def test_sqlite_migration_upgrade_check_downgrade(tmp_path):
+def test_sqlite_migration_preserves_legacy_and_requires_reviewed_downgrade(tmp_path):
     url = "sqlite+aiosqlite:///" + (tmp_path / "migration.db").as_posix()
     env = {**os.environ, "DATABASE_URL": url}
     cwd = Path(__file__).resolve().parents[1]
@@ -260,13 +276,235 @@ def test_sqlite_migration_upgrade_check_downgrade(tmp_path):
     engine = create_engine(url.replace("+aiosqlite", ""))
     with engine.connect() as connection:
         assert set(inspect(connection).get_table_names()) == set(Base.metadata.tables) | {
-            "alembic_version"
+            "alembic_version",
+            "planning_parts",
+        }
+        assert {c["name"] for c in inspect(connection).get_columns("tasks")} >= {
+            "availability",
+            "decomposition_state",
+            "unexpanded_scope",
+            "source_summary_revision",
+            "source_planning_input_revision",
         }
         assert connection.exec_driver_sql("PRAGMA foreign_key_check").all() == []
+    with DBSession(engine) as db:
+        _, _, task, step, session = make_plan(db)
+        assert step.task_id == task.id
+        assert session.step_id == step.id
     engine.dispose()
-    alembic("check")
-    alembic("downgrade", "base")
+    # C01 chủ động giữ cột/bảng legacy và từ chối downgrade mất nguồn gốc.
+    downgrade = subprocess.run(
+        [sys.executable, "-m", "alembic", "downgrade", "base"],
+        cwd=cwd,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert downgrade.returncode != 0
+    assert "C01 downgrade requires an explicit snapshot/data recovery plan" in downgrade.stderr
     alembic("upgrade", "head")
+
+
+def test_migrated_thought_link_enforces_owner_and_concurrent_uniqueness(sqlite_migration):
+    url, alembic = sqlite_migration
+    alembic("upgrade", "head")
+    engine = create_engine(url.replace("+aiosqlite", ""))
+
+    @event.listens_for(engine, "connect")
+    def enable_foreign_keys(connection, _record):
+        connection.execute("PRAGMA foreign_keys=ON")
+
+    try:
+        with DBSession(engine) as db:
+            user, _, _, _, session = make_plan(db)
+            run = run_for(
+                session,
+                user.id,
+                ended_at=session.scheduled_end,
+                run_state="awaiting_checkin",
+                active_phase="ended",
+                segment_index=None,
+            )
+            other = User(email="other-owner@test.example", display_name="Other")
+            db.add_all([run, other])
+            db.flush()
+            thought = Thought(
+                user_id=user.id,
+                source_run_id=run.id,
+                client_thought_id="thought-race",
+                input_type="audio",
+                capture_state="saved",
+                attempt_count=1,
+            )
+            db.add(thought)
+            db.commit()
+            user_id, other_id, thought_id = user.id, other.id, thought.id
+            db.add(
+                PlanningDraft(
+                    user_id=other_id,
+                    client_draft_id="wrong-owner",
+                    source_thought_id=thought_id,
+                    input_source="thought_conversion",
+                )
+            )
+            with pytest.raises(IntegrityError, match="FOREIGN KEY"):
+                db.commit()
+            db.rollback()
+
+        ready = Barrier(2, timeout=5)
+
+        def insert_draft(client_id):
+            with DBSession(engine) as db:
+                draft = PlanningDraft(
+                    user_id=user_id,
+                    client_draft_id=client_id,
+                    source_thought_id=thought_id,
+                    input_source="thought_conversion",
+                )
+                db.add(draft)
+                ready.wait()
+                try:
+                    db.commit()
+                except IntegrityError as error:
+                    db.rollback()
+                    assert "planning_drafts.source_thought_id" in str(error.orig)
+                    return None
+                return draft.id
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(insert_draft, ["attempt-a", "attempt-b"]))
+        winner_ids = [draft_id for draft_id in results if draft_id is not None]
+        with DBSession(engine) as db:
+            assert len(winner_ids) == 1
+            assert db.scalars(select(PlanningDraft.id)).all() == winner_ids
+    finally:
+        engine.dispose()
+
+
+def test_reminder_offsets_storage_preserves_existing_preferences(engine):
+    with DBSession(engine) as db:
+        existing, pref, *_ = make_plan(db)
+        pref.reminder_offsets = [300]
+        db.commit()
+        new = User(email="new-reminders@test.example", display_name="New")
+        db.add(new)
+        db.flush()
+        db.add(UserPreference(user_id=new.id, reminder_offsets=[900, 600, 300]))
+        db.commit()
+        existing_id, new_id = existing.id, new.id
+
+    with DBSession(engine) as db:
+        offsets = {
+            owner: values
+            for owner, values in db.execute(
+                select(UserPreference.user_id, UserPreference.reminder_offsets)
+            ).all()
+        }
+        assert offsets == {existing_id: [300], new_id: [900, 600, 300]}
+
+
+@pytest.mark.asyncio
+async def test_run_end_event_checkin_and_receipt_survive_reopen(sqlite_migration):
+    url, alembic = sqlite_migration
+    alembic("upgrade", "head")
+
+    class EndResult(BaseModel):
+        run_id: str
+        checkin_id: str
+
+    def seed_run(db):
+        user, _, _, _, session = make_plan(db)
+        run = run_for(session, user.id)
+        db.add(run)
+        db.flush()
+        db.add(
+            RunEvent(
+                user_id=user.id,
+                run_id=run.id,
+                client_event_id="start-event",
+                event_type="start",
+                occurred_at=run.started_at,
+                payload={},
+            )
+        )
+        db.commit()
+        return user.id, run.id, session.scheduled_end
+
+    engine = make_engine(url)
+    try:
+        sessions = session_factory(engine)
+        async with sessions() as db:
+            user_id, run_id, ended_at = await db.run_sync(seed_run)
+
+        owner = str(user_id)
+        key = "end-command"
+        digest = command_service.command_hash("end_run", str(run_id), {"event_id": "end-event"})
+
+        async def stage_end(db, event_id):
+            run = await db.get(SessionRun, run_id)
+            assert run is not None
+            run.ended_at = ended_at
+            run.run_state = "awaiting_checkin"
+            run.active_phase = "ended"
+            run.segment_index = None
+            run.work_elapsed_seconds = 3600
+            run.actual_work_seconds = 3600
+            run.actual_source = "timer_proxy"
+            run.checkin_timeout_at = ended_at + timedelta(seconds=300)
+            run.dnd_release_at = run.checkin_timeout_at
+            checkin = CheckIn(user_id=user_id, run_id=run_id, kind="final", asked_at=ended_at)
+            db.add(checkin)
+            await db.flush()
+            result = EndResult(run_id=str(run_id), checkin_id=str(checkin.id))
+            command_service.record(db, owner, key, digest, "end_run", result)
+            await db.flush()
+            db.add(
+                RunEvent(
+                    user_id=user_id,
+                    run_id=run_id,
+                    client_event_id=event_id,
+                    event_type="end",
+                    occurred_at=ended_at,
+                    payload={},
+                )
+            )
+            return result
+
+        async with sessions() as db:
+            await stage_end(db, "start-event")
+            with pytest.raises(IntegrityError, match="run_events.client_event_id"):
+                await db.commit()
+            await db.rollback()
+
+        async with sessions() as db:
+            run = await db.get(SessionRun, run_id)
+            assert run is not None and run.run_state == "running" and run.ended_at is None
+            assert await db.scalar(select(CheckIn.id)) is None
+            assert await command_service.replay(db, owner, key, digest) is None
+            result = await stage_end(db, "end-event")
+            await db.commit()
+    finally:
+        await engine.dispose()
+
+    reopened = make_engine(url)
+    try:
+        async with session_factory(reopened)() as db:
+            assert await command_service.replay(db, owner, key, digest) == result.model_dump()
+            receipt = await get_command_result(user_id=owner, command_id=key, db=db)
+            assert receipt.result_reference == result.model_dump()
+            run = await db.get(SessionRun, run_id)
+            assert run is not None and run.ended_at == ended_at
+            assert run.actual_work_seconds == 3600 and run.outcome == "unknown"
+            assert run.checkin_timeout_at == ended_at + timedelta(seconds=300)
+            assert [str(value) for value in await db.scalars(select(CheckIn.id))] == [
+                result.checkin_id
+            ]
+            assert set(await db.scalars(select(RunEvent.client_event_id))) == {
+                "start-event",
+                "end-event",
+            }
+    finally:
+        await reopened.dispose()
 
 
 def test_postgresql_offline_migration_contains_deferred_fks():
@@ -281,26 +519,43 @@ def test_postgresql_offline_migration_contains_deferred_fks():
     assert result.returncode == 0, result.stderr
     assert "ALTER TABLE planning_drafts ADD CONSTRAINT fk_draft_source_thought" in result.stdout
     assert "CREATE UNIQUE INDEX uq_user_live_run" in result.stdout
+    assert "DO $c01$" in result.stdout
+    assert "client_step_keys" in result.stdout
+    assert "USING to_json(resource_ref)" in result.stdout
 
 
-def test_part_cannot_belong_to_another_task_of_same_user(engine):
+def test_focus_defaults_upgrade_preserves_existing_preferences(sqlite_migration):
+    url, migrate = sqlite_migration
+    migrate("upgrade", "20261106_01")
+    engine = create_engine(url.replace("+aiosqlite", ""))
+    with DBSession(engine) as db:
+        user = User(email="legacy-defaults@example.test", display_name="Legacy")
+        db.add(user)
+        db.flush()
+        db.add(UserPreference(user_id=user.id, reminder_offsets=[300], micro_task_seconds=45))
+        db.commit()
+        owner = user.id
+        db.execute(update(UserPreference).values(micro_task_seconds=None))
+        db.commit()
+    migrate("upgrade", "head")
+    with DBSession(engine) as db:
+        pref = db.scalar(select(UserPreference).where(UserPreference.user_id == owner))
+        assert pref is not None
+        assert pref.micro_task_seconds == 120
+        assert pref.reminder_offsets == [300]
+    engine.dispose()
+
+
+def test_step_cannot_reference_task_of_another_user(engine):
     with DBSession(engine) as db:
         user, _, task, step, _ = make_plan(db)
-        other = Task(user_id=user.id, title="Other task", time_constraint={})
+        other_user = User(email="other-owner@example.test", display_name="Other")
+        db.add(other_user)
+        db.flush()
+        other = Task(user_id=other_user.id, title="Other task", time_constraint={})
         db.add(other)
         db.flush()
-        part = PlanningPart(
-            user_id=user.id,
-            task_id=other.id,
-            client_part_key="part",
-            scope_description="Part",
-            order_index=0,
-            decomposition_state="complete",
-            scheduling_state="complete",
-        )
-        db.add(part)
-        db.flush()
-        step.planning_part_id = part.id
+        step.task_id = other.id
         with pytest.raises(IntegrityError):
             db.commit()
 

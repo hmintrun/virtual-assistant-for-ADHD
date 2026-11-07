@@ -6,6 +6,7 @@ from uuid import NAMESPACE_DNS, UUID, uuid4, uuid5
 
 from pydantic import ValidationError
 from sqlalchemy import select, update
+from sqlalchemy.exc import MultipleResultsFound
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import AppError
@@ -14,6 +15,7 @@ from app.models.planning import PlanningDraft as PlanningDraftModel
 from app.models.settings import Availability as AvailabilityModel
 from app.models.user import User as UserModel
 from app.models.user import UserPreference as UserPreferenceModel
+from app.repositories import run_repository, thought_repository
 from app.schemas.availability import Availability, DraftAvailability
 from app.schemas.common import (
     AvailabilityRef,
@@ -40,8 +42,8 @@ from app.schemas.task import (
     LLMTaskExtractionPayload,
     TaskExtractionResult,
 )
-from app.services.ai_service import ai_service
-from app.services.command_service import durable_command
+from app.services.ai_service import UF1_FALLBACK_NOTICE, UF1_FALLBACK_QUESTIONS, ai_service
+from app.services.command_service import durable_command, lock_owner
 from app.services.scheduler_engine import validate_planning_prerequisites
 
 
@@ -164,9 +166,42 @@ def _serialize_summary_payload(draft: PlanningDraft) -> dict[str, Any]:
             draft.candidate_ref.model_dump(mode="json") if draft.candidate_ref is not None else None
         ),
         "confirmed_task_id": draft.confirmed_task_id,
-        "source_thought_id": draft.source_thought_id,
     }
     return summary_dict
+
+
+def _fallback_notice() -> ClarificationIssue:
+    return ClarificationIssue(
+        code="AI_FALLBACK_NOTICE",
+        field_path="summary",
+        message="AI đang tạm gián đoạn. Bạn vẫn có thể kiểm tra và xác nhận trên biểu mẫu.",
+        question=UF1_FALLBACK_NOTICE,
+        blocking=False,
+    )
+
+
+def _restore_summary(raw_summary: dict[str, Any]) -> TaskSummary:
+    summary = TaskSummary.model_validate(raw_summary)
+    issues: list[ClarificationIssue] = []
+    restored = False
+    for issue in summary.clarification_issues:
+        if issue.code == "AI_CLARIFICATION" and issue.field_path.startswith(
+            "clarification_questions["
+        ):
+            if issue.question in UF1_FALLBACK_QUESTIONS.values():
+                # Các câu hỏi này đã có bản tương ứng do validator UF1 tạo.
+                restored = True
+                continue
+            if issue.question == UF1_FALLBACK_NOTICE:
+                issue = _fallback_notice()
+                restored = True
+        if issue not in issues:
+            issues.append(issue)
+    if restored:
+        return summary.model_copy(
+            update={"clarification_issues": issues, "can_plan": not any(i.blocking for i in issues)}
+        )
+    return summary
 
 
 def _row_to_schema(row: PlanningDraftModel, fallback_draft_id: str | None = None) -> PlanningDraft:
@@ -179,8 +214,8 @@ def _row_to_schema(row: PlanningDraftModel, fallback_draft_id: str | None = None
     cand_ref_raw = api_meta.get("candidate_ref")
     cand_ref = CandidateRef.model_validate(cand_ref_raw) if isinstance(cand_ref_raw, dict) else None
     confirmed_task_id = api_meta.get("confirmed_task_id")
-    source_thought_id = api_meta.get("source_thought_id") or (
-        str(row.source_thought_id) if row.source_thought_id else None
+    source_thought_id = (
+        str(row.source_thought_id) if row.source_thought_id else api_meta.get("source_thought_id")
     )
     return PlanningDraft(
         ai_context=api_meta.get("ai_context") or {},
@@ -189,7 +224,7 @@ def _row_to_schema(row: PlanningDraftModel, fallback_draft_id: str | None = None
         stage=row.stage,
         raw_input=row.raw_input,
         input_source=cast(Literal["text", "voice", "thought"], row.input_source),
-        summary=TaskSummary.model_validate(raw_summary),
+        summary=_restore_summary(raw_summary),
         summary_revision=row.summary_revision,
         summary_confirmed_revision=row.summary_confirmed_revision,
         candidate_ref=cand_ref,
@@ -202,6 +237,8 @@ def _row_to_schema(row: PlanningDraftModel, fallback_draft_id: str | None = None
 
 async def ensure_dev_seed_in_db(db: AsyncSession) -> None:
     """Bước 5.1 (F07, T23): Khởi tạo bảng và seed idempotent cho User A, User B cùng các Draft mẫu."""
+    if db.info.get("dev_seed_ready"):
+        return
     bind = db.get_bind()
     engine_key = id(bind)
     if engine_key not in _INITIALIZED_ENGINES:
@@ -240,7 +277,8 @@ async def ensure_dev_seed_in_db(db: AsyncSession) -> None:
                     effective_revision=1,
                     buffer_multiplier=1.2,
                     reminder_style="gentle",
-                    reminder_offsets=[900],
+                    micro_task_seconds=120,
+                    reminder_offsets=[900, 600, 300],
                 )
             )
             changed = True
@@ -279,6 +317,58 @@ async def ensure_dev_seed_in_db(db: AsyncSession) -> None:
 
     if changed:
         await db.commit()
+    db.info["dev_seed_ready"] = True
+
+
+async def _validate_source_thought(
+    db: AsyncSession, user_id: str, draft_id: str, source_thought_id: str | None
+) -> UUID | None:
+    if source_thought_id is None:
+        return None
+    try:
+        thought_id = UUID(source_thought_id)
+    except ValueError:
+        thought_id = None
+    owner = resolve_user_uuid(user_id)
+    thought = (
+        await thought_repository.get_thought(db, owner, thought_id)
+        if thought_id is not None
+        else None
+    )
+    if thought is None:
+        raise AppError(
+            status_code=404,
+            code="RESOURCE_NOT_FOUND",
+            message="Không tìm thấy suy nghĩ nguồn.",
+            next_action="reload",
+        )
+    if thought.source_run_id is not None:
+        run = await run_repository.get_run(db, owner, thought.source_run_id)
+        if run is None or run.ended_at is None:
+            raise AppError(
+                status_code=409,
+                code="SESSION_STILL_RUNNING",
+                message="Chỉ tạo nháp từ suy nghĩ sau khi phiên nguồn kết thúc.",
+                next_action="wait_for_session_end",
+            )
+    try:
+        links = await thought_repository.get_links(db, owner, [thought.id])
+    except MultipleResultsFound:
+        raise AppError(
+            status_code=409,
+            code="SOURCE_CHANGED",
+            message="Dữ liệu cũ có nhiều nháp cùng nguồn suy nghĩ; cần đối soát liên kết.",
+            next_action="reload_and_review",
+        ) from None
+    linked = links.get(thought.id)
+    if linked is not None and linked.draft.id != resolve_draft_uuid(draft_id):
+        raise AppError(
+            status_code=409,
+            code="THOUGHT_ALREADY_LINKED",
+            message="Suy nghĩ này đã có bản nháp.",
+            next_action="open_linked_draft",
+        )
+    return thought.id
 
 
 async def _persist_draft_to_db(
@@ -293,6 +383,13 @@ async def _persist_draft_to_db(
         await ensure_dev_seed_in_db(db)
         did = resolve_draft_uuid(draft.draft_id)
         uid = resolve_user_uuid(user_id)
+        if draft.source_thought_id is not None:
+            await lock_owner(db, user_id)
+        source_thought_id = await _validate_source_thought(
+            db, user_id, draft.draft_id, draft.source_thought_id
+        )
+        if source_thought_id is not None:
+            draft.source_thought_id = str(source_thought_id)
         values = {
             "stage": draft.stage,
             "raw_input": draft.raw_input,
@@ -302,6 +399,7 @@ async def _persist_draft_to_db(
             "summary_confirmed_revision": draft.summary_confirmed_revision,
             "planning_input_revision": draft.planning_input_revision,
             "user_step_proposal": draft.user_step_proposal,
+            "source_thought_id": source_thought_id,
         }
         if expected is not None:
             written_id = await db.scalar(
@@ -1081,6 +1179,7 @@ async def confirm_draft_summary(
                     message=issue.message,
                 )
                 for issue in issues
+                if issue.blocking
             ],
             next_action="fix_fields",
         )
@@ -1088,6 +1187,8 @@ async def confirm_draft_summary(
     # 3. Kiểm tra nguồn giờ rảnh (availability_ref) có bị lệch revision hiện tại không (409 SOURCE_CHANGED)
     avail_ref = draft.summary.availability_ref
     if db is None and avail_ref is not None:
+        # Nháp legacy có thể giữ dict; chuẩn hóa trước khi đọc ID/revision.
+        avail_ref = AvailabilityRef.model_validate(avail_ref)
         current_avail_rev = _CURRENT_AVAILABILITY_REVISIONS.get(
             (
                 user_id,
@@ -1195,6 +1296,12 @@ async def analyze_draft(
             next_action="reload_and_review",
         )
 
+    # Kiểm nguồn trước provider và kiểm lại lúc lưu để chặn chuyển suy nghĩ trong phiên.
+    if db is not None:
+        await _validate_source_thought(
+            db, user_id, draft_id, payload.source_thought_id or snapshot_draft.source_thought_id
+        )
+
     # Pha 2: Gọi AI ngoài transaction; giữ snapshot làm ngữ cảnh, không tạo Task.
     availability = await _summary_availability(snapshot_draft.summary, user_id, db)
     summary = snapshot_draft.summary
@@ -1235,7 +1342,11 @@ async def analyze_draft(
             if tc
             else snapshot_draft.ai_context.get("time_constraint") or {}
         ),
-        clarification_issues=[i for i in summary.clarification_issues if i.code.startswith("AI_")],
+        clarification_issues=[
+            i
+            for i in summary.clarification_issues
+            if i.code.startswith("AI_") and i.code != "AI_FALLBACK_NOTICE"
+        ],
         content=summary.description,
         scope=summary.scope,
         deadline=(tc.deadline_at if tc.kind == "deadline" else tc.finish_by_at) if tc else None,
@@ -1479,7 +1590,16 @@ async def analyze_draft(
         + ", ".join(f"'{phrase}'" for phrase in ambiguous_phrases)
         + " bạn có thể làm từ mấy giờ đến mấy giờ cụ thể để mình xếp lịch chuẩn xác?",
     }
+    if extracted.generation_tier == "tier_3_rule_based":
+        ai_issues.append(_fallback_notice())
     for index, question in enumerate(dict.fromkeys(extracted.clarification_questions)):
+        if extracted.generation_tier == "tier_3_rule_based" and (
+            question in UF1_FALLBACK_QUESTIONS.values() or question == UF1_FALLBACK_NOTICE
+        ):
+            # Validator UF1 hỏi đúng trường còn thiếu sau khi đã hợp nhất bản tóm tắt.
+            continue
+        if any(issue.question == question for issue in ai_issues):
+            continue
         if question in generated_availability_questions:
             if any(i.field_path == "availability" for i in ai_issues):
                 continue
@@ -1515,7 +1635,7 @@ async def analyze_draft(
     active_keys = {
         f"{i.code}|{i.field_path}|{i.question}": i
         for i in current_draft.summary.clarification_issues
-        if i.code.startswith("AI_")
+        if i.code.startswith("AI_") and i.code != "AI_FALLBACK_NOTICE"
     }
     for key, issue in active_keys.items():
         if (
@@ -1539,6 +1659,12 @@ async def analyze_draft(
         )
         if not resolved and issue not in ai_issues:
             ai_issues.append(issue)
+    structured_questions = {i.question for i in ai_issues if i.code != "AI_CLARIFICATION"}
+    ai_issues = [
+        i
+        for i in ai_issues
+        if i.code != "AI_CLARIFICATION" or i.question not in structured_questions
+    ]
     ai_issues = list({(i.code, i.field_path, i.question): i for i in ai_issues}.values())
     merged_summary = TaskSummary.model_validate(
         {

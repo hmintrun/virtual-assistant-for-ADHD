@@ -1,14 +1,19 @@
 # Schema/DTO cho cài đặt trợ lý (UserPreference - Dòng 39) và tái xuất Availability từ availability.py (Dòng 40)
+from typing import Annotated
+
 from pydantic import Field, model_validator
 
 from app.schemas.availability import (
     Availability,
     DateOverride,
+    DraftAvailability,
     LocalInterval,
     TaskAvailabilityLimit,
     WeeklyRule,
 )
 from app.schemas.common import ApiModel
+
+ReminderOffsets = Annotated[list[Annotated[int, Field(ge=0)]], Field(min_length=1, max_length=3)]
 
 
 class PreferenceChanges(ApiModel):
@@ -16,9 +21,17 @@ class PreferenceChanges(ApiModel):
 
     work_interval_seconds: int | None = Field(default=None, ge=0)
     rest_interval_seconds: int | None = Field(default=None, ge=0)
-    reminder_offsets: list[int] | None = None
+    reminder_offsets: ReminderOffsets | None = None
     buffer_multiplier: float | None = Field(default=None, gt=0)
     reminder_style: str | None = None
+
+    @model_validator(mode="after")
+    def distinct_offsets(self):
+        if self.reminder_offsets is not None and len(set(self.reminder_offsets)) != len(
+            self.reminder_offsets
+        ):
+            raise ValueError("Các mốc nhắc không được trùng nhau")
+        return self
 
 
 class UserPreference(ApiModel):
@@ -30,7 +43,7 @@ class UserPreference(ApiModel):
     work_interval_seconds: int = Field(ge=0)
     rest_interval_seconds: int = Field(ge=0)
     micro_task_seconds: int | None = Field(default=None, ge=0)
-    reminder_offsets: list[int] = Field(min_length=1, max_length=1)
+    reminder_offsets: ReminderOffsets
     buffer_multiplier: float = Field(gt=0)
     reminder_style: str = Field(min_length=1)
     requested_changes: PreferenceChanges | None = None
@@ -70,7 +83,7 @@ class AvailabilityChanges(ApiModel):
 
 
 class SettingsChanges(ApiModel):
-    availability: AvailabilityChanges | None = None
+    availability: DraftAvailability | None = None
     preferences: PreferenceChanges | None = None
 
     @model_validator(mode="after")
@@ -90,12 +103,29 @@ class SettingsChanges(ApiModel):
 class SettingsChangeRequest(ApiModel):
     expected_preferences_revision: int | None = Field(default=None, ge=0)
     expected_availability_revision: int | None = Field(default=None, ge=0)
+    target_draft_id: str | None = Field(default=None, min_length=1)
+    target_task_id: str | None = Field(default=None, min_length=1)
+    expected_summary_revision: int | None = Field(default=None, ge=1)
+    expected_planning_input_revision: int | None = Field(default=None, ge=1)
+    expected_task_revision: int | None = Field(default=None, ge=1)
     changes: SettingsChanges
 
     @model_validator(mode="after")
     def required_revisions(self):
-        if self.changes.availability is not None and self.expected_availability_revision is None:
-            raise ValueError("Đổi giờ rảnh cần expected_availability_revision; lần đầu dùng 0")
+        if self.changes.availability is not None:
+            if (self.target_draft_id is None) == (self.target_task_id is None):
+                raise ValueError("Chỉnh giờ cần chọn đúng một Draft hoặc Task đã có")
+            if self.target_draft_id is not None and (
+                self.expected_summary_revision is None
+                or self.expected_planning_input_revision is None
+            ):
+                raise ValueError("Chỉnh Draft cần hai revision hiện hành")
+            if self.target_task_id is not None and self.expected_task_revision is None:
+                raise ValueError("Chỉnh Task cần expected_task_revision")
+            if self.expected_availability_revision is not None:
+                raise ValueError("Giờ riêng không dùng revision bộ giờ chung")
+        elif self.target_draft_id is not None or self.target_task_id is not None:
+            raise ValueError("Target chỉ áp dụng khi chỉnh giờ đã khai báo")
         if self.changes.preferences is not None and self.expected_preferences_revision is None:
             raise ValueError("Đổi cài đặt cần expected_preferences_revision; lần đầu dùng 0")
         return self
@@ -108,6 +138,10 @@ class SettingsChangeResult(ApiModel):
     requested_revision: int | None
     effective_revision: int
     requested_availability_revision: int | None
-    effective_availability_revision: int
+    effective_availability_revision: int | None
     requested_changes: SettingsChanges
     pending_proposal_id: str | None
+    target_draft_id: str | None = None
+    target_task_id: str | None = None
+    summary_revision: int | None = None
+    planning_input_revision: int | None = None

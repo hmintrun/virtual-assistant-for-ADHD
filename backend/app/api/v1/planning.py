@@ -42,7 +42,7 @@ async def create_candidate(
     current_user: CurrentUserDep,
     db: DbSessionDep,
 ) -> SuccessEnvelope[PlanCandidate]:
-    """Dòng 9 trên API Sheet: Tạo phương án chia việc và xếp lịch từ bản nháp đã xác nhận (UF2)."""
+    """Dòng 9 trên API Sheet: Tạo phương án từ nháp đã xác nhận; AI chia bước hoặc user gửi manual_steps (UF2)."""
     candidate = await plan_service.create_candidate(
         user_id=current_user.user_id,
         db=db,
@@ -107,7 +107,7 @@ async def patch_candidate(
     current_user: CurrentUserDep,
     db: DbSessionDep,
 ) -> SuccessEnvelope[PlanCandidate]:
-    """Dòng 11 trên API Sheet: Sửa phương án nháp theo client_*_key và tính/kiểm lại (UF2)."""
+    """Dòng 11 trên API Sheet: Sửa bằng edits theo client keys hoặc user_instruction; cùng kiểm nguồn và lịch (UF2)."""
     candidate = await plan_service.patch_candidate(
         user_id=current_user.user_id,
         db=db,

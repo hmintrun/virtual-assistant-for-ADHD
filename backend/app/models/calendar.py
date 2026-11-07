@@ -92,10 +92,25 @@ class CalendarSyncJob(OwnedMixin, RecordMixin, Base):
 
 class PlanningContext(OwnedMixin, RecordMixin, Base):
     __tablename__ = "planning_contexts"
-    availability_id: Mapped[UUID] = mapped_column(
+    __table_args__ = (
+        CheckConstraint(
+            "(availability_id IS NOT NULL AND availability_revision IS NOT NULL "
+            "AND source_draft_id IS NULL AND source_summary_revision IS NULL AND availability_snapshot IS NULL) "
+            "OR (availability_id IS NULL AND availability_revision IS NULL "
+            "AND source_draft_id IS NOT NULL AND source_summary_revision IS NOT NULL "
+            "AND source_summary_revision > 0 AND availability_snapshot IS NOT NULL)",
+            name="context_source_exclusive",
+        ),
+    )
+    availability_id: Mapped[UUID | None] = mapped_column(
         ForeignKey("availabilities.id", ondelete="RESTRICT")
     )
-    availability_revision: Mapped[int]
+    availability_revision: Mapped[int | None]
+    source_draft_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("planning_drafts.id", ondelete="RESTRICT")
+    )
+    source_summary_revision: Mapped[int | None]
+    availability_snapshot: Mapped[dict[str, Any] | None] = mapped_column(JSON(none_as_null=True))
     query_start: Mapped[datetime] = mapped_column(UTCDateTime())
     query_end: Mapped[datetime] = mapped_column(UTCDateTime())
     fetched_at: Mapped[datetime] = mapped_column(UTCDateTime())

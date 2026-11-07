@@ -5,13 +5,11 @@ from typing import Annotated, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, File, Form, Header, UploadFile
-from sqlalchemy import select
 
 from app.api.deps import CurrentUserDep, DbSessionDep
 from app.core.config import settings
 from app.core.errors import AppError
-from app.models.execution import SessionRun
-from app.models.thought import Thought
+from app.repositories import run_repository, thought_repository
 from app.schemas.common import FieldError, SuccessEnvelope, build_response_meta
 from app.schemas.voice import TranscriptionData
 from app.services import command_service
@@ -145,9 +143,7 @@ async def create_transcription(
                 next_action="reload",
             ) from None
         owner = resolve_user_uuid(current_user.user_id)
-        thought = await db.scalar(
-            select(Thought).where(Thought.id == thought_uuid, Thought.user_id == owner)
-        )
+        thought = await thought_repository.get_thought(db, owner, thought_uuid)
         if thought is None:
             raise AppError(
                 status_code=404,
@@ -156,11 +152,7 @@ async def create_transcription(
                 next_action="reload",
             )
         if thought.source_run_id is not None:
-            run = await db.scalar(
-                select(SessionRun).where(
-                    SessionRun.id == thought.source_run_id, SessionRun.user_id == owner
-                )
-            )
+            run = await run_repository.get_run(db, owner, thought.source_run_id)
             if run is None:
                 raise AppError(
                     status_code=404,

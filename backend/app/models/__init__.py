@@ -9,8 +9,9 @@ from app.models.calendar import (
     CalendarSyncJob,
     PlanningContext,
 )
+from app.models.device import DeviceState
 from app.models.execution import ActualCorrection, CheckIn, RunEvent, SessionRun
-from app.models.planning import PlanCandidate, PlanningDraft, PlanningPart, ScheduleVersion
+from app.models.planning import PlanCandidate, PlanningDraft, ScheduleVersion
 from app.models.schedule_proposal import RescheduleProposal
 from app.models.session import Session
 from app.models.settings import AdaptationSuggestion, Availability, SettingChangeRequest
@@ -29,9 +30,9 @@ __all__ = [
     "Session",
     "PlanningDraft",
     "PlanCandidate",
-    "PlanningPart",
     "ScheduleVersion",
     "SessionRun",
+    "DeviceState",
     "CheckIn",
     "RunEvent",
     "ActualCorrection",

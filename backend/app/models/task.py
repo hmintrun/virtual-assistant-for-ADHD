@@ -30,6 +30,12 @@ class Task(RecordMixin, Base):
     )
     availability_ref: Mapped[dict[str, Any] | None] = mapped_column(JSON(none_as_null=True))
     source_summary: Mapped[dict[str, Any] | None] = mapped_column(JSON(none_as_null=True))
+    # Giờ có hiệu lực tách khỏi bản yêu cầu ban đầu trong source_summary.
+    availability: Mapped[dict[str, Any] | None] = mapped_column(JSON(none_as_null=True))
+    source_summary_revision: Mapped[int | None]
+    source_planning_input_revision: Mapped[int | None]
+    decomposition_state: Mapped[str] = mapped_column(String(32), default="complete")
+    unexpanded_scope: Mapped[str | None] = mapped_column(Text)
     avoidance_count: Mapped[int] = mapped_column(default=0)
     user: Mapped[User] = relationship(back_populates="tasks", lazy="raise", foreign_keys=[user_id])
     steps: Mapped[list[Step]] = relationship(

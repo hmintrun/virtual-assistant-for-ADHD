@@ -1,4 +1,4 @@
-"""Durable command replay shared by UF1 and Voice; no provider calls here."""
+"""Durable command receipts and replay; no provider calls here."""
 
 import hashlib
 import inspect
@@ -70,7 +70,14 @@ async def lock_owner(db, user_id):
 def record(db, user_id, key, digest, operation, result):
     refs = {
         name: getattr(result, name)
-        for name in ("draft_id", "thought_id", "candidate_id", "change_request_id")
+        for name in (
+            "draft_id",
+            "thought_id",
+            "candidate_id",
+            "change_request_id",
+            "run_id",
+            "checkin_id",
+        )
         if isinstance(getattr(result, name, None), str)
     }
     db.add(
@@ -98,6 +105,9 @@ def durable_command(operation, result_type: type[BaseModel]):
             bound = inspect.signature(function).bind(*args, **kwargs)
             db = bound.arguments.get("db")
             if db is None:
+                return await function(*args, **kwargs)
+            if db.info.get("defer_command_commit"):
+                # Lệnh cha (Settings -> sửa Draft) sở hữu transaction và receipt.
                 return await function(*args, **kwargs)
             user_id = bound.arguments["user_id"]
             key = bound.arguments["idempotency_key"]

@@ -85,6 +85,7 @@ class Settings(BaseSettings):
     DEFAULT_WORK_INTERVAL_SECONDS: int = 1500  # 25 phút tập trung
     DEFAULT_REST_INTERVAL_SECONDS: int = 300  # 5 phút nghỉ ngắn
     DEFAULT_MICRO_TASK_SECONDS: int = 120  # 2 phút khởi động phá vỡ tê liệt ADHD
+    PLANNING_REVIEW_LEAD_SECONDS: int = Field(default=300, ge=120)
     DEFAULT_MIN_INTER_SESSION_GAP_SECONDS: int = 900  # Khoảng cách tối thiểu 15 phút giữa 2 phiên
     DEFAULT_BUFFER_MULTIPLIER: float = 1.2
     DEFAULT_TIMEZONE: str = "Asia/Ho_Chi_Minh"
