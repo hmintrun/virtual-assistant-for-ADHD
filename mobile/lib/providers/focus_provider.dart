@@ -142,8 +142,8 @@ class FocusProvider extends ChangeNotifier {
   })  : _clock = clock ?? const SystemClock(),
         timer = timer ?? FocusTimerService(clock: clock),
         microTaskTimer = microTaskTimer ?? FocusTimerService(clock: clock),
-        recorder = recorder ?? AudioRecorderService(),
-        dnd = dnd ?? DndService(),
+        recorder = recorder ?? AudioRecorderService.instance,
+        dnd = dnd ?? DndService.instance,
         _api = api ?? ApiClient(),
         _repository = repository ??
             (storage != null
@@ -158,9 +158,12 @@ class FocusProvider extends ChangeNotifier {
     };
     this.recorder.onAutoStopFailed = (error) {
       _isRecording = false;
-      _recordingPath = null;
       _lastError = error.message;
-      unawaited(_recordingFailed());
+      if (error.countsAsFailure) {
+        unawaited(_recordingFailed());
+      } else {
+        _notify();
+      }
     };
   }
 
@@ -177,7 +180,6 @@ class FocusProvider extends ChangeNotifier {
   DateTime? _runEndsAt;
   FocusStage _stage = FocusStage.ended;
   FocusStage _resumeStage = FocusStage.active;
-  DndSnapshot? _dndSnapshot;
   List<SessionSegmentModel> _segments = const [];
   int _segmentIndex = 0;
   int _actualWorkSeconds = 0;
@@ -187,7 +189,6 @@ class FocusProvider extends ChangeNotifier {
   bool _isOffline = false;
   bool _isRecording = false;
   int _recordingAttempts = 0;
-  String? _recordingPath;
   String? _lastError;
   Timer? _offlineProbe;
   Timer? _undoExpiry;
@@ -248,7 +249,13 @@ class FocusProvider extends ChangeNotifier {
         ? await FocusNativeController.instance.recoverOnAppStart()
         : null;
     final json = await _repository.loadActiveRun();
-    if (json == null) return;
+    if (json == null) {
+      if (!_usesNativeFocus) {
+        final staleOwner = await dnd.pendingOwnerRunId();
+        if (staleOwner != null) await dnd.restore(runId: staleOwner);
+      }
+      return;
+    }
     try {
       _session = FocusSessionInfo.fromJson(
         Map<String, dynamic>.from(json['session'] as Map),
@@ -265,10 +272,8 @@ class FocusProvider extends ChangeNotifier {
         (stage) => stage.name == json['stage'],
         orElse: () => FocusStage.active,
       );
-      final dndJson = json['dnd_snapshot'] as Map<String, dynamic>?;
-      _dndSnapshot = dndJson == null ? null : DndSnapshot.fromJson(dndJson);
       _dndApplied = nativeRecovery == null
-          ? _dndSnapshot?.appApplied ?? false
+          ? await dnd.pendingOwnerRunId() == _session!.sessionId
           : nativeRecovery.state == FocusRecoveryState.running ||
               nativeRecovery.state == FocusRecoveryState.awaitingCheckIn;
       _stage = _resumeStage;
@@ -328,6 +333,7 @@ class FocusProvider extends ChangeNotifier {
     _stage = FocusStage.reminder;
     _resumeStage = FocusStage.reminder;
     _recordingAttempts = 0;
+    recorder.resetFailures();
     _lastError = null;
     _alarmScheduled = null;
     await _refreshDndPermission();
@@ -395,7 +401,6 @@ class FocusProvider extends ChangeNotifier {
         _runEndsAt = result.endsAt;
         _dndApplied = result.dndApplied;
         _alarmScheduled = result.alarmScheduled;
-        _dndSnapshot = null;
       } catch (_) {
         _dndApplied = false;
         _alarmScheduled = false;
@@ -406,11 +411,8 @@ class FocusProvider extends ChangeNotifier {
           .fold<int>(0, (total, segment) => total + segment.durationSeconds);
       _runEndsAt = _clock.now().add(Duration(seconds: totalSeconds));
       try {
-        _dndSnapshot = await dnd.enable();
-        _dndApplied = _dndSnapshot?.appApplied ?? false;
+        _dndApplied = await dnd.enable(runId: _session!.sessionId);
       } catch (_) {
-        _dndSnapshot =
-            const DndSnapshot(previousFilter: null, appApplied: false);
         _dndApplied = false;
       }
       try {
@@ -476,11 +478,9 @@ class FocusProvider extends ChangeNotifier {
       try {
         final saved = await recorder.stopAndFinalize();
         _isRecording = false;
-        _recordingPath = null;
         await _saveFinalizedRecording(saved);
       } catch (error) {
         _isRecording = false;
-        _recordingPath = null;
         _lastError = error.toString();
       }
     }
@@ -546,36 +546,26 @@ class FocusProvider extends ChangeNotifier {
   Future<void> beginRecording() async {
     if (_isRecording || !isActiveRun || _stage == FocusStage.breakTime) return;
     _lastError = null;
-    String? path;
     try {
-      path = await recorder.createRecordingPath();
-      await recorder.start(path: path);
-      _recordingPath = path;
+      await recorder.start();
       _isRecording = true;
       _notify();
     } catch (error) {
-      if (path != null) await recorder.delete(path);
       _lastError = error.toString();
       await _recordingFailed();
     }
   }
 
   Future<void> stopAndSaveThought() async {
-    final path = _recordingPath;
-    if (!_isRecording || path == null) return;
+    if (!_isRecording) return;
     try {
       final recording = await recorder.stopAndFinalize();
       _isRecording = false;
-      _recordingPath = null;
       await _saveAudioThought(recording);
       await _persistRun();
       _notify();
     } catch (error) {
       _isRecording = false;
-      _recordingPath = null;
-      try {
-        await recorder.delete(path);
-      } catch (_) {}
       _lastError = error.toString();
       if (error is! RecorderException || error.countsAsFailure) {
         await _recordingFailed();
@@ -588,6 +578,7 @@ class FocusProvider extends ChangeNotifier {
 
   Future<void> _saveAudioThought(ThoughtRecording recording) async {
     final now = _clock.now();
+    final attemptCount = (_recordingAttempts + 1).clamp(1, 3);
     final thought = ThoughtRecord(
       clientThoughtId: now.microsecondsSinceEpoch.toString(),
       createdAt: now,
@@ -595,11 +586,13 @@ class FocusProvider extends ChangeNotifier {
       sourceRunId: _session?.sessionId,
       inputType: 'audio',
       localAudioPath: recording.path,
-      attemptCount: (_recordingAttempts + 1).clamp(1, 3),
+      attemptCount: attemptCount,
       captureState: 'saved',
       isPendingSync: true,
     );
     await _saveThought(thought);
+    _recordingAttempts = 0;
+    recorder.resetFailures();
     if (_stage != FocusStage.thoughtSaved) _resumeStage = _stage;
     _stage = FocusStage.thoughtSaved;
     _toastExpiry?.cancel();
@@ -612,7 +605,6 @@ class FocusProvider extends ChangeNotifier {
 
   Future<void> _onAutoRecordingSaved(ThoughtRecording recording) async {
     _isRecording = false;
-    _recordingPath = null;
     await _saveAudioThought(recording);
     await _persistRun();
     _notify();
@@ -620,18 +612,14 @@ class FocusProvider extends ChangeNotifier {
 
   Future<void> cancelRecording() async {
     await recorder.cancel();
-    final path = _recordingPath;
-    if (path != null) await recorder.delete(path);
-    _recordingPath = null;
     _isRecording = false;
     _notify();
   }
 
   Future<void> _recordingFailed() async {
     _isRecording = false;
-    _recordingPath = null;
     _recordingAttempts++;
-    _stage = _recordingAttempts >= 3
+    _stage = recorder.shouldFallbackToText || _recordingAttempts >= 3
         ? FocusStage.textFallback
         : FocusStage.saveFailed;
     await _persistRun();
@@ -639,7 +627,7 @@ class FocusProvider extends ChangeNotifier {
   }
 
   Future<void> retryRecording() async {
-    if (_recordingAttempts >= 3) {
+    if (recorder.shouldFallbackToText || _recordingAttempts >= 3) {
       _setStage(FocusStage.textFallback);
       return;
     }
@@ -663,6 +651,8 @@ class FocusProvider extends ChangeNotifier {
       isPendingSync: true,
     );
     await _saveThought(thought);
+    _recordingAttempts = 0;
+    recorder.resetFailures();
     if (_stage != FocusStage.thoughtSaved) {
       _resumeStage = _stage;
     }
@@ -685,7 +675,7 @@ class FocusProvider extends ChangeNotifier {
     _undoneThoughtIds.add(thought.clientThoughtId);
     if (thought.localAudioPath != null) {
       try {
-        await recorder.delete(thought.localAudioPath!);
+        await recorder.deleteRecording(thought.localAudioPath!);
       } catch (_) {}
     }
     await _repository.deleteThought(thought.clientThoughtId);
@@ -741,7 +731,7 @@ class FocusProvider extends ChangeNotifier {
     await _repository.deleteThought(thought.clientThoughtId);
     if (thought.localAudioPath != null) {
       try {
-        await recorder.delete(thought.localAudioPath!);
+        await recorder.deleteRecording(thought.localAudioPath!);
       } catch (_) {}
     }
     _scheduleOutboxFlush();
@@ -853,7 +843,6 @@ class FocusProvider extends ChangeNotifier {
       'stage': _stage.name,
       'timer_deadline': timer.endsAt?.toIso8601String(),
       'timer_duration': timer.durationSeconds,
-      'dnd_snapshot': _dndSnapshot?.toJson(),
     });
   }
 
@@ -897,19 +886,18 @@ class FocusProvider extends ChangeNotifier {
         final saved = result.savedRecording;
         if (saved != null) {
           _isRecording = false;
-          _recordingPath = null;
           await _saveFinalizedRecording(saved);
         }
       } catch (_) {}
     } else {
       try {
-        await dnd.restore(_dndSnapshot);
+        final runId = session?.sessionId;
+        if (runId != null) await dnd.restore(runId: runId);
       } catch (_) {}
       try {
         await WakelockPlus.disable();
       } catch (_) {}
     }
-    _dndSnapshot = null;
     _dndApplied = false;
   }
 

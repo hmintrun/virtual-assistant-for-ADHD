@@ -40,7 +40,6 @@ class RecorderException implements Exception {
 class AudioRecorderService {
   AudioRecorderService._();
   static final AudioRecorderService instance = AudioRecorderService._();
-  factory AudioRecorderService() => instance;
 
   static const int maxFailures = 3;
 
@@ -68,19 +67,15 @@ class AudioRecorderService {
   /// Kiểm tra (và trên Android: hỏi) quyền micro.
   Future<bool> hasPermission() => _recorder.hasPermission();
 
-  Future<String> createRecordingPath() => _newRecordingPath();
-
   /// Bắt đầu thu (khi user BẤM GIỮ nút "Cất suy nghĩ").
-  Future<void> start({
-    String? path,
-    Duration maxDuration = defaultMaxDuration,
-  }) async {
+  Future<void> start({Duration maxDuration = defaultMaxDuration}) async {
     if (isRecording) return;
-    final recordingPath = path ?? await _newRecordingPath();
+    String? path;
     try {
       if (!await _recorder.hasPermission()) {
         throw const RecorderException('Chưa có quyền dùng micro.');
       }
+      path = await _newRecordingPath();
       await _recorder.start(
         const RecordConfig(
           encoder: AudioEncoder.aacLc,
@@ -91,13 +86,13 @@ class AudioRecorderService {
           // hết phiên) → không mất nửa sau của suy nghĩ, chuông vẫn kêu đúng giờ.
           audioInterruption: AudioInterruptionMode.none,
         ),
-        path: recordingPath,
+        path: path,
       );
-      _currentPath = recordingPath;
+      _currentPath = path;
       _startedAt = DateTime.now();
       _maxDurationTimer = Timer(maxDuration, _autoStop);
     } catch (error) {
-      await _deleteIfExists(recordingPath);
+      if (path != null) await _deleteIfExists(path);
       throw _recordFailure(error, fallback: 'Chưa bắt đầu thu được.');
     }
   }
@@ -144,10 +139,6 @@ class AudioRecorderService {
     }
   }
 
-  /// Backward-compatible adapter for the existing FocusProvider flow.
-  Future<String> stopAndValidate(String expectedPath) async =>
-      (await stopAndFinalize()).path;
-
   /// Hủy bản đang thu và xóa file dở. Không tính là lỗi.
   Future<void> cancel() async {
     final path = _currentPath;
@@ -165,8 +156,6 @@ class AudioRecorderService {
 
   /// Xóa file của một suy nghĩ đã cất (dùng cho Undo / xóa trong Hộp nháp).
   Future<void> deleteRecording(String path) => _deleteIfExists(path);
-
-  Future<void> delete(String path) => deleteRecording(path);
 
   /// Gọi khi user đã chuyển sang nhập chữ hoặc bắt đầu phiên mới.
   void resetFailures() => _failedAttempts = 0;
