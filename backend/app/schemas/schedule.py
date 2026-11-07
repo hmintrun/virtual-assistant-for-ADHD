@@ -201,15 +201,12 @@ class LLMRescheduleEmpathyPayload(BaseModel):
         ...,
         min_length=5,
         max_length=400,
-        description=(
-            "1 câu giải thích ngắn gọn lý do dời lịch kèm lời động viên không gây áp lực "
-            "(Guilt-free Adaptive Rescheduling), xóa bỏ cảm giác tự trách của người ADHD."
-        ),
+        description="Một câu trong allowed_notes, nêu lý do và giữ quyền quyết định của người dùng.",
     )
     encouragement_tip: str | None = Field(
         default=None,
         max_length=250,
-        description="Gợi ý nhẹ nhàng chăm sóc bản thân (ví dụ: uống ngụm nước, hít thở sâu).",
+        description="Dùng đúng allowed_tip hoặc null nếu không cần thêm gợi ý.",
     )
 
 
