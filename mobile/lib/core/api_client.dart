@@ -143,10 +143,24 @@ class ApiException implements Exception {
     final detail = body is Map<String, dynamic>
         ? body['error'] as Map<String, dynamic>?
         : null;
+    final serverMessage = detail?['message'] as String?;
+    final message = serverMessage ??
+        switch (error.type) {
+          DioExceptionType.connectionTimeout =>
+            'Kết nối đến máy chủ quá lâu. Kiểm tra mạng và thử lại.',
+          DioExceptionType.sendTimeout =>
+            'Gửi yêu cầu quá lâu. Kiểm tra mạng rồi thử lại.',
+          DioExceptionType.receiveTimeout =>
+            'Máy chủ phản hồi quá lâu. Bạn có thể thử tải lại sau.',
+          DioExceptionType.connectionError =>
+            'Chưa kết nối được máy chủ. Kiểm tra backend, mạng và địa chỉ API.',
+          DioExceptionType.badCertificate =>
+            'Kết nối bảo mật tới máy chủ không thành công.',
+          _ => error.message ??
+              'Không thể kết nối backend. Hãy kiểm tra server và địa chỉ API.',
+        };
     return ApiException(
-      detail?['message'] as String? ??
-          error.message ??
-          'Không thể kết nối backend. Hãy kiểm tra server và địa chỉ API.',
+      message,
       code: detail?['code'] as String?,
       statusCode: error.response?.statusCode,
       fieldErrors: (detail?['field_errors'] as List<dynamic>? ?? const [])

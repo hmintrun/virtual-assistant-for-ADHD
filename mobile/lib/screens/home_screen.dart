@@ -2,9 +2,12 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
 import '../core/theme.dart';
+import '../models/focus_session_model.dart';
+import '../providers/focus_provider.dart';
 import '../providers/task_provider.dart';
 import '../widgets/melbel_ui.dart';
 import 'calendar_screen.dart';
+import 'focus_screen.dart';
 import 'task_entry_screen.dart';
 
 class HomeScreen extends StatefulWidget {
@@ -39,6 +42,49 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
+  Future<void> _openFocusForTask(TaskProvider taskProvider) async {
+    final task = taskProvider.confirmedTask;
+    if (task == null || task.sessions.isEmpty) return;
+    final sessions = [...task.sessions]
+      ..sort((a, b) => a.scheduledStart.compareTo(b.scheduledStart));
+    final session = sessions.firstWhere(
+      (item) => item.status == 'scheduled',
+      orElse: () => sessions.first,
+    );
+    final matchingSteps =
+        task.steps.where((item) => item.stepId == session.stepId);
+    final step = matchingSteps.isNotEmpty
+        ? matchingSteps.first
+        : (task.steps.isEmpty ? null : task.steps.first);
+    final focusSession = FocusSessionInfo(
+      sessionId: session.sessionId,
+      taskTitle: task.title,
+      stepTitle: step?.title ?? 'Bước hiện tại',
+      scheduledStart: session.scheduledStart,
+      scheduledEnd: session.scheduledEnd,
+      workSeconds: session.workSeconds,
+      restSeconds: session.restSeconds,
+      microTaskText: session.microTaskText,
+      segments: session.segments,
+      deadline: taskProvider.deadline,
+    );
+    final focus = context.read<FocusProvider>();
+    await focus.startSession(focusSession);
+    if (!mounted) return;
+    await Navigator.push(
+      context,
+      MaterialPageRoute<void>(builder: (_) => const FocusScreen()),
+    );
+  }
+
+  Future<void> _reopenFocus(FocusProvider focus) async {
+    if (!focus.isActiveRun || focus.session == null) return;
+    await Navigator.push(
+      context,
+      MaterialPageRoute<void>(builder: (_) => const FocusScreen()),
+    );
+  }
+
   void _onTabSelected(int index) {
     if (index == _selectedTab) return;
     if (index == 1) {
@@ -49,13 +95,7 @@ class _HomeScreenState extends State<HomeScreen> {
     } else if (index == 2) {
       _openNewTask();
     } else if (index == 3) {
-      showMelbelInfo(
-        context,
-        title: 'Cài đặt trợ lý',
-        message:
-            'Các tùy chọn thời lượng phiên và phong cách nhắc sẽ có ở luồng tiếp theo.',
-        icon: Icons.settings_outlined,
-      );
+      Navigator.of(context).pushNamed('/account');
     } else {
       setState(() => _selectedTab = index);
     }
@@ -73,7 +113,7 @@ class _HomeScreenState extends State<HomeScreen> {
         padding: EdgeInsets.only(bottom: MediaQuery.paddingOf(context).bottom),
         decoration: BoxDecoration(
           color: MelbelColors.kSurface.withValues(alpha: 0.95),
-          border: const Border(
+          border: Border(
             top: BorderSide(color: MelbelColors.kOutlineVariant, width: 0.5),
           ),
         ),
@@ -100,7 +140,7 @@ class _HomeScreenState extends State<HomeScreen> {
             ),
             _BottomTab(
               icon: Icons.settings,
-              label: 'Cài đặt',
+              label: 'Tài khoản',
               isSelected: _selectedTab == 3,
               onTap: () => _onTabSelected(3),
             ),
@@ -118,14 +158,14 @@ class _HomeScreenState extends State<HomeScreen> {
               children: [
                 Text(
                   _greetingText,
-                  style: const TextStyle(
+                  style: TextStyle(
                     fontFamily: 'Be Vietnam Pro',
                     fontSize: 14,
                     color: MelbelColors.kOnSurfaceVariant,
                   ),
                 ),
                 const SizedBox(height: 4),
-                const Text(
+                Text(
                   'Không gian hôm nay',
                   style: TextStyle(
                     fontFamily: 'Be Vietnam Pro',
@@ -153,7 +193,7 @@ class _HomeScreenState extends State<HomeScreen> {
                   borderRadius: BorderRadius.circular(12),
                   border: Border.all(color: MelbelColors.kOutlineVariant),
                 ),
-                child: const Row(
+                child: Row(
                   children: [
                     Icon(
                       Icons.add_circle,
@@ -182,6 +222,39 @@ class _HomeScreenState extends State<HomeScreen> {
             ),
             const SizedBox(height: 20),
 
+            Consumer<FocusProvider>(
+              builder: (context, focus, _) {
+                if (!focus.isActiveRun || focus.session == null) {
+                  return const SizedBox.shrink();
+                }
+                return Padding(
+                  padding: const EdgeInsets.only(bottom: 16),
+                  child: MelbelCard(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Eyebrow('Phiên đang chạy'),
+                        const SizedBox(height: 8),
+                        Text(
+                          focus.session!.taskTitle,
+                          style: const TextStyle(
+                              fontSize: 17, fontWeight: FontWeight.w600),
+                        ),
+                        const SizedBox(height: 12),
+                        PrimaryCta(
+                          label: focus.stage == FocusStage.recovery
+                              ? 'Khôi phục phiên'
+                              : 'Quay lại phiên',
+                          icon: Icons.play_arrow_rounded,
+                          onPressed: () => _reopenFocus(focus),
+                        ),
+                      ],
+                    ),
+                  ),
+                );
+              },
+            ),
+
             // Section: Next Session (Hero Card)
             Consumer<TaskProvider>(
               builder: (context, task, _) {
@@ -203,7 +276,7 @@ class _HomeScreenState extends State<HomeScreen> {
                     ? 'Phiên làm việc đã xác nhận'
                     : saved.steps.first.title;
                 final displayDeadline = task.deadline == null
-                    ? '18:00 Ngày mai'
+                    ? 'Chưa đặt hạn chót'
                     : task.formatDeadline(task.deadline);
 
                 return MelbelCard(
@@ -216,7 +289,7 @@ class _HomeScreenState extends State<HomeScreen> {
                           const Eyebrow('Phiên tiếp theo'),
                           Row(
                             children: [
-                              const Icon(
+                              Icon(
                                 Icons.schedule,
                                 size: 16,
                                 color: MelbelColors.kTertiaryFixedDim,
@@ -224,7 +297,7 @@ class _HomeScreenState extends State<HomeScreen> {
                               const SizedBox(width: 4),
                               Text(
                                 'Hạn chót: $displayDeadline',
-                                style: const TextStyle(
+                                style: TextStyle(
                                   fontFamily: 'Be Vietnam Pro',
                                   fontSize: 12,
                                   color: MelbelColors.kOnSurfaceVariant,
@@ -237,7 +310,7 @@ class _HomeScreenState extends State<HomeScreen> {
                       const SizedBox(height: 10),
                       Text(
                         displayTitle,
-                        style: const TextStyle(
+                        style: TextStyle(
                           fontFamily: 'Be Vietnam Pro',
                           fontSize: 18,
                           fontWeight: FontWeight.w600,
@@ -247,7 +320,7 @@ class _HomeScreenState extends State<HomeScreen> {
                       const SizedBox(height: 4),
                       Text(
                         displayScope,
-                        style: const TextStyle(
+                        style: TextStyle(
                           fontFamily: 'Be Vietnam Pro',
                           fontSize: 14,
                           color: MelbelColors.kOnSurfaceVariant,
@@ -311,11 +384,11 @@ class _HomeScreenState extends State<HomeScreen> {
                                 child: Container(
                                   width: 20,
                                   height: 20,
-                                  decoration: const BoxDecoration(
+                                  decoration: BoxDecoration(
                                     color: MelbelColors.kPrimaryContainer,
                                     shape: BoxShape.circle,
                                   ),
-                                  child: const Icon(
+                                  child: Icon(
                                     Icons.nightlight,
                                     size: 13,
                                     color: MelbelColors.kOnPrimaryContainer,
@@ -329,16 +402,20 @@ class _HomeScreenState extends State<HomeScreen> {
                       const SizedBox(height: 20),
 
                       PrimaryCta(
-                        label: 'Xem lịch phiên',
+                        label: 'Chuẩn bị phiên',
                         icon: Icons.play_arrow,
-                        onPressed: () {
-                          Navigator.push(
+                        onPressed: () => _openFocusForTask(task),
+                      ),
+                      Center(
+                        child: TextButton(
+                          onPressed: () => Navigator.push(
                             context,
                             MaterialPageRoute<void>(
                               builder: (_) => const CalendarScreen(),
                             ),
-                          );
-                        },
+                          ),
+                          child: const Text('Mở lịch phiên'),
+                        ),
                       ),
                     ],
                   ),
@@ -347,44 +424,56 @@ class _HomeScreenState extends State<HomeScreen> {
             ),
             const SizedBox(height: 24),
 
-            // Section: Remaining Today
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: const [
-                Text(
-                  'Còn lại hôm nay',
-                  style: TextStyle(
-                    fontFamily: 'Be Vietnam Pro',
-                    fontSize: 14,
-                    fontWeight: FontWeight.w500,
-                    color: MelbelColors.kOnSurfaceVariant,
-                  ),
-                ),
-                Text(
-                  '2 nhiệm vụ',
-                  style: TextStyle(
-                    fontFamily: 'Be Vietnam Pro',
-                    fontSize: 12,
-                    color: MelbelColors.kOnSurfaceVariant,
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 10),
-
-            _RemainingTaskCard(
-              title: '14:00 · Trả lời email đối tác',
-              deadline: 'Hạn 15:00',
-              tag: '1 phiên 25p',
-              note: 'Cần tập trung nhẹ nhàng',
-            ),
-            const SizedBox(height: 10),
-
-            _RemainingTaskCard(
-              title: '16:30 · Đọc tài liệu tham khảo',
-              deadline: 'Hạn 17:30',
-              tag: '1 phiên 25p',
-              note: 'Không áp lực thời gian',
+            Consumer<TaskProvider>(
+              builder: (context, task, _) {
+                final confirmed = task.confirmedTask;
+                final sessions = (confirmed?.sessions ?? const [])
+                    .where((session) => session.status == 'scheduled')
+                    .toList()
+                  ..sort(
+                      (a, b) => a.scheduledStart.compareTo(b.scheduledStart));
+                return Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        Text('Còn lại hôm nay',
+                            style: TextStyle(
+                                fontSize: 14,
+                                fontWeight: FontWeight.w500,
+                                color: MelbelColors.kOnSurfaceVariant)),
+                        Text(
+                          sessions.isEmpty ? '—' : '${sessions.length} phiên',
+                          style: TextStyle(
+                              fontSize: 12,
+                              color: MelbelColors.kOnSurfaceVariant),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 10),
+                    if (sessions.isEmpty)
+                      const MelbelCard(
+                        child: Text(
+                            'Chưa có phiên nào được xác nhận cho hôm nay.'),
+                      )
+                    else
+                      for (final session in sessions)
+                        Padding(
+                          padding: const EdgeInsets.only(bottom: 10),
+                          child: _RemainingTaskCard(
+                            title:
+                                '${_clock(session.scheduledStart)} · ${confirmed!.title}',
+                            deadline: task.deadline == null
+                                ? 'Chưa đặt hạn chót'
+                                : 'Hạn ${task.formatDeadline(task.deadline)}',
+                            tag: '${(session.workSeconds / 60).ceil()} phút',
+                            note: 'Phiên đã xác nhận',
+                          ),
+                        ),
+                  ],
+                );
+              },
             ),
             const SizedBox(height: 20),
 
@@ -407,7 +496,7 @@ class _HomeScreenState extends State<HomeScreen> {
                         borderRadius: BorderRadius.circular(12),
                         border: Border.all(color: MelbelColors.kOutlineVariant),
                       ),
-                      child: const Row(
+                      child: Row(
                         mainAxisAlignment: MainAxisAlignment.center,
                         children: [
                           Icon(
@@ -447,7 +536,7 @@ class _HomeScreenState extends State<HomeScreen> {
                         borderRadius: BorderRadius.circular(12),
                         border: Border.all(color: MelbelColors.kOutlineVariant),
                       ),
-                      child: const Row(
+                      child: Row(
                         mainAxisAlignment: MainAxisAlignment.center,
                         children: [
                           Icon(
@@ -477,6 +566,9 @@ class _HomeScreenState extends State<HomeScreen> {
       ),
     );
   }
+
+  String _clock(DateTime value) =>
+      '${value.hour.toString().padLeft(2, '0')}:${value.minute.toString().padLeft(2, '0')}';
 }
 
 class _RemainingTaskCard extends StatelessWidget {
@@ -510,7 +602,7 @@ class _RemainingTaskCard extends StatelessWidget {
               Expanded(
                 child: Text(
                   title,
-                  style: const TextStyle(
+                  style: TextStyle(
                     fontFamily: 'Be Vietnam Pro',
                     fontSize: 15,
                     fontWeight: FontWeight.w500,
@@ -522,7 +614,7 @@ class _RemainingTaskCard extends StatelessWidget {
               const SizedBox(width: 8),
               Text(
                 deadline,
-                style: const TextStyle(
+                style: TextStyle(
                   fontFamily: 'Be Vietnam Pro',
                   fontSize: 12,
                   color: MelbelColors.kOnSurfaceVariant,
@@ -541,7 +633,7 @@ class _RemainingTaskCard extends StatelessWidget {
                 ),
                 child: Text(
                   tag,
-                  style: const TextStyle(
+                  style: TextStyle(
                     fontFamily: 'Be Vietnam Pro',
                     fontSize: 12,
                     color: MelbelColors.kOnSurfaceVariant,
@@ -552,7 +644,7 @@ class _RemainingTaskCard extends StatelessWidget {
               Expanded(
                 child: Text(
                   note,
-                  style: const TextStyle(
+                  style: TextStyle(
                     fontFamily: 'Be Vietnam Pro',
                     fontSize: 12,
                     color: MelbelColors.kOnSurfaceVariant,

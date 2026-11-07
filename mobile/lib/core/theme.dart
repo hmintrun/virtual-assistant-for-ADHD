@@ -2,78 +2,83 @@ import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 
 class MelbelColors {
-  // Core Surfaces
-  static const kSurface = Color(0xFF10131D);
-  static const kSurfaceDim = Color(0xFF10131D);
-  static const kSurfaceBright = Color(0xFF363944);
-  static const kSurfaceContainerLowest = Color(0xFF0B0E17);
-  static const kSurfaceContainerLow = Color(0xFF181B25);
-  static const kSurfaceContainer = Color(0xFF1C1F29);
-  static const kSurfaceContainerHigh = Color(0xFF272A34);
-  static const kSurfaceContainerHighest = Color(0xFF32343F);
+  static bool isDark = false;
+  static Color _pick(int day, int night) => Color(isDark ? night : day);
 
-  // Text / On-surface
-  static const kOnSurface = Color(0xFFE0E2F0);
-  static const kOnSurfaceVariant = Color(0xFFCDC6B7);
-  static const kTextPrimary = Color(0xFFE0E2F0);
-  static const kTextSecondary = Color(0xFF8B90A0);
-
-  // Primary / Moon Accent
-  static const kPrimary = Color(0xFFFFF4DD);
-  static const kOnPrimary = Color(0xFF39300C);
-  static const kPrimaryContainer = Color(0xFFE9D8A6);
-  static const kOnPrimaryContainer = Color(0xFF6A5E36);
-
-  // Secondary / Sage Green
-  static const kSecondary = Color(0xFFB2CDBA);
-  static const kOnSecondary = Color(0xFF1E3528);
-  static const kSecondaryContainer = Color(0xFF364E3F);
-  static const kOnSecondaryContainer = Color(0xFFA4BFAC);
-  static const kSage = Color(0xFFB2CDBA);
-
-  // Tertiary / Warm Amber (Deadline, gentle warnings)
-  static const kTertiary = Color(0xFFFFF3EB);
-  static const kOnTertiary = Color(0xFF472A00);
-  static const kTertiaryContainer = Color(0xFFFFD19F);
-  static const kOnTertiaryContainer = Color(0xFF7C5729);
-  static const kTertiaryFixedDim = Color(0xFFEFBE86);
-  static const kAmber = Color(0xFFEFBE86);
-
-  // Outline / Borders
-  static const kOutline = Color(0xFF969083);
-  static const kOutlineVariant = Color(0xFF4B463B);
-
-  // Error
-  static const kError = Color(0xFFFFB4AB);
-  static const kOnError = Color(0xFF690005);
+  static Color get kBackground => _pick(0xFFF4F1EA, 0xFF15161A);
+  static Color get kSurface => _pick(0xFFF4F1EA, 0xFF1E2029);
+  static Color get kSurfaceDim => _pick(0xFFF4F1EA, 0xFF15161A);
+  static Color get kSurfaceBright => _pick(0xFFFFFFFF, 0xFF2B2D36);
+  static Color get kSurfaceContainerLowest => _pick(0xFFFFFFFF, 0xFF1A1B20);
+  static Color get kSurfaceContainerLow => _pick(0xFFFFFFFF, 0xFF20222A);
+  static Color get kSurfaceContainer => _pick(0xFFFFFFFF, 0xFF252832);
+  static Color get kSurfaceContainerHigh => _pick(0xFFF4F1EA, 0xFF2B2D36);
+  static Color get kSurfaceContainerHighest => _pick(0xFFDDD8CB, 0xFF424653);
+  static Color get kOnSurface => _pick(0xFF2B2D36, 0xFFF4F1EA);
+  static Color get kOnSurfaceVariant => _pick(0xFF6B6F7C, 0xFFB7BAC4);
+  static Color get kTextPrimary => kOnSurface;
+  static Color get kTextSecondary => kOnSurfaceVariant;
+  static Color get kPrimary => const Color(0xFFC9A94E);
+  static Color get kOnPrimary => const Color(0xFF2B2D36);
+  static Color get kPrimaryContainer => const Color(0xFFC9A94E);
+  static Color get kOnPrimaryContainer => const Color(0xFF2B2D36);
+  static Color get kSecondary => _pick(0xFF6B6F7C, 0xFFB7BAC4);
+  static Color get kOnSecondary => const Color(0xFFFFFFFF);
+  static Color get kSecondaryContainer => _pick(0xFFF4F1EA, 0xFF353945);
+  static Color get kOnSecondaryContainer => kOnSurface;
+  static Color get kSage => _pick(0xFF4F7A5E, 0xFF7CA58A);
+  static Color get kTertiary => _pick(0xFFC98B3F, 0xFFE1AC69);
+  static Color get kOnTertiary => const Color(0xFF2B2D36);
+  static Color get kTertiaryContainer => _pick(0xFFF4F1EA, 0xFF353945);
+  static Color get kOnTertiaryContainer => kOnSurface;
+  static Color get kTertiaryFixedDim => kOnSurfaceVariant;
+  static Color get kAmber => kTertiary;
+  static Color get kOutline => _pick(0xFFDDD8CB, 0xFF424653);
+  static Color get kOutlineVariant => kOutline;
+  static Color get kError => kTertiary;
+  static Color get kOnError => const Color(0xFF2B2D36);
 }
 
 class MelbelTheme {
-  static ThemeData get darkTheme {
+  static ThemeData get currentTheme {
+    final dark = MelbelColors.isDark;
+    final brightness = dark ? Brightness.dark : Brightness.light;
     return ThemeData(
       useMaterial3: true,
-      brightness: Brightness.dark,
+      brightness: brightness,
       scaffoldBackgroundColor: MelbelColors.kSurface,
       canvasColor: MelbelColors.kSurface,
-      colorScheme: const ColorScheme.dark(
+      colorScheme: ColorScheme(
+        brightness: brightness,
         surface: MelbelColors.kSurface,
-        primary: MelbelColors.kPrimaryContainer,
+        onSurface: MelbelColors.kOnSurface,
+        primary: MelbelColors.kPrimary,
         onPrimary: MelbelColors.kOnPrimary,
         secondary: MelbelColors.kSecondary,
         onSecondary: MelbelColors.kOnSecondary,
+        tertiary: MelbelColors.kTertiary,
+        onTertiary: MelbelColors.kOnTertiary,
+        error: MelbelColors.kError,
+        onError: MelbelColors.kOnError,
         surfaceContainer: MelbelColors.kSurfaceContainer,
         surfaceContainerHigh: MelbelColors.kSurfaceContainerHigh,
         surfaceContainerLow: MelbelColors.kSurfaceContainerLow,
         outline: MelbelColors.kOutline,
         outlineVariant: MelbelColors.kOutlineVariant,
+        errorContainer: MelbelColors.kTertiaryContainer,
+        onErrorContainer: MelbelColors.kOnTertiaryContainer,
+        surfaceTint: MelbelColors.kPrimary,
+        inverseSurface: MelbelColors.kOnSurface,
+        onInverseSurface: MelbelColors.kSurface,
+        inversePrimary: MelbelColors.kPrimary,
       ),
       textTheme: GoogleFonts.beVietnamProTextTheme(
-        ThemeData.dark().textTheme,
+        dark ? ThemeData.dark().textTheme : ThemeData.light().textTheme,
       ).apply(
         bodyColor: MelbelColors.kOnSurface,
         displayColor: MelbelColors.kOnSurface,
       ),
-      appBarTheme: const AppBarTheme(
+      appBarTheme: AppBarTheme(
         backgroundColor: MelbelColors.kSurface,
         elevation: 0,
         scrolledUnderElevation: 0,
@@ -87,7 +92,7 @@ class MelbelTheme {
       ),
       elevatedButtonTheme: ElevatedButtonThemeData(
         style: ElevatedButton.styleFrom(
-          backgroundColor: MelbelColors.kPrimaryContainer,
+          backgroundColor: MelbelColors.kPrimary,
           foregroundColor: MelbelColors.kOnPrimary,
           minimumSize: const Size.fromHeight(56),
           shape: RoundedRectangleBorder(

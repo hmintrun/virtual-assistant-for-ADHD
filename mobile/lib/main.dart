@@ -1,19 +1,39 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 
 import 'core/theme.dart';
+import 'providers/focus_provider.dart';
 import 'providers/task_provider.dart';
+import 'providers/theme_provider.dart';
+import 'screens/onboarding_screens.dart';
+import 'screens/support_screens.dart';
 import 'screens/home_screen.dart';
+import 'services/alarm_service.dart';
+import 'services/focus_native_controller.dart';
 
-void main() {
+Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  if (!kIsWeb && defaultTargetPlatform == TargetPlatform.android) {
+    await AlarmService.instance.init();
+    await FocusNativeController.instance.init();
+  }
   final taskProvider = TaskProvider();
+  final focusProvider = FocusProvider();
+  final themeProvider = ThemeProvider();
   unawaited(taskProvider.restoreCurrentDraft());
+  unawaited(focusProvider.restore());
+  await themeProvider.restore();
   runApp(
-    ChangeNotifierProvider.value(
-      value: taskProvider,
+    MultiProvider(
+      providers: [
+        ChangeNotifierProvider.value(value: taskProvider),
+        ChangeNotifierProvider.value(value: focusProvider),
+        ChangeNotifierProvider.value(value: themeProvider),
+      ],
       child: const ProPlanApp(),
     ),
   );
@@ -24,20 +44,38 @@ class ProPlanApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    context.watch<ThemeProvider>();
     return MaterialApp(
       title: 'Melbel',
       debugShowCheckedModeBanner: false,
-      theme: MelbelTheme.darkTheme,
-      builder: (context, child) => ColoredBox(
-        color: const Color(0xFF080A10),
-        child: Center(
-          child: ConstrainedBox(
-            constraints: const BoxConstraints(maxWidth: 430),
-            child: child ?? const SizedBox.shrink(),
+      theme: MelbelTheme.currentTheme,
+      routes: {
+        '/login': (_) => const LoginScreen(),
+        '/home': (_) => const HomeScreen(),
+        '/help': (_) => const HelpScreen(),
+        '/account': (_) => const AccountScreen(),
+      },
+      builder: (context, child) => AnnotatedRegion<SystemUiOverlayStyle>(
+        value: SystemUiOverlayStyle(
+          statusBarColor: Colors.transparent,
+          statusBarIconBrightness:
+              MelbelColors.isDark ? Brightness.light : Brightness.dark,
+          systemNavigationBarColor: MelbelColors.kSurface,
+          systemNavigationBarIconBrightness:
+              MelbelColors.isDark ? Brightness.light : Brightness.dark,
+          systemNavigationBarDividerColor: MelbelColors.kOutline,
+        ),
+        child: ColoredBox(
+          color: MelbelColors.kBackground,
+          child: Center(
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 430),
+              child: child ?? const SizedBox.shrink(),
+            ),
           ),
         ),
       ),
-      home: const HomeScreen(),
+      home: const LoginScreen(),
     );
   }
 }

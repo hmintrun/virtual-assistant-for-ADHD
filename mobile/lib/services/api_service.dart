@@ -61,7 +61,8 @@ class ApiService {
   }
 
   /// API 2: Lấy danh sách các bản nháp (GET /api/v1/drafts)
-  Future<List<PlanningDraftModel>> listDrafts({int limit = 20, String? cursor}) async {
+  Future<List<PlanningDraftModel>> listDrafts(
+      {int limit = 20, String? cursor}) async {
     final response = await _dio.get<Map<String, dynamic>>(
       '/drafts',
       queryParameters: {
@@ -72,7 +73,9 @@ class ApiService {
 
     final data = response.data!['data'] as Map<String, dynamic>;
     final items = data['items'] as List<dynamic>? ?? [];
-    return items.map((e) => PlanningDraftModel.fromJson(e as Map<String, dynamic>)).toList();
+    return items
+        .map((e) => PlanningDraftModel.fromJson(e as Map<String, dynamic>))
+        .toList();
   }
 
   /// API 3: Mở lại chi tiết 1 bản nháp (GET /api/v1/drafts/{draft_id})
@@ -161,13 +164,13 @@ class ApiService {
     required String draftId,
     required int sourceSummaryRevision,
     required int sourcePlanningInputRevision,
-    List<String>? selectedPartKeys,
+    List<String>? selectedStepKeys,
   }) async {
     final idempotencyKey = ApiConfig.generateIdempotencyKey('gen_candidate');
     final payload = <String, dynamic>{
       'source_summary_revision': sourceSummaryRevision,
       'source_planning_input_revision': sourcePlanningInputRevision,
-      if (selectedPartKeys != null) 'selected_part_keys': selectedPartKeys,
+      if (selectedStepKeys != null) 'selected_step_keys': selectedStepKeys,
     };
 
     final response = await _dio.post<Map<String, dynamic>>(
@@ -182,7 +185,8 @@ class ApiService {
 
   /// API 9: Đọc lại phương án lịch nháp (GET /api/v1/candidates/{candidate_id})
   Future<PlanCandidateModel> getCandidate(String candidateId) async {
-    final response = await _dio.get<Map<String, dynamic>>('/candidates/$candidateId');
+    final response =
+        await _dio.get<Map<String, dynamic>>('/candidates/$candidateId');
     final data = response.data!['data'] as Map<String, dynamic>;
     return PlanCandidateModel.fromJson(data);
   }
@@ -216,7 +220,8 @@ class ApiService {
     required int expectedSummaryRevision,
     required int expectedPlanningInputRevision,
   }) async {
-    final idempotencyKey = ApiConfig.generateIdempotencyKey('confirm_candidate');
+    final idempotencyKey =
+        ApiConfig.generateIdempotencyKey('confirm_candidate');
     final payload = <String, dynamic>{
       'expected_review_revision': expectedReviewRevision,
       'expected_summary_revision': expectedSummaryRevision,
@@ -253,7 +258,9 @@ class ApiService {
 
     final data = response.data!['data'] as Map<String, dynamic>;
     final items = data['items'] as List<dynamic>? ?? [];
-    return items.map((e) => TaskModel.fromJson(e as Map<String, dynamic>)).toList();
+    return items
+        .map((e) => TaskModel.fromJson(e as Map<String, dynamic>))
+        .toList();
   }
 
   /// API 16: Đọc lịch trình chính thức (GET /api/v1/schedule)

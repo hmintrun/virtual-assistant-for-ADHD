@@ -61,13 +61,13 @@ class _TaskReadyScreenState extends State<TaskReadyScreen> {
                     Container(
                       width: 10,
                       height: 10,
-                      decoration: const BoxDecoration(
+                      decoration: BoxDecoration(
                         color: MelbelColors.kSecondary,
                         shape: BoxShape.circle,
                       ),
                     ),
                     const SizedBox(width: 8),
-                    const Text(
+                    Text(
                       'Mọi thứ đã rõ ràng',
                       style: TextStyle(
                         fontFamily: 'Be Vietnam Pro',
@@ -84,7 +84,7 @@ class _TaskReadyScreenState extends State<TaskReadyScreen> {
             const SizedBox(height: 16),
 
             // Heading
-            const Text(
+            Text(
               'Bạn đã sẵn sàng chứ?',
               style: TextStyle(
                 fontFamily: 'Be Vietnam Pro',
@@ -95,7 +95,7 @@ class _TaskReadyScreenState extends State<TaskReadyScreen> {
               ),
             ),
             const SizedBox(height: 4),
-            const Text(
+            Text(
               'Cứ thong thả, hệ thống đã chuẩn bị nhịp làm việc êm dịu nhất cho bạn.',
               style: TextStyle(
                 fontFamily: 'Be Vietnam Pro',
@@ -116,7 +116,7 @@ class _TaskReadyScreenState extends State<TaskReadyScreen> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  const Text(
+                  Text(
                     'Tên việc',
                     style: TextStyle(
                       fontFamily: 'Be Vietnam Pro',
@@ -127,7 +127,7 @@ class _TaskReadyScreenState extends State<TaskReadyScreen> {
                   const SizedBox(height: 4),
                   Text(
                     displayTitle,
-                    style: const TextStyle(
+                    style: TextStyle(
                       fontFamily: 'Be Vietnam Pro',
                       fontSize: 20,
                       fontWeight: FontWeight.w600,
@@ -151,11 +151,11 @@ class _TaskReadyScreenState extends State<TaskReadyScreen> {
                             Container(
                               width: 40,
                               height: 40,
-                              decoration: const BoxDecoration(
+                              decoration: BoxDecoration(
                                 color: MelbelColors.kSurfaceContainerHighest,
                                 shape: BoxShape.circle,
                               ),
-                              child: const Icon(
+                              child: Icon(
                                 Icons.flag,
                                 size: 20,
                                 color: MelbelColors.kPrimaryContainer,
@@ -165,7 +165,7 @@ class _TaskReadyScreenState extends State<TaskReadyScreen> {
                             Column(
                               crossAxisAlignment: CrossAxisAlignment.start,
                               children: [
-                                const Text(
+                                Text(
                                   'Hạn chót',
                                   style: TextStyle(
                                     fontFamily: 'Be Vietnam Pro',
@@ -176,7 +176,7 @@ class _TaskReadyScreenState extends State<TaskReadyScreen> {
                                 const SizedBox(height: 2),
                                 Text(
                                   displayDeadline,
-                                  style: const TextStyle(
+                                  style: TextStyle(
                                     fontFamily: 'Be Vietnam Pro',
                                     fontSize: 15,
                                     fontWeight: FontWeight.w600,
@@ -198,7 +198,7 @@ class _TaskReadyScreenState extends State<TaskReadyScreen> {
                             ),
                             borderRadius: BorderRadius.circular(999),
                           ),
-                          child: const Text(
+                          child: Text(
                             'Hạn đã chọn',
                             style: TextStyle(
                               fontFamily: 'Be Vietnam Pro',
@@ -247,7 +247,7 @@ class _TaskReadyScreenState extends State<TaskReadyScreen> {
                   color: MelbelColors.kOutlineVariant.withValues(alpha: 0.3),
                 ),
               ),
-              child: const Row(
+              child: Row(
                 children: [
                   Icon(Icons.eco, size: 22, color: MelbelColors.kSecondary),
                   SizedBox(width: 12),
@@ -304,7 +304,7 @@ class _DetailLine extends StatelessWidget {
             children: [
               Text(
                 title,
-                style: const TextStyle(
+                style: TextStyle(
                   fontFamily: 'Be Vietnam Pro',
                   fontSize: 12,
                   color: MelbelColors.kOnSurfaceVariant,
@@ -313,7 +313,7 @@ class _DetailLine extends StatelessWidget {
               const SizedBox(height: 2),
               Text(
                 content,
-                style: const TextStyle(
+                style: TextStyle(
                   fontFamily: 'Be Vietnam Pro',
                   fontSize: 14,
                   fontWeight: FontWeight.w500,
