@@ -462,8 +462,18 @@ async def test_http_create_draft_persists_fk_and_receipt_and_promotes_legacy(sto
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("source", ["wrong_owner", "missing", "running"])
-async def test_http_rejects_invalid_thought_source_without_writing(storage, http_client, source):
+@pytest.mark.parametrize("source", ["wrong_owner", "missing", "running", "paused"])
+async def test_http_rejects_invalid_thought_source_without_writing(
+    storage, http_client, source, monkeypatch
+):
+    def unexpected_voice_service():
+        pytest.fail("STT service accessed before the Thought/source Run guard passed")
+
+    async def unexpected_llm(*args, **kwargs):
+        pytest.fail("LLM called for an invalid or active Thought source")
+
+    monkeypatch.setattr(voice, "get_voice_service", unexpected_voice_service)
+    monkeypatch.setattr(draft_service.ai_service, "extract_task_intent", unexpected_llm)
     thought_id = storage.thought_id
     async with storage.sessions() as db:
         if source == "wrong_owner":
@@ -482,7 +492,7 @@ async def test_http_rejects_invalid_thought_source_without_writing(storage, http
         else:
             run = await db.get(SessionRun, storage.run_id)
             run.ended_at = None
-            run.run_state = "running"
+            run.run_state = source
             await db.commit()
         before = await db.scalar(select(func.count()).select_from(PlanningDraft))
     key = str(uuid4())
@@ -496,7 +506,7 @@ async def test_http_rejects_invalid_thought_source_without_writing(storage, http
             "source_thought_id": str(thought_id),
         },
     )
-    assert response.status_code == (409 if source == "running" else 404), response.text
+    assert response.status_code == (409 if source in {"running", "paused"} else 404), response.text
     async with storage.sessions() as db:
         assert await db.scalar(select(func.count()).select_from(PlanningDraft)) == before
         assert (

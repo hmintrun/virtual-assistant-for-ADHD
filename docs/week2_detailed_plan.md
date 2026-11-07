@@ -70,6 +70,10 @@ Với Undo, hết hạn thì nút không còn nhận thao tác; request Undo và
 
 ## 3. Các giai đoạn thực hiện tuần tự
 
+**Quyết định MT ngày 07/11/2026:** CheckIn tối thiểu tuần 2 chỉ có Nghỉ ngay và Báo bận; nghỉ ngay giữ kết quả chưa xác nhận, báo hoàn thành phiên/bước/việc để tuần 3. Payload, revision, timeout/offline và các ca kiểm đã được ghi tại [Contract CheckIn tuần 2](backend/MT_WEEK2.md). Đây là chốt nghiệp vụ để triển khai, chưa phải nghiệm thu API hoặc APK.
+
+**Đầu ra MT ngày 07/11/2026:** [báo cáo MT: microcopy, micro-task, điểm chặn và kịch bản demo](backend/MT_WEEK2.md). Nền tuần 2 hiện dùng Gemini Transcribe; cần đối chiếu với mục tiêu Groq Whisper và kiểm provider thật. Cất suy nghĩ trong phiên chỉ lưu audio thô. Các tài liệu là đầu vào ghép/kiểm thử, chưa chứng minh UI hoặc UF3–UF4 đã hoạt động đầy đủ.
+
 Cả nhóm thực hiện theo thứ tự: **Có lịch thật trên app → Chạy được phiên tập trung → Cất và xem lại suy nghĩ → Kiểm thử và bàn giao MVP**. Bảng phân công ở mục 2 xác định trách nhiệm cả tuần; các bảng dưới đây xác định phần việc cần ưu tiên và bàn giao trong từng giai đoạn.
 
 Trong cùng một giai đoạn, các thành viên làm song song và ghép từng phần vào `dev`, tiếp tục dùng API contract/JSON chung. Mỗi giai đoạn có **một người chịu trách nhiệm chính về kết quả chung**; người này theo dõi các phần phụ thuộc, điều phối hỗ trợ và bảo đảm đủ điều kiện chuyển tiếp. Minh Trung điều phối tiến độ toàn tuần và review/merge; Doãn Thành kiểm tra bằng chứng nghiệm thu.

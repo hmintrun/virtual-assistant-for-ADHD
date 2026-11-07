@@ -71,7 +71,7 @@ Các ứng dụng hiện có như **Goblin Tools** (chỉ bẻ nhỏ việc rờ
 | **Frontend Mobile** | **Flutter SDK (Dart)** | Phát triển đa nền tảng, xuất file `.apk` cho Android. Các gói thư viện chính:<br>• `provider`: Quản lý trạng thái (`User`, `Task`, `Session`, `Theme`).<br>• `dio` & `flutter_secure_storage`: Gọi REST API, interceptor đính kèm và lưu trữ bảo mật JWT Token.<br>• `flutter_dnd`, `wakelock_plus`, `flutter_local_notifications`: Tự động bật/tắt DND, giữ sáng màn hình nhẹ trong phiên, báo thức chính xác dưới nền.<br>• `table_calendar` & `circular_countdown_timer`: Hiển thị lịch trực quan và đồng hồ đếm ngược dịu mắt.<br>• `flutter_tts` & `speech_to_text`: Xử lý giọng nói trực tiếp trên thiết bị (On-device Fallback & Offline mode). |
 | **Backend & Server** | **Python 3.12 (FastAPI + Uvicorn)** | Hiệu năng cao, xử lý bất đồng bộ (`async/await`) tốt, tích hợp trực tiếp hệ sinh thái AI/LLM và thuật toán lập lịch. |
 | **AI / LLM Engine** | **Gemini 3.8 Flash (`gemini-3.8-flash`)** + **Warm Backup (`gemini-3.5-flash-lite`)**<br>*(Dự phòng Tầng 2: `qwen/qwen3.8-27b` & `openai/gpt-oss-20b` qua Groq Cloud)* | Điều phối **Quality-First Hedged Execution** (hỗ trợ chứng thực GCP Service Account / Google AI Studio API Key): Phân tích mục tiêu & hợp nhất nháp (UF1), bẻ nhỏ công việc thành các bước (UF2), hiểu yêu cầu sửa kế hoạch tự nhiên và sinh lời giải thích/động viên (UF2, UF6). |
-| **Giọng nói (STT & TTS)** | • **STT Primary:** Groq Cloud (`whisper-large-v3` / `whisper-large-v3-turbo`)<br>• **TTS Primary:** `edge-tts` (Python)<br>• **On-device Fallback:** `speech_to_text` & `flutter_tts` | • **Groq Whisper** nhận diện tiếng Việt cực nhanh và chuẩn xác cho UF1, UF2, UF5, UF6.<br>• **edge-tts** miễn phí, truyền qua stream/pipe dễ dàng, tùy chỉnh tốc độ và giọng đọc.<br>• Tự động fallback về `speech_to_text` / `flutter_tts` trên thiết bị khi mạng yếu hoặc mất kết nối. |
+| **Giọng nói (STT & TTS)** | • **STT mục tiêu:** Groq Whisper (`whisper-large-v3-turbo`)<br>• **TTS Primary:** `edge-tts` (Python)<br>• **On-device Fallback:** `speech_to_text` & `flutter_tts` | • Nền tuần 2 hiện dùng adapter **Gemini Transcribe**; cần kiểm chứng provider thật và đối chiếu với mục tiêu Groq Whisper.<br>• **edge-tts** miễn phí, truyền qua stream/pipe dễ dàng, tùy chỉnh tốc độ và giọng đọc.<br>• Tự động fallback về `speech_to_text` / `flutter_tts` trên thiết bị khi mạng yếu hoặc mất kết nối. |
 | **Cơ sở dữ liệu (Database)** | • **ORM:** SQLAlchemy 2.0<br>• **Giai đoạn Code (Tuần 1–7):** SQLite (`.db` local)<br>• **Giai đoạn Deploy (Tuần 8–10):** PostgreSQL (Supabase / Neon.tech)<br>• **Mobile Local Cache:** SQLite (`sqflite`) / `shared_preferences` | Dùng SQLite local ở giai đoạn phát triển để tránh lỗi mạng và linh hoạt khi thay đổi schema; chuyển đổi mượt mà sang PostgreSQL trên Cloud ở giai đoạn cuối nhờ SQLAlchemy 2.0 mà không cần viết lại truy vấn. |
 | **Lịch Ngoại vi & Giao thức MCP** | • **Dịch vụ:** Google Calendar API (OAuth 2.0)<br>• **Giao thức:** **Model Context Protocol (MCP)** | • **Đọc lịch:** Tự động lấy các sự kiện bận từ Google Calendar để suy ra khung giờ rảnh ở UF1, giải phóng người dùng khỏi việc phải nhớ và gõ tay.<br>• **Ghi lịch:** Đồng bộ 2 chiều các phiên tập trung (`Focus Sessions`) lên Google Calendar sau khi chốt ở UF2 và UF6.<br>• **MCP Protocol:** Chuẩn hóa giao tiếp giữa AI Agent/Backend và các công cụ Calendar ngoại vi một cách an toàn và nhất quán. |
 
@@ -111,7 +111,7 @@ Các ứng dụng hiện có như **Goblin Tools** (chỉ bẻ nhỏ việc rờ
 - **Xử lý lỗi AI êm ái (Graceful Degradation - Đa tầng):**
   Khi gọi AI gặp sự cố hoặc quá thời gian chờ, tuyệt đối không trả về màn hình trắng hay báo lỗi kỹ thuật thô. Áp dụng **Cơ chế Dự phòng 3 Tầng (3-Tier Fallback)**:
   1. **Tầng 1 (Primary + Warm Backup Gemini):** Gọi **`gemini-3.8-flash`** kết hợp khởi chạy ngầm **`gemini-3.5-flash-lite`** (Warm Backup giữ sẵn trong RAM nếu model chính xử lý chậm).
-  2. **Tầng 2 (Cross-Provider Groq Fallback):** Nếu nhánh Google lỗi nhanh, quá hạn mức (Rate Limit 429) hoặc chạm mốc Hedge, Backend tự động chuyển sang **`qwen/qwen3.8-27b`** trên Groq Cloud (và model phụ **`openai/gpt-oss-20b`** nếu chạm trần TPM — dùng chung `GROQ_API_KEY` với Groq Whisper).
+  2. **Tầng 2 (Cross-Provider Groq Fallback):** Nếu nhánh Google lỗi nhanh, quá hạn mức (Rate Limit 429) hoặc chạm mốc Hedge, Backend tự động chuyển sang **`qwen/qwen3.8-27b`** trên Groq Cloud (và model phụ **`openai/gpt-oss-20b`** nếu chạm trần TPM — dùng `GROQ_API_KEY` cho LLM; STT tuần 2 dùng Gemini).
   3. **Tầng 3 (Deterministic Rule-based Fallback):** Nếu mất kết nối tới cả 2 nhà cung cấp AI, hệ thống tự động kích hoạt thuật toán chia công việc thành các phiên cố định theo thời lượng tập trung mặc định của người dùng (ví dụ: `20–25 phút/phiên` + `5 phút nghỉ`) kèm câu thông báo thân thiện để không làm đứt mạch làm việc.
   - **Phạm vi áp dụng UF2:** Khi sinh Candidate bị lỗi provider, timeout hoặc kết quả phân rã AI không hợp lệ, dùng `_fallback_decompose_task` theo cấu hình user rồi để scheduler kiểm lịch. Khi chỉnh Candidate theo key thất bại, service trả `503 AI_UNAVAILABLE` với thông báo phương án cũ được giữ nguyên; không phân rã lại hoặc tạo Candidate thay thế. Lỗi quyền/revision/nguồn và yêu cầu cần làm rõ vẫn theo kiểm tra nghiệp vụ, không được bỏ qua bằng fallback.
 
@@ -294,7 +294,7 @@ flowchart TD
 #### UF1 — Tương tác & Xác nhận công việc
 - **Mục tiêu & Điểm bắt đầu:** Hệ thống hiểu đúng công việc, khung giờ rảnh và deadline khi người dùng thêm mục tiêu mới; áp dụng cơ chế gộp câu hỏi làm rõ vào 1 vòng duy nhất để giải phóng trí nhớ ngắn hạn.
 - **Luồng xử lý chính (4 bước):**
-  1. **Nhập liệu đa phương thức:** Người dùng nhập công việc bằng **Giọng nói** (STT ưu tiên Groq Whisper `whisper-large-v3-turbo`, fallback on-device `speech_to_text`) hoặc **Văn bản**. LLM trích xuất mục tiêu, hạn chót, mốc thời gian và ghi chú.
+  1. **Nhập liệu đa phương thức:** Người dùng nhập công việc bằng **Giọng nói** (STT mục tiêu ưu tiên Groq Whisper; fallback on-device `speech_to_text` cho nhập việc ngoài phiên) hoặc **Văn bản**. LLM trích xuất mục tiêu, hạn chót, mốc thời gian và ghi chú.
   2. **Kiểm tra 4 nhóm thông tin bắt buộc:** Hệ thống đối chiếu dữ liệu để đảm bảo có đủ 4 thành phần:
      - *Nội dung công việc (Task content)*
      - *Phạm vi / Đầu ra mong muốn (Scope)*
@@ -310,7 +310,7 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-    A["Người dùng nhập việc (Voice / Text)"] --> B["STT (Groq Whisper / On-device Fallback)"]
+    A["Người dùng nhập việc (Voice / Text)"] --> B["STT (Groq Whisper / On-device Fallback ngoài phiên)"]
     B --> C["LLM trích xuất mục tiêu & Kiểm tra 4 trường bắt buộc"]
     C --> D{"Đủ thông tin & Không mâu thuẫn?"}
     D -->|"Thiếu / Mâu thuẫn"| E["Hiển thị Bản tóm tắt + Gộp hỏi bổ sung trong 1 màn hình"]
@@ -509,7 +509,7 @@ Bảng này giữ các nguyên tắc nghiệp vụ và bổ sung cách thể hi�
 
 **Chuông khi đang thu UF4 — quyết định tuần 2:** Giữ yêu cầu âm thanh báo hết phiên sai lệch ≤1 giây, không hoãn tối đa 15 giây để chờ thả nút. Bảo vệ file đang thu và phối hợp audio focus/finalize; phần hỏi check-in có thể chờ thao tác thu kết thúc nhưng không lùi `ended_at`, cộng thời gian này vào actual hoặc lùi hạn khôi phục DND. Phải kiểm cả âm thanh thực sự phát và file nghe lại được trên máy thật. Phân công và tiêu chí triển khai tại [kế hoạch tuần 2](docs/week2_detailed_plan.md).
 
-**CheckIn tối thiểu tuần 2:** End Run phải trả CheckIn cuối/ID/revision; phản hồi Chọn nghỉ/Báo bận và lazy timeout xử lý cùng Run, giữ actual/ended_at. Khi đọc/start sau `ended_at+300`, đối soát trạng thái quá hạn nguyên tử; thiết bị vẫn tự khôi phục DND đúng hạn không phụ thuộc request Backend. “Chọn nghỉ” không tự xác nhận hoàn thành. Payload nghỉ khi chưa xác nhận kết quả còn cần MT/Hưng/Cương/An chốt ở giai đoạn 1; không phát minh enum hoặc gán `completed` để vượt validation.
+**CheckIn tối thiểu tuần 2 — MT chốt ngày 07/11/2026:** Chỉ có **Nghỉ ngay** và **Báo bận**; xác nhận hoàn thành phiên/bước/việc để tuần 3. Nghỉ ngay khôi phục Focus/DND tại thiết bị ngay, ghi `response_state=answered`, `session_outcome=unknown`; Báo bận ghi `answered` + `busy`. Cả hai giữ `step_completed=null`, `task_completed=null`, `skip_scope=null`; đóng chờ Run bằng `run_state=closed`, không tự xác nhận hoàn thành hoặc dời lịch. End Run trả CheckIn cuối/ID/revision. Khi đọc/start sau `ended_at+300`, đối soát timeout nguyên tử thành `no_respond` + `unknown`, giữ actual/ended_at; thiết bị tự khôi phục đúng owner kể cả offline. Kết quả được bổ sung sau trên cùng CheckIn; UI/API báo hoàn thành thuộc tuần 3. Chi tiết request/response, offline/retry và tiêu chí nghiệm thu tại [Contract CheckIn tuần 2](docs/backend/MT_WEEK2.md). Đây là quyết định contract, chưa xác nhận endpoint/service đã triển khai.
 
 ### 8.3. Phần Hợp đồng còn Thiếu Chi tiết
 
@@ -556,7 +556,7 @@ adhd-assistant/
 │   │   │   ├── ai_service.py         # Gemini Flash + Groq Fallback + Prompt templates
 │   │   │   ├── calendar_mcp_service.py # Tích hợp Google Calendar API & giao thức MCP
 │   │   │   ├── scheduler_engine.py   # Thuật toán Python: Rolling Horizon, Buffer, Reschedule
-│   │   │   └── voice_service.py      # Groq Whisper STT & edge-tts stream
+│   │   │   └── voice_service.py      # Gemini Transcribe STT; TTS theo cấu hình/triển khai riêng
 │   │   └── main.py           # Entrypoint FastAPI + Uvicorn
 │   ├── requirements.txt
 │   └── .env.example
@@ -585,7 +585,7 @@ adhd-assistant/
 | **Prompt & AI Engineer** | Minh Trung (`mt`), Quang Khải (`kai`) | Thiết kế System Prompts, Structured JSON Outputs cho Gemini Flash, kết nối Google Calendar qua giao thức MCP, cơ chế Fallback Groq LLM và xử lý mâu thuẫn ngữ cảnh. |
 | **Algorithm & Business Logic Designer** | Quốc Hưng (`vqh`), Quốc Thịnh (`qt`), Doãn Thành (`thành`) | Xây dựng thuật toán xếp/dời lịch Rolling Horizon, công thức Buffer Time, kiểm tra thiếu hụt giờ rảnh trước Deadline và xử lý nhánh UF4/UF5/UF6/UF7 tiết kiệm token. |
 | **Mobile Developer Lead & Frontend UI** | Thanh An (`tan`) | Xây dựng giao diện Flutter chuẩn W3C COGA (màn hình Prompt UF1, Review Task/Calendar UF2/UF6, 1-Step UI UF3); phối hợp Quang Khải về native và Quốc Thịnh về timer/local repository. |
-| **Voice Design, Focus Mode & System** | Quang Khải (`kai`) | Tích hợp STT/TTS (Groq Whisper + `edge-tts` + On-device fallback), nút Push-to-Talk UF4, DND (`flutter_dnd`), `wakelock_plus`, báo thức nền chính xác. |
+| **Voice Design, Focus Mode & System** | Quang Khải (`kai`) | Tích hợp STT/TTS (ưu tiên Groq Whisper và `edge-tts`; kiểm chênh lệch adapter hiện có và fallback trên thiết bị), nút Push-to-Talk UF4, DND (`flutter_dnd`), `wakelock_plus`, báo thức nền chính xác. |
 | **Tester / QA** | Doãn Thành (`thành`) | Kiểm thử các nhánh biên (Edge cases: mất mạng, thu âm lỗi 3 lần, tắt app trước khi duyệt lịch UF6, không phản hồi UF5, độ trễ AI & độ chính xác chuông báo). |
 
 ---

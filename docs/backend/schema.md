@@ -318,7 +318,7 @@ API liên quan: [dòng 16](https://docs.google.com/spreadsheets/d/1RTI0Hv0DydDX5
 | `device_id` | string | Thiết bị đã được chấp nhận thực hiện Run; có trong response start và end hiện hành. |
 | `started_at` | date-time | Thời điểm thực sự bắt đầu sau khi thao tác được chấp nhận. |
 | `ended_at` | date-time \| null | Mốc kết thúc thực tế của Run, ghi ngay khi hết toàn phiên hoặc user dừng; không phải giờ trả lời check-in hay server nhận đồng bộ. |
-| `run_state` | string enum | Lần thực hiện đang chạy, chờ phản hồi hay đã đóng; nghỉ nội bộ vẫn đang chạy. |
+| `run_state` | string enum | Lần thực hiện đang chạy, chờ phản hồi hay đã đóng; nghỉ nội bộ vẫn đang chạy. Contract tuần 2 dùng `closed` khi nghỉ/bận/timeout, không mang nghĩa hoàn thành công việc. |
 | `active_phase` | string enum | Quãng đang chạy: work hoặc rest; kết thúc là ended. Run không có phase micro vì micro-task ở trước phiên chính. |
 | `segment_index` | integer \| null | Quãng đang chạy; giúp phục hồi đúng vị trí khi mở lại app. |
 | `dnd_release_at` | date-time \| null | Mốc khôi phục Tập trung/DND: ended_at + 300 giây khi chưa xác nhận; nếu xác nhận cuối phiên sớm hơn thì dùng thời điểm đó. Chỉ khi Run kết thúc mới có mốc, không kéo dài actual. |
@@ -346,7 +346,7 @@ API liên quan: [dòng 20](https://docs.google.com/spreadsheets/d/1RTI0Hv0DydDX5
 | `run_id` | string | Lần thực hiện mà phản hồi này nói tới. |
 | `kind` | string enum | Phân biệt hỏi giữa phiên và hỏi khi kết thúc toàn phiên. |
 | `response_state` | string enum | open, answered hoặc no_respond cho check-in cuối phiên. Trả lời sau hạn cập nhật cùng CheckIn thành answered. not_started thuộc trạng thái bắt đầu của Session, không gán cho CheckIn có Run giả. |
-| `session_outcome` | string enum | Kết quả phiên người dùng xác nhận; không tự suy từ timer. |
+| `session_outcome` | string enum | Kết quả phiên người dùng xác nhận; không tự suy từ timer. Tuần 2 chỉ nhận `unknown` cho Nghỉ ngay hoặc `busy` cho Báo bận; báo hoàn thành để tuần 3. |
 | `step_completed` | boolean \| null | Người dùng xác nhận đầu ra Step đã đạt hay chưa. |
 | `task_completed` | boolean \| null | Xác nhận toàn bộ phạm vi Task, kể cả phần chưa chia; không lấy việc xong Step cuối của phần đang lập lịch làm hoàn tất Task. |
 | `skip_scope` | SkipScope \| null | skipped cần skip_session, postpone_session hoặc skip_step. Không skipped thì null. Bỏ Session/Step không tự hoàn thành Task; thay đổi lịch đi qua UF6. |
@@ -355,6 +355,8 @@ API liên quan: [dòng 20](https://docs.google.com/spreadsheets/d/1RTI0Hv0DydDX5
 | `responded_at` | date-time \| null | Thời điểm người dùng thực sự trả lời; không dùng mốc này để kéo dài ended_at hoặc actual. |
 | `response_revision` | integer | Phiên bản phản hồi để sửa câu trả lời trên cùng CheckIn và tránh ghi đè/đếm kết quả lặp. |
 | `checkin_id` | string | Trường bổ sung từ response Sheet; mã tài nguyên hoặc liên kết server. |
+
+**Bổ sung contract tuần 2, MT chốt 07/11/2026:** Nghỉ ngay có `response_state=answered` nhưng `session_outcome=unknown`; `step_completed`, `task_completed`, `skip_scope` đều null. `answered` không có nghĩa hoàn thành. PUT response trả `{data: {check_in, run}, meta}` để Mobile nhận revision của cả hai tài nguyên. End dùng `end_reason=timer_elapsed` hoặc `user_stopped`; Run đóng dùng `closed`. Timeout tăng revision một lần, phản hồi muộn sửa cùng CheckIn. Chi tiết và JSON mẫu tại [Contract CheckIn tuần 2](MT_WEEK2.md). Đây là bổ sung cần triển khai đồng bộ DTO/service/router/Mobile, chưa có bằng chứng HTTP hoạt động.
 
 ### O14 Thought
 
@@ -1089,7 +1091,7 @@ Quyết định đã được người dùng chốt, lấy [Project mục 8.2](.
 | Nhắc trước phiên | Default mới `[900, 600, 300]`, 1–3 mốc integer không âm, không trùng, giảm dần; giữ lựa chọn user cũ | Code/Settings còn khóa một mốc, default `[900]`; dedupe đã có offset. Capabilities số đơn chưa biểu diễn default nhiều mốc; Cương/Hưng cập nhật đồng bộ DTO, service và Mobile theo checklist |
 | Chuông khi thu âm | Âm thanh báo hết giờ ≤1 giây, bảo vệ file; không hoãn 15 giây hoặc dùng rung/UI thay điều kiện âm thanh | Chưa có bằng chứng Android. Không dời ended_at/actual/timeout DND theo lúc finalize; kiểm sớm 04/11 và nghiệm thu thiết bị |
 | Undo Thought | Outbox local lưu bền chờ 5 giây; Undo cất mới hủy gửi/dọn file, xóa bản cũ giữ khả năng phục hồi | Local repository/outbox/UI và API UF4 còn phải triển khai; không coi DELETE là đã có endpoint Undo |
-| Kết thúc tối thiểu | CheckIn cuối, phản hồi và lazy timeout đọc/start sau hạn; thiết bị tự khôi phục DND đúng owner | Router/service UF3–UF4/CheckIn mới là khung. “Chọn nghỉ” chưa xác nhận kết quả cần ví dụ payload được nhóm chốt, không suy completed |
+| Kết thúc tối thiểu | CheckIn cuối, phản hồi và lazy timeout đọc/start sau hạn; thiết bị tự khôi phục DND đúng owner | Router/service UF3–UF4/CheckIn mới là khung. MT đã chốt Nghỉ ngay → answered/unknown và Báo bận → answered/busy, Step/Task null; xem [contract và JSON mẫu](MT_WEEK2.md). Cần triển khai/test HTTP và thiết bị |
 | Thought → Draft | Metadata Thought có trên server, user yêu cầu sau phiên: POST voice/transcriptions purpose=thought_to_draft → POST thoughts/{id}/draft; retry riêng từng bước | STT có kiểm owner/Run và receipt DB, còn cache RAM trùng; API tạo Draft từ Thought chờ triển khai. FK unique source_thought_id đã có, chỉ kiểm migration/đường dùng và ánh xạ liên kết |
 | Vai trò tuần 2 | Cương: router/DTO/HTTP; Hưng: service nghiệp vụ; Tín: schema/migration/repository; An/Thịnh/Khải: UI/local/native | Kế thừa contract chung trên dev; không tạo bộ JSON riêng theo người |
 
