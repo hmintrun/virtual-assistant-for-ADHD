@@ -22,6 +22,20 @@ class CandidateReviewScreen extends StatelessWidget {
     }
     final feasibility = candidate.feasibility;
     final deficitSeconds = feasibility['deficit_seconds'] as int?;
+    final scheduledKeys =
+        candidate.sessions.map((session) => session['client_step_key']).toSet();
+    final unscheduledKeys =
+        (feasibility['unscheduled_step_keys'] as List?)?.toSet() ?? const {};
+    final stepsWithoutFullSchedule = candidate.steps
+        .where((step) =>
+            !scheduledKeys.contains(step['client_step_key']) ||
+            unscheduledKeys.contains(step['client_step_key']))
+        .map((step) => step['title'])
+        .whereType<String>()
+        .toList();
+    final unexpandedScope = candidate.unexpandedScope?.trim() ?? '';
+    final hasRemainder =
+        unexpandedScope.isNotEmpty || stepsWithoutFullSchedule.isNotEmpty;
     final hasPastSession = candidate.sessions.any((session) {
       final value =
           DateTime.tryParse(session['scheduled_start'] as String? ?? '');
@@ -63,7 +77,9 @@ class CandidateReviewScreen extends StatelessWidget {
                     const SizedBox(width: 8),
                     Expanded(
                         child: Text(
-                            _feasibilityLabel(candidate.feasibilityStatus),
+                            candidate.isFeasible && hasRemainder
+                                ? 'Phần có lịch đã xếp được'
+                                : _feasibilityLabel(candidate.feasibilityStatus),
                             style: const TextStyle(
                                 color: MelbelColors.kOnSurface,
                                 fontWeight: FontWeight.w600)))
@@ -96,6 +112,24 @@ class CandidateReviewScreen extends StatelessWidget {
                   ],
                 ])),
             const SizedBox(height: 14),
+            if (hasRemainder) ...[
+              MelbelCard(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text('Phần chưa có lịch',
+                        style: TextStyle(fontWeight: FontWeight.w600)),
+                    if (unexpandedScope.isNotEmpty)
+                      Text('Chưa chia thành bước: $unexpandedScope'),
+                    if (stepsWithoutFullSchedule.isNotEmpty)
+                      Text(
+                        'Bước chưa xếp đủ: ${stepsWithoutFullSchedule.join(', ')}',
+                      ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 14),
+            ],
             for (var i = 0; i < candidate.steps.length; i++) ...[
               _stepCard(context, candidate.steps[i], i),
               const SizedBox(height: 10),
@@ -108,12 +142,6 @@ class CandidateReviewScreen extends StatelessWidget {
                 const SizedBox(height: 8),
               ],
             ],
-            if (candidate.planningParts
-                .any((part) => part['decomposition_state'] != 'complete'))
-              const MelbelCard(
-                  child: Text(
-                      'Một số phần nằm ngoài phạm vi phân rã chi tiết hiện tại; có thể tiếp tục khi kế hoạch được cập nhật.',
-                      style: TextStyle(color: MelbelColors.kOnSurfaceVariant))),
             const SizedBox(height: 14),
             if (!candidate.isFeasible)
               SecondaryCta(
@@ -126,7 +154,11 @@ class CandidateReviewScreen extends StatelessWidget {
               ),
             if (!candidate.isFeasible) const SizedBox(height: 8),
             PrimaryCta(
-              label: task.isApiBusy ? 'Đang xác nhận…' : 'Chốt kế hoạch',
+              label: task.isApiBusy
+                  ? 'Đang xác nhận…'
+                  : hasRemainder
+                      ? 'Chốt phần đã xếp lịch'
+                      : 'Chốt kế hoạch',
               icon: task.isApiBusy ? Icons.hourglass_top : Icons.lock_outline,
               onPressed: canConfirm ? () => _confirm(context) : null,
             ),
