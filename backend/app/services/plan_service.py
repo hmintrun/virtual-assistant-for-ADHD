@@ -1508,8 +1508,77 @@ async def patch_candidate(
 async def _enqueue_calendar(
     db: AsyncSession, owner: UUID, sessions: list[SessionRow], version: int
 ) -> str:
-    # A22.1 tích hợp sau: không tạo liên kết/event/job giả để báo đã đồng bộ.
-    return "not_integrated"
+    """Tạo CalendarEventLink và CalendarSyncJob trong cùng transaction khi chốt lịch UF2."""
+    stmt = (
+        select(CalendarConnection)
+        .where(
+            CalendarConnection.user_id == owner,
+            CalendarConnection.connection_state == "connected",
+            CalendarConnection.write_calendar_id.is_not(None),
+        )
+        .order_by(CalendarConnection.created_at.desc())
+        .limit(1)
+    )
+    conn = (await db.execute(stmt)).scalar_one_or_none()
+    if not conn or not conn.write_calendar_id:
+        return "not_integrated"
+
+    for session in sessions:
+        event_id = f"session{session.id.hex}"
+        link = CalendarEventLink(
+            id=uuid4(),
+            user_id=owner,
+            session_id=session.id,
+            connection_id=conn.id,
+            google_calendar_id=conn.write_calendar_id,
+            google_event_id=event_id,
+            google_etag=None,
+            desired_schedule_revision=version,
+            synced_schedule_revision=None,
+            sync_state="pending",
+            is_current=True,
+        )
+        db.add(link)
+
+        payload_snapshot = {
+            "id": event_id,
+            "summary": "ProPlan VA Focus Session",
+            "start": {
+                "dateTime": session.scheduled_start.isoformat(),
+                "timeZone": "Asia/Ho_Chi_Minh",
+            },
+            "end": {
+                "dateTime": session.scheduled_end.isoformat(),
+                "timeZone": "Asia/Ho_Chi_Minh",
+            },
+            "transparency": "opaque",
+            "reminders": {"useDefault": False, "overrides": []},
+            "extendedProperties": {
+                "private": {
+                    "proactive_session_id": str(session.id),
+                    "proactive_schedule_revision": str(version),
+                }
+            },
+        }
+
+        job = CalendarSyncJob(
+            id=uuid4(),
+            user_id=owner,
+            connection_id=conn.id,
+            event_link_id=link.id,
+            target_kind="session_event",
+            target_ref=str(session.id),
+            operation="create",
+            target_schedule_revision=version,
+            expected_google_etag=None,
+            payload_snapshot=payload_snapshot,
+            idempotency_key=f"sync_session:{session.id}:v{version}:create",
+            job_state="queued",
+            attempt_count=0,
+        )
+        db.add(job)
+
+    return "pending"
 
 
 def _confirmed_payload(saved: dict[str, Any]) -> dict[str, Any]:

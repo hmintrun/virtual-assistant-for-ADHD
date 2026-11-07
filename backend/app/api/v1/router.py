@@ -2,7 +2,7 @@
 from fastapi import APIRouter
 
 from app.api.v1 import (
-    calendars,
+    calendar,
     drafts,
     planning,
     schedule,
@@ -14,7 +14,7 @@ from app.api.v1 import (
 from app.core.config import settings as app_settings
 
 api_router = APIRouter(prefix=app_settings.API_V1_STR)
-api_router.include_router(calendars.router)
+api_router.include_router(calendar.router)
 api_router.include_router(drafts.router)
 api_router.include_router(voice.router)
 api_router.include_router(planning.router)

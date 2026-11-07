@@ -71,9 +71,16 @@ class Settings(BaseSettings):
         repr=False,
         description="OAuth 2.0 Client Secret; ẩn hoàn toàn khỏi log/repr để bảo mật.",
     )
-    GOOGLE_OAUTH_REDIRECT_URI: str = "http://localhost:8000/api/v1/calendars/oauth2callback"
+    GOOGLE_OAUTH_REDIRECT_URI: str = "http://localhost:8000/api/v1/calendar/oauth/callback"
+    CALENDAR_CREDENTIAL_SECRET_KEY: str = Field(
+        default="",
+        repr=False,
+        description="Fernet 32-byte base64 encryption key dùng cho credential_ref.",
+    )
     GOOGLE_CALENDAR_DEFAULT_SCOPES: list[str] = [
-        "https://www.googleapis.com/auth/calendar.readonly",
+        "https://www.googleapis.com/auth/calendar.calendarlist.readonly",
+        "https://www.googleapis.com/auth/calendar.events.readonly",
+        "https://www.googleapis.com/auth/calendar.app.created",
         "https://www.googleapis.com/auth/calendar.events",
     ]
 

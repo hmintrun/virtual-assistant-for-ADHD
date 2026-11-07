@@ -16,9 +16,11 @@ from datetime import UTC, date, datetime, time, timezone
 from typing import Any
 from uuid import UUID
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.calendar import CalendarConnection
+from app.models.calendar import CalendarConnection, CalendarEventLink
+from app.models.session import Session
 from app.schemas.calendar import (
     BusyInterval,
     BusyIntervalSource,
@@ -222,7 +224,24 @@ async def ingest_calendar_sources(
             coverage_state="manual_only",
         )
 
-    # 2. Duyệt qua từng nguồn Calendar được chọn
+    # 2. Lấy thông tin các session đang active của user đã đồng bộ lên Google Calendar
+    stmt = (
+        select(CalendarEventLink, Session)
+        .join(Session, CalendarEventLink.session_id == Session.id)
+        .where(
+            CalendarEventLink.user_id == uid,
+            CalendarEventLink.is_current.is_(True),
+        )
+    )
+    active_links = (await db.execute(stmt)).all()
+    event_to_session: dict[tuple[str, str], Session] = {}
+    session_id_to_session: dict[str, Session] = {}
+    for link, sess in active_links:
+        if link.google_calendar_id and link.google_event_id:
+            event_to_session[(link.google_calendar_id, link.google_event_id)] = sess
+        session_id_to_session[str(sess.id)] = sess
+
+    # 3. Duyệt qua từng nguồn Calendar được chọn
     for src in selected_sources:
         src_key = (src.connection_id, src.google_calendar_id)
         if src_key in excluded_map:
@@ -249,24 +268,66 @@ async def ingest_calendar_sources(
                 normalized = normalize_google_event(
                     raw_ev, src.connection_id, src.google_calendar_id
                 )
-                if normalized:
-                    event_snapshots.append(normalized)
-                    clipped = clip_busy_interval(
-                        normalized.start_at, normalized.end_at, q_start_utc, q_end_utc
+                if not normalized:
+                    continue
+
+                # Kiểm tra xem sự kiện có gắn với proactive_session_id hay không
+                extended = raw_ev.get("extendedProperties")
+                private_props = extended.get("private") if isinstance(extended, dict) else {}
+                proactive_session_id = (
+                    private_props.get("proactive_session_id")
+                    if isinstance(private_props, dict)
+                    else None
+                )
+
+                matched_session = None
+                if proactive_session_id:
+                    if proactive_session_id in session_id_to_session:
+                        matched_session = session_id_to_session[proactive_session_id]
+                    else:
+                        try:
+                            sess_uuid = UUID(proactive_session_id)
+                            direct_sess = await db.get(Session, sess_uuid)
+                            if direct_sess and direct_sess.user_id == uid:
+                                session_id_to_session[proactive_session_id] = direct_sess
+                                matched_session = direct_sess
+                        except Exception:
+                            pass
+                elif (src.google_calendar_id, normalized.google_event_id) in event_to_session:
+                    matched_session = event_to_session[(src.google_calendar_id, normalized.google_event_id)]
+
+                if matched_session is not None:
+                    # So khớp thời gian (dung sai 60s)
+                    sess_start = matched_session.scheduled_start.astimezone(UTC)
+                    sess_end = matched_session.scheduled_end.astimezone(UTC)
+                    ev_start = normalized.start_at.astimezone(UTC)
+                    ev_end = normalized.end_at.astimezone(UTC)
+
+                    is_untouched = (
+                        abs((ev_start - sess_start).total_seconds()) < 60.0
+                        and abs((ev_end - sess_end).total_seconds()) < 60.0
                     )
-                    if clipped:
-                        busy_intervals.append(
-                            BusyInterval(
-                                start_at=clipped[0],
-                                end_at=clipped[1],
-                                source=BusyIntervalSource(
-                                    kind="calendar_event",
-                                    connection_id=src.connection_id,
-                                    google_calendar_id=src.google_calendar_id,
-                                    google_event_id=normalized.google_event_id,
-                                ),
-                            )
+                    if is_untouched:
+                        # Bản sao chưa bị kéo dời -> bỏ qua để không tính trùng khoảng bận
+                        continue
+
+                event_snapshots.append(normalized)
+                clipped = clip_busy_interval(
+                    normalized.start_at, normalized.end_at, q_start_utc, q_end_utc
+                )
+                if clipped:
+                    busy_intervals.append(
+                        BusyInterval(
+                            start_at=clipped[0],
+                            end_at=clipped[1],
+                            source=BusyIntervalSource(
+                                kind="calendar_event",
+                                connection_id=src.connection_id,
+                                google_calendar_id=src.google_calendar_id,
+                                google_event_id=normalized.google_event_id,
+                            ),
                         )
+                    )
 
         except CalendarAuthError as exc:
             logger.warning("Auth error reading calendar %s: %s", src.google_calendar_id, exc)

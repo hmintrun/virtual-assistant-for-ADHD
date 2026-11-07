@@ -119,11 +119,25 @@ class CalendarContext(StrictSchema):
     selected_calendar_sources: list[CalendarSource] = Field(default_factory=list)
 
 
-
 class OAuthAuthUrlResponse(StrictSchema):
     """URL dẫn tới màn hình đồng ý OAuth 2.0 của Google."""
 
     auth_url: str
+
+
+class CalendarAuthorizationRequest(StrictSchema):
+    """Yêu cầu khởi tạo luồng kết nối Google Calendar từ thiết bị."""
+
+    device_id: str = "default_device"
+    return_target: str | None = None
+
+
+class CalendarAuthorizationResponse(StrictSchema):
+    """Kết quả tạo authorization intent."""
+
+    authorization_id: str
+    auth_url: str
+    expires_at: datetime
 
 
 class CalendarConnectionRead(StrictSchema):
@@ -165,3 +179,63 @@ class CalendarSelectionUpdateRequest(StrictSchema):
 
     read_calendar_ids: list[str] = Field(default_factory=list)
     write_calendar_id: str | None = None
+
+
+class CalendarConfigurationPreviewRequest(StrictSchema):
+    """Yêu cầu xem trước tác động cấu hình lịch đọc/ghi."""
+
+    expected_connection_revision: int | None = None
+    read_calendar_ids: list[str] = Field(default_factory=list)
+    write_calendar_id: str | None = None
+    existing_event_action: str | None = None  # e.g., 'provision_new', 'keep', 'move'
+
+
+class CalendarConfigurationPreviewResponse(StrictSchema):
+    """Bản xem trước cấu hình lịch trước khi áp dụng chính thức."""
+
+    preview_id: str
+    connection_id: str
+    read_calendar_ids: list[str] = Field(default_factory=list)
+    write_calendar_id: str | None = None
+    existing_event_action: str | None = None
+    status: str = "pending"
+
+
+class CalendarConfigurationConfirmRequest(StrictSchema):
+    """Yêu cầu xác nhận áp dụng cấu hình lịch từ bản xem trước."""
+
+    expected_preview_revision: int | None = 1
+
+
+class CalendarDisconnectRequest(StrictSchema):
+    """Yêu cầu ngắt kết nối Calendar."""
+
+    expected_connection_revision: int | None = None
+
+
+class CalendarRefreshRequest(StrictSchema):
+    """Yêu cầu làm mới dữ liệu nguồn Calendar."""
+
+    from_at: datetime | None = None
+    to_at: datetime | None = None
+    expected_connection_revision: int | None = None
+
+
+class CalendarSyncJobRead(StrictSchema):
+    """Thông tin trạng thái công việc đồng bộ lịch."""
+
+    job_id: str
+    connection_id: str
+    target_kind: str
+    target_ref: str
+    operation: str
+    job_state: str
+    attempt_count: int = 0
+    next_retry_at: datetime | None = None
+    last_error_code: str | None = None
+
+
+class CalendarSyncJobRetryRequest(StrictSchema):
+    """Yêu cầu thử lại một sync job bị lỗi."""
+
+    expected_job_revision: int | None = None
