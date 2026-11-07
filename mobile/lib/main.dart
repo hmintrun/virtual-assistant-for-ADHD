@@ -11,9 +11,11 @@ import 'providers/theme_provider.dart';
 import 'screens/onboarding_screens.dart';
 import 'screens/support_screens.dart';
 import 'screens/home_screen.dart';
+import 'services/alarm_service.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  await AlarmService.instance.init();
   final taskProvider = TaskProvider();
   final focusProvider = FocusProvider();
   final themeProvider = ThemeProvider();
