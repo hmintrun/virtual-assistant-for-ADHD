@@ -66,7 +66,10 @@ def upgrade():
     # PostgreSQL dùng cùng một backfill SQL ở online và --sql. Reflection/vòng
     # đọc Python chỉ dành cho SQLite online, nơi batch migration cần DB thật.
     if op.get_context().dialect.name == "postgresql":
-        op.execute(sa.text(POSTGRES_BACKFILL))
+        # asyncpg chỉ prepare được một câu SQL mỗi lần.
+        op.execute(sa.text(POSTGRES_BACKFILL_TASKS))
+        op.execute(sa.text(POSTGRES_BACKFILL_STEPS))
+        op.execute(sa.text(POSTGRES_BACKFILL_CANDIDATES))
         return
     connection = op.get_bind()
     meta = sa.MetaData()
@@ -164,7 +167,7 @@ def downgrade():
     raise RuntimeError("C01 downgrade requires an explicit snapshot/data recovery plan")
 
 
-POSTGRES_BACKFILL = r"""
+POSTGRES_BACKFILL_TASKS = """
 UPDATE tasks AS t
 SET availability = t.source_summary -> 'availability',
     decomposition_state = CASE WHEN EXISTS (
@@ -177,7 +180,9 @@ SET availability = t.source_summary -> 'availability',
         FROM planning_parts AS p
         WHERE p.task_id = t.id AND p.decomposition_state <> 'complete'
     );
+"""
 
+POSTGRES_BACKFILL_STEPS = """
 WITH ordered AS (
     SELECT s.id, row_number() OVER (
         PARTITION BY s.task_id
@@ -188,7 +193,9 @@ WITH ordered AS (
 )
 UPDATE steps AS s SET order_index = ordered.new_index
 FROM ordered WHERE s.id = ordered.id;
+"""
 
+POSTGRES_BACKFILL_CANDIDATES = """
 DO $c01$
 DECLARE
     candidate RECORD;
