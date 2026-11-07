@@ -46,6 +46,15 @@ SchemaT = TypeVar("SchemaT", bound=BaseModel)
 _CLOUD_PLATFORM_SCOPES = ["https://www.googleapis.com/auth/cloud-platform"]
 
 
+UF1_FALLBACK_QUESTIONS = {
+    "description": "Bạn muốn thực hiện công việc cụ thể nào?",
+    "scope": "Phạm vi hoặc kết quả đầu ra mong muốn của việc này là gì (ví dụ: số trang, số phần cần hoàn thiện)?",
+    "availability": "Bạn có những khung giờ rảnh cụ thể nào (từ mấy giờ đến mấy giờ) để mình sắp xếp các phiên tập trung?",
+    "time_constraint": "Hạn chót (ngày và giờ) bạn cần hoàn thành xong công việc này là khi nào?",
+}
+UF1_FALLBACK_NOTICE = "Hệ thống AI đang tạm gián đoạn nên chưa phân tích được ghi chú bổ sung vừa rồi, bạn kiểm tra và xác nhận trực tiếp trên biểu mẫu giúp mình nhé?"
+
+
 class ExecutionTimingProfile(NamedTuple):
     """Cấu hình các mốc thời gian (giây) cho bộ điều phối Quality-First Hedged Execution."""
 
@@ -687,23 +696,15 @@ class AIService:
 
         questions: list[str] = []
         if not content_val:
-            questions.append("Bạn muốn thực hiện công việc cụ thể nào?")
+            questions.append(UF1_FALLBACK_QUESTIONS["description"])
         if not prev_scope:
-            questions.append(
-                "Phạm vi hoặc kết quả đầu ra mong muốn của việc này là gì (ví dụ: số trang, số phần cần hoàn thiện)?"
-            )
+            questions.append(UF1_FALLBACK_QUESTIONS["scope"])
         if not prev_slots and not prev_windows:
-            questions.append(
-                "Bạn có những khung giờ rảnh cụ thể nào (từ mấy giờ đến mấy giờ) để mình sắp xếp các phiên tập trung?"
-            )
+            questions.append(UF1_FALLBACK_QUESTIONS["availability"])
         if prev_deadline is None:
-            questions.append(
-                "Hạn chót (ngày và giờ) bạn cần hoàn thành xong công việc này là khi nào?"
-            )
+            questions.append(UF1_FALLBACK_QUESTIONS["time_constraint"])
         if not questions:
-            questions.append(
-                "Hệ thống AI đang tạm gián đoạn nên chưa phân tích được ghi chú bổ sung vừa rồi, bạn kiểm tra và xác nhận trực tiếp trên biểu mẫu giúp mình nhé?"
-            )
+            questions.append(UF1_FALLBACK_NOTICE)
 
         summary_text = (
             f"Đã ghi nhận công việc: '{content_val}'. Mình cần bạn bổ sung/xác nhận thêm thông tin bên dưới để lên lịch chuẩn xác nhé."
@@ -772,19 +773,22 @@ class AIService:
                 schema_cls=LLMTaskDecompositionPayload,
                 profile=self._decomposition_profile(),
             )
+            if not llm_payload.requires_clarification and any(
+                not step.expected_output or not step.expected_output.strip()
+                for step in llm_payload.steps
+            ):
+                raise ValueError("AI decomposition is missing expected outputs")
             return TaskDecompositionResult(
                 **llm_payload.model_dump(),
                 generation_tier=winner_tier,
             )
         except Exception as exc:
             logger.warning(
-                "UF2 chưa có phương án hợp lệ; giữ Draft để thử lại: %s",
+                "UF2 dùng phương án Python dự phòng do lỗi: %s",
                 type(exc).__name__,
             )
             return self._fallback_decompose_task(
-                cleaned_title,
-                user_focus_duration=user_focus_duration,
-                scope=scope,
+                cleaned_title, user_focus_duration=user_focus_duration, scope=scope
             )
 
     def _fallback_decompose_task(
@@ -798,9 +802,9 @@ class AIService:
         Khi mất kết nối tới cả 2 tầng AI, tự động chia thành 3 bước chuẩn theo thời lượng
         tập trung mặc định của người dùng kèm Micro-task khởi động 2 phút cụ thể.
         """
-        cleaned_title = task_title.strip() or "Công việc hiện tại"
+        cleaned_title = (task_title.strip() or "Công việc hiện tại")[:100]
         safe_duration = max(5, min(180, user_focus_duration))
-        scope_hint = f" ({scope.strip()})" if scope and scope.strip() else ""
+        scope_hint = f" ({scope.strip()[:80]})" if scope and scope.strip() else ""
 
         steps = [
             StepPromptItem(

@@ -1,4 +1,4 @@
-"""Durable command replay shared by UF1 and Voice; no provider calls here."""
+"""Durable command receipts and replay; no provider calls here."""
 
 import hashlib
 import inspect
@@ -70,7 +70,14 @@ async def lock_owner(db, user_id):
 def record(db, user_id, key, digest, operation, result):
     refs = {
         name: getattr(result, name)
-        for name in ("draft_id", "thought_id", "candidate_id", "change_request_id")
+        for name in (
+            "draft_id",
+            "thought_id",
+            "candidate_id",
+            "change_request_id",
+            "run_id",
+            "checkin_id",
+        )
         if isinstance(getattr(result, name, None), str)
     }
     db.add(

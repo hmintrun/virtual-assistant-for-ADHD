@@ -64,7 +64,7 @@ class PlanCandidateModel {
       Map<String, dynamic>.from(raw['feasibility'] as Map<String, dynamic>);
   String get feasibilityStatus => feasibility['status'] as String? ?? 'unknown';
   bool get isFeasible => feasibilityStatus == 'feasible' && !stale;
-  List<JsonMap> get planningParts => _maps(raw['planning_parts']);
+  String? get unexpandedScope => raw['unexpanded_scope'] as String?;
   List<JsonMap> get steps => _maps(raw['steps']);
   List<JsonMap> get sessions => _maps(raw['sessions']);
   JsonMap get sourceRevisions => Map<String, dynamic>.from(

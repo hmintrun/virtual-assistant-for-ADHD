@@ -176,6 +176,18 @@ class GenerateCandidateRequest(ApiModel):
     manual_steps: list[ManualStepInput] | None = Field(default=None, min_length=1)
     unexpanded_scope: str | None = None
 
+    @model_validator(mode="before")
+    @classmethod
+    def accept_empty_legacy_selection(cls, value):
+        # Client trước C01 luôn gửi khóa này với null. Không ánh xạ Part sang
+        # Step theo vị trí vì có thể chọn nhầm phạm vi công việc.
+        if isinstance(value, dict) and "selected_part_keys" in value:
+            if value["selected_part_keys"] is not None:
+                raise ValueError("Client cũ cần đổi lựa chọn Part thành selected_step_keys của C01")
+            value = dict(value)
+            value.pop("selected_part_keys")
+        return value
+
     @model_validator(mode="after")
     def valid_manual_source(self) -> Self:
         if self.manual_steps is None:

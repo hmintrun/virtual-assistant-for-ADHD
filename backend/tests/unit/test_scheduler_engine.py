@@ -18,7 +18,7 @@ from app.schemas.availability import Availability, WeeklyRule
 from app.schemas.calendar import BusyInterval, BusyIntervalSource, CalendarContext
 from app.schemas.common import SessionSegment, TimeConstraint, TimeInterval
 from app.schemas.draft import AvailabilityRef, TaskSummary
-from app.schemas.planning import CandidatePart, CandidateStep
+from app.schemas.planning import CandidateStep
 from app.schemas.settings import UserPreference
 from app.schemas.task import Session
 from app.services.scheduler_engine import (
@@ -135,7 +135,9 @@ def sample_valid_summary():
 
 def test_validation_success(sample_valid_summary, sample_valid_availability):
     can_plan, issues = validate_planning_prerequisites(
-        sample_valid_summary, sample_valid_availability
+        sample_valid_summary,
+        sample_valid_availability,
+        reference_now=datetime(2026, 10, 29, tzinfo=UTC),
     )
     assert can_plan is True
     assert len(issues) == 0
@@ -145,7 +147,9 @@ def test_validation_missing_fields(sample_valid_summary, sample_valid_availabili
     invalid_summary = sample_valid_summary.model_copy(
         update={"title": "", "scope": None, "time_constraint": None}
     )
-    can_plan, issues = validate_planning_prerequisites(invalid_summary, sample_valid_availability)
+    can_plan, issues = validate_planning_prerequisites(
+        invalid_summary, sample_valid_availability, reference_now=datetime(2026, 10, 29, tzinfo=UTC)
+    )
     assert can_plan is False
     codes = {iss.code for iss in issues}
     assert "MISSING_TITLE" in codes
@@ -155,7 +159,9 @@ def test_validation_missing_fields(sample_valid_summary, sample_valid_availabili
 
 def test_validation_unconfirmed_availability(sample_valid_summary, sample_valid_availability):
     unconfirmed_avail = sample_valid_availability.model_copy(update={"confirmed_at": None})
-    can_plan, issues = validate_planning_prerequisites(sample_valid_summary, unconfirmed_avail)
+    can_plan, issues = validate_planning_prerequisites(
+        sample_valid_summary, unconfirmed_avail, reference_now=datetime(2026, 10, 29, tzinfo=UTC)
+    )
     assert can_plan is False
     assert any(iss.code == "AVAILABILITY_NOT_CONFIRMED" for iss in issues)
 
@@ -285,7 +291,6 @@ def test_schedule_sessions_feasible(sample_pref):
     steps = [
         CandidateStep(
             client_step_key="step-1",
-            client_part_key="part-1",
             title="Nghiên cứu tài liệu",
             expected_output="Ghi chú",
             order_index=0,
@@ -297,7 +302,6 @@ def test_schedule_sessions_feasible(sample_pref):
         ),
         CandidateStep(
             client_step_key="step-2",
-            client_part_key="part-1",
             title="Viết phác thảo",
             expected_output="Bản thảo",
             order_index=1,
@@ -307,16 +311,6 @@ def test_schedule_sessions_feasible(sample_pref):
             estimate_source="user_confirmed",
             status="pending",
         ),
-    ]
-
-    parts = [
-        CandidatePart(
-            client_part_key="part-1",
-            scope_description="Phần 1",
-            order_index=0,
-            decomposition_state="complete",
-            scheduling_state="complete",
-        )
     ]
 
     # Khoảng rảnh cả ngày 08:00 - 18:00 (10 giờ = 36000s)
@@ -335,7 +329,6 @@ def test_schedule_sessions_feasible(sample_pref):
         fixed_sessions=[],
         time_constraint=tc,
         pref=sample_pref,
-        planning_parts=parts,
     )
 
     assert report.status == "feasible"
@@ -358,7 +351,6 @@ def test_schedule_sessions_deficit(sample_pref):
     steps = [
         CandidateStep(
             client_step_key="step-1",
-            client_part_key="part-1",
             title="Viết báo cáo dài",
             expected_output="Báo cáo",
             order_index=0,
@@ -370,15 +362,6 @@ def test_schedule_sessions_deficit(sample_pref):
         )
     ]
 
-    parts = [
-        CandidatePart(
-            client_part_key="part-1",
-            scope_description="P1",
-            order_index=0,
-            decomposition_state="complete",
-            scheduling_state="not_scheduled",
-        )
-    ]
     effective_intervals = [TimeInterval(start_at=t_start, end_at=t_end)]
     tc = TimeConstraint(kind="deadline", start_at=t_start, deadline_at=t_end, input_timezone="UTC")
 
@@ -388,12 +371,11 @@ def test_schedule_sessions_deficit(sample_pref):
         fixed_sessions=[],
         time_constraint=tc,
         pref=sample_pref,
-        planning_parts=parts,
     )
 
     assert report.status == "infeasible"
     assert report.fully_scheduled is False
-    assert report.deficit_seconds > 0
+    assert report.deficit_seconds is not None and report.deficit_seconds > 0
     assert any(b.code == "TOTAL_DEFICIT" for b in report.blocking_reasons)
 
 
@@ -458,26 +440,8 @@ def test_order_steps_by_priority_multitask():
     key_b = compute_task_priority_key(tc_task_b, importance=5, task_id="task_b")
     task_priority_map = {"task_a": key_a, "task_b": key_b}
 
-    parts = [
-        CandidatePart(
-            client_part_key="p_a",
-            scope_description="Part A",
-            order_index=0,
-            decomposition_state="complete",
-            scheduling_state="complete",
-        ),
-        CandidatePart(
-            client_part_key="p_b",
-            scope_description="Part B",
-            order_index=0,
-            decomposition_state="complete",
-            scheduling_state="complete",
-        ),
-    ]
-
     s_a1 = CandidateStep(
         client_step_key="sa1",
-        client_part_key="p_a",
         title="A1",
         expected_output="out",
         order_index=0,
@@ -489,7 +453,6 @@ def test_order_steps_by_priority_multitask():
     )
     s_a2 = CandidateStep(
         client_step_key="sa2",
-        client_part_key="p_a",
         title="A2",
         expected_output="out",
         order_index=1,
@@ -501,7 +464,6 @@ def test_order_steps_by_priority_multitask():
     )
     s_b1 = CandidateStep(
         client_step_key="sb1",
-        client_part_key="p_b",
         title="B1",
         expected_output="out",
         order_index=0,
@@ -513,7 +475,6 @@ def test_order_steps_by_priority_multitask():
     )
     s_b2 = CandidateStep(
         client_step_key="sb2",
-        client_part_key="p_b",
         title="B2",
         expected_output="out",
         order_index=1,
@@ -529,7 +490,6 @@ def test_order_steps_by_priority_multitask():
 
     ordered = order_steps_by_priority(
         steps=scrambled_steps,
-        planning_parts=parts,
         task_priority_map=task_priority_map,
         step_to_task_map=step_to_task,
     )
@@ -614,6 +574,7 @@ def test_evaluate_buffer_adaptation_median():
             "estimated_base_seconds": 3000,
             "actual_work_seconds": 3900,
             "scope_modified": False,
+            "actual_source": "timer_proxy",
         },
         {
             "step_id": "st2",
@@ -621,6 +582,7 @@ def test_evaluate_buffer_adaptation_median():
             "estimated_base_seconds": 2000,
             "actual_work_seconds": 2800,
             "scope_modified": False,
+            "actual_source": "timer_proxy",
         },
         {
             "step_id": "st3",
@@ -628,6 +590,7 @@ def test_evaluate_buffer_adaptation_median():
             "estimated_base_seconds": 3000,
             "actual_work_seconds": 3900,
             "scope_modified": False,
+            "actual_source": "timer_proxy",
         },
         {
             "step_id": "st4",
@@ -635,6 +598,7 @@ def test_evaluate_buffer_adaptation_median():
             "estimated_base_seconds": 4000,
             "actual_work_seconds": 5400,
             "scope_modified": False,
+            "actual_source": "timer_proxy",
         },
         {
             "step_id": "st5",
@@ -642,6 +606,7 @@ def test_evaluate_buffer_adaptation_median():
             "estimated_base_seconds": 3000,
             "actual_work_seconds": 3900,
             "scope_modified": False,
+            "actual_source": "timer_proxy",
         },
         # Bước chưa hoàn thành hoặc đổi scope -> phải bị lọc bỏ
         {
@@ -672,3 +637,78 @@ def test_evaluate_buffer_adaptation_median():
     assert suggestion["suggested_value"] == 1.30
     assert suggestion["sample_count"] == 5
     assert suggestion["model_revision"] is None  # Thuần toán học thống kê
+
+
+# ==============================================================================
+# 7. Test bổ sung đối chiếu PDF (AlgorithmDes.pdf UF2-4, UF2-18)
+# ==============================================================================
+
+
+def test_TC_UF2_04_empty_intervals_returns_not_feasible(sample_pref):
+    """PDF UF2-4: Thiếu giờ rảnh → chỉ là lịch nháp, KHÔNG kết luận feasible."""
+    t_start = datetime(2026, 10, 30, 8, 0, tzinfo=UTC)
+    t_end = datetime(2026, 10, 30, 18, 0, tzinfo=UTC)
+
+    steps = [
+        CandidateStep(
+            client_step_key="s1",
+            title="Bước",
+            expected_output="Kết quả",
+            order_index=0,
+            estimated_base_seconds=1500,
+            remaining_base_seconds=1500,
+            buffer_multiplier=1.2,
+            estimate_source="user_confirmed",
+            status="pending",
+        )
+    ]
+    tc = TimeConstraint(kind="deadline", start_at=t_start, deadline_at=t_end, input_timezone="UTC")
+
+    sessions, report = schedule_candidate_sessions(
+        steps=steps,
+        effective_intervals=[],
+        fixed_sessions=[],
+        time_constraint=tc,
+        pref=sample_pref,
+    )
+
+    assert sessions == [], "Không có giờ rảnh → không được sinh Session"
+    assert report.fully_scheduled is False
+    assert report.status != "feasible", (
+        f"PDF UF2-4: thiếu giờ rảnh không được kết luận feasible, status={report.status!r}"
+    )
+
+
+def test_TC_UF2_18_scheduler_does_not_modify_time_constraint(sample_pref):
+    """PDF UF2-18: Không tự dời deadline khi tính lịch."""
+    t_start = datetime(2026, 10, 30, 8, 0, tzinfo=UTC)
+    t_end = datetime(2026, 10, 30, 18, 0, tzinfo=UTC)
+
+    tc = TimeConstraint(kind="deadline", start_at=t_start, deadline_at=t_end, input_timezone="UTC")
+    original_start = tc.start_at
+    original_deadline = tc.deadline_at
+
+    steps = [
+        CandidateStep(
+            client_step_key="s1",
+            title="Bước",
+            expected_output="Kết quả",
+            order_index=0,
+            estimated_base_seconds=1500,
+            remaining_base_seconds=1500,
+            buffer_multiplier=1.2,
+            estimate_source="user_confirmed",
+            status="pending",
+        )
+    ]
+
+    schedule_candidate_sessions(
+        steps=steps,
+        effective_intervals=[TimeInterval(start_at=t_start, end_at=t_end)],
+        fixed_sessions=[],
+        time_constraint=tc,
+        pref=sample_pref,
+    )
+
+    assert tc.start_at == original_start, "Scheduler không được đổi start_at"
+    assert tc.deadline_at == original_deadline, "PDF UF2-18: Scheduler không được tự dời deadline"

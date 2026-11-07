@@ -1,4 +1,6 @@
 # Schema/DTO cho cài đặt trợ lý (UserPreference - Dòng 39) và tái xuất Availability từ availability.py (Dòng 40)
+from typing import Annotated
+
 from pydantic import Field, model_validator
 
 from app.schemas.availability import (
@@ -11,15 +13,25 @@ from app.schemas.availability import (
 )
 from app.schemas.common import ApiModel
 
+ReminderOffsets = Annotated[list[Annotated[int, Field(ge=0)]], Field(min_length=1, max_length=3)]
+
 
 class PreferenceChanges(ApiModel):
     """Các thay đổi cài đặt đang chờ duyệt (nếu ảnh hưởng lịch tương lai)."""
 
     work_interval_seconds: int | None = Field(default=None, ge=0)
     rest_interval_seconds: int | None = Field(default=None, ge=0)
-    reminder_offsets: list[int] | None = None
+    reminder_offsets: ReminderOffsets | None = None
     buffer_multiplier: float | None = Field(default=None, gt=0)
     reminder_style: str | None = None
+
+    @model_validator(mode="after")
+    def distinct_offsets(self):
+        if self.reminder_offsets is not None and len(set(self.reminder_offsets)) != len(
+            self.reminder_offsets
+        ):
+            raise ValueError("Các mốc nhắc không được trùng nhau")
+        return self
 
 
 class UserPreference(ApiModel):
@@ -31,7 +43,7 @@ class UserPreference(ApiModel):
     work_interval_seconds: int = Field(ge=0)
     rest_interval_seconds: int = Field(ge=0)
     micro_task_seconds: int | None = Field(default=None, ge=0)
-    reminder_offsets: list[int] = Field(min_length=1, max_length=1)
+    reminder_offsets: ReminderOffsets
     buffer_multiplier: float = Field(gt=0)
     reminder_style: str = Field(min_length=1)
     requested_changes: PreferenceChanges | None = None

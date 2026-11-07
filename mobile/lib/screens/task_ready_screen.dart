@@ -43,7 +43,7 @@ class _TaskReadyScreenState extends State<TaskReadyScreen> {
     final task = context.watch<TaskProvider>();
     final displayTitle = task.title;
     final displayDeadline = task.formatDeadline(task.deadline);
-    final availabilityStr = task.serverAvailabilitySummary;
+    final availabilityStr = task.availabilitySummary;
 
     return Scaffold(
       appBar: const MelbelAppBar(title: 'Ready State', showBack: true),

@@ -7,6 +7,8 @@ import '../models/planning_models.dart';
 import '../models/task_model.dart';
 
 class PlanningApi {
+  static const defaultTimezone = 'Asia/Ho_Chi_Minh';
+
   PlanningApi(
       {ApiClient? client,
       FlutterSecureStorage? storage,
@@ -62,11 +64,6 @@ class PlanningApi {
     }
   }
 
-  Future<AvailabilityModel> getAvailability() async =>
-      AvailabilityModel.fromJson(
-        await _client.getData('/availability'),
-      );
-
   Future<PlanningDraftModel> getDraft(String draftId) async =>
       PlanningDraftModel.fromJson(await _client.getData(
         '/drafts/${Uri.encodeComponent(draftId)}',
@@ -87,7 +84,7 @@ class PlanningApi {
     required String title,
     required String scope,
     required DateTime? deadline,
-    required AvailabilityModel availability,
+    JsonMap? availability,
     String inputSource = 'text',
   }) async {
     final intent = <String, dynamic>{
@@ -97,8 +94,7 @@ class PlanningApi {
       'title': title,
       'scope': scope,
       'deadline': deadline?.toUtc().toIso8601String(),
-      'availability_ref': availability.reference,
-      'timezone': availability.timezone,
+      if (availability != null) 'availability': availability,
     };
     final json = await _command(
       operation: 'create_$clientDraftId',
@@ -114,7 +110,7 @@ class PlanningApi {
               title != rawInput &&
               title.length <= 100)
             'title': title,
-          'availability_ref': availability.reference,
+          if (availability != null) 'availability': availability,
           'importance': 3,
           if (scope.trim().isNotEmpty) 'scope': scope.trim(),
           if (deadline != null)
@@ -123,7 +119,7 @@ class PlanningApi {
               'start_at': _vnIso(_now()),
               'deadline_at': _vnIso(deadline),
               'finish_by_at': null,
-              'input_timezone': availability.timezone,
+              'input_timezone': defaultTimezone,
             },
         },
       },
@@ -159,7 +155,7 @@ class PlanningApi {
     required String title,
     required String scope,
     required DateTime? deadline,
-    required String timezone,
+    JsonMap? availability,
   }) async {
     final oldTime = draft.summary['time_constraint'] as Map<String, dynamic>?;
     final oldEnd = DateTime.tryParse(
@@ -172,7 +168,7 @@ class PlanningApi {
       'title': title,
       'scope': scope,
       'deadline': deadline?.toUtc().toIso8601String(),
-      'timezone': timezone,
+      if (availability != null) 'availability': availability,
       'previous_time_constraint': oldTime,
     };
     final json = await _command(
@@ -183,7 +179,9 @@ class PlanningApi {
         'expected_planning_input_revision': draft.planningInputRevision,
         'changes': {
           'summary': {
-            if (title.length <= 100) 'title': title, 'scope': scope,
+            if (title.length <= 100) 'title': title,
+            'scope': scope,
+            if (availability != null) 'availability': availability,
             // Chỉ sửa thời gian khi user đổi hạn; không đổi start/window khi sửa chữ.
             if (deadlineChanged)
               'time_constraint': {
@@ -191,7 +189,8 @@ class PlanningApi {
                 'start_at': oldTime?['start_at'] ?? _vnIso(_now()),
                 'deadline_at': _vnIso(deadline),
                 'finish_by_at': null,
-                'input_timezone': timezone,
+                'input_timezone':
+                    oldTime?['input_timezone'] ?? defaultTimezone,
               },
           }
         },
