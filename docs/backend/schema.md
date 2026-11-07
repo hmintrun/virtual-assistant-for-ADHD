@@ -74,7 +74,7 @@ API liên quan: [dòng 39](https://docs.google.com/spreadsheets/d/1RTI0Hv0DydDX5
 | `work_interval_seconds` | integer | Độ dài tối đa một quãng làm chính theo cấu hình có hiệu lực; không phải toàn Session. |
 | `rest_interval_seconds` | integer | Độ dài nghỉ bên trong khi có; khác khoảng cách 900 giây giữa hai Session. Có thể không tạo quãng nghỉ bên trong. |
 | `micro_task_seconds` | integer \| null | Ước lượng độ nhỏ của gợi ý chuẩn bị nếu có; có thể null khi chưa chốt qua nghiên cứu. Không có timer riêng và không cộng vào thời lượng Run/Session chính. |
-| `reminder_offsets` | array<integer> | Đích tuần 2 đã chốt: 1–3 integer giây không âm, không trùng, chuẩn hóa giảm dần; default mới `[900, 600, 300]`, giữ cấu hình user đã lưu. Code nền vẫn một offset `[900]`, chưa gửi mảng ba phần tử vào API cho tới khi DTO/validation được mở rộng. Micro-task hiển thị cùng lời nhắc, không tự start Run. |
+| `reminder_offsets` | array<integer> | Đích tuần 2 đã chốt: 1–3 integer giây không âm, không trùng, chuẩn hóa giảm dần; default mới `[900, 600, 300]`, giữ cấu hình user đã lưu. Backend hiện nhận mảng 1–3 mốc; Capabilities còn trả trường mặc định số đơn `default_reminder_offset_seconds=900`. Micro-task hiển thị cùng lời nhắc, không tự start Run. |
 | `requested_revision` | integer \| null | Phiên bản cài đặt mới được yêu cầu, có thể đang chờ đổi lịch. |
 | `effective_revision` | integer | Phiên bản đã có hiệu lực; dùng tạo lịch hoặc snapshot thực thi. |
 | `buffer_multiplier` | number | Hệ số dự phòng đang có hiệu lực; chỉ áp một lần lên làm chính. Giá trị cụ thể cần nghiên cứu/pilot. |
@@ -671,7 +671,7 @@ TaskAvailabilityLimit — Kiểu tương thích nguồn Availability cũ: {task_
 
 SettingsChange — changes:{preferences?:PreferenceChanges,availability?:DraftAvailability}. Sửa giờ phải chọn đúng một target_draft_id hoặc target_task_id. Draft cần expected_summary_revision + expected_planning_input_revision; Task cần expected_task_revision. availability là bản thay thế đầy đủ, không dùng expected_availability_revision. Task đã lưu cần UF6 nên hiện trả 503 POLICY_NOT_CONFIGURED và giữ lịch/giờ cũ. Lần đầu preferences dùng expected_preferences_revision=0, không phải nhập giờ rảnh cố định.
 
-reminder_offsets: đích tuần 2 là 1–3 integer giây không âm, không trùng, giảm dần; code hiện còn khóa một mốc.
+reminder_offsets: Backend nhận 1–3 integer giây không âm, không trùng, chuẩn hóa giảm dần.
 
 PreferenceChanges — Các trường cấu hình được phép sửa trong SettingsChange.preferences. Trên O01 requested_changes là PreferenceChanges|null; trên kết quả change-request requested_changes là SettingsChange có namespace preferences/availability.
 
@@ -1088,7 +1088,7 @@ Quyết định đã được người dùng chốt, lấy [Project mục 8.2](.
 
 | Nội dung | Yêu cầu đã chốt | Trạng thái triển khai tại nền tuần 2 |
 | --- | --- | --- |
-| Nhắc trước phiên | Default mới `[900, 600, 300]`, 1–3 mốc integer không âm, không trùng, giảm dần; giữ lựa chọn user cũ | Code/Settings còn khóa một mốc, default `[900]`; dedupe đã có offset. Capabilities số đơn chưa biểu diễn default nhiều mốc; Cương/Hưng cập nhật đồng bộ DTO, service và Mobile theo checklist |
+| Nhắc trước phiên | Default mới `[900, 600, 300]`, 1–3 mốc integer không âm, không trùng, giảm dần; giữ lựa chọn user cũ | DTO, Settings, default user mới và dedupe đã hỗ trợ nhiều mốc. Capabilities còn trường số đơn; cần đồng bộ Mobile và kiểm tạo/hủy/phát nhắc trên Android |
 | Chuông khi thu âm | Âm thanh báo hết giờ ≤1 giây, bảo vệ file; không hoãn 15 giây hoặc dùng rung/UI thay điều kiện âm thanh | Chưa có bằng chứng Android. Không dời ended_at/actual/timeout DND theo lúc finalize; kiểm sớm 04/11 và nghiệm thu thiết bị |
 | Undo Thought | Outbox local lưu bền chờ 5 giây; Undo cất mới hủy gửi/dọn file, xóa bản cũ giữ khả năng phục hồi | Local repository/outbox/UI và API UF4 còn phải triển khai; không coi DELETE là đã có endpoint Undo |
 | Kết thúc tối thiểu | CheckIn cuối, phản hồi và lazy timeout đọc/start sau hạn; thiết bị tự khôi phục DND đúng owner | Router/service UF3–UF4/CheckIn mới là khung. MT đã chốt Nghỉ ngay → answered/unknown và Báo bận → answered/busy, Step/Task null; xem [contract và JSON mẫu](MT_WEEK2.md). Cần triển khai/test HTTP và thiết bị |
