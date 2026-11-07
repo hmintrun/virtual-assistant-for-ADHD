@@ -127,33 +127,29 @@ class TestUnimplementedAndHiddenGaps(unittest.TestCase):
             raise MissingEndpoint("DELETE Draft trả 405: method chưa có")
         self.assertIn(response.status_code, (200, 204), response.text)
 
-    @pytest.mark.xfail(
-        strict=True,
-        raises=MissingEndpoint,
-        reason="POST /sessions/{id}/start chưa triển khai (HTTP 404). Ngoài phạm vi UF1–UF2.",
-    )
-    def test_gap_missing_session_execution_apis(self):
+    def test_session_execution_router_rejects_incomplete_request(self):
+        """Router đã có: thiếu body/key phải trả validation, không coi là Run thành công."""
         with TestClient(app) as client:
             response = client.post("/api/v1/sessions/sess_123/start")
-        if response.status_code == 404 and not endpoint_registered(
-            "POST", "/api/v1/sessions/sess_123/start"
-        ):
-            raise MissingEndpoint("Route start session chưa có")
-        self.assertIn(response.status_code, (200, 201), response.text)
+        self.assertTrue(endpoint_registered("POST", "/api/v1/sessions/sess_123/start"))
+        self.assertEqual(response.status_code, 422, response.text)
+        self.assertEqual(response.json()["error"]["code"], "VALIDATION_ERROR")
+        fields = {item["field_path"] for item in response.json()["error"]["field_errors"]}
+        self.assertIn("header.Idempotency-Key", fields)
 
-    @pytest.mark.xfail(
-        strict=True,
-        raises=MissingEndpoint,
-        reason="POST /thoughts chưa triển khai (HTTP 404). Ngoài phạm vi UF1–UF2.",
-    )
-    def test_gap_missing_thoughts_inbox_api(self):
+    def test_thought_capture_router_rejects_legacy_payload(self):
+        """Payload cũ không phải metadata Thought theo schema đã chốt."""
         with TestClient(app) as client:
             response = client.post(
                 "/api/v1/thoughts", json={"content": "Nhớ gọi điện", "source": "text"}
             )
-        if response.status_code == 404 and not endpoint_registered("POST", "/api/v1/thoughts"):
-            raise MissingEndpoint("Route Thought capture chưa có")
-        self.assertIn(response.status_code, (200, 201), response.text)
+        self.assertTrue(endpoint_registered("POST", "/api/v1/thoughts"))
+        self.assertEqual(response.status_code, 422, response.text)
+        self.assertEqual(response.json()["error"]["code"], "VALIDATION_ERROR")
+        fields = {item["field_path"] for item in response.json()["error"]["field_errors"]}
+        self.assertTrue(
+            {"client_thought_id", "input_type", "capture_state", "attempt_count"} <= fields
+        )
 
     @pytest.mark.skip(
         reason="Ca isinstance(dict) cũ không chứng minh mất idempotency. Được thay bằng regression receipt lưu DB/reopen/retry ở suite tích hợp mới."
