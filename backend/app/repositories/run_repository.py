@@ -22,7 +22,7 @@ async def get_live_run(db: AsyncSession, user_id: UUID) -> SessionRun | None:
         select(SessionRun)
         .where(
             SessionRun.user_id == user_id,
-            SessionRun.run_state.in_(("running", "paused", "awaiting_checkin")),
+            SessionRun.run_state.in_(("running", "paused")),
         )
         .execution_options(populate_existing=True)
     )

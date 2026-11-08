@@ -326,7 +326,8 @@ async def test_run_checkin_revision_conflict_and_event_scope(storage):
         fresh.session_outcome = "partial"
         await second.commit()
     async with storage.sessions() as db:
-        run = await run_repository.get_live_run(db, storage.owner)
+        assert await run_repository.get_live_run(db, storage.owner) is None
+        run = await run_repository.get_run(db, storage.owner, storage.run_id)
         assert run is not None
         assert run.id == storage.run_id and run.outcome == "unknown"
         assert run.ended_at == storage.ended_at and run.actual_work_seconds == 3600

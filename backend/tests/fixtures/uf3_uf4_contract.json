@@ -1,0 +1,680 @@
+{
+  "start": {
+    "method": "POST",
+    "path": "/api/v1/sessions/{session_id}/start",
+    "request": {
+      "path": {
+        "session_id": "session_1"
+      },
+      "body": {
+        "expected_schedule_revision": 8,
+        "device_id": "device_1",
+        "requested_start_at": "2026-10-30T09:00:00+07:00"
+      },
+      "headers": {
+        "Idempotency-Key": "lenh_start_1"
+      }
+    },
+    "response": {
+      "http_status": 201,
+      "body": {
+        "data": {
+          "run_id": "run_1",
+          "session_id": "session_1",
+          "device_id": "device_1",
+          "run_revision": 1,
+          "started_at": "2026-10-30T09:00:00+07:00",
+          "ended_at": null,
+          "run_state": "running",
+          "active_phase": "work",
+          "segment_index": 0,
+          "work_elapsed_seconds": 0,
+          "rest_elapsed_seconds": 0,
+          "actual_work_seconds": null,
+          "actual_source": null,
+          "outcome": "unknown",
+          "checkin_timeout_at": null,
+          "settings_snapshot": {
+            "effective_revision": 4,
+            "session": {
+              "session_id": "session_1",
+              "step_id": "step_1",
+              "scheduled_start": "2026-10-30T09:00:00+07:00",
+              "scheduled_end": "2026-10-30T10:10:00+07:00",
+              "micro_task_text": "Mở file báo cáo và đọc đề bài",
+              "micro_task_seconds": null,
+              "work_seconds": 3600,
+              "rest_seconds": 600,
+              "segments": [
+                {
+                  "order_index": 0,
+                  "kind": "work",
+                  "duration_seconds": 1500
+                },
+                {
+                  "order_index": 1,
+                  "kind": "rest",
+                  "duration_seconds": 300
+                },
+                {
+                  "order_index": 2,
+                  "kind": "work",
+                  "duration_seconds": 1500
+                },
+                {
+                  "order_index": 3,
+                  "kind": "rest",
+                  "duration_seconds": 300
+                },
+                {
+                  "order_index": 4,
+                  "kind": "work",
+                  "duration_seconds": 600
+                }
+              ],
+              "duration_seconds": 4200,
+              "schedule_revision": 8,
+              "status": "scheduled",
+              "calendar_event_link_id": null,
+              "start_state": "started",
+              "start_decision_due_at": "2026-10-30T09:15:00+07:00"
+            }
+          },
+          "dnd_release_at": null
+        },
+        "meta": {
+          "request_id": "req-demo",
+          "server_time": "2026-10-30T09:00:00+07:00"
+        }
+      }
+    }
+  },
+  "events": {
+    "method": "POST",
+    "path": "/api/v1/runs/{run_id}/events",
+    "request": {
+      "path": {
+        "run_id": "run_1"
+      },
+      "body": {
+        "device_id": "device_1",
+        "expected_run_revision": 1,
+        "events": [
+          {
+            "event_id": "event_1",
+            "event_type": "progress",
+            "occurred_at": "2026-10-30T09:25:00+07:00",
+            "segment_index": 0,
+            "work_elapsed_seconds": 1500,
+            "rest_elapsed_seconds": 0
+          }
+        ]
+      },
+      "headers": {
+        "Idempotency-Key": "lenh_19_1"
+      }
+    },
+    "response": {
+      "http_status": 200,
+      "body": {
+        "data": {
+          "run_id": "run_1",
+          "run_revision": 2,
+          "accepted_event_ids": [
+            "event_1"
+          ],
+          "duplicate_event_ids": []
+        },
+        "meta": {
+          "request_id": "req-demo",
+          "server_time": "2026-10-30T09:25:00+07:00"
+        }
+      }
+    }
+  },
+  "end": {
+    "method": "POST",
+    "path": "/api/v1/runs/{run_id}/end",
+    "request": {
+      "path": {
+        "run_id": "run_1"
+      },
+      "body": {
+        "device_id": "device_1",
+        "expected_run_revision": 2,
+        "event_id": "event_ket_thuc_1",
+        "ended_at": "2026-10-30T10:10:00+07:00",
+        "end_reason": "timer_elapsed",
+        "work_elapsed_seconds": 3600,
+        "rest_elapsed_seconds": 600
+      },
+      "headers": {
+        "Idempotency-Key": "lenh_20_1"
+      }
+    },
+    "response": {
+      "http_status": 200,
+      "body": {
+        "data": {
+          "run_id": "run_1",
+          "session_id": "session_1",
+          "device_id": "device_1",
+          "run_revision": 3,
+          "started_at": "2026-10-30T09:00:00+07:00",
+          "ended_at": "2026-10-30T10:10:00+07:00",
+          "run_state": "awaiting_checkin",
+          "active_phase": "ended",
+          "segment_index": null,
+          "work_elapsed_seconds": 3600,
+          "rest_elapsed_seconds": 600,
+          "actual_work_seconds": 3600,
+          "actual_source": "timer_proxy",
+          "outcome": "unknown",
+          "checkin_timeout_at": "2026-10-30T10:15:00+07:00",
+          "settings_snapshot": {
+            "effective_revision": 4,
+            "session": {
+              "session_id": "session_1",
+              "step_id": "step_1",
+              "scheduled_start": "2026-10-30T09:00:00+07:00",
+              "scheduled_end": "2026-10-30T10:10:00+07:00",
+              "micro_task_text": "Mở file báo cáo và đọc đề bài",
+              "micro_task_seconds": null,
+              "work_seconds": 3600,
+              "rest_seconds": 600,
+              "segments": [
+                {
+                  "order_index": 0,
+                  "kind": "work",
+                  "duration_seconds": 1500
+                },
+                {
+                  "order_index": 1,
+                  "kind": "rest",
+                  "duration_seconds": 300
+                },
+                {
+                  "order_index": 2,
+                  "kind": "work",
+                  "duration_seconds": 1500
+                },
+                {
+                  "order_index": 3,
+                  "kind": "rest",
+                  "duration_seconds": 300
+                },
+                {
+                  "order_index": 4,
+                  "kind": "work",
+                  "duration_seconds": 600
+                }
+              ],
+              "duration_seconds": 4200,
+              "schedule_revision": 8,
+              "status": "scheduled",
+              "calendar_event_link_id": null,
+              "start_state": "started",
+              "start_decision_due_at": "2026-10-30T09:15:00+07:00"
+            }
+          },
+          "check_in": {
+            "checkin_id": "checkin_1",
+            "run_id": "run_1",
+            "kind": "final",
+            "response_state": "open",
+            "session_outcome": "unknown",
+            "step_completed": null,
+            "task_completed": null,
+            "skip_scope": null,
+            "remaining_note": null,
+            "asked_at": "2026-10-30T10:10:00+07:00",
+            "responded_at": null,
+            "response_revision": 0
+          },
+          "dnd_release_at": "2026-10-30T10:15:00+07:00"
+        },
+        "meta": {
+          "request_id": "req-demo",
+          "server_time": "2026-10-30T10:10:00+07:00"
+        }
+      }
+    }
+  },
+  "device": {
+    "method": "PUT",
+    "path": "/api/v1/devices/{device_id}/state",
+    "request": {
+      "path": {
+        "device_id": "device_1"
+      },
+      "body": {
+        "device_report_revision": 1,
+        "notification_permission": "granted",
+        "microphone_permission": "granted",
+        "dnd_permission": "granted",
+        "alarm_capability": "available",
+        "active_run_id": null,
+        "last_schedule_revision": 8,
+        "dnd_owner_run_id": null,
+        "dnd_apply_state": "not_applied",
+        "dnd_restore_state": "not_needed",
+        "reported_at": "2026-10-29T15:00:00+07:00",
+        "app_visibility": "foreground"
+      },
+      "headers": {
+        "Idempotency-Key": "lenh_21_1"
+      }
+    },
+    "response": {
+      "http_status": 200,
+      "body": {
+        "data": {
+          "device_id": "device_1",
+          "device_report_revision": 1,
+          "notification_permission": "granted",
+          "microphone_permission": "granted",
+          "dnd_permission": "granted",
+          "alarm_capability": "available",
+          "active_run_id": null,
+          "last_schedule_revision": 8,
+          "dnd_owner_run_id": null,
+          "dnd_apply_state": "not_applied",
+          "dnd_restore_state": "not_needed",
+          "reported_at": "2026-10-29T15:00:00+07:00",
+          "app_visibility": "foreground"
+        },
+        "meta": {
+          "request_id": "req-demo",
+          "server_time": "2026-10-29T15:00:00+07:00"
+        }
+      }
+    }
+  },
+  "reminders": {
+    "method": "GET",
+    "path": "/api/v1/reminders",
+    "request": {
+      "query": {
+        "device_id": "device_1",
+        "from": "2026-10-30T07:00:00+07:00",
+        "to": "2026-11-13T07:00:00+07:00",
+        "schedule_revision": 8
+      },
+      "body": null
+    },
+    "response": {
+      "http_status": 200,
+      "body": {
+        "data": {
+          "items": [
+            {
+              "reminder_id": "reminder_1",
+              "session_id": "session_1",
+              "schedule_revision": 8,
+              "kind": "before_session",
+              "fire_at": "2026-10-30T08:45:00+07:00",
+              "dedupe_key": "demo-session-reminder-v8",
+              "delivery_state": "scheduled",
+              "user_action": null,
+              "device_id": "device_1"
+            }
+          ],
+          "next_cursor": null
+        },
+        "meta": {
+          "request_id": "req-demo",
+          "server_time": "2026-10-29T15:00:00+07:00"
+        }
+      }
+    }
+  },
+  "reminder_receipt": {
+    "method": "POST",
+    "path": "/api/v1/reminders/{reminder_id}/receipt",
+    "request": {
+      "path": {
+        "reminder_id": "reminder_1"
+      },
+      "body": {
+        "device_id": "device_1",
+        "schedule_revision": 8,
+        "delivery_state": "scheduled",
+        "occurred_at": "2026-10-29T15:00:00+07:00",
+        "user_action": null
+      },
+      "headers": {
+        "Idempotency-Key": "lenh_23_1"
+      }
+    },
+    "response": {
+      "http_status": 200,
+      "body": {
+        "data": {
+          "reminder_id": "reminder_1",
+          "session_id": "session_1",
+          "schedule_revision": 8,
+          "kind": "before_session",
+          "fire_at": "2026-10-30T08:45:00+07:00",
+          "dedupe_key": "demo-session-reminder-v8",
+          "delivery_state": "scheduled",
+          "user_action": null,
+          "device_id": "device_1"
+        },
+        "meta": {
+          "request_id": "req-demo",
+          "server_time": "2026-10-29T15:00:00+07:00"
+        }
+      }
+    }
+  },
+  "capture": {
+    "method": "POST",
+    "path": "/api/v1/thoughts",
+    "request": {
+      "body": {
+        "client_thought_id": "thought_may_1",
+        "source_run_id": "run_1",
+        "input_type": "audio",
+        "capture_state": "saved",
+        "attempt_count": 1,
+        "text_content": null
+      },
+      "headers": {
+        "Idempotency-Key": "lenh_24_1"
+      }
+    },
+    "response": {
+      "http_status": 201,
+      "body": {
+        "data": {
+          "thought_id": "thought_1",
+          "thought_revision": 1,
+          "client_thought_id": "thought_may_1",
+          "source_run_id": "run_1",
+          "input_type": "audio",
+          "text_content": null,
+          "attempt_count": 1,
+          "linked_draft_id": null,
+          "converted_task_id": null,
+          "capture_state": "saved",
+          "retention_expires_at": null
+        },
+        "meta": {
+          "request_id": "req-demo",
+          "server_time": "2026-10-30T09:30:00+07:00"
+        }
+      }
+    }
+  },
+  "thought_list": {
+    "method": "GET",
+    "path": "/api/v1/thoughts",
+    "request": {
+      "query": {
+        "limit": 20
+      },
+      "body": null
+    },
+    "response": {
+      "http_status": 200,
+      "body": {
+        "data": {
+          "items": [
+            {
+              "thought_id": "thought_1",
+              "thought_revision": 1,
+              "client_thought_id": "thought_may_1",
+              "source_run_id": "run_1",
+              "input_type": "audio",
+              "text_content": null,
+              "attempt_count": 1,
+              "linked_draft_id": null,
+              "converted_task_id": null,
+              "capture_state": "saved",
+              "retention_expires_at": null
+            }
+          ],
+          "next_cursor": null
+        },
+        "meta": {
+          "request_id": "req-demo",
+          "server_time": "2026-10-30T09:30:00+07:00"
+        }
+      }
+    }
+  },
+  "thought": {
+    "method": "GET",
+    "path": "/api/v1/thoughts/{thought_id}",
+    "request": {
+      "path": {
+        "thought_id": "thought_1"
+      },
+      "body": null
+    },
+    "response": {
+      "http_status": 200,
+      "body": {
+        "data": {
+          "thought_id": "thought_1",
+          "thought_revision": 1,
+          "client_thought_id": "thought_may_1",
+          "source_run_id": "run_1",
+          "input_type": "audio",
+          "text_content": null,
+          "attempt_count": 1,
+          "linked_draft_id": null,
+          "converted_task_id": null,
+          "capture_state": "saved",
+          "retention_expires_at": null
+        },
+        "meta": {
+          "request_id": "req-demo",
+          "server_time": "2026-10-30T09:30:00+07:00"
+        }
+      }
+    }
+  },
+  "to_draft": {
+    "method": "POST",
+    "path": "/api/v1/thoughts/{thought_id}/draft",
+    "request": {
+      "path": {
+        "thought_id": "thought_1"
+      },
+      "body": {
+        "expected_thought_revision": 1,
+        "text_content": "Viết bản nháp báo cáo môn học"
+      },
+      "headers": {
+        "Idempotency-Key": "lenh_27_1"
+      }
+    },
+    "response": {
+      "http_status": 201,
+      "body": {
+        "data": {
+          "thought_id": "thought_1",
+          "linked_draft_id": "draft_1",
+          "converted_task_id": null,
+          "draft": {
+            "draft_id": "draft_1",
+            "client_draft_id": "draft_may_1",
+            "stage": "collecting",
+            "raw_input": "Viết bản nháp báo cáo môn học",
+            "input_source": "thought",
+            "summary": {
+              "title": "Viết báo cáo môn học",
+              "description": "Viết bản nháp báo cáo môn học",
+              "goal": null,
+              "scope": null,
+              "extra_requirements": [],
+              "time_constraint": null,
+              "availability_ref": {
+                "availability_id": "availability_1",
+                "revision": 2
+              },
+              "importance": null,
+              "clarification_issues": [
+                {
+                  "code": "TIME_CONSTRAINT_REQUIRED",
+                  "field_path": "time_constraint",
+                  "message": "Chưa có mốc bắt đầu và hoàn tất.",
+                  "question": "Bạn muốn bắt đầu khi nào và cần xong trước lúc nào?",
+                  "blocking": true
+                },
+                {
+                  "code": "SCOPE_REQUIRED",
+                  "field_path": "scope",
+                  "message": "Chưa rõ đầu ra và giới hạn.",
+                  "question": "Bản nháp cần có những phần nào?",
+                  "blocking": true
+                }
+              ],
+              "can_plan": false,
+              "field_sources": {
+                "title": {
+                  "source": "ai_suggested",
+                  "source_ref": "raw_input"
+                },
+                "description": {
+                  "source": "user_input",
+                  "source_ref": "raw_input"
+                },
+                "availability_ref": {
+                  "source": "user_confirmed",
+                  "source_ref": "availability_revision:2"
+                }
+              }
+            },
+            "summary_revision": 1,
+            "summary_confirmed_revision": null,
+            "candidate_ref": null,
+            "source_thought_id": "thought_1",
+            "confirmed_task_id": null,
+            "user_step_proposal": null,
+            "planning_input_revision": 1
+          }
+        },
+        "meta": {
+          "request_id": "req-demo",
+          "server_time": "2026-10-30T10:20:00+07:00"
+        }
+      }
+    }
+  },
+  "delete": {
+    "method": "DELETE",
+    "path": "/api/v1/thoughts/{thought_id}",
+    "request": {
+      "path": {
+        "thought_id": "thought_1"
+      },
+      "body": {
+        "expected_thought_revision": 1
+      },
+      "headers": {
+        "Idempotency-Key": "lenh_28_1"
+      }
+    },
+    "response": {
+      "http_status": 200,
+      "body": {
+        "data": {
+          "thought_id": "thought_1",
+          "deleted": true,
+          "local_cleanup_required": true
+        },
+        "meta": {
+          "request_id": "req-demo",
+          "server_time": "2026-10-30T10:25:00+07:00"
+        }
+      }
+    }
+  },
+  "checkin_list": {
+    "method": "GET",
+    "path": "/api/v1/runs/{run_id}/check-ins",
+    "request": {
+      "path": {
+        "run_id": "run_1"
+      },
+      "query": {
+        "kind": "final"
+      },
+      "body": null
+    },
+    "response": {
+      "http_status": 200,
+      "body": {
+        "data": {
+          "items": [
+            {
+              "checkin_id": "checkin_1",
+              "run_id": "run_1",
+              "kind": "final",
+              "response_state": "open",
+              "session_outcome": "unknown",
+              "step_completed": null,
+              "task_completed": null,
+              "skip_scope": null,
+              "remaining_note": null,
+              "asked_at": "2026-10-30T10:10:00+07:00",
+              "responded_at": null,
+              "response_revision": 0
+            }
+          ],
+          "next_cursor": null
+        },
+        "meta": {
+          "request_id": "req-demo",
+          "server_time": "2026-10-30T10:10:00+07:00"
+        }
+      }
+    }
+  },
+  "checkin_response": {
+    "method": "PUT",
+    "path": "/api/v1/check-ins/{checkin_id}/response",
+    "request": {
+      "path": {
+        "checkin_id": "checkin_1"
+      },
+      "body": {
+        "expected_response_revision": 0,
+        "responded_at": "2026-10-30T10:20:00+07:00",
+        "session_outcome": "partial",
+        "step_completed": false,
+        "task_completed": false,
+        "skip_scope": null,
+        "remaining_note": "Còn một tài liệu chưa đọc xong."
+      },
+      "headers": {
+        "Idempotency-Key": "lenh_31_1"
+      }
+    },
+    "response": {
+      "http_status": 200,
+      "body": {
+        "data": {
+          "checkin_id": "checkin_1",
+          "run_id": "run_1",
+          "kind": "final",
+          "response_state": "answered",
+          "session_outcome": "partial",
+          "step_completed": false,
+          "task_completed": false,
+          "skip_scope": null,
+          "remaining_note": "Còn một tài liệu chưa đọc xong.",
+          "asked_at": "2026-10-30T10:10:00+07:00",
+          "responded_at": "2026-10-30T10:20:00+07:00",
+          "response_revision": 1
+        },
+        "meta": {
+          "request_id": "req-demo",
+          "server_time": "2026-10-30T10:20:00+07:00"
+        }
+      }
+    }
+  }
+}
