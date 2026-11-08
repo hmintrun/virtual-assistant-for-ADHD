@@ -4,6 +4,7 @@ import '../core/api_client.dart';
 import '../core/theme.dart';
 import '../providers/task_provider.dart';
 import '../widgets/melbel_ui.dart';
+import 'support_screens.dart';
 import 'task_entry_screen.dart';
 
 class CalendarScreen extends StatefulWidget {
@@ -76,7 +77,7 @@ class _CalendarScreenState extends State<CalendarScreen> {
       }).toList();
 
   Future<void> _openDay(DateTime day) async {
-    if (_loading || _error != null) return;
+    if (_loading) return;
     final sessions = _onDate(day);
     final add = await showModalBottomSheet<bool>(
         context: context,
@@ -144,6 +145,15 @@ class _CalendarScreenState extends State<CalendarScreen> {
     final days = DateTime(_month.year, _month.month + 1, 0).day;
     return Scaffold(
         appBar: const MelbelAppBar(title: 'Lịch', showBack: true),
+        floatingActionButton: FloatingActionButton.extended(
+          onPressed: () => Navigator.of(context).push(
+            MaterialPageRoute<void>(
+              builder: (_) => const CalendarVoiceQuestionScreen(),
+            ),
+          ),
+          icon: const Icon(Icons.mic_none),
+          label: const Text('Hỏi lịch'),
+        ),
         body: ListView(padding: const EdgeInsets.all(20), children: [
           Row(children: [
             Expanded(
@@ -182,15 +192,13 @@ class _CalendarScreenState extends State<CalendarScreen> {
                 final date =
                     DateTime(_month.year, _month.month, index - offset + 1);
                 return InkWell(
-                    onTap: _loading || _error != null
-                        ? null
-                        : () => _openDay(date),
+                    onTap: _loading ? null : () => _openDay(date),
                     child: Column(
                         mainAxisAlignment: MainAxisAlignment.center,
                         children: [
                           Text('${date.day}'),
                           if (_onDate(date).isNotEmpty)
-                            const Icon(Icons.circle,
+                            Icon(Icons.circle,
                                 size: 6, color: MelbelColors.kSecondary),
                         ]));
               }),

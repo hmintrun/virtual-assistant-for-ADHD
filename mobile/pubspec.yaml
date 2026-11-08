@@ -25,6 +25,7 @@ dependencies:
 
   # Audio Recording & On-device Voice
   record: ^5.2.0
+  path_provider: ^2.1.6
   audioplayers: ^6.0.0
   flutter_tts: ^4.1.0
   speech_to_text: ^7.0.0
@@ -35,6 +36,9 @@ dependencies:
   shimmer: ^3.0.0
   intl: ^0.19.0
   google_fonts: ^8.2.1
+  timezone: ^0.9.4
+  shared_preferences: ^2.5.6
+  android_alarm_manager_plus: ^5.1.2
 
 dev_dependencies:
   flutter_test:

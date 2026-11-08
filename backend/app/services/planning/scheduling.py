@@ -78,7 +78,7 @@ def order_steps_by_priority(
     def sort_key(step: CandidateStep) -> tuple:
         task_id = step_to_task_map.get(step.client_step_key, "") if step_to_task_map else ""
         task_prio = task_priority_map.get(task_id, default_task_key) if task_priority_map else (0,)
-        return (task_prio, step.order_index, step.client_step_key)
+        return (task_prio, part_order_map.get(step.client_part_key, 0), step.order_index)
 
     return sorted(steps, key=sort_key)
 

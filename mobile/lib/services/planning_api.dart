@@ -129,17 +129,22 @@ class PlanningApi {
     return PlanningDraftModel.fromJson(json);
   }
 
-  Future<PlanningDraftModel> analyzeDraft(PlanningDraftModel draft) async {
+  Future<PlanningDraftModel> analyzeDraft(
+    PlanningDraftModel draft, {
+    String? message,
+  }) async {
     final json = await _client.postData(
       '/drafts/${Uri.encodeComponent(draft.draftId)}/analyze',
       idempotencyKey: ApiClient.stableIdempotencyKey(
         'analyze_${draft.draftId}',
-        '${draft.summaryRevision}_${draft.planningInputRevision}_${draft.rawInput}',
+        '${draft.summaryRevision}_${draft.planningInputRevision}_${draft.rawInput}_${message ?? ''}',
       ),
       data: {
         'expected_summary_revision': draft.summaryRevision,
         'expected_planning_input_revision': draft.planningInputRevision,
         'raw_input': draft.rawInput ?? draft.title,
+        if (message != null && message.trim().isNotEmpty)
+          'message': message.trim(),
       },
     );
     return PlanningDraftModel.fromJson(json);
@@ -229,7 +234,7 @@ class PlanningApi {
     final body = <String, dynamic>{
       'source_summary_revision': draft.summaryRevision,
       'source_planning_input_revision': draft.planningInputRevision,
-      'selected_part_keys': null,
+      'selected_step_keys': null,
       'planning_horizon': null,
     };
     final json = await _command(

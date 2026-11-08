@@ -667,9 +667,7 @@ DateOverride — {date:string YYYY-MM-DD,intervals:array<{start_local:string HH:
 
 TaskAvailabilityLimit — Kiểu tương thích nguồn Availability cũ: {task_id:string,intervals:array<TimeInterval>}. Không dùng thay DraftAvailability của yêu cầu mới.
 
-SettingsChange — changes:{preferences?:PreferenceChanges,availability?:DraftAvailability}. Sửa giờ phải chọn đúng một target_draft_id hoặc target_task_id. Draft cần expected_summary_revision + expected_planning_input_revision; Task cần expected_task_revision. availability là bản thay thế đầy đủ, không dùng expected_availability_revision. Task đã lưu cần UF6 nên hiện trả 503 POLICY_NOT_CONFIGURED và giữ lịch/giờ cũ. Lần đầu preferences dùng expected_preferences_revision=0, không phải nhập giờ rảnh cố định.
-
-reminder_offsets: đích tuần 2 là 1–3 integer giây không âm, không trùng, giảm dần; code hiện còn khóa một mốc.
+SettingsChange — {preferences?:{work_interval_seconds?:integer>0,rest_interval_seconds?:integer>=0,reminder_offsets?:array<integer>=0 gồm 1–3 phần tử không trùng, giảm dần (đích tuần 2; code nền còn khóa 1),buffer_multiplier?:number>0 theo policy,reminder_style?:string},availability?:{timezone?:string,weekly_rules?:array<WeeklyRule>,date_overrides?:array<DateOverride>,task_limits?:array<TaskAvailabilityLimit>}}. Ít nhất một trường hợp lệ; không sửa revision/trường do server quản lý. Miền buffer và số giây min/max khác lấy capabilities, chưa tự gán số minh họa.
 
 PreferenceChanges — Các trường cấu hình được phép sửa trong SettingsChange.preferences. Trên O01 requested_changes là PreferenceChanges|null; trên kết quả change-request requested_changes là SettingsChange có namespace preferences/availability.
 
@@ -1040,22 +1038,10 @@ Các trường streak trong schema cũ (current_streak_days, streak_frozen, stre
 
 Bản đồng bộ local không tự cập nhật Backend Docs/Sheet hoặc triển khai code. Các quyết định tuần 2 được người dùng chốt ở Project/kế hoạch và ghi tại mục 12; phần còn mở phải tiếp tục chốt, cập nhật nguồn liên quan và DTO/tests cùng thay đổi.
 
-## 10. Kiểm chứng và chuyển giao
-
 - Script review: `_temp/c01_tests/conftest.py`, `test_unit.py`, `test_integration.py`, `system_test.md`. User đã duyệt chạy: unit 10/10 và integration 10/10 đạt ngày 03/11/2026; system chưa chạy, phải thao tác app thật.
 - Static lint/type đạt. Bộ 20 ca C01 đã chạy trên SQLite tạm/AI giả; không thay kiểm app, provider thật hoặc PostgreSQL. Mốc 175 ca ngày 02/11 là kết quả trước đợt đổi contract này.
 - Test cũ còn dùng PlanningPart cần được chuyển fixture/assert theo contract mới; không sửa/xóa test để che lỗi hoặc coi suite cũ đã chạy đạt.
 - Mobile cần bỏ Part keys, đọc giờ riêng và SourceRevisions.availability=null, gửi đúng revisions/Context. Không sửa source Mobile trong đợt Backend này.
-
-### Kết quả kiểm C01 ngày 03/11/2026
-
-- Unit 10/10; integration 10/10 đạt sau sửa. Confirm UF2 dùng HTTP 201 theo router/hợp đồng gốc; UF1 thiếu giờ trả 422 VALIDATION_ERROR, next_action=fix_fields, field_path=availability.
-- Đã sửa GET Context trả đúng draft_id công khai thay vì UUID khóa ngoại; snapshot và summary revision được kiểm trong integration.
-- Test dùng SQLite tạm, AI giả, user giả và preferences có sẵn; chưa kiểm AI trích xuất voice/text, Google, PostgreSQL hoặc cảm ứng Mobile.
-
-### Ghi nhận nền trước C01
-
-Phần dưới ghi lại snapshot ngày 03/11 trước C01; trạng thái UF2/Settings hiện tại theo mục C01 phía trên.
 
 - DTO AI nội bộ có goal, time_constraint chưa đầy đủ và issue theo trường; API Mobile vẫn trả PlanningDraft/TaskSummary hiện hành. Snapshot ai_context không trả ra JSON công khai; lưu trong summary._api_meta của Draft và phục hồi qua DB.
 - AI null/omitted không xóa dữ liệu user. PATCH giữ quy tắc omitted/null hiện có. AI bổ sung yêu cầu được trim/loại trùng chính xác, giữ yêu cầu cũ; user sửa form có thể thay cả danh sách.
