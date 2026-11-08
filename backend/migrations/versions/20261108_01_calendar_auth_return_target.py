@@ -19,5 +19,6 @@ def upgrade():
 
 
 def downgrade():
-    with op.batch_alter_table("calendar_authorizations") as batch_op:
-        batch_op.drop_column("return_target")
+    # Bảo toàn schema và dữ liệu theo quy ước guard C01 của dự án
+    raise RuntimeError("C01 downgrade requires an explicit snapshot/data recovery plan")
+
