@@ -55,6 +55,15 @@ public class FlutterDndPlugin implements FlutterPlugin, MethodCallHandler {
             case "getCurrentInterruptionFilter":
                 result.success(getCurrentInterruptionFilter());
                 break;
+            case "setAppNotificationPolicy":
+                Integer categories = call.argument("priorityCategories");
+                Integer callSenders = call.argument("priorityCallSenders");
+                Integer messageSenders = call.argument("priorityMessageSenders");
+                result.success(setAppNotificationPolicy(
+                        categories == null ? 0 : categories,
+                        callSenders == null ? NotificationManager.Policy.PRIORITY_SENDERS_ANY : callSenders,
+                        messageSenders == null ? NotificationManager.Policy.PRIORITY_SENDERS_ANY : messageSenders));
+                break;
             default:
                 result.notImplemented();
                 break;
@@ -81,6 +90,20 @@ public class FlutterDndPlugin implements FlutterPlugin, MethodCallHandler {
             return true;
         }
         return false;
+    }
+
+    /**
+     * ProPlan VA patch: Android 15+ (API 35, targetSdk >= 35) turns DND set by an app into an
+     * implicit rule that uses the APP's own policy (default blocks calls). This sets that app
+     * policy. Below API 35 the same call would overwrite the user's GLOBAL DND policy, so it is
+     * deliberately skipped there (returns false).
+     */
+    private boolean setAppNotificationPolicy(int categories, int callSenders, int messageSenders) {
+        if (android.os.Build.VERSION.SDK_INT < 35) return false;
+        if (!notificationManager.isNotificationPolicyAccessGranted()) return false;
+        notificationManager.setNotificationPolicy(
+                new NotificationManager.Policy(categories, callSenders, messageSenders));
+        return true;
     }
 
     private int getCurrentInterruptionFilter() {

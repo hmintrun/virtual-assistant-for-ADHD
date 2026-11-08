@@ -38,7 +38,7 @@ class DraftSavedScreen extends StatelessWidget {
               child: Row(
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
-                  const Row(
+                  Row(
                     children: [
                       Icon(
                         Icons.check_circle,
@@ -59,7 +59,7 @@ class DraftSavedScreen extends StatelessWidget {
                   ),
                   Text(
                     timeStr,
-                    style: const TextStyle(
+                    style: TextStyle(
                       fontFamily: 'Be Vietnam Pro',
                       fontSize: 12,
                       color: MelbelColors.kOnSurfaceVariant,
@@ -73,7 +73,7 @@ class DraftSavedScreen extends StatelessWidget {
             // Reassuring Low-Stimulation Greeting
             Column(
               crossAxisAlignment: CrossAxisAlignment.start,
-              children: const [
+              children: [
                 Row(
                   children: [
                     Icon(
@@ -136,13 +136,13 @@ class DraftSavedScreen extends StatelessWidget {
                           Container(
                             width: 8,
                             height: 8,
-                            decoration: const BoxDecoration(
+                            decoration: BoxDecoration(
                               color: MelbelColors.kPrimaryContainer,
                               shape: BoxShape.circle,
                             ),
                           ),
                           const SizedBox(width: 8),
-                          const Eyebrow(
+                          Eyebrow(
                             'Công việc nháp',
                             color: MelbelColors.kPrimaryContainer,
                           ),
@@ -155,7 +155,7 @@ class DraftSavedScreen extends StatelessWidget {
                             const BoxConstraints(minWidth: 32, minHeight: 32),
                         onPressed: () => Navigator.popUntil(
                             context, (route) => route.isFirst),
-                        icon: const Icon(
+                        icon: Icon(
                           Icons.archive_outlined,
                           size: 20,
                           color: MelbelColors.kOnSurfaceVariant,
@@ -166,9 +166,9 @@ class DraftSavedScreen extends StatelessWidget {
                   const SizedBox(height: 8),
                   Text(
                     task.title.isEmpty
-                        ? 'Soạn báo cáo đánh giá quý 3'
+                        ? 'Chưa có nội dung công việc'
                         : task.title,
-                    style: const TextStyle(
+                    style: TextStyle(
                       fontFamily: 'Be Vietnam Pro',
                       fontSize: 18,
                       fontWeight: FontWeight.w600,
@@ -178,7 +178,7 @@ class DraftSavedScreen extends StatelessWidget {
                   const SizedBox(height: 6),
                   Row(
                     children: [
-                      const Icon(
+                      Icon(
                         Icons.schedule,
                         size: 16,
                         color: MelbelColors.kTertiaryFixedDim,
@@ -186,7 +186,7 @@ class DraftSavedScreen extends StatelessWidget {
                       const SizedBox(width: 6),
                       Text(
                         'Hạn: ${task.formatDeadline(task.deadline)}',
-                        style: const TextStyle(
+                        style: TextStyle(
                           fontFamily: 'Be Vietnam Pro',
                           fontSize: 14,
                           fontWeight: FontWeight.w500,
@@ -215,174 +215,27 @@ class DraftSavedScreen extends StatelessWidget {
             ),
             const SizedBox(height: 24),
 
-            // Ambient Schedule
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: const [
-                Row(
-                  children: [
-                    Icon(
-                      Icons.calendar_today,
-                      size: 18,
-                      color: MelbelColors.kSecondary,
-                    ),
-                    SizedBox(width: 8),
-                    Text(
-                      'Lịch hôm nay',
-                      style: TextStyle(
-                        fontFamily: 'Be Vietnam Pro',
-                        fontSize: 15,
-                        fontWeight: FontWeight.w500,
-                        color: MelbelColors.kOnSurface,
-                      ),
-                    ),
-                  ],
-                ),
-                Text(
-                  '2 phiên còn lại',
-                  style: TextStyle(
-                    fontFamily: 'Be Vietnam Pro',
-                    fontSize: 12,
-                    color: MelbelColors.kOnSurfaceVariant,
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 12),
-
-            // Calm Scheduled Task Item 1
-            Container(
-              padding: const EdgeInsets.all(14),
-              decoration: BoxDecoration(
-                color: MelbelColors.kSurfaceContainerLow,
-                borderRadius: BorderRadius.circular(12),
-                border: Border.all(
-                  color: MelbelColors.kOutlineVariant.withValues(alpha: 0.3),
-                ),
-              ),
-              child: Row(
-                children: [
-                  Container(
-                    width: 24,
-                    height: 24,
-                    decoration: BoxDecoration(
-                      color: MelbelColors.kSurfaceContainer,
-                      borderRadius: BorderRadius.circular(6),
-                    ),
-                    child: const Icon(
-                      Icons.done,
-                      size: 16,
-                      color: MelbelColors.kSecondary,
-                    ),
-                  ),
-                  const SizedBox(width: 12),
-                  const Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          'Đồng bộ nhanh cùng nhóm',
-                          style: TextStyle(
-                            fontFamily: 'Be Vietnam Pro',
-                            fontSize: 14,
-                            fontWeight: FontWeight.w500,
-                            color: MelbelColors.kOnSurface,
-                          ),
-                        ),
-                        SizedBox(height: 2),
-                        Text(
-                          '15:30 · 15 phút nhẹ nhàng',
-                          style: TextStyle(
-                            fontFamily: 'Be Vietnam Pro',
-                            fontSize: 12,
-                            color: MelbelColors.kOnSurfaceVariant,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                  Container(
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-                    decoration: BoxDecoration(
-                      color: MelbelColors.kSurfaceContainer,
-                      borderRadius: BorderRadius.circular(4),
-                    ),
-                    child: const Text(
-                      'Sắp tới',
-                      style: TextStyle(
-                        fontFamily: 'Be Vietnam Pro',
-                        fontSize: 11,
-                        color: MelbelColors.kSecondary,
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-            const SizedBox(height: 10),
-
-            // Calm Scheduled Task Item 2
-            Container(
-              padding: const EdgeInsets.all(14),
-              decoration: BoxDecoration(
-                color: MelbelColors.kSurfaceContainerLow,
-                borderRadius: BorderRadius.circular(12),
-                border: Border.all(
-                  color: MelbelColors.kOutlineVariant.withValues(alpha: 0.3),
-                ),
-              ),
-              child: Row(
-                children: [
-                  Container(
-                    width: 24,
-                    height: 24,
-                    decoration: BoxDecoration(
-                      color: MelbelColors.kSurfaceContainer,
-                      borderRadius: BorderRadius.circular(6),
-                    ),
-                    child: const Icon(
-                      Icons.spa,
-                      size: 16,
-                      color: MelbelColors.kOnSurfaceVariant,
-                    ),
-                  ),
-                  const SizedBox(width: 12),
-                  const Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          'Nghỉ mắt & uống nước',
-                          style: TextStyle(
-                            fontFamily: 'Be Vietnam Pro',
-                            fontSize: 14,
-                            color: MelbelColors.kOnSurfaceVariant,
-                          ),
-                        ),
-                        SizedBox(height: 2),
-                        Text(
-                          '16:30 · Thư giãn thần kinh',
-                          style: TextStyle(
-                            fontFamily: 'Be Vietnam Pro',
-                            fontSize: 12,
-                            color: MelbelColors.kOnSurfaceVariant,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                  const Icon(
-                    Icons.more_horiz,
-                    size: 18,
-                    color: MelbelColors.kOnSurfaceVariant,
-                  ),
-                ],
-              ),
-            ),
+            const _NoScheduleCard(),
           ],
         ),
       ),
     );
   }
+}
+
+class _NoScheduleCard extends StatelessWidget {
+  const _NoScheduleCard();
+
+  @override
+  Widget build(BuildContext context) => MelbelCard(
+        child: Row(
+          children: [
+            Icon(Icons.calendar_today, color: MelbelColors.kSecondary),
+            SizedBox(width: 12),
+            Expanded(
+              child: Text('Chưa có phiên nào được xác nhận cho hôm nay.'),
+            ),
+          ],
+        ),
+      );
 }

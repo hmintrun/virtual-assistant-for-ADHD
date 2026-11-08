@@ -34,8 +34,8 @@ class SessionRun(OwnedMixin, RecordMixin, Base):
             "uq_user_live_run",
             "user_id",
             unique=True,
-            sqlite_where=text("run_state IN ('running', 'paused', 'awaiting_checkin')"),
-            postgresql_where=text("run_state IN ('running', 'paused', 'awaiting_checkin')"),
+            sqlite_where=text("run_state IN ('running', 'paused')"),
+            postgresql_where=text("run_state IN ('running', 'paused')"),
         ),
     )
     session_id: Mapped[UUID] = mapped_column(

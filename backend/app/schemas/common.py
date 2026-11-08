@@ -13,7 +13,6 @@ class ApiModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
-# Giữ bí danh tương thích nếu có module nội bộ tham chiếu StrictSchema
 StrictSchema = ApiModel
 
 
@@ -142,7 +141,18 @@ class ConfiguredParameters(ApiModel):
     audio_max_seconds: int | None = None
     audio_max_bytes: int | None = None
     preview_ttl_seconds: int | None = None
-    default_reminder_offset_seconds: int = Field(ge=0)
+    default_reminder_offset_seconds: int = Field(
+        default=900,
+        ge=0,
+        deprecated=True,
+        description="DEPRECATED: Client dung default_reminder_offsets de nhan day du danh sach [900, 600, 300]",
+    )
+    default_reminder_offsets: list[int] = Field(
+        default=[900, 600, 300],
+        min_length=1,
+        max_length=3,
+        description="Mở rộng tuần 2: Nhận 1-3 mốc nhắc nhở mặc định trước phiên (giây): [900, 600, 300].",
+    )
     start_grace_seconds: int = Field(ge=0)
     min_inter_session_gap_seconds: int = Field(ge=0)
     checkin_timeout_seconds: int = Field(ge=0)

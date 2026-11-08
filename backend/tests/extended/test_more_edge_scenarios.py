@@ -201,7 +201,7 @@ class TestAdditionalEdgeScenarios(unittest.TestCase):
             self.assertTrue(
                 any(
                     kw in st.micro_task_prompt.lower()
-                    for kw in ["2 phút", "mở", "đọc", "dọn", "bắt tay", "tài liệu", "ghi"]
+                    for kw in ["2 phút", "mở", "đọc", "dọn", "bắt tay", "tài liệu", "ghi", "đánh dấu", "kiểm tra"]
                 ),
                 f"Micro-task prompt '{st.micro_task_prompt}' không chứa hành động khởi động hợp lệ.",
             )

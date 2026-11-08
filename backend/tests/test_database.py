@@ -121,7 +121,7 @@ def test_run_ended_does_not_complete_task_and_late_checkin_same_row(engine):
         assert run.ended_at == session.scheduled_end
 
 
-@pytest.mark.parametrize("run_state", ["running", "awaiting_checkin"])
+@pytest.mark.parametrize("run_state", ["running", "paused"])
 def test_duplicate_active_run_and_final_checkin_rejected(engine, run_state):
     with DBSession(engine) as db:
         user, _, _, _, session = make_plan(db)

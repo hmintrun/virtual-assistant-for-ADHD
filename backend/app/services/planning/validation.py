@@ -7,6 +7,15 @@ Kiểm tra 4 nhóm thông tin bắt buộc (Nội dung, Phạm vi, Ràng buộc 
 from __future__ import annotations
 
 import zoneinfo
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
+
+from app.schemas.calendar import BusyInterval
+from app.schemas.common import TimeInterval
+
+if TYPE_CHECKING:
+    from app.models.execution import SessionRun
+    from app.models.session import Session
 from datetime import UTC, date, datetime, timedelta
 
 from app.schemas.availability import Availability, DraftAvailability
@@ -330,3 +339,163 @@ def validate_planning_prerequisites(
     can_plan = not has_blocking
 
     return can_plan, issues
+
+
+@dataclass(frozen=True)
+class SessionStartFeasibilityResult:
+    """Kết quả kiểm tra tính khả thi điều kiện bắt đầu phiên tập trung (A12.1)."""
+
+    is_feasible: bool
+    error_code: str | None = None
+    message: str = ""
+    suggested_action: str = ""
+    adjusted_duration_seconds: int | None = None
+
+
+def validate_session_start_feasibility(
+    session: Any,
+    requested_start_at: datetime,
+    live_run: Any = None,
+    busy_intervals: list[BusyInterval] | None = None,
+    adjacent_sessions: list[Any] | None = None,
+    free_intervals: list[TimeInterval] | None = None,
+    min_inter_session_gap_seconds: int = 900,
+    max_early_start_seconds: int = 900,
+    max_start_delay_seconds: int = 900,
+) -> SessionStartFeasibilityResult:
+    """Kiểm tra toàn diện 5 Guardrails trước khi cho phép bắt đầu phiên tập trung (A12.1).
+
+    Guardrail 1: Quyền sở hữu và trạng thái phiên (scheduled / waiting).
+    Guardrail 2: Cửa sổ thời gian bắt đầu (Early <= 15p, Delay <= 15p).
+    Guardrail 3: Ràng buộc 1-Step UI (Không có phiên nào khác đang live).
+    Guardrail 4: Không đè lên lịch bận Calendar (Busy Intervals).
+    Guardrail 5: Đảm bảo khoảng nghỉ tối thiểu 15p (Inter-session gap) với phiên liền kề.
+    """
+    # Guardrail 1: Kiểm tra trạng thái Session
+    status = getattr(session, "status", "scheduled")
+    start_state = getattr(session, "start_state", "waiting")
+
+    if status == "completed":
+        return SessionStartFeasibilityResult(
+            is_feasible=False,
+            error_code="SESSION_ALREADY_COMPLETED",
+            message="Phiên làm việc này đã hoàn thành.",
+            suggested_action="view_summary",
+        )
+    if status == "cancelled":
+        return SessionStartFeasibilityResult(
+            is_feasible=False,
+            error_code="SESSION_CANCELLED",
+            message="Phiên làm việc này đã bị hủy.",
+            suggested_action="reschedule_uf6",
+        )
+    if status == "missed" or start_state == "not_started":
+        return SessionStartFeasibilityResult(
+            is_feasible=False,
+            error_code="SESSION_MISSED",
+            message="Phiên làm việc đã bị quá hạn bắt đầu (quá 15 phút). Hãy dời lịch nhé.",
+            suggested_action="reschedule_uf6",
+        )
+    if status not in ("scheduled", "in_progress"):
+        return SessionStartFeasibilityResult(
+            is_feasible=False,
+            error_code="INVALID_SESSION_STATUS",
+            message="Trạng thái phiên không hợp lệ để bắt đầu.",
+            suggested_action="reload",
+        )
+
+    # Guardrail 2: Kiểm tra cửa sổ thời gian bắt đầu (Early / Late)
+    req_utc = requested_start_at.astimezone(UTC)
+    sched_start_utc = session.scheduled_start.astimezone(UTC)
+
+    earliest_allowed = sched_start_utc - timedelta(seconds=max_early_start_seconds)
+    if req_utc < earliest_allowed:
+        diff_min = int((sched_start_utc - req_utc).total_seconds() // 60)
+        return SessionStartFeasibilityResult(
+            is_feasible=False,
+            error_code="START_TOO_EARLY",
+            message=f"Chưa đến giờ bắt đầu phiên (còn {diff_min} phút). Bạn có thể xem micro-task khởi động 2 phút trước nhé.",
+            suggested_action="wait",
+        )
+
+    latest_allowed = sched_start_utc + timedelta(seconds=max_start_delay_seconds)
+    if req_utc > latest_allowed:
+        return SessionStartFeasibilityResult(
+            is_feasible=False,
+            error_code="START_EXPIRED",
+            message="Đã quá 15 phút so với giờ hẹn bắt đầu. ProPlan sẽ giúp bạn dời phiên này sang khung giờ khác thoải mái hơn.",
+            suggested_action="reschedule_uf6",
+        )
+
+    # Guardrail 3: Ràng buộc 1-Step UI (Không có phiên live nào khác)
+    if live_run is not None:
+        run_state = getattr(live_run, "run_state", None)
+        run_session_id = str(getattr(live_run, "session_id", ""))
+        current_session_id = str(getattr(session, "id", getattr(session, "session_id", "")))
+
+        if run_state in ("running", "paused", "awaiting_checkin") and run_session_id != current_session_id:
+            return SessionStartFeasibilityResult(
+                is_feasible=False,
+                error_code="ANOTHER_SESSION_ACTIVE",
+                message="Bạn đang có một phiên tập trung khác đang chạy. Hãy hoàn thành phiên đó trước nhé.",
+                suggested_action="complete_active",
+            )
+
+    # Guardrail 4: Xung đột với sự kiện bận từ Calendar
+    work_seconds = getattr(session, "work_seconds", 1500)
+    run_start = req_utc
+    run_end = req_utc + timedelta(seconds=work_seconds)
+
+    if busy_intervals:
+        for busy in busy_intervals:
+            b_s = busy.start_at.astimezone(UTC)
+            b_e = busy.end_at.astimezone(UTC)
+            # Kiểm tra khoảng giao nhau
+            if max(run_start, b_s) < min(run_end, b_e):
+                return SessionStartFeasibilityResult(
+                    is_feasible=False,
+                    error_code="CONFLICTS_WITH_BUSY_EVENT",
+                    message="Thời gian thực hiện phiên này bị trùng vào một lịch bận đã có. Hãy dời lịch để không bị ngắt quãng nhé.",
+                    suggested_action="reschedule_uf6",
+                )
+
+    # Guardrail 5: Đảm bảo khoảng nghỉ tối thiểu (Inter-session Gap >= 15p)
+    if adjacent_sessions:
+        current_session_id = str(getattr(session, "id", getattr(session, "session_id", "")))
+        for adj in adjacent_sessions:
+            adj_id = str(getattr(adj, "id", getattr(adj, "session_id", "")))
+            if adj_id == current_session_id:
+                continue
+
+            adj_start = adj.scheduled_start.astimezone(UTC)
+            adj_end = adj.scheduled_end.astimezone(UTC)
+
+            # Phiên kế tiếp ngay sau phiên hiện tại
+            if adj_start >= run_end:
+                gap = (adj_start - run_end).total_seconds()
+                if gap < min_inter_session_gap_seconds:
+                    return SessionStartFeasibilityResult(
+                        is_feasible=False,
+                        error_code="INSUFFICIENT_INTER_SESSION_GAP",
+                        message=f"Thời gian kết thúc quá sát phiên tiếp theo (cần tối thiểu {min_inter_session_gap_seconds // 60} phút nghỉ ngơi).",
+                        suggested_action="reschedule_uf6",
+                    )
+
+            # Phiên liền trước phiên hiện tại
+            if adj_end <= run_start:
+                gap = (run_start - adj_end).total_seconds()
+                if gap < min_inter_session_gap_seconds:
+                    return SessionStartFeasibilityResult(
+                        is_feasible=False,
+                        error_code="INSUFFICIENT_INTER_SESSION_GAP",
+                        message=f"Thời gian bắt đầu quá gần với phiên vừa kết thúc (cần tối thiểu {min_inter_session_gap_seconds // 60} phút nghỉ ngơi).",
+                        suggested_action="wait",
+                    )
+
+    return SessionStartFeasibilityResult(
+        is_feasible=True,
+        error_code=None,
+        message="Điều kiện bắt đầu phiên hoàn toàn khả thi.",
+        suggested_action="start_now",
+    )
+

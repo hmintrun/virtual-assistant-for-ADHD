@@ -28,6 +28,7 @@ _DEFAULT_CAPABILITIES = CapabilitiesData(
         audio_max_bytes=None,
         preview_ttl_seconds=None,
         default_reminder_offset_seconds=900,
+        default_reminder_offsets=[900, 600, 300],
         start_grace_seconds=900,
         min_inter_session_gap_seconds=900,
         checkin_timeout_seconds=300,
