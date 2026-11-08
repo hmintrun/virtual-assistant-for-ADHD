@@ -813,7 +813,7 @@ class AIService:
                 expected_output="Danh sách các ý chính hoặc dụng cụ cần thiết đã sẵn sàng.",
                 estimated_minutes=safe_duration,
                 micro_task_prompt=(
-                    f"Dọn gọn mặt bàn trong 2 phút và ghi ra 3 gạch đầu dòng đầu tiên cho '{cleaned_title}'."
+                    f"Đặt một tài liệu hoặc dụng cụ cần dùng cho '{cleaned_title}' trước mặt."
                 ),
                 cognitive_load="light",
             ),
@@ -822,9 +822,7 @@ class AIService:
                 title=f"Thực hiện phần trọng tâm của: {cleaned_title}{scope_hint}",
                 expected_output="Hoàn thành bản nháp hoặc phần khối lượng chính của công việc.",
                 estimated_minutes=safe_duration,
-                micro_task_prompt=(
-                    f"Mở ngay tài liệu/công cụ làm việc của '{cleaned_title}' và bắt tay vào mục đầu tiên."
-                ),
+                micro_task_prompt=f"Mở tài liệu hoặc công cụ làm việc của '{cleaned_title}'.",
                 cognitive_load="medium",
             ),
             StepPromptItem(
@@ -833,7 +831,7 @@ class AIService:
                 expected_output="Kết quả đã được kiểm tra lại và sẵn sàng bàn giao/lưu trữ.",
                 estimated_minutes=safe_duration,
                 micro_task_prompt=(
-                    f"Đọc lướt lại phần đầu kết quả của '{cleaned_title}' để kiểm tra các chi tiết còn sót."
+                    f"Đánh dấu một chi tiết cần kiểm tra trong kết quả của '{cleaned_title}'."
                 ),
                 cognitive_load="light",
             ),

@@ -77,9 +77,22 @@ def record(db, user_id, key, digest, operation, result):
             "change_request_id",
             "run_id",
             "checkin_id",
+            "session_id",
+            "device_id",
+            "reminder_id",
         )
         if isinstance(getattr(result, name, None), str)
     }
+    linked_draft_id = getattr(result, "linked_draft_id", None)
+    if "draft_id" not in refs and isinstance(linked_draft_id, str):
+        refs["draft_id"] = linked_draft_id
+    nested_checkin = getattr(result, "check_in", None)
+    if (
+        "checkin_id" not in refs
+        and nested_checkin is not None
+        and isinstance(getattr(nested_checkin, "checkin_id", None), str)
+    ):
+        refs["checkin_id"] = nested_checkin.checkin_id
     db.add(
         CommandReceipt(
             user_id=owner_uuid(user_id),
@@ -96,7 +109,7 @@ def record(db, user_id, key, digest, operation, result):
     )
 
 
-def durable_command(operation, result_type: type[BaseModel]):
+def durable_command(operation, result_type: type[BaseModel], *, resource_arg: str = "draft_id"):
     """Commit the function's DB changes and receipt together; replay before execution."""
 
     def decorate(function):
@@ -112,7 +125,9 @@ def durable_command(operation, result_type: type[BaseModel]):
             user_id = bound.arguments["user_id"]
             key = bound.arguments["idempotency_key"]
             payload = bound.arguments["payload"].model_dump(mode="json", exclude_unset=True)
-            digest = command_hash(operation, bound.arguments.get("draft_id", ""), payload)
+            resource_val = bound.arguments.get(resource_arg, "") if resource_arg else ""
+            resource_str = "" if resource_val is None else str(resource_val)
+            digest = command_hash(operation, resource_str, payload)
             saved = await replay(db, user_id, key, digest)
             if saved is not None:
                 return result_type.model_validate(saved)
