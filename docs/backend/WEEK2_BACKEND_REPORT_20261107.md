@@ -12,7 +12,7 @@
 
 Trong Tuần 2, phân hệ Backend đã hoàn thiện và kết nối đồng bộ 3 tầng mã nguồn:
 
-$$\text{Tầng 1: HTTP Router / DTO (Kim Cương)} \longrightarrow \text{Tầng 2: Core Service / Logic (Quốc Hưng)} \longrightarrow \text{Tầng 3: Storage / DB (Trang Tín)}$$
+$$\text{Tầng 1: HTTP Router / DTO (Kim Cương)} \longrightarrow \text{Tầng 2: Core Service / Logic (Quốc Hưng)} \longrightarrow \text{Tầng 3: Storage / DB (Tín Nhiệm)}$$
 
 1. **Tầng HTTP Router (`backend/app/api/v1/` — Kim Cương phụ trách):**
    - Đóng gói toàn bộ DTO Pydantic v2 (Input validation, Response serializing).
@@ -21,7 +21,7 @@ $$\text{Tầng 1: HTTP Router / DTO (Kim Cương)} \longrightarrow \text{Tầng 
 2. **Tầng Core Service & Business Engine (`backend/app/services/` — Quốc Hưng phụ trách):**
    - Điều phối State Machine của phiên làm việc (`SessionRun`), cất suy nghĩ (`Thought`), lời nhắc (`Reminder`) và xử lý phản hồi (`CheckIn`).
    - Đảm bảo **Strict Guardrails**: Không gọi STT/LLM trong phiên, không tự ý dời lịch của các công việc khác, không tự động đánh dấu hoàn thành khi hết giờ đếm ngược.
-3. **Tầng Database & Persistence (`backend/app/models/`, `repositories/` — Trang Tín phụ trách):**
+3. **Tầng Database & Persistence (`backend/app/models/`, `repositories/` — Tín Nhiệm phụ trách):**
    - Triển khai migration `20261107_02_live_run_index.py`: Thiết lập ràng buộc độc bản `uq_user_live_run` trên bảng `session_runs` (kết hợp các trạng thái `running`, `paused`, `awaiting_checkin`) — bảo đảm toàn vẹn nguyên tắc: **Mỗi người dùng tại một thời điểm chỉ có DUY NHẤT 1 phiên làm việc trực tiếp**.
 
 ---
@@ -172,7 +172,7 @@ $$\text{Tầng 1: HTTP Router / DTO (Kim Cương)} \longrightarrow \text{Tầng 
 Hiện tại, toàn bộ mã nguồn Backend của Tuần 2 (Router KC + Storage TN + Services Hưng) **đã tích hợp và kiểm thử đạt 97/97 tests pass tại máy local của tôi**. 
 
 Để chuẩn bị nghiệm thu MVP v0.2 và giúp nhóm Mobile có thể gọi API thật:
-1. **Thực hiện Integration PR:** Đề nghị Minh Trung tạo PR và tiến hành hợp nhất nhánh `backend` (chứa W04–W08 của Hưng), `feat/kc-w2-uf3-uf4-router` (của Cương) và `feat/tn-w2-storage` (của Tín) vào nhánh tích hợp chung `dev`.
+1. **Thực hiện Integration PR:** Đề nghị Minh Trung tạo PR và tiến hành hợp nhất nhánh `backend` (chứa W04–W08 của Hưng), `feat/kc-w2-uf3-uf4-router` (của Cương) và `feat/tn-w2-storage` (của Tín Nhiệm) vào nhánh tích hợp chung `dev`.
 2. **Cập nhật Biên bản Tuần 2:** Đánh dấu hoàn thành toàn bộ các hạng mục Backend trong `docs/week2_baseline.md`.
 3. **Mở đường cho Sprint Tuần 3:** Sau khi nhánh `dev` được ổn định, tôi sẽ bắt tay vào triển khai ngay các thuật toán thích ứng UF6 (Proposal dời lịch) và UF7 (Tiến hóa hệ số đệm cá nhân hóa).
 
