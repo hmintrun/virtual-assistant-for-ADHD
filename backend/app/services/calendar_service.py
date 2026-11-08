@@ -10,7 +10,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 from uuid import UUID, uuid4, uuid5, NAMESPACE_DNS
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.calendar import (
@@ -108,12 +108,18 @@ class CalendarService:
         state = secrets.token_urlsafe(32)
         state_hash = _hash_state(state)
 
-        # Xóa các authorization cũ chưa hoàn thành của user
+        now_utc = datetime.now(timezone.utc)
+        # BUG-13: Chỉ dọn dẹp các authorization đã hết hạn hoặc đã tiêu thụ, giữ lại các session khác đang mở của user
         await self.db.execute(
-            delete(CalendarAuthorization).where(CalendarAuthorization.user_id == uid)
+            delete(CalendarAuthorization).where(
+                CalendarAuthorization.user_id == uid,
+                or_(
+                    CalendarAuthorization.expires_at < now_utc,
+                    CalendarAuthorization.consumed_at.is_not(None),
+                ),
+            )
         )
 
-        now_utc = datetime.now(timezone.utc)
         expires_at = now_utc + timedelta(minutes=15)
 
         auth_intent = CalendarAuthorization(
@@ -166,6 +172,11 @@ class CalendarService:
 
         uid = auth_intent.user_id
         await _ensure_user_exists(self.db, uid)
+
+        # Lấy return_target và tiêu thụ authorization ngay để chống race condition / code reuse
+        return_target = auth_intent.return_target
+        auth_intent.consumed_at = now_utc
+        await self.db.commit()
 
         # Đổi authorization code lấy token
         target_redirect_uri = redirect_uri or auth_intent.redirect_uri or None
@@ -236,9 +247,6 @@ class CalendarService:
         conn.connection_state = "connected"
         conn.last_successful_sync_at = now_utc
 
-        # Tiêu thụ authorization
-        return_target = auth_intent.return_target
-        auth_intent.consumed_at = now_utc
         await self.db.commit()
         await self.db.refresh(conn)
         return conn, return_target
@@ -315,11 +323,14 @@ class CalendarService:
                 connection.connection_state = "connected"
                 await self.db.commit()
                 await self.db.refresh(connection)
-            except Exception as e:
-                logger.error("Failed to refresh access token for connection %s: %s", connection.id, e)
+            except CalendarAuthError as e:
+                logger.error("Permanent auth failure refreshing token for connection %s: %s", connection.id, e)
                 connection.connection_state = "needs_reconnect"
                 await self.db.commit()
                 raise CalendarAuthError("Phiên đăng nhập Google Calendar đã hết hạn và không thể làm mới. Vui lòng kết nối lại.") from e
+            except Exception as e:
+                logger.warning("Transient network error refreshing token for connection %s: %s", connection.id, e)
+                raise CalendarClientError("Không thể kết nối đến Google Calendar để làm mới token. Vui lòng thử lại sau.", status_code=502) from e
 
         if not access_token:
             connection.connection_state = "needs_reconnect"
@@ -336,37 +347,8 @@ class CalendarService:
         if not conn:
             raise CalendarClientError("Không tìm thấy kết nối lịch tương ứng.", status_code=404)
 
-        creds = _deserialize_credentials_safe(
-            conn.credential_ref,
-            user_id=conn.user_id,
-            connection_id=conn.id,
-        )
-        access_token = creds.get("access_token", "")
-        refresh_token = creds.get("refresh_token", "")
-
-        try:
-            raw_items = await self.client.list_calendar_list(access_token)
-        except CalendarAuthError:
-            # Thử tự động refresh token nếu có refresh_token
-            if refresh_token:
-                try:
-                    refreshed = await self.client.refresh_access_token(refresh_token)
-                    access_token = refreshed.get("access_token", "")
-                    creds["access_token"] = access_token
-                    # Lưu lại với Fernet
-                    conn.credential_ref = encrypt_credentials(creds)
-                    conn.connection_state = "connected"
-                    await self.db.commit()
-                    raw_items = await self.client.list_calendar_list(access_token)
-                except Exception as e:
-                    logger.warning("Token refresh failed: %s", e)
-                    conn.connection_state = "needs_reconnect"
-                    await self.db.commit()
-                    raise CalendarAuthError("Phiên kết nối Google đã hết hạn. Vui lòng kết nối lại.")
-            else:
-                conn.connection_state = "needs_reconnect"
-                await self.db.commit()
-                raise CalendarAuthError("Cần cấp lại quyền truy cập Google Calendar.")
+        access_token = await self.get_valid_access_token(conn)
+        raw_items = await self.client.list_calendar_list(access_token)
 
         read_ids = set(conn.read_calendar_ids or [])
         write_id = conn.write_calendar_id
@@ -458,6 +440,7 @@ class CalendarService:
         self,
         user_id: str | UUID,
         preview_id: str | UUID,
+        expected_preview_revision: int | None = None,
     ) -> CalendarConnection:
         """Áp dụng cấu hình từ preview đã xác nhận, thực hiện provisioning secondary calendar nếu cần."""
         uid = _resolve_uuid(user_id)
@@ -470,7 +453,22 @@ class CalendarService:
         )
         preview = (await self.db.execute(stmt)).scalar_one_or_none()
         if not preview:
-            raise CalendarClientError("Bản xem trước cấu hình không tồn tại hoặc đã hết hạn.", status_code=404)
+            raise CalendarClientError("Bản xem trước cấu hình không tồn tại hoặc đã được xử lý.", status_code=404)
+
+        if (
+            expected_preview_revision is not None
+            and preview.base_connection_revision is not None
+            and preview.base_connection_revision != expected_preview_revision
+        ):
+            raise CalendarClientError(
+                "Phiên bản bản xem trước không khớp (đã bị cập nhật).", status_code=409
+            )
+
+        now_utc = datetime.now(timezone.utc)
+        if preview.expires_at and preview.expires_at < now_utc:
+            preview.status = "expired"
+            await self.db.commit()
+            raise CalendarClientError("Bản xem trước cấu hình đã hết hạn. Vui lòng tạo bản xem trước mới.", status_code=409)
 
         conn = await self.db.get(CalendarConnection, preview.connection_id)
         if not conn:
@@ -481,19 +479,30 @@ class CalendarService:
         write_id = payload.get("write_calendar_id")
         action = payload.get("existing_event_action")
 
-        # Provisioning secondary calendar "ProPlan VA Focus" nếu được yêu cầu
+        # Provisioning secondary calendar "ProPlan VA Focus" nếu được yêu cầu (BUG-14: kiểm tra tránh tạo trùng)
         if action == "provision_new" or write_id in ("provision_new", "create_new"):
             access_token = await self.get_valid_access_token(conn)
-            try:
-                new_cal = await self.client.provision_proactive_calendar(
-                    access_token=access_token,
-                    summary="ProPlan VA Focus",
-                    time_zone="Asia/Ho_Chi_Minh",
-                )
-                write_id = new_cal.get("id")
-            except Exception as e:
-                logger.error("Failed to provision secondary calendar: %s", e)
-                raise CalendarClientError(f"Không thể tạo lịch ProPlan VA Focus: {e}", status_code=502)
+            # Kiểm tra xem tài khoản đã có lịch ProPlan VA Focus từ trước chưa
+            existing_cals = await self.client.list_calendar_list(access_token)
+            found_id = None
+            for c in existing_cals:
+                if c.get("summary") == "ProPlan VA Focus":
+                    found_id = c.get("id")
+                    break
+
+            if found_id:
+                write_id = found_id
+            else:
+                try:
+                    new_cal = await self.client.provision_proactive_calendar(
+                        access_token=access_token,
+                        summary="ProPlan VA Focus",
+                        time_zone="Asia/Ho_Chi_Minh",
+                    )
+                    write_id = new_cal.get("id")
+                except Exception as e:
+                    logger.error("Failed to provision secondary calendar: %s", e)
+                    raise CalendarClientError(f"Không thể tạo lịch ProPlan VA Focus: {e}", status_code=502)
 
         conn.read_calendar_ids = read_ids
         conn.write_calendar_id = write_id

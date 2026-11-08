@@ -367,6 +367,10 @@ class FakeCalendarClient(CalendarClientInterface):
     """Mock client hoàn toàn offline phục vụ testing và dev không cần mạng."""
 
     def __init__(self):
+        self.reset()
+
+    def reset(self) -> None:
+        """Đặt lại trạng thái mock cho các bài kiểm thử."""
         self.mock_events: dict[str, list[dict[str, Any]]] = {}
         self.mock_calendars: list[dict[str, Any]] = [
             {
@@ -444,7 +448,7 @@ class FakeCalendarClient(CalendarClientInterface):
                 "id": "mock_evt_1",
                 "summary": "Daily Standup Meeting",
                 "start": {"dateTime": time_min.isoformat()},
-                "end": {"dateTime": time_min.isoformat()},
+                "end": {"dateTime": (time_min + timedelta(hours=1)).isoformat()},
                 "transparency": "opaque",
                 "status": "confirmed",
                 "etag": '"mock_etag_1"',
@@ -541,6 +545,13 @@ class FakeCalendarClient(CalendarClientInterface):
 
 
 _fake_client_instance: FakeCalendarClient | None = None
+
+
+def reset_fake_calendar_client() -> None:
+    """Đặt lại client giả lập phục vụ cô lập môi trường test."""
+    global _fake_client_instance
+    if _fake_client_instance is not None:
+        _fake_client_instance.reset()
 
 
 def get_calendar_client() -> CalendarClientInterface:

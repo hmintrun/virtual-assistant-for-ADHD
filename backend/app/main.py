@@ -31,15 +31,18 @@ async def _calendar_sync_background_loop():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    worker_task = asyncio.create_task(_calendar_sync_background_loop())
+    worker_task = None
+    if settings.ENABLE_CALENDAR_SYNC_WORKER and not getattr(settings, "TESTING", False):
+        worker_task = asyncio.create_task(_calendar_sync_background_loop())
     try:
         yield
     finally:
-        worker_task.cancel()
-        try:
-            await worker_task
-        except asyncio.CancelledError:
-            pass
+        if worker_task:
+            worker_task.cancel()
+            try:
+                await worker_task
+            except asyncio.CancelledError:
+                pass
 
 
 app = FastAPI(title=settings.PROJECT_NAME, lifespan=lifespan)

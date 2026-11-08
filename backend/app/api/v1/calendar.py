@@ -19,6 +19,8 @@ from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Query, status
 from fastapi.responses import RedirectResponse
+from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 
 from app.api.deps import CurrentUserDep, DbSessionDep
 from app.models.calendar import CalendarPreview, CalendarSyncJob
@@ -257,6 +259,7 @@ async def confirm_configuration_preview(
         conn = await service.confirm_configuration_preview(
             user_id=current_user.user_id,
             preview_id=preview_id,
+            expected_preview_revision=payload.expected_preview_revision,
         )
     except CalendarClientError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.message)
@@ -350,10 +353,15 @@ async def get_connection_events(
     conn = await service.get_connection_by_id(current_user.user_id, connection_id)
     if not conn:
         raise HTTPException(status_code=404, detail="Không tìm thấy kết nối lịch.")
-    access_token = await service.get_valid_access_token(conn)
-    q_start = from_at or datetime.now(timezone.utc)
-    q_end = to_at or (q_start + timedelta(days=14))
-    raw_events = await service.client.list_events(access_token, google_calendar_id, q_start, q_end)
+    try:
+        access_token = await service.get_valid_access_token(conn)
+        q_start = from_at or datetime.now(timezone.utc)
+        q_end = to_at or (q_start + timedelta(days=14))
+        raw_events = await service.client.list_events(access_token, google_calendar_id, q_start, q_end)
+    except CalendarAuthError as exc:
+        raise HTTPException(status_code=401, detail=exc.message)
+    except CalendarClientError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.message)
     events: list[CalendarEvent] = []
     for raw in raw_events[:limit]:
         norm = normalize_google_event(raw, str(connection_id), google_calendar_id)
@@ -379,8 +387,13 @@ async def get_connection_event_detail(
     conn = await service.get_connection_by_id(current_user.user_id, connection_id)
     if not conn:
         raise HTTPException(status_code=404, detail="Không tìm thấy kết nối lịch.")
-    access_token = await service.get_valid_access_token(conn)
-    raw = await service.client.get_event(access_token, google_calendar_id, event_id)
+    try:
+        access_token = await service.get_valid_access_token(conn)
+        raw = await service.client.get_event(access_token, google_calendar_id, event_id)
+    except CalendarAuthError as exc:
+        raise HTTPException(status_code=401, detail=exc.message)
+    except CalendarClientError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.message)
     if not raw:
         raise HTTPException(status_code=404, detail="Không tìm thấy sự kiện trên Google Calendar.")
     norm = normalize_google_event(raw, str(connection_id), google_calendar_id)
@@ -405,6 +418,13 @@ async def create_event_change_preview(
     conn = await service.get_connection_by_id(current_user.user_id, conn_id)
     if not conn:
         raise HTTPException(status_code=404, detail="Không tìm thấy kết nối lịch tương ứng.")
+
+    # BUG-16: Kiểm tra bắt buộc có google_event_id khi update hoặc delete
+    if payload.operation in ("update", "delete") and not payload.google_event_id:
+        raise HTTPException(
+            status_code=400,
+            detail="Thao tác cập nhật hoặc xóa sự kiện yêu cầu cung cấp google_event_id.",
+        )
 
     preview_payload = {
         "operation": payload.operation,
@@ -454,16 +474,62 @@ async def confirm_event_change_preview(
     preview = await db.get(CalendarPreview, preview_id)
     if not preview or preview.user_id != _resolve_uuid(current_user.user_id):
         raise HTTPException(status_code=404, detail="Bản xem trước thay đổi không tồn tại.")
+
+    if (
+        payload.expected_preview_revision is not None
+        and preview.base_connection_revision is not None
+        and preview.base_connection_revision != payload.expected_preview_revision
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="Phiên bản bản xem trước không khớp (đã bị cập nhật).",
+        )
+
+    now_utc = datetime.now(timezone.utc)
+    if preview.expires_at and preview.expires_at < now_utc:
+        preview.status = "expired"
+        await db.commit()
+        raise HTTPException(
+            status_code=409,
+            detail="Bản xem trước thay đổi đã hết hạn (15 phút). Vui lòng tạo bản xem trước mới.",
+        )
+
+    uid = _resolve_uuid(current_user.user_id)
+    idempotency_key = f"manual_event_change_{preview.id}"
+
+    # BUG-12: Kiểm tra idempotent job đã tồn tại chưa (phòng ngừa double-click)
+    existing_job = (
+        await db.scalars(
+            select(CalendarSyncJob).where(
+                CalendarSyncJob.user_id == uid,
+                CalendarSyncJob.idempotency_key == idempotency_key,
+            )
+        )
+    ).first()
+
+    if existing_job:
+        data = CalendarSyncJobRead(
+            job_id=str(existing_job.id),
+            connection_id=str(existing_job.connection_id),
+            target_kind=existing_job.target_kind,
+            target_ref=existing_job.target_ref,
+            operation=existing_job.operation,
+            job_state=existing_job.job_state,
+            attempt_count=existing_job.attempt_count,
+            next_retry_at=existing_job.next_retry_at,
+            last_error_code=existing_job.last_error_code,
+        )
+        return SuccessEnvelope(data=data, meta=build_response_meta())
+
     if preview.status != "pending":
         raise HTTPException(status_code=409, detail="Bản xem trước đã được xử lý hoặc hết hạn.")
 
     preview_data = preview.payload or {}
     op = preview_data.get("operation", "create")
     conn_id = _resolve_uuid(preview_data.get("connection_id", preview.connection_id))
-    idempotency_key = f"manual_event_change_{preview.id}"
 
     job = CalendarSyncJob(
-        user_id=_resolve_uuid(current_user.user_id),
+        user_id=uid,
         connection_id=conn_id,
         target_kind="event",
         target_ref=preview_data.get("google_event_id") or str(preview.id),
@@ -475,9 +541,24 @@ async def confirm_event_change_preview(
         attempt_count=0,
     )
     preview.status = "confirmed"
-    db.add(job)
-    await db.commit()
-    await db.refresh(job)
+    try:
+        db.add(job)
+        await db.commit()
+        await db.refresh(job)
+    except IntegrityError:
+        await db.rollback()
+        existing_job = (
+            await db.scalars(
+                select(CalendarSyncJob).where(
+                    CalendarSyncJob.user_id == uid,
+                    CalendarSyncJob.idempotency_key == idempotency_key,
+                )
+            )
+        ).first()
+        if existing_job:
+            job = existing_job
+        else:
+            raise
 
     data = CalendarSyncJobRead(
         job_id=str(job.id),
@@ -505,7 +586,12 @@ async def refresh_calendar(
     current_user: CurrentUserDep,
     db: DbSessionDep,
 ) -> SuccessEnvelope[dict[str, str]]:
-    processed = await process_calendar_sync_jobs(db, limit=20)
+    service = CalendarService(db)
+    conn = await service.get_connection_by_id(current_user.user_id, connection_id)
+    if not conn:
+        raise HTTPException(status_code=404, detail="Không tìm thấy kết nối lịch.")
+
+    processed = await process_calendar_sync_jobs(db, user_id=current_user.user_id, limit=20)
     return SuccessEnvelope(
         data={"status": "refreshed", "jobs_processed": str(processed)},
         meta=build_response_meta(),
@@ -563,11 +649,12 @@ async def retry_sync_job(
     job.attempt_count = 0
     job.next_retry_at = None
     job.last_error_code = None
+    job.lease_expires_at = None
     await db.commit()
     await db.refresh(job)
 
     # Thử xử lý ngay lập tức
-    await process_calendar_sync_jobs(db, limit=5)
+    await process_calendar_sync_jobs(db, user_id=current_user.user_id, limit=5)
     await db.refresh(job)
 
     data = CalendarSyncJobRead(

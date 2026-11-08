@@ -406,6 +406,7 @@ async def create_planning_context(
             query_start=payload.from_at,
             query_end=payload.to_at,
             manual_busy_intervals=payload.manual_busy_intervals,
+            target_task_id=draft.confirmed_task_id if draft else None,
         )
         if ingestion.coverage_state == "degraded":
             raise _error(
@@ -867,6 +868,7 @@ def _reschedule(
         horizon.end_at,
         calendar_context=source.context,
         manual_busy=source.context.manual_busy_intervals,
+        fixed_sessions=source.fixed_sessions,
     )
     tc = TimeConstraint(
         kind="window",
@@ -1135,6 +1137,7 @@ def _concrete_issues(candidate: PlanCandidate, source: PlanningSources) -> list[
         horizon.end_at,
         calendar_context=source.context,
         manual_busy=source.context.manual_busy_intervals,
+        fixed_sessions=source.fixed_sessions,
     )
     sessions = sorted(candidate.sessions, key=lambda item: item.scheduled_start)
     scope = candidate.feasibility.verification_scope

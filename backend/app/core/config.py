@@ -82,6 +82,8 @@ class Settings(BaseSettings):
         "https://www.googleapis.com/auth/calendar.events.readonly",
         "https://www.googleapis.com/auth/calendar",
     ]
+    ENABLE_CALENDAR_SYNC_WORKER: bool = True
+    TESTING: bool = False
 
     # Voice STT (V01 & A21) — chọn sau khảo sát STT tiếng Việt 01/11/2026: Gemini Transcribe smart.
     # Dự phòng khi Backend lỗi/mất mạng nằm ở Mobile (speech_to_text on-device).

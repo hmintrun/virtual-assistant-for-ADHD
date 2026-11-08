@@ -22,6 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.calendar import CalendarConnection, CalendarEventLink
 from app.models.session import Session
+from app.models.step import Step
 from app.schemas.calendar import (
     BusyInterval,
     BusyIntervalSource,
@@ -186,6 +187,8 @@ async def ingest_calendar_sources(
     query_end: datetime,
     manual_busy_intervals: list[ManualBusyInterval] | None = None,
     user_tz_name: str = "Asia/Ho_Chi_Minh",
+    target_task_id: UUID | str | None = None,
+    ignored_session_ids: set[str] | set[UUID] | None = None,
 ) -> CalendarIngestionResult:
     """Thu thập, chuẩn hóa sự kiện và tính toán khoảng bận từ các nguồn Google Calendar."""
     uid = _resolve_uuid(user_id)
@@ -229,22 +232,28 @@ async def ingest_calendar_sources(
             coverage_state="manual_only",
         )
 
-    # 2. Lấy thông tin các session đang active của user đã đồng bộ lên Google Calendar
+    # 2. Lấy thông tin các session đang active của user đã đồng bộ lên Google Calendar kèm task_id (BUG-18: giới hạn khoảng thời gian truy vấn)
     stmt = (
-        select(CalendarEventLink, Session)
+        select(CalendarEventLink, Session, Step.task_id)
         .join(Session, CalendarEventLink.session_id == Session.id)
+        .outerjoin(Step, Session.step_id == Step.id)
         .where(
             CalendarEventLink.user_id == uid,
             CalendarEventLink.is_current.is_(True),
+            Session.scheduled_end >= q_start_utc,
+            Session.scheduled_start <= q_end_utc,
         )
     )
     active_links = (await db.execute(stmt)).all()
     event_to_session: dict[tuple[str, str], Session] = {}
     session_id_to_session: dict[str, Session] = {}
-    for link, sess in active_links:
+    session_id_to_task_id: dict[str, str] = {}
+    for link, sess, task_id in active_links:
         if link.google_calendar_id and link.google_event_id:
             event_to_session[(link.google_calendar_id, link.google_event_id)] = sess
         session_id_to_session[str(sess.id)] = sess
+        if task_id:
+            session_id_to_task_id[str(sess.id)] = str(task_id)
 
     # 3. Duyệt qua từng nguồn Calendar được chọn
     for src in selected_sources:
@@ -299,6 +308,9 @@ async def ingest_calendar_sources(
                             if direct_sess and direct_sess.user_id == uid:
                                 session_id_to_session[proactive_session_id] = direct_sess
                                 matched_session = direct_sess
+                                step = await db.get(Step, direct_sess.step_id)
+                                if step and step.task_id:
+                                    session_id_to_task_id[proactive_session_id] = str(step.task_id)
                         except Exception:
                             pass
                 elif (src.google_calendar_id, normalized.google_event_id) in event_to_session:
@@ -316,8 +328,25 @@ async def ingest_calendar_sources(
                         and abs((ev_end - sess_end).total_seconds()) < 60.0
                     )
                     if is_untouched:
-                        # Bản sao chưa bị kéo dời -> bỏ qua để không tính trùng khoảng bận
-                        continue
+                        # Chỉ bỏ qua nếu session thuộc chính task đang lập lịch lại (để không tự chặn chính nó).
+                        # Session thuộc các Task khác BẮT BUỘC phải giữ lại để không bị xếp đè (Inter-task collision)!
+                        is_own_rescheduled = False
+                        if ignored_session_ids:
+                            sess_id_str = str(matched_session.id)
+                            if sess_id_str in ignored_session_ids or matched_session.id in ignored_session_ids:
+                                is_own_rescheduled = True
+                        if target_task_id and not is_own_rescheduled:
+                            t_id = session_id_to_task_id.get(str(matched_session.id))
+                            if not t_id and getattr(matched_session, "step_id", None):
+                                step = await db.get(Step, matched_session.step_id)
+                                if step and step.task_id:
+                                    t_id = str(step.task_id)
+                                    session_id_to_task_id[str(matched_session.id)] = t_id
+                            if t_id and str(t_id) == str(target_task_id):
+                                is_own_rescheduled = True
+
+                        if is_own_rescheduled:
+                            continue
 
                 event_snapshots.append(normalized)
                 clipped = clip_busy_interval(
