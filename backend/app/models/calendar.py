@@ -147,6 +147,7 @@ class CalendarAuthorization(OwnedMixin, RecordMixin, Base):
     __tablename__ = "calendar_authorizations"
     state_hash: Mapped[str] = mapped_column(String(64), unique=True)
     redirect_uri: Mapped[str] = mapped_column(Text)
+    return_target: Mapped[str | None] = mapped_column(Text)
     credential_ref: Mapped[str | None] = mapped_column(Text)
     expires_at: Mapped[datetime] = mapped_column(UTCDateTime())
     consumed_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
