@@ -1,6 +1,6 @@
 # Schema/DTO cho bản chụp ngữ cảnh lập lịch và nguồn lịch bận Google/Manual (CalendarContext - Dòng 61, 62)
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import ConfigDict, Field, model_validator
 
@@ -117,3 +117,155 @@ class CalendarContext(StrictSchema):
     manual_busy_intervals: list[ManualBusyInterval] = Field(default_factory=list)
     excluded_sources: list[ExcludedCalendarSource] = Field(default_factory=list)
     selected_calendar_sources: list[CalendarSource] = Field(default_factory=list)
+
+
+class OAuthAuthUrlResponse(StrictSchema):
+    """URL dẫn tới màn hình đồng ý OAuth 2.0 của Google."""
+
+    auth_url: str
+
+
+class CalendarAuthorizationRequest(StrictSchema):
+    """Yêu cầu khởi tạo luồng kết nối Google Calendar từ thiết bị."""
+
+    device_id: str = "default_device"
+    return_target: str | None = None
+
+
+class CalendarAuthorizationResponse(StrictSchema):
+    """Kết quả tạo authorization intent."""
+
+    authorization_id: str
+    auth_url: str
+    expires_at: datetime
+
+
+class CalendarConnectionRead(StrictSchema):
+    """Thông tin hiển thị kết nối tài khoản lịch O23."""
+
+    connection_id: str
+    provider: str = "google"
+    account_ref: str
+    connection_state: str
+    read_calendar_ids: list[str] = Field(default_factory=list)
+    write_calendar_id: str | None = None
+    granted_scopes: list[str] = Field(default_factory=list)
+    last_successful_sync_at: datetime | None = None
+
+
+class CalendarSummaryItem(StrictSchema):
+    """Tóm tắt một lịch cụ thể của người dùng trong Google Calendar."""
+
+    id: str
+    summary: str
+    description: str | None = None
+    primary: bool = False
+    access_role: str = "reader"
+    background_color: str | None = None
+    selected_for_read: bool = False
+    selected_for_write: bool = False
+
+
+class CalendarListResponse(StrictSchema):
+    """Danh sách các lịch mà người dùng sở hữu hoặc có quyền truy cập."""
+
+    connection_id: str
+    account_ref: str
+    items: list[CalendarSummaryItem] = Field(default_factory=list)
+
+
+class CalendarSelectionUpdateRequest(StrictSchema):
+    """Yêu cầu cập nhật các lịch được chọn để đọc giờ bận và ghi session."""
+
+    read_calendar_ids: list[str] = Field(default_factory=list)
+    write_calendar_id: str | None = None
+
+
+class CalendarConfigurationPreviewRequest(StrictSchema):
+    """Yêu cầu xem trước tác động cấu hình lịch đọc/ghi."""
+
+    expected_connection_revision: int | None = None
+    read_calendar_ids: list[str] = Field(default_factory=list)
+    write_calendar_id: str | None = None
+    existing_event_action: str | None = None  # e.g., 'provision_new', 'keep', 'move'
+
+
+class CalendarConfigurationPreviewResponse(StrictSchema):
+    """Bản xem trước cấu hình lịch trước khi áp dụng chính thức."""
+
+    preview_id: str
+    connection_id: str
+    read_calendar_ids: list[str] = Field(default_factory=list)
+    write_calendar_id: str | None = None
+    existing_event_action: str | None = None
+    status: str = "pending"
+
+
+class CalendarConfigurationConfirmRequest(StrictSchema):
+    """Yêu cầu xác nhận áp dụng cấu hình lịch từ bản xem trước."""
+
+    expected_preview_revision: int | None = 1
+
+
+class CalendarDisconnectRequest(StrictSchema):
+    """Yêu cầu ngắt kết nối Calendar."""
+
+    expected_connection_revision: int | None = None
+
+
+class CalendarRefreshRequest(StrictSchema):
+    """Yêu cầu làm mới dữ liệu nguồn Calendar."""
+
+    from_at: datetime | None = None
+    to_at: datetime | None = None
+    expected_connection_revision: int | None = None
+
+
+class CalendarSyncJobRead(StrictSchema):
+    """Thông tin trạng thái công việc đồng bộ lịch."""
+
+    job_id: str
+    connection_id: str
+    target_kind: str
+    target_ref: str
+    operation: str
+    job_state: str
+    attempt_count: int = 0
+    next_retry_at: datetime | None = None
+    last_error_code: str | None = None
+
+
+class CalendarSyncJobRetryRequest(StrictSchema):
+    """Yêu cầu thử lại một sync job bị lỗi."""
+
+    expected_job_revision: int | None = None
+
+
+class EventChangePreviewRequest(StrictSchema):
+    """Yêu cầu tạo bản xem trước thay đổi sự kiện trên Google Calendar (Dòng 55)."""
+
+    operation: str
+    connection_id: str
+    google_calendar_id: str
+    payload: dict[str, Any] | None = None
+    recurrence_scope: str | None = None
+    google_event_id: str | None = None
+    expected_google_etag: str | None = None
+
+
+class EventChangePreviewResponse(StrictSchema):
+    """Bản xem trước thay đổi sự kiện (Dòng 55)."""
+
+    preview_id: str
+    connection_id: str
+    kind: str = "event_change"
+    operation: str
+    status: str = "pending"
+    payload: dict[str, Any]
+
+
+class EventChangeConfirmRequest(StrictSchema):
+    """Yêu cầu xác nhận thay đổi sự kiện từ preview (Dòng 56)."""
+
+    expected_preview_revision: int | None = 1
+    source_revisions: dict[str, Any] | None = None

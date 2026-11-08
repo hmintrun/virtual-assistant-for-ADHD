@@ -82,6 +82,7 @@ from app.services.ai_service import ai_service
 from app.services.scheduler_engine import (
     calculate_buffered_work,
     compute_effective_free_intervals,
+    ingest_calendar_sources,
     schedule_candidate_sessions,
     validate_planning_prerequisites,
 )
@@ -398,10 +399,20 @@ async def create_planning_context(
             raise _invalid(
                 "Cần lý do và thời điểm user đã xác nhận loại nguồn lịch.", "excluded_sources"
             )
-        if selected - excluded:
+        ingestion = await ingest_calendar_sources(
+            db=db,
+            user_id=user_id,
+            selected_sources=payload.selected_calendar_sources,
+            excluded_sources=payload.excluded_sources,
+            query_start=payload.from_at,
+            query_end=payload.to_at,
+            manual_busy_intervals=payload.manual_busy_intervals,
+            target_task_id=draft.confirmed_task_id if draft else None,
+        )
+        if ingestion.coverage_state == "degraded":
             raise _error(
                 "CALENDAR_UNAVAILABLE",
-                "Chưa ghép bộ đọc Google Calendar; không thể coi các lịch đã chọn là trống.",
+                "Không thể đọc một hoặc nhiều nguồn lịch đã chọn. Vui lòng thử lại hoặc xác nhận loại trừ nguồn lỗi.",
                 503,
                 "retry_or_review_calendar_sources",
             )
@@ -418,31 +429,13 @@ async def create_planning_context(
                 item.google_calendar_id for item in payload.selected_calendar_sources
             ],
             selected_calendar_sources=payload.selected_calendar_sources,
-            busy_intervals=[
-                BusyInterval(
-                    start_at=item.start_at,
-                    end_at=item.end_at,
-                    source=BusyIntervalSource(
-                        kind="manual", client_interval_id=item.client_interval_id
-                    ),
-                )
-                for item in payload.manual_busy_intervals
-            ],
+            busy_intervals=ingestion.busy_intervals,
+            event_snapshots=ingestion.event_snapshots,
             manual_busy_intervals=payload.manual_busy_intervals,
             excluded_sources=payload.excluded_sources,
+            calendar_errors=ingestion.calendar_errors,
             sync_state="valid",
-            coverage_state="manual_fallback" if excluded else "manual_only",
-            calendar_errors=[
-                CalendarError(
-                    connection_id=item.connection_id,
-                    google_calendar_id=item.google_calendar_id,
-                    error_code="CALENDAR_READ_NOT_IMPLEMENTED",
-                    retryable=True,
-                    requires_reconnect=False,
-                    observed_at=now,
-                )
-                for item in payload.excluded_sources
-            ],
+            coverage_state=ingestion.coverage_state,
         )
         if draft is not None:
             overlaps = (
@@ -927,6 +920,7 @@ def _reschedule(
         horizon.end_at,
         calendar_context=source.context,
         manual_busy=source.context.manual_busy_intervals,
+        fixed_sessions=source.fixed_sessions,
     )
     tc = TimeConstraint(
         kind="window",
@@ -1195,6 +1189,7 @@ def _concrete_issues(candidate: PlanCandidate, source: PlanningSources) -> list[
         horizon.end_at,
         calendar_context=source.context,
         manual_busy=source.context.manual_busy_intervals,
+        fixed_sessions=source.fixed_sessions,
     )
     sessions = sorted(candidate.sessions, key=lambda item: item.scheduled_start)
     scope = candidate.feasibility.verification_scope
@@ -1568,8 +1563,77 @@ async def patch_candidate(
 async def _enqueue_calendar(
     db: AsyncSession, owner: UUID, sessions: list[SessionRow], version: int
 ) -> str:
-    # A22.1 tích hợp sau: không tạo liên kết/event/job giả để báo đã đồng bộ.
-    return "not_integrated"
+    """Tạo CalendarEventLink và CalendarSyncJob trong cùng transaction khi chốt lịch UF2."""
+    stmt = (
+        select(CalendarConnection)
+        .where(
+            CalendarConnection.user_id == owner,
+            CalendarConnection.connection_state == "connected",
+            CalendarConnection.write_calendar_id.is_not(None),
+        )
+        .order_by(CalendarConnection.created_at.desc())
+        .limit(1)
+    )
+    conn = (await db.execute(stmt)).scalar_one_or_none()
+    if not conn or not conn.write_calendar_id:
+        return "not_integrated"
+
+    for session in sessions:
+        event_id = f"session{session.id.hex}"
+        link = CalendarEventLink(
+            id=uuid4(),
+            user_id=owner,
+            session_id=session.id,
+            connection_id=conn.id,
+            google_calendar_id=conn.write_calendar_id,
+            google_event_id=event_id,
+            google_etag=None,
+            desired_schedule_revision=version,
+            synced_schedule_revision=None,
+            sync_state="pending",
+            is_current=True,
+        )
+        db.add(link)
+
+        payload_snapshot = {
+            "id": event_id,
+            "summary": "ProPlan VA Focus Session",
+            "start": {
+                "dateTime": session.scheduled_start.isoformat(),
+                "timeZone": "Asia/Ho_Chi_Minh",
+            },
+            "end": {
+                "dateTime": session.scheduled_end.isoformat(),
+                "timeZone": "Asia/Ho_Chi_Minh",
+            },
+            "transparency": "opaque",
+            "reminders": {"useDefault": False, "overrides": []},
+            "extendedProperties": {
+                "private": {
+                    "proactive_session_id": str(session.id),
+                    "proactive_schedule_revision": str(version),
+                }
+            },
+        }
+
+        job = CalendarSyncJob(
+            id=uuid4(),
+            user_id=owner,
+            connection_id=conn.id,
+            event_link_id=link.id,
+            target_kind="session_event",
+            target_ref=str(session.id),
+            operation="create",
+            target_schedule_revision=version,
+            expected_google_etag=None,
+            payload_snapshot=payload_snapshot,
+            idempotency_key=f"sync_session:{session.id}:v{version}:create",
+            job_state="queued",
+            attempt_count=0,
+        )
+        db.add(job)
+
+    return "pending"
 
 
 def _confirmed_payload(saved: dict[str, Any]) -> dict[str, Any]:
