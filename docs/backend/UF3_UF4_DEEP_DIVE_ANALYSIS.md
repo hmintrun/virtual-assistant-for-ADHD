@@ -556,19 +556,56 @@ erDiagram
 
 ## 9. MA TRẬN BÀI TOÁN THẺ 04 & PHÂN CÔNG TRÁCH NHIỆM
 
-| Mã Task | Tên bài toán theo Thẻ 04 | Role phụ trách | Thành viên | File / Vị trí chịu trách nhiệm | Trạng thái hiện tại | Công việc cụ thể cần thực hiện |
-| :---: | :--- | :---: | :---: | :--- | :---: | :--- |
-| **`A11`** | Đặt lịch lời nhắc trước phiên | Voice / Mobile | `kai` / `khang` | Mobile: `services/reminder_service.dart`<br>BE: `models/system.py` (`Reminder`) | Chưa ghép nối | Lập lịch local notification tại các mốc 15p, 10p, 5p; gọi API Dòng 22/23. |
-| **`A12.0`**| Sinh Micro-task 2 phút | AI / Backend | `luan` / `vqh` | BE: `services/ai_service.py`<br>`services/plan_service.py` | **Đã có code lõi** | AI sinh câu hành động 2p khi tạo Candidate; copy sang `sessions.micro_task_text`. |
-| **`A12.1`**| Kiểm tra điều kiện bắt đầu phiên | Algorithm Lead | `vqh` (Quốc Hưng) | BE: `services/planning/validation.py`<br>`services/scheduler_engine.py` | **Chưa viết hàm** | Viết hàm kiểm tra toàn khoảng `[start, start+duration]` với giờ rảnh, calendar và gap 15p. |
-| **`A12.2`**| Tạo SessionRun & Điều phối phiên | Backend Lead | `vqh` (Quốc Hưng) | BE: `api/v1/focus.py`<br>`services/session_run_service.py` | **Placeholder** | Viết router `/sessions/{id}/start`, `/runs/{id}/end`; tạo Pydantic schemas execution. |
-| **`A12.3`**| Bật Focus Mode & DND an toàn | Voice / Mobile | `kai` / `khang` | Mobile: `services/dnd_service.dart`<br>`packages/flutter_dnd/` | **Placeholder** | Sửa `pubspec.yaml` trỏ local patch; xin quyền DND; gọi `wakelock_plus` và `flutter_dnd`. |
-| **`A13`** | Thu âm thô UF4 (Raw Audio) | Voice / Mobile | `kai` / `khang` | Mobile: `services/audio_recorder_service.dart`<br>BE: `api/v1/thoughts.py` | **Placeholder** | Viết service thu âm `.m4a` local, logic retry $\le 3$ lần, text fallback; router thoughts. |
-| **`A21`** | Chuyển âm thanh Thought sang chữ | Voice / STT | `kai` | BE: `api/v1/voice.py`<br>`services/voice_service.py` | **Đã có code thật** | Đã có logic `check_thought()` chặn HTTP 409 khi run chưa dừng; cần nối UI Mobile gọi lên. |
-| **`I04`**  | Tích hợp luồng Focus & Đồng bộ | Backend / Mobile | `vqh` / `khang` | Toàn bộ luồng kết nối UF3 | **Chưa ghép nối** | Kết nối Mobile `FocusScreen` với Backend API Dòng 16–21. |
-| **`A18`** | Gửi lại lệnh an toàn (Idempotency)| Backend Lead | `vqh` (Quốc Hưng) | BE: `services/command_service.py` | **Đã có code lõi** | Áp dụng replay lệnh cho các endpoint ghi `/start`, `/end`, `/thoughts`. |
-| **`M01`**  | Giao diện 1-Step UI & Timer | Mobile Lead | `khang` | Mobile: `screens/focus_screen.dart`<br>`widgets/countdown_timer_widget.dart` | **Placeholder** | Dựng màn hình tập trung W3C COGA $\le 3$ phần tử, đồng hồ đếm ngược, nút PTT. |
-| **`K07-12`**| Bộ kiểm chứng UF3 & UF4 | QA Lead | `thành` | Test suites: `tests/integration/` | **Chưa viết** | Viết kịch bản test: nhắc 15p, chặn 2 run live, quá hạn 15p, retry thu âm 3 lần, fallback. |
+*Cập nhật ngày 07/11/2026 sau khi hoàn tất tích hợp W01–W08 Backend (commits `05e4ff0`, `d927a14`, `0c51a59`). Đối chiếu trực tiếp với Thẻ 04 (`t.dk4juq71zmx2`), `docs/week1_detailed_plan.md` và `docs/week2_detailed_plan.md`.*
+
+### 9.1. Bảng Đối Chiếu Chi Tiết & Trạng Thái Thực Thi Toàn Bộ Tasks Thẻ 04 (Chuẩn Tuần 1)
+
+| Mã Task | Role | Đầu ra cần bàn giao | Trạng thái kỹ thuật & Bằng chứng thực tế |
+|:---|:---|:---|:---|
+| **C01 / P01** | Backend Lead (`vqh`) | Chuẩn hóa 3 tầng Task–Step–Session, nguồn giờ rảnh riêng, optimistic revision | **[HOÀN THÀNH 100%]** Đã loại bỏ hoàn toàn PlanningPart; nối nguồn giờ riêng DraftAvailability; 41/41 test SQLite đạt. |
+| **P02** | Database (`tn`) | SQLAlchemy 2.0 ORM, migrations core, snapshot giờ và tương thích dữ liệu cũ | **[HOÀN THÀNH 100%]** 11 models ORM hoàn chỉnh; 3 migration scripts (20261030_01, 20261103_01, 20261107_02); test độ bền DB đạt. |
+| **P03** | Backend Lead (`vqh`) | Hạ tầng FastAPI, Exception Handlers, Uvicorn, Lockfile | **[HOÀN THÀNH 100%]** Khởi động localhost ổn định; Swagger/OpenAPI đầy đủ; cấu hình CORS và middleware. |
+| **V01 / P04** | Voice Lead (`kai`) | Audio do user gửi lên → STT bóc chữ / báo lỗi rõ ràng | **[HOÀN THÀNH 100%]** Nối Groq Whisper và Gemini 3.5 Transcribe; bóc chữ chuẩn xác tiếng Việt; có fallback khi mạng lỗi. |
+| **A01** | AI Lead (`mt`) | Trích xuất nội dung, mục tiêu, phạm vi công việc từ text/voice | **[HOÀN THÀNH 100%]** Prompt Gemini Flash trích xuất chuẩn xác; Pydantic v2 schema validation chặt chẽ. |
+| **A02.1** | AI Lead (`mt`) | Trích xuất thời gian, deadline, giờ rảnh; gộp câu hỏi làm rõ 1 vòng | **[HOÀN THÀNH 100%]** Tự động phát hiện thông tin thiếu, gom toàn bộ vào clarification_questions (Single-Round Clarification). |
+| **A02.2** | Algorithm (`vqh`, `qt`) | Kiểm tra tính khả thi đầu vào, chặn ảo giác thời gian của AI | **[HOÀN THÀNH 100%]** Hàm validate_planning_prerequisites kiểm tra deadline không trôi về quá khứ và có giờ rảnh. |
+| **A03 / I01** | Backend Lead (`vqh`) | Lưu nháp Draft, merge bổ sung, confirm chốt đầu vào UF1 | **[HOÀN THÀNH 100%]** Endpoint /tasks/draft và /confirm-summary hoạt động tốt; lưu bền vững. |
+| **A04** | AI Lead (`mt`) | AI phân rã Task → Steps có thứ tự, đầu ra; giữ unexpanded_scope | **[HOÀN THÀNH 100%]** Prompt bẻ nhỏ công việc chuẩn; bảo toàn phạm vi chưa chia hết khi công việc quá lớn. |
+| **A05** | Algorithm (`vqh`, `qt`) | Hệ số đệm cá nhân hóa (k_buffer = 1.2) | **[HOÀN THÀNH 100%]** Nhân buffer vào thời lượng làm việc chính; tuyệt đối không nhân vào thời gian nghỉ hoặc micro-task. |
+| **A06** | Algorithm (`vqh`, `qt`) | Cắt khoảng rảnh trống (T_free) và xếp các Sessions work/rest | **[HOÀN THÀNH 100%]** Thuật toán Two-pointer interval subtraction; giữ khoảng nghỉ tối thiểu 15 phút (gap 900s). |
+| **A07** | Algorithm (`qt`, `vqh`) | Ưu tiên lịch ổn định đa nhiệm 4-tuple, không dời Task đã chốt | **[HOÀN THÀNH 100%]** Hàm compute_task_priority_key (deadline, importance, start_at, stable_tie_breaker) đạt 69+ assertions test. |
+| **A08** | Algorithm (`vqh`, `qt`) | Tính toán thiếu hụt thời gian trước Deadline (Delta T_deficit) | **[HOÀN THÀNH 100%]** Công thức tính Delta T = T_req - T_free; báo lỗi PLAN_NOT_CONFIRMABLE để user nới deadline. |
+| **A09** | Algorithm (`vqh`, `qt`) | Chiến lược Rolling Horizon 14 ngày (2–3 tuần gần nhất) | **[HOÀN THÀNH 100%]** Chỉ xếp lịch chi tiết các phiên cho 14 ngày tới, giữ nguyên tổng thể dự án. |
+| **A10** | Algorithm (`vqh`, `qt`) | Đóng gói Candidate và báo cáo khả thi phương án chia việc | **[HOÀN THÀNH 100%]** Endpoint POST /candidates và GET /candidates/{id} trả về đầy đủ sessions và cảnh báo thiếu giờ. |
+| **P07 / I02** | Backend Lead (`vqh`) | Điều phối nguồn Draft → Context → Candidate | **[HOÀN THÀNH 100%]** Khóa cứng nguồn Draft và Context; cho phép nhập bước thủ công khi AI gặp sự cố. |
+| **P07 / A18 (UF2)**| Backend Lead (`vqh`) | Confirm UF2 nguyên tử, Optimistic Locking revision, receipt chống trùng | **[HOÀN THÀNH 100%]** Lưu Task, Steps, Sessions trong 1 transaction duy nhất; rollback sạch nếu lỗi. |
+| **A11** | Router (`kc`) / Voice (`kai`) | Đặt lịch lời nhắc trước phiên 15p, 10p, 5p ([900, 600, 300]) | **[BE ĐẠT 100%]** DTO & validation trong focus.py, service/device_service.py. Mobile lập lịch local notification khi Doze mode. |
+| **A12.0** | AI Lead (`mt`) | Sinh Micro-task 2 phút khởi động (Launchpad) | **[HOÀN THÀNH 100%]** AI sinh câu hành động 2p khi tạo Candidate; lưu cột sessions.micro_task_text; không cộng duration. |
+| **A12.1** | Algorithm (`vqh`) | Kiểm tra điều kiện bắt đầu phiên (Start Window Feasibility) | **[BE ĐẠT 100%]** Test W04 pass: kiểm start window, grace period 15p, gap 15p, chặn lấn lịch; trả 409 SESSION_MISSED nếu quá 15p. |
+| **A12.2** | Router (`kc`) / Service (`vqh`) | Router focus.py, run_service.py: quản lý SessionRun | **[BE ĐẠT 100%]** Commit 0c51a59, d927a14; ràng buộc uq_user_live_run; đảm bảo 1 live Run/user; chặn 2 Run đồng thời. |
+| **A12.3** | Voice / Mobile (`kai`) | Bật Focus Mode, DND an toàn và Wakelock | **[BE ĐẠT 100%]** API sẵn sàng; lazy timeout 5p tự dọn Run & nhả DND. Mobile đang ghép flutter_dnd và wakelock_plus. |
+| **A13** | Router (`kc`) / Service (`vqh`) | Thu âm thô UF4 (Raw Audio PTT .m4a), thoughts.py, thought_service.py | **[BE ĐẠT 100%]** Lưu metadata .m4a thô, Undo 5s, bảo vệ cấm gọi STT/LLM trong phiên. Mobile ghép recorder PTT, retry 3 lần, text fallback. |
+| **A21** | Voice (`kai`, `kc`) | Chuyển âm thanh Thought sang chữ sau phiên (STT) | **[BE ĐẠT 100%]** check_thought() chặn 409 khi phiên đang chạy; cho phép bóc chữ khi đã kết thúc để tạo Draft UF1. |
+| **I04** | Backend / Mobile | Tích hợp luồng Focus & Đồng bộ | **[BE SẴN SÀNG 100%]** 97 unit/integration tests pass. Mobile đang ghép FocusScreen với API Dòng 16–21. |
+| **A18 (UF3/4)** | Backend Lead (`vqh`) | Idempotency replay lệnh qua CommandReceipt cho start/end/thought | **[HOÀN THÀNH 100%]** Bảng command_receipts lưu kết quả, replay an toàn khi rớt mạng hoặc double-tap. |
+| **Check-in min**| Router (`kc`) / Service (`vqh`) | Endpoint PUT /check-ins/{id}/response cho Chọn nghỉ / Báo bận | **[HOÀN THÀNH 100%]** Lazy timeout 5p tự dọn Run sang no_response, nhả DND an toàn, không suy hoàn thành phiên. |
+| **M01** | Mobile Lead (`tan`, `qt`) | Giao diện 1-Step UI & Timer | **[ĐANG GHÉP MOBILE]** Dựng màn hình tập trung W3C COGA <= 3 phần tử, đồng hồ đếm ngược, nút PTT. |
+| **K07-12** | QA Lead (`thành`) | Bộ kiểm chứng UF3 & UF4 | **[BE ĐẠT 100%]** 97 tests pass + 34/34 bước Console E2E W08. QA đang đo máy thật: Doze mode, chuông <= 1s. |
+
+---
+
+### 9.2. Highlight Nhóm Tasks Chưa Hoàn Thành Cần Thực Hiện Tiếp
+
+| Mã Task | Phân nhóm | Role phụ trách | Trạng thái hiện tại | Phần còn lại & Kế hoạch xử lý |
+|:---|:---|:---|:---|:---|
+| **Auth JWT** | Nợ kỹ thuật | Backend Lead (`vqh`) | ⚠️ **[CẦN LÀM NGAY]** `security.py` đang dùng stub `resolve_dev_current_user` | Thay thế bằng JWT Decoder thực tế; tạo endpoint `POST /api/v1/auth/google` xác thực Google ID Token và cấp Access/Refresh Token. |
+| **RAM Cache** | Nợ kỹ thuật | Backend Lead (`vqh`) | ⚠️ **[CẦN LÀM NGAY]** Biến in-memory `_FAKE_DRAFTS_BY_OWNER` trong `draft_service.py` | Dọn sạch biến dict RAM; chuyển 100% sang `PlanningDraftModel` và bảng `command_receipts` trên DB. |
+| **A20** | Nghiên cứu | Algorithm (`vqh`, `qt`) | ⚠️ **[TỒN ĐỌNG — ĐANG HOÃN]** Chưa đủ dữ liệu lâm sàng thực tế | Tạm giữ $k_{\text{buffer}} = 1.2$ làm giả định thiết kế; thu thập dữ liệu pilot khi có người dùng thử nghiệm. |
+| **A22.1 / A22.2** | Tích hợp | Backend Lead (`vqh`) | ⚠️ **[TỒN ĐỌNG — SẮP LÀM]** Hoãn tích hợp thật ở Tuần 2; đã có thiết kế 2 chiều | Triển khai theo lộ trình 4 mốc: C01 (Auth Bridge) $\rightarrow$ C02 (OAuth Fernet & Cal) $\rightarrow$ C03 (Trừ giờ bận) $\rightarrow$ C04 (Outbox Sync Worker). |
+| **UF5 Mở rộng** | Tính năng mới | Voice (`kai`) / Service (`vqh`) | ⏳ **[CHƯA LÀM — TUẦN 3]** Tuần 2 mới có CheckIn tối thiểu bằng nút bấm | Hội thoại Voice Check-in 2 chiều qua `edge-tts`, xử lý 3 chip Skip (`[Hoãn làm sau]`, `[Bỏ phiên]`, `[Bỏ bước]`), SnackBar Undo 5s. |
+| **UF6** | Tính năng mới | Backend Lead (`vqh`) | ⏳ **[CHƯA LÀM — TUẦN 3]** Chưa có logic Adaptive Rescheduling | Tạo endpoint `POST /proposals`; logic lưu `pending_approval` khi tắt app và tịnh tiến giờ thực tế tại thời điểm mở lại app. |
+| **UF7** | Tính năng mới | Backend Lead (`vqh`) | ⏳ **[CHƯA LÀM — TUẦN 3]** Chưa có Worker tính Buffer MA 7–10 phiên | Xây dựng Worker chạy ngầm tính độ lệch $k_{\text{history}}$ và tự động gửi gợi ý điều chỉnh lịch nhẹ nhàng vào cuối tuần. |
+| **PostgreSQL Staging**| Kiểm thử | Database (`tn`) | ⏳ **[CHƯA LÀM — TUẦN 3]** Mới kiểm thử 100% trên SQLite | Thiết lập môi trường PostgreSQL Staging và chạy toàn bộ suite 209+ tests để đảm bảo tính tương thích trước khi release. |
 
 ---
 
