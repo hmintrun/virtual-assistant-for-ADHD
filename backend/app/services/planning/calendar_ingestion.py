@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import logging
+import zoneinfo
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timezone
 from typing import Any
@@ -37,12 +38,13 @@ logger = logging.getLogger(__name__)
 
 
 def parse_event_datetime(
-    dt_payload: dict[str, Any] | None, default_tz: timezone = UTC
+    dt_payload: dict[str, Any] | None,
+    user_tz_name: str = "Asia/Ho_Chi_Minh",
 ) -> datetime | None:
     """Parse đối tượng start hoặc end của Google Calendar API thành UTC datetime.
 
     Hỗ trợ cả dateTime (RFC 3339) và date (sự kiện cả ngày - all-day).
-    Với all-day event, Google trả date='YYYY-MM-DD', quy về 00:00:00 theo default_tz.
+    Với all-day event, Google trả date='YYYY-MM-DD', quy về 00:00:00 theo múi giờ địa phương user_tz_name.
     """
     if not dt_payload:
         return None
@@ -52,7 +54,7 @@ def parse_event_datetime(
         try:
             parsed = datetime.fromisoformat(dt_str)
             if parsed.tzinfo is None:
-                parsed = parsed.replace(tzinfo=default_tz)
+                parsed = parsed.replace(tzinfo=zoneinfo.ZoneInfo(user_tz_name))
             return parsed.astimezone(UTC)
         except Exception as e:
             logger.debug("Failed to parse ISO datetime '%s': %s", dt_str, e)
@@ -62,9 +64,10 @@ def parse_event_datetime(
     if date_str:
         try:
             d = date.fromisoformat(date_str)
-            naive_dt = datetime.combine(d, time.min)
-            localized = naive_dt.replace(tzinfo=default_tz)
-            return localized.astimezone(UTC)
+            user_tz = zoneinfo.ZoneInfo(user_tz_name)
+            # Sự kiện cả ngày bắt đầu lúc 00:00:00 theo múi giờ địa phương của người dùng
+            local_dt = datetime.combine(d, time.min, tzinfo=user_tz)
+            return local_dt.astimezone(UTC)
         except Exception as e:
             logger.debug("Failed to parse all-day date '%s': %s", date_str, e)
             return None
@@ -76,6 +79,7 @@ def normalize_google_event(
     item: dict[str, Any],
     connection_id: str,
     google_calendar_id: str,
+    user_tz_name: str = "Asia/Ho_Chi_Minh",
 ) -> CalendarEvent | None:
     """Chuẩn hóa một item từ Google Calendar API sang CalendarEvent (O26).
 
@@ -96,8 +100,8 @@ def normalize_google_event(
     if not event_id:
         return None
 
-    start_at = parse_event_datetime(item.get("start"))
-    end_at = parse_event_datetime(item.get("end"))
+    start_at = parse_event_datetime(item.get("start"), user_tz_name=user_tz_name)
+    end_at = parse_event_datetime(item.get("end"), user_tz_name=user_tz_name)
 
     if not start_at or not end_at or end_at <= start_at:
         return None
@@ -181,6 +185,7 @@ async def ingest_calendar_sources(
     query_start: datetime,
     query_end: datetime,
     manual_busy_intervals: list[ManualBusyInterval] | None = None,
+    user_tz_name: str = "Asia/Ho_Chi_Minh",
 ) -> CalendarIngestionResult:
     """Thu thập, chuẩn hóa sự kiện và tính toán khoảng bận từ các nguồn Google Calendar."""
     uid = _resolve_uuid(user_id)
@@ -266,7 +271,10 @@ async def ingest_calendar_sources(
             # Chuẩn hóa các sự kiện đọc được
             for raw_ev in raw_events:
                 normalized = normalize_google_event(
-                    raw_ev, src.connection_id, src.google_calendar_id
+                    raw_ev,
+                    src.connection_id,
+                    src.google_calendar_id,
+                    user_tz_name=user_tz_name,
                 )
                 if not normalized:
                     continue

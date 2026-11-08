@@ -38,12 +38,14 @@ async def process_sync_job(
     if not conn or conn.connection_state != "connected":
         job.job_state = "failed"
         job.last_error_code = "CONNECTION_NOT_ACTIVE"
+        job.attempt_count = 5  # Đánh dấu không retry nữa
         await db.commit()
         return "failed"
 
     if not conn.write_calendar_id:
         job.job_state = "failed"
         job.last_error_code = "NO_WRITE_CALENDAR"
+        job.attempt_count = 5  # Đánh dấu không retry nữa
         await db.commit()
         return "failed"
 
@@ -54,6 +56,7 @@ async def process_sync_job(
         logger.warning("Token acquisition failed for job %s: %s", job.id, exc)
         job.job_state = "failed"
         job.last_error_code = "AUTH_FAILED"
+        job.attempt_count = 5
         await db.commit()
         return "failed"
 
@@ -168,7 +171,7 @@ async def process_calendar_sync_jobs(
     stmt = (
         select(CalendarSyncJob)
         .where(
-            CalendarSyncJob.job_state.in_(["queued", "failed"]),
+            CalendarSyncJob.job_state == "queued",
             CalendarSyncJob.attempt_count < 5,
             or_(
                 CalendarSyncJob.next_retry_at.is_(None),

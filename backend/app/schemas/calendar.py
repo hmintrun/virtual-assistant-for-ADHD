@@ -1,6 +1,6 @@
 # Schema/DTO cho bản chụp ngữ cảnh lập lịch và nguồn lịch bận Google/Manual (CalendarContext - Dòng 61, 62)
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import ConfigDict, Field, model_validator
 
@@ -239,3 +239,33 @@ class CalendarSyncJobRetryRequest(StrictSchema):
     """Yêu cầu thử lại một sync job bị lỗi."""
 
     expected_job_revision: int | None = None
+
+
+class EventChangePreviewRequest(StrictSchema):
+    """Yêu cầu tạo bản xem trước thay đổi sự kiện trên Google Calendar (Dòng 55)."""
+
+    operation: str
+    connection_id: str
+    google_calendar_id: str
+    payload: dict[str, Any] | None = None
+    recurrence_scope: str | None = None
+    google_event_id: str | None = None
+    expected_google_etag: str | None = None
+
+
+class EventChangePreviewResponse(StrictSchema):
+    """Bản xem trước thay đổi sự kiện (Dòng 55)."""
+
+    preview_id: str
+    connection_id: str
+    kind: str = "event_change"
+    operation: str
+    status: str = "pending"
+    payload: dict[str, Any]
+
+
+class EventChangeConfirmRequest(StrictSchema):
+    """Yêu cầu xác nhận thay đổi sự kiện từ preview (Dòng 56)."""
+
+    expected_preview_revision: int | None = 1
+    source_revisions: dict[str, Any] | None = None

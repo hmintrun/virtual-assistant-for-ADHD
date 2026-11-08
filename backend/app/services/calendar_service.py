@@ -121,6 +121,7 @@ class CalendarService:
             user_id=uid,
             state_hash=state_hash,
             redirect_uri=redirect_uri or "",
+            return_target=return_target,
             expires_at=expires_at,
         )
         self.db.add(auth_intent)
@@ -143,7 +144,7 @@ class CalendarService:
         code: str,
         state: str,
         redirect_uri: str | None = None,
-    ) -> CalendarConnection:
+    ) -> tuple[CalendarConnection, str | None]:
         """Xác thực mã callback từ Google và tạo hoặc cập nhật CalendarConnection với Fernet encryption."""
         state_hash = _hash_state(state)
         now_utc = datetime.now(timezone.utc)
@@ -236,10 +237,11 @@ class CalendarService:
         conn.last_successful_sync_at = now_utc
 
         # Tiêu thụ authorization
+        return_target = auth_intent.return_target
         auth_intent.consumed_at = now_utc
         await self.db.commit()
         await self.db.refresh(conn)
-        return conn
+        return conn, return_target
 
     async def get_connections(self, user_id: str | UUID) -> list[CalendarConnectionRead]:
         """Lấy danh sách các kết nối Calendar của người dùng."""

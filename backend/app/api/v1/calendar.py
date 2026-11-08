@@ -18,9 +18,10 @@ from typing import Annotated, Any
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Query, status
+from fastapi.responses import RedirectResponse
 
 from app.api.deps import CurrentUserDep, DbSessionDep
-from app.models.calendar import CalendarSyncJob
+from app.models.calendar import CalendarPreview, CalendarSyncJob
 from app.schemas.calendar import (
     CalendarAuthorizationRequest,
     CalendarAuthorizationResponse,
@@ -28,17 +29,22 @@ from app.schemas.calendar import (
     CalendarConfigurationPreviewRequest,
     CalendarConfigurationPreviewResponse,
     CalendarConnectionRead,
+    CalendarEvent,
     CalendarListResponse,
     CalendarRefreshRequest,
     CalendarSelectionUpdateRequest,
     CalendarSyncJobRead,
     CalendarSyncJobRetryRequest,
+    EventChangeConfirmRequest,
+    EventChangePreviewRequest,
+    EventChangePreviewResponse,
     OAuthAuthUrlResponse,
 )
 from app.schemas.common import SuccessEnvelope, build_response_meta
 from app.services.calendar_service import CalendarService, _resolve_uuid
 from app.services.calendar_sync_worker import process_calendar_sync_jobs
 from app.services.google_calendar_client import CalendarAuthError, CalendarClientError
+from app.services.planning.calendar_ingestion import normalize_google_event
 
 router = APIRouter(prefix="/calendar", tags=["calendar"])
 
@@ -90,19 +96,19 @@ async def get_authorization_url(
 # 46 | GET /api/v1/calendar/oauth/callback
 @router.get(
     "/oauth/callback",
-    response_model=SuccessEnvelope[CalendarConnectionRead],
-    summary="Tiếp nhận Authorization Code từ Google và hoàn tất kết nối",
+    summary="Tiếp nhận Authorization Code từ Google và redirect về mobile app",
+    response_class=RedirectResponse,
 )
 async def oauth_callback(
     code: Annotated[str, Query(min_length=1, description="Authorization code do Google cấp")],
     state: Annotated[str, Query(min_length=1, description="State token bảo vệ chống CSRF")],
     db: DbSessionDep,
     current_user: CurrentUserDep | None = None,
-) -> SuccessEnvelope[CalendarConnectionRead]:
+) -> RedirectResponse:
     service = CalendarService(db)
     user_id = current_user.user_id if current_user else None
     try:
-        conn = await service.handle_oauth_callback(
+        conn, return_target = await service.handle_oauth_callback(
             user_id=user_id,
             code=code,
             state=state,
@@ -112,31 +118,22 @@ async def oauth_callback(
     except CalendarClientError as exc:
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=exc.message)
 
-    data = CalendarConnectionRead(
-        connection_id=str(conn.id),
-        provider=conn.provider,
-        account_ref=conn.account_ref,
-        connection_state=conn.connection_state,
-        read_calendar_ids=conn.read_calendar_ids or [],
-        write_calendar_id=conn.write_calendar_id,
-        granted_scopes=conn.granted_scopes or [],
-        last_successful_sync_at=conn.last_successful_sync_at,
-    )
-    return SuccessEnvelope(data=data, meta=build_response_meta())
+    target_url = return_target or f"proplan://calendar/connected?connection_id={conn.id}"
+    return RedirectResponse(url=target_url, status_code=302)
 
 
 # Tương thích ngược: GET /api/v1/calendar/oauth2callback
 @router.get(
     "/oauth2callback",
-    response_model=SuccessEnvelope[CalendarConnectionRead],
     include_in_schema=False,
+    response_class=RedirectResponse,
 )
 async def oauth2_callback_legacy(
     code: Annotated[str, Query(min_length=1)],
     state: Annotated[str, Query(min_length=1)],
     db: DbSessionDep,
     current_user: CurrentUserDep | None = None,
-) -> SuccessEnvelope[CalendarConnectionRead]:
+) -> RedirectResponse:
     return await oauth_callback(code=code, state=state, db=db, current_user=current_user)
 
 
@@ -337,7 +334,7 @@ async def disconnect_connection(
 # 53 | GET /api/v1/calendar/connections/{connection_id}/events
 @router.get(
     "/connections/{connection_id}/events",
-    response_model=SuccessEnvelope[list[dict[str, Any]]],
+    response_model=SuccessEnvelope[list[CalendarEvent]],
     summary="Đọc danh sách sự kiện trong khoảng thời gian từ Google Calendar",
 )
 async def get_connection_events(
@@ -348,7 +345,7 @@ async def get_connection_events(
     from_at: Annotated[datetime | None, Query(alias="from", description="Thời điểm bắt đầu")] = None,
     to_at: Annotated[datetime | None, Query(alias="to", description="Thời điểm kết thúc")] = None,
     limit: Annotated[int, Query(ge=1, le=250)] = 50,
-) -> SuccessEnvelope[list[dict[str, Any]]]:
+) -> SuccessEnvelope[list[CalendarEvent]]:
     service = CalendarService(db)
     conn = await service.get_connection_by_id(current_user.user_id, connection_id)
     if not conn:
@@ -356,14 +353,19 @@ async def get_connection_events(
     access_token = await service.get_valid_access_token(conn)
     q_start = from_at or datetime.now(timezone.utc)
     q_end = to_at or (q_start + timedelta(days=14))
-    events = await service.client.list_events(access_token, google_calendar_id, q_start, q_end)
-    return SuccessEnvelope(data=events[:limit], meta=build_response_meta())
+    raw_events = await service.client.list_events(access_token, google_calendar_id, q_start, q_end)
+    events: list[CalendarEvent] = []
+    for raw in raw_events[:limit]:
+        norm = normalize_google_event(raw, str(connection_id), google_calendar_id)
+        if norm:
+            events.append(norm)
+    return SuccessEnvelope(data=events, meta=build_response_meta())
 
 
 # 54 | GET /api/v1/calendar/connections/{connection_id}/events/{event_id}
 @router.get(
     "/connections/{connection_id}/events/{event_id}",
-    response_model=SuccessEnvelope[dict[str, Any]],
+    response_model=SuccessEnvelope[CalendarEvent],
     summary="Lấy chi tiết một sự kiện trên Google Calendar",
 )
 async def get_connection_event_detail(
@@ -372,16 +374,123 @@ async def get_connection_event_detail(
     current_user: CurrentUserDep,
     db: DbSessionDep,
     google_calendar_id: Annotated[str, Query(description="ID của lịch Google chứa sự kiện")],
-) -> SuccessEnvelope[dict[str, Any]]:
+) -> SuccessEnvelope[CalendarEvent]:
     service = CalendarService(db)
     conn = await service.get_connection_by_id(current_user.user_id, connection_id)
     if not conn:
         raise HTTPException(status_code=404, detail="Không tìm thấy kết nối lịch.")
     access_token = await service.get_valid_access_token(conn)
-    event = await service.client.get_event(access_token, google_calendar_id, event_id)
-    if not event:
+    raw = await service.client.get_event(access_token, google_calendar_id, event_id)
+    if not raw:
         raise HTTPException(status_code=404, detail="Không tìm thấy sự kiện trên Google Calendar.")
-    return SuccessEnvelope(data=event, meta=build_response_meta())
+    norm = normalize_google_event(raw, str(connection_id), google_calendar_id)
+    if not norm:
+        raise HTTPException(status_code=404, detail="Sự kiện không hợp lệ hoặc đã bị hủy.")
+    return SuccessEnvelope(data=norm, meta=build_response_meta())
+
+
+# 55 | POST /api/v1/calendar/event-change-previews
+@router.post(
+    "/event-change-previews",
+    response_model=SuccessEnvelope[EventChangePreviewResponse],
+    summary="Tạo bản xem trước thay đổi sự kiện trên Google Calendar",
+)
+async def create_event_change_preview(
+    payload: EventChangePreviewRequest,
+    current_user: CurrentUserDep,
+    db: DbSessionDep,
+) -> SuccessEnvelope[EventChangePreviewResponse]:
+    conn_id = _resolve_uuid(payload.connection_id)
+    service = CalendarService(db)
+    conn = await service.get_connection_by_id(current_user.user_id, conn_id)
+    if not conn:
+        raise HTTPException(status_code=404, detail="Không tìm thấy kết nối lịch tương ứng.")
+
+    preview_payload = {
+        "operation": payload.operation,
+        "connection_id": str(conn_id),
+        "google_calendar_id": payload.google_calendar_id,
+        "payload": payload.payload or {},
+        "recurrence_scope": payload.recurrence_scope,
+        "google_event_id": payload.google_event_id,
+        "expected_google_etag": payload.expected_google_etag,
+    }
+    preview = CalendarPreview(
+        user_id=_resolve_uuid(current_user.user_id),
+        connection_id=conn_id,
+        kind="event_change",
+        payload=preview_payload,
+        status="pending",
+        source_revisions={},
+        expires_at=datetime.now(timezone.utc) + timedelta(minutes=15),
+    )
+    db.add(preview)
+    await db.commit()
+    await db.refresh(preview)
+
+    data = EventChangePreviewResponse(
+        preview_id=str(preview.id),
+        connection_id=str(conn_id),
+        kind="event_change",
+        operation=payload.operation,
+        status="pending",
+        payload=preview_payload,
+    )
+    return SuccessEnvelope(data=data, meta=build_response_meta())
+
+
+# 56 | POST /api/v1/calendar/event-change-previews/{preview_id}/confirm
+@router.post(
+    "/event-change-previews/{preview_id}/confirm",
+    response_model=SuccessEnvelope[CalendarSyncJobRead],
+    summary="Xác nhận và đưa thay đổi sự kiện vào hàng đợi Outbox sync",
+)
+async def confirm_event_change_preview(
+    preview_id: UUID,
+    payload: EventChangeConfirmRequest,
+    current_user: CurrentUserDep,
+    db: DbSessionDep,
+) -> SuccessEnvelope[CalendarSyncJobRead]:
+    preview = await db.get(CalendarPreview, preview_id)
+    if not preview or preview.user_id != _resolve_uuid(current_user.user_id):
+        raise HTTPException(status_code=404, detail="Bản xem trước thay đổi không tồn tại.")
+    if preview.status != "pending":
+        raise HTTPException(status_code=409, detail="Bản xem trước đã được xử lý hoặc hết hạn.")
+
+    preview_data = preview.payload or {}
+    op = preview_data.get("operation", "create")
+    conn_id = _resolve_uuid(preview_data.get("connection_id", preview.connection_id))
+    idempotency_key = f"manual_event_change_{preview.id}"
+
+    job = CalendarSyncJob(
+        user_id=_resolve_uuid(current_user.user_id),
+        connection_id=conn_id,
+        target_kind="event",
+        target_ref=preview_data.get("google_event_id") or str(preview.id),
+        operation=op,
+        idempotency_key=idempotency_key,
+        payload_snapshot=preview_data.get("payload", {}),
+        expected_google_etag=preview_data.get("expected_google_etag"),
+        job_state="queued",
+        attempt_count=0,
+    )
+    preview.status = "confirmed"
+    db.add(job)
+    await db.commit()
+    await db.refresh(job)
+
+    data = CalendarSyncJobRead(
+        job_id=str(job.id),
+        connection_id=str(job.connection_id),
+        target_kind=job.target_kind,
+        target_ref=job.target_ref,
+        operation=job.operation,
+        job_state=job.job_state,
+        attempt_count=job.attempt_count,
+        next_retry_at=job.next_retry_at,
+        last_error_code=job.last_error_code,
+    )
+    return SuccessEnvelope(data=data, meta=build_response_meta())
 
 
 # 57 | POST /api/v1/calendar/connections/{connection_id}/refresh

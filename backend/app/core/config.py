@@ -80,8 +80,7 @@ class Settings(BaseSettings):
     GOOGLE_CALENDAR_DEFAULT_SCOPES: list[str] = [
         "https://www.googleapis.com/auth/calendar.calendarlist.readonly",
         "https://www.googleapis.com/auth/calendar.events.readonly",
-        "https://www.googleapis.com/auth/calendar.app.created",
-        "https://www.googleapis.com/auth/calendar.events",
+        "https://www.googleapis.com/auth/calendar",
     ]
 
     # Voice STT (V01 & A21) — chọn sau khảo sát STT tiếng Việt 01/11/2026: Gemini Transcribe smart.
