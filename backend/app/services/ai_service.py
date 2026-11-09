@@ -155,8 +155,8 @@ class AIService:
     def _get_gemini_client(self) -> genai.Client | None:
         """
         Khởi tạo lười (lazy-init) Gemini Client với retry=1 để lỗi là nhảy tầng tức thì:
-        - Ưu tiên 1: File JSON Service Account (`credentials.json`) trên cổng Agent Platform / Vertex Postpay.
-        - Ưu tiên 2: Chuỗi `GEMINI_API_KEY` trên cổng Gemini Developer API.
+        - Ưu tiên 1: Chuỗi `GEMINI_API_KEY` trên cổng Gemini Developer API.
+        - Dự phòng phụ: File JSON Service Account nếu được cấu hình rõ ràng.
         """
         if self._gemini_client is not None:
             return self._gemini_client
@@ -164,6 +164,13 @@ class AIService:
         http_opts = types.HttpOptions(
             retry_options=types.HttpRetryOptions(attempts=1),
         )
+
+        if self._settings.has_gemini_key:
+            self._gemini_client = genai.Client(
+                api_key=self._settings.GEMINI_API_KEY,
+                http_options=http_opts,
+            )
+            return self._gemini_client
 
         cred_file = self._settings.resolved_google_credentials_file
         if cred_file is not None:
@@ -188,16 +195,9 @@ class AIService:
                     return self._gemini_client
             except Exception as exc:
                 logger.warning(
-                    "Không thể nạp credentials.json (%s), chuyển sang kiểm tra GEMINI_API_KEY.",
+                    "Không thể nạp Service Account (%s).",
                     type(exc).__name__,
                 )
-
-        if self._settings.has_gemini_key:
-            self._gemini_client = genai.Client(
-                api_key=self._settings.GEMINI_API_KEY,
-                http_options=http_opts,
-            )
-            return self._gemini_client
 
         return None
 
@@ -245,7 +245,7 @@ class AIService:
         client = self._get_gemini_client()
         if client is None:
             raise RuntimeError(
-                "Chưa cấu hình chứng thực Gemini (credentials.json hoặc GEMINI_API_KEY)."
+                "Chưa cấu hình chứng thực Gemini (GEMINI_API_KEY)."
             )
 
         target_model = model_name or self._settings.GEMINI_FLASH_MODEL

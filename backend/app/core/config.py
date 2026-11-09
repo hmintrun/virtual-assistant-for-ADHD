@@ -40,7 +40,7 @@ class Settings(BaseSettings):
     GEMINI_API_KEY: str = Field(default="", repr=False)
     GROQ_API_KEY: str = Field(default="", repr=False)
     GOOGLE_CREDENTIALS_PATH: str = Field(
-        default="credentials.json",
+        default="",
         repr=False,
         description=(
             "Đường dẫn tương đối (từ backend/) hoặc tuyệt đối tới file JSON Service Account "
