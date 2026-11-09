@@ -223,6 +223,49 @@ class TestAIService(unittest.TestCase):
         self.assertFalse(result.is_complete)
         self.assertEqual(result.content, "Làm bài tập Giải tích chương 2")
 
+    def test_provider_cleanup_does_not_delay_timeout_fallback(self) -> None:
+        async def run_case(*, gemini_available: bool) -> None:
+            service = AIService(
+                Settings(
+                    AI_TIMEOUT_SECONDS=0.06,
+                    AI_WARM_BACKUP_DELAY_SECONDS=0.02,
+                    AI_GROQ_HEDGE_DELAY_SECONDS=0.03,
+                )
+            )
+            allow_cleanup = asyncio.Event()
+            provider_tasks: set[asyncio.Task[Any]] = set()
+
+            async def stalled_provider(**_: Any) -> None:
+                task = asyncio.current_task()
+                assert task is not None
+                provider_tasks.add(task)
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    await allow_cleanup.wait()
+                    raise
+
+            with (
+                patch.object(service, "_get_gemini_client", return_value=object() if gemini_available else None),
+                patch.object(service, "_get_groq_client", return_value=object()),
+                patch.object(service, "_call_gemini_structured", side_effect=stalled_provider),
+                patch.object(service, "_call_groq_structured", side_effect=stalled_provider),
+            ):
+                request = asyncio.create_task(service.extract_task_intent("Làm báo cáo"))
+                try:
+                    done, _ = await asyncio.wait({request}, timeout=0.5)
+                    self.assertIn(request, done)
+                    self.assertEqual(request.result().generation_tier, "tier_3_rule_based")
+                    self.assertTrue(provider_tasks)
+                    self.assertTrue(all(task.cancelling() and not task.done() for task in provider_tasks))
+                finally:
+                    allow_cleanup.set()
+                    await asyncio.gather(request, *provider_tasks, return_exceptions=True)
+
+        for gemini_available in (True, False):
+            with self.subTest(gemini_available=gemini_available):
+                asyncio.run(run_case(gemini_available=gemini_available))
+
     def test_primary_preferred_over_faster_warm_backup(self) -> None:
         """
         Đảm bảo nếu flash-lite (Warm Backup) trả xong trước trong RAM nhưng 3.8-flash (Primary)
