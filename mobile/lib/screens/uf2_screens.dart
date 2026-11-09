@@ -2,10 +2,13 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
 import '../core/theme.dart';
+import '../models/focus_session_model.dart';
+import '../providers/focus_provider.dart';
 import '../providers/task_provider.dart';
 import '../widgets/melbel_ui.dart';
 import 'home_screen.dart';
 import 'candidate_review_screen.dart';
+import 'focus_screen.dart';
 
 // Helper for opening new screens
 Future<void> _open(BuildContext context, Widget page) => Navigator.push<void>(
@@ -170,7 +173,7 @@ class _DecompositionChoiceScreenState extends State<DecompositionChoiceScreen>
                                   child: Container(
                                     width: 4,
                                     height: 4,
-                                    decoration: const BoxDecoration(
+                                    decoration: BoxDecoration(
                                       color: MelbelColors.kPrimaryContainer,
                                       shape: BoxShape.circle,
                                     ),
@@ -201,7 +204,7 @@ class _DecompositionChoiceScreenState extends State<DecompositionChoiceScreen>
                         Container(
                           width: 6,
                           height: 6,
-                          decoration: const BoxDecoration(
+                          decoration: BoxDecoration(
                             color: MelbelColors.kSecondary,
                             shape: BoxShape.circle,
                           ),
@@ -540,7 +543,7 @@ class _VoiceAssistantModalState extends State<VoiceAssistantModal> {
   @override
   Widget build(BuildContext context) {
     return Container(
-      decoration: const BoxDecoration(
+      decoration: BoxDecoration(
         color: MelbelColors.kSurfaceContainer,
         borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
       ),
@@ -568,7 +571,7 @@ class _VoiceAssistantModalState extends State<VoiceAssistantModal> {
           const SizedBox(height: 12),
 
           // Header Pill
-          const Row(
+          Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
               Row(
@@ -612,7 +615,7 @@ class _VoiceAssistantModalState extends State<VoiceAssistantModal> {
                 color: MelbelColors.kSurfaceContainerHighest,
                 borderRadius: BorderRadius.circular(16),
               ),
-              child: const Column(
+              child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Row(
@@ -656,11 +659,11 @@ class _VoiceAssistantModalState extends State<VoiceAssistantModal> {
               Container(
                 width: 32,
                 height: 32,
-                decoration: const BoxDecoration(
+                decoration: BoxDecoration(
                   color: MelbelColors.kPrimaryContainer,
                   shape: BoxShape.circle,
                 ),
-                child: const Icon(
+                child: Icon(
                   Icons.dark_mode,
                   size: 18,
                   color: MelbelColors.kOnPrimaryContainer,
@@ -674,7 +677,7 @@ class _VoiceAssistantModalState extends State<VoiceAssistantModal> {
                     color: MelbelColors.kSurfaceContainerLow,
                     borderRadius: BorderRadius.circular(16),
                   ),
-                  child: const Column(
+                  child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       Text(
@@ -726,12 +729,12 @@ class _VoiceAssistantModalState extends State<VoiceAssistantModal> {
                   ),
                   child: TextField(
                     controller: _controller,
-                    style: const TextStyle(
+                    style: TextStyle(
                       fontFamily: 'Be Vietnam Pro',
                       fontSize: 14,
                       color: MelbelColors.kOnSurface,
                     ),
-                    decoration: const InputDecoration(
+                    decoration: InputDecoration(
                       hintText: 'Nhập hoặc nói yêu cầu khác...',
                       hintStyle: TextStyle(
                         fontFamily: 'Be Vietnam Pro',
@@ -781,7 +784,7 @@ class _VoiceAssistantModalState extends State<VoiceAssistantModal> {
           Center(
             child: TextButton(
               onPressed: () => Navigator.pop(context),
-              child: const Text(
+              child: Text(
                 'Hủy',
                 style: TextStyle(
                   fontFamily: 'Be Vietnam Pro',
@@ -826,7 +829,7 @@ class FeasibilityScreen extends StatelessWidget {
               ),
               child: Row(
                 children: [
-                  const Icon(
+                  Icon(
                     Icons.assignment,
                     size: 24,
                     color: MelbelColors.kPrimaryContainer,
@@ -838,7 +841,7 @@ class FeasibilityScreen extends StatelessWidget {
                       children: [
                         Text(
                           displayTitle,
-                          style: const TextStyle(
+                          style: TextStyle(
                             fontFamily: 'Be Vietnam Pro',
                             fontSize: 16,
                             fontWeight: FontWeight.w600,
@@ -846,7 +849,7 @@ class FeasibilityScreen extends StatelessWidget {
                           ),
                         ),
                         const SizedBox(height: 4),
-                        const Row(
+                        Row(
                           children: [
                             Icon(
                               Icons.schedule,
@@ -885,7 +888,7 @@ class FeasibilityScreen extends StatelessWidget {
                   Row(
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
-                      const Row(
+                      Row(
                         children: [
                           Icon(
                             Icons.timelapse,
@@ -913,7 +916,7 @@ class FeasibilityScreen extends StatelessWidget {
                           color: MelbelColors.kSurfaceContainer,
                           borderRadius: BorderRadius.circular(999),
                         ),
-                        child: const Text(
+                        child: Text(
                           'Ước tính',
                           style: TextStyle(
                             fontFamily: 'Be Vietnam Pro',
@@ -925,7 +928,7 @@ class FeasibilityScreen extends StatelessWidget {
                     ],
                   ),
                   const SizedBox(height: 12),
-                  const Text(
+                  Text(
                     'Cần 150 phút, hiện chỉ còn 45 phút trước hạn.',
                     style: TextStyle(
                       fontFamily: 'Be Vietnam Pro',
@@ -972,13 +975,13 @@ class FeasibilityScreen extends StatelessWidget {
                           Container(
                             width: 8,
                             height: 8,
-                            decoration: const BoxDecoration(
+                            decoration: BoxDecoration(
                               color: MelbelColors.kSecondary,
                               shape: BoxShape.circle,
                             ),
                           ),
                           const SizedBox(width: 4),
-                          const Text(
+                          Text(
                             'Còn 45p',
                             style: TextStyle(
                               fontFamily: 'Be Vietnam Pro',
@@ -1001,7 +1004,7 @@ class FeasibilityScreen extends StatelessWidget {
                             ),
                           ),
                           const SizedBox(width: 4),
-                          const Text(
+                          Text(
                             'Thiếu 105p',
                             style: TextStyle(
                               fontFamily: 'Be Vietnam Pro',
@@ -1011,7 +1014,7 @@ class FeasibilityScreen extends StatelessWidget {
                           ),
                         ],
                       ),
-                      const Text(
+                      Text(
                         'Tổng cần: 150p',
                         style: TextStyle(
                           fontFamily: 'Be Vietnam Pro',
@@ -1027,7 +1030,7 @@ class FeasibilityScreen extends StatelessWidget {
             const SizedBox(height: 20),
 
             // Trạng thái nhã nhặn
-            const Center(
+            Center(
               child: Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
@@ -1134,11 +1137,11 @@ class _ExtendTimeScreenState extends State<ExtendTimeScreen> {
                   Container(
                     width: 32,
                     height: 32,
-                    decoration: const BoxDecoration(
+                    decoration: BoxDecoration(
                       color: MelbelColors.kSurfaceContainerHigh,
                       shape: BoxShape.circle,
                     ),
-                    child: const Icon(
+                    child: Icon(
                       Icons.edit_calendar,
                       size: 18,
                       color: MelbelColors.kSecondary,
@@ -1149,7 +1152,7 @@ class _ExtendTimeScreenState extends State<ExtendTimeScreen> {
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        const Text(
+                        Text(
                           'CÔNG VIỆC ĐANG THỰC HIỆN',
                           style: TextStyle(
                             fontFamily: 'Be Vietnam Pro',
@@ -1162,7 +1165,7 @@ class _ExtendTimeScreenState extends State<ExtendTimeScreen> {
                         const SizedBox(height: 4),
                         Text(
                           displayTitle,
-                          style: const TextStyle(
+                          style: TextStyle(
                             fontFamily: 'Be Vietnam Pro',
                             fontSize: 17,
                             fontWeight: FontWeight.w500,
@@ -1170,7 +1173,7 @@ class _ExtendTimeScreenState extends State<ExtendTimeScreen> {
                           ),
                         ),
                         const SizedBox(height: 4),
-                        const Text(
+                        Text(
                           'Hạn hiện tại: 17:00 hôm nay',
                           style: TextStyle(
                             fontFamily: 'Be Vietnam Pro',
@@ -1187,7 +1190,7 @@ class _ExtendTimeScreenState extends State<ExtendTimeScreen> {
             const SizedBox(height: 20),
 
             // Selection Title
-            const Row(
+            Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
                 Text(
@@ -1224,7 +1227,7 @@ class _ExtendTimeScreenState extends State<ExtendTimeScreen> {
             const SizedBox(height: 16),
 
             // Reassuring Message
-            const Row(
+            Row(
               children: [
                 Icon(Icons.dark_mode, size: 20, color: MelbelColors.kSecondary),
                 SizedBox(width: 8),
@@ -1255,7 +1258,7 @@ class _ExtendTimeScreenState extends State<ExtendTimeScreen> {
                   Row(
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
-                      const Row(
+                      Row(
                         children: [
                           Icon(
                             Icons.cloud_download,
@@ -1286,7 +1289,7 @@ class _ExtendTimeScreenState extends State<ExtendTimeScreen> {
                         ),
                         child: Text(
                           'Hạn mới: ${current['deadline']}',
-                          style: const TextStyle(
+                          style: TextStyle(
                             fontFamily: 'Be Vietnam Pro',
                             fontSize: 12,
                             fontWeight: FontWeight.w500,
@@ -1302,14 +1305,14 @@ class _ExtendTimeScreenState extends State<ExtendTimeScreen> {
                     children: [
                       Text(
                         current['range']!,
-                        style: const TextStyle(
+                        style: TextStyle(
                           fontFamily: 'Be Vietnam Pro',
                           fontSize: 16,
                           fontWeight: FontWeight.w500,
                           color: MelbelColors.kOnSurface,
                         ),
                       ),
-                      const Text(
+                      Text(
                         'Tổng cộng: 120 phút',
                         style: TextStyle(
                           fontFamily: 'Be Vietnam Pro',
@@ -1383,7 +1386,7 @@ class _ExtendTimeScreenState extends State<ExtendTimeScreen> {
                   const SizedBox(height: 10),
                   Text(
                     current['desc']!,
-                    style: const TextStyle(
+                    style: TextStyle(
                       fontFamily: 'Be Vietnam Pro',
                       fontSize: 13,
                       color: MelbelColors.kOutline,
@@ -1507,7 +1510,7 @@ class UnconfirmedPlanScreen extends StatelessWidget {
                 color: MelbelColors.kSurfaceContainerHigh,
                 borderRadius: BorderRadius.circular(12),
               ),
-              child: const Row(
+              child: Row(
                 children: [
                   Icon(
                     Icons.shield_outlined,
@@ -1549,13 +1552,13 @@ class UnconfirmedPlanScreen extends StatelessWidget {
                           Container(
                             width: 8,
                             height: 8,
-                            decoration: const BoxDecoration(
+                            decoration: BoxDecoration(
                               color: MelbelColors.kTertiaryContainer,
                               shape: BoxShape.circle,
                             ),
                           ),
                           const SizedBox(width: 8),
-                          const Text(
+                          Text(
                             'BẢN NHÁP TẠM LƯU',
                             style: TextStyle(
                               fontFamily: 'Be Vietnam Pro',
@@ -1567,7 +1570,7 @@ class UnconfirmedPlanScreen extends StatelessWidget {
                           ),
                         ],
                       ),
-                      const Icon(
+                      Icon(
                         Icons.nightlight,
                         size: 20,
                         color: MelbelColors.kOnSurfaceVariant,
@@ -1577,7 +1580,7 @@ class UnconfirmedPlanScreen extends StatelessWidget {
                   const SizedBox(height: 12),
                   Text(
                     displayTitle,
-                    style: const TextStyle(
+                    style: TextStyle(
                       fontFamily: 'Be Vietnam Pro',
                       fontSize: 18,
                       fontWeight: FontWeight.w600,
@@ -1616,7 +1619,7 @@ class UnconfirmedPlanScreen extends StatelessWidget {
                     ),
                   ),
                   const SizedBox(height: 16),
-                  const Divider(color: MelbelColors.kSurfaceContainerHighest),
+                  Divider(color: MelbelColors.kSurfaceContainerHighest),
                   const SizedBox(height: 12),
 
                   // 2 Sub-boxes
@@ -1652,7 +1655,7 @@ class UnconfirmedPlanScreen extends StatelessWidget {
                                 deficit == null
                                     ? 'Trạng thái: ${candidate?.feasibilityStatus ?? 'chưa có phương án'}'
                                     : 'Backend báo thiếu ${(deficit / 60).ceil()} phút',
-                                style: const TextStyle(
+                                style: TextStyle(
                                   fontFamily: 'Be Vietnam Pro',
                                   fontSize: 13,
                                   color: MelbelColors.kOnSurface,
@@ -1696,7 +1699,7 @@ class UnconfirmedPlanScreen extends StatelessWidget {
                               SizedBox(height: 2),
                               Text(
                                 '$sessionCount phiên theo phương án backend',
-                                style: const TextStyle(
+                                style: TextStyle(
                                   fontFamily: 'Be Vietnam Pro',
                                   fontSize: 13,
                                   color: MelbelColors.kOnSurface,
@@ -1711,7 +1714,7 @@ class UnconfirmedPlanScreen extends StatelessWidget {
                   const SizedBox(height: 14),
 
                   // Gentle non-judgmental note
-                  const Row(
+                  Row(
                     children: [
                       Icon(Icons.eco, size: 16, color: MelbelColors.kSecondary),
                       SizedBox(width: 6),
@@ -1750,7 +1753,7 @@ class UnconfirmedPlanScreen extends StatelessWidget {
             const SizedBox(height: 20),
 
             // Footer lock
-            const Center(
+            Center(
               child: Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
@@ -1785,6 +1788,41 @@ class UnconfirmedPlanScreen extends StatelessWidget {
 class PlanLockedScreen extends StatelessWidget {
   const PlanLockedScreen({super.key});
 
+  Future<void> _startFirstSession(BuildContext context) async {
+    final taskProvider = context.read<TaskProvider>();
+    final task = taskProvider.confirmedTask;
+    if (task == null || task.sessions.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Chưa có phiên đầu tiên trong lịch.')),
+      );
+      return;
+    }
+    final session = task.sessions.first;
+    final matchingSteps =
+        task.steps.where((step) => step.stepId == session.stepId);
+    final step = matchingSteps.isNotEmpty
+        ? matchingSteps.first
+        : (task.steps.isEmpty ? null : task.steps.first);
+    final focusSession = FocusSessionInfo(
+      sessionId: session.sessionId,
+      taskTitle: taskProvider.title,
+      stepTitle: step?.title ?? 'Bước hiện tại',
+      scheduledStart: session.scheduledStart,
+      scheduledEnd: session.scheduledEnd,
+      workSeconds: session.workSeconds,
+      restSeconds: session.restSeconds,
+      microTaskText: session.microTaskText,
+      segments: session.segments,
+      deadline: taskProvider.deadline,
+    );
+    await context.read<FocusProvider>().startSession(focusSession);
+    if (!context.mounted) return;
+    await Navigator.push(
+      context,
+      MaterialPageRoute<void>(builder: (_) => const FocusScreen()),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final task = context.watch<TaskProvider>();
@@ -1805,7 +1843,7 @@ class PlanLockedScreen extends StatelessWidget {
         : '${confirmedSessions.length} phiên theo lịch backend';
 
     return Scaffold(
-      appBar: const MelbelAppBar(title: 'Phân Tách Nhiệm Vụ', showBack: true),
+      appBar: const MelbelAppBar(title: 'Kế hoạch đã sẵn sàng', showBack: true),
       bottomNavigationBar: Container(
         padding: EdgeInsets.fromLTRB(
           20,
@@ -1815,41 +1853,31 @@ class PlanLockedScreen extends StatelessWidget {
         ),
         decoration: BoxDecoration(
           color: MelbelColors.kSurface.withValues(alpha: 0.95),
-          border: const Border(
+          border: Border(
             top: BorderSide(color: MelbelColors.kOutlineVariant, width: 0.5),
           ),
         ),
-        child: InkWell(
-          onTap: () {
-            Navigator.of(context).pushAndRemoveUntil(
-              MaterialPageRoute<void>(builder: (_) => const HomeScreen()),
-              (route) => false,
-            );
-          },
-          borderRadius: BorderRadius.circular(16),
-          child: Container(
-            height: 56,
-            decoration: BoxDecoration(
-              color: MelbelColors.kPrimaryContainer,
-              borderRadius: BorderRadius.circular(16),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            PrimaryCta(
+              label: 'Bắt đầu phiên đầu tiên',
+              icon: Icons.play_arrow,
+              onPressed: () => _startFirstSession(context),
             ),
-            child: const Row(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                Icon(Icons.home, size: 20, color: Color(0xFF171A24)),
-                SizedBox(width: 8),
-                Text(
-                  'Về trang chủ',
-                  style: TextStyle(
-                    fontFamily: 'Be Vietnam Pro',
-                    fontSize: 16,
-                    fontWeight: FontWeight.w600,
-                    color: Color(0xFF171A24),
-                  ),
-                ),
-              ],
+            const SizedBox(height: 8),
+            SecondaryCta(
+              label: 'Về trang chủ',
+              icon: Icons.home_outlined,
+              height: 48,
+              onPressed: () {
+                Navigator.of(context).pushAndRemoveUntil(
+                  MaterialPageRoute<void>(builder: (_) => const HomeScreen()),
+                  (route) => false,
+                );
+              },
             ),
-          ),
+          ],
         ),
       ),
       body: SafeArea(
@@ -1906,7 +1934,7 @@ class PlanLockedScreen extends StatelessWidget {
                     ),
                   ),
                   const SizedBox(height: 16),
-                  const Text(
+                  Text(
                     'Đã chốt lịch thành công',
                     style: TextStyle(
                       fontFamily: 'Be Vietnam Pro',
@@ -1916,7 +1944,7 @@ class PlanLockedScreen extends StatelessWidget {
                     ),
                   ),
                   const SizedBox(height: 6),
-                  const Text(
+                  Text(
                     'Mọi thứ đã sẵn sàng theo nhịp êm dịu của bạn',
                     textAlign: TextAlign.center,
                     style: TextStyle(
@@ -1947,7 +1975,7 @@ class PlanLockedScreen extends StatelessWidget {
                       Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          const Text(
+                          Text(
                             'KẾ HOẠCH VỪA KHÓA',
                             style: TextStyle(
                               fontFamily: 'Be Vietnam Pro',
@@ -1960,7 +1988,7 @@ class PlanLockedScreen extends StatelessWidget {
                           const SizedBox(height: 4),
                           Text(
                             displayTitle,
-                            style: const TextStyle(
+                            style: TextStyle(
                               fontFamily: 'Be Vietnam Pro',
                               fontSize: 17,
                               fontWeight: FontWeight.w600,
@@ -1972,11 +2000,11 @@ class PlanLockedScreen extends StatelessWidget {
                       Container(
                         width: 32,
                         height: 32,
-                        decoration: const BoxDecoration(
+                        decoration: BoxDecoration(
                           color: MelbelColors.kSurfaceContainerHigh,
                           shape: BoxShape.circle,
                         ),
-                        child: const Icon(
+                        child: Icon(
                           Icons.lock,
                           size: 18,
                           color: MelbelColors.kPrimaryContainer,
@@ -2047,7 +2075,7 @@ class PlanLockedScreen extends StatelessWidget {
               spacing: 12,
               runSpacing: 8,
               children: [
-                const Text(
+                Text(
                   'Cảm giác của bạn lúc này?',
                   style: TextStyle(
                     fontFamily: 'Be Vietnam Pro',
@@ -2070,12 +2098,12 @@ class PlanLockedScreen extends StatelessWidget {
             Center(
               child: TextButton.icon(
                 onPressed: () => _open(context, const SessionReminderScreen()),
-                icon: const Icon(
+                icon: Icon(
                   Icons.notifications_active,
                   size: 16,
                   color: MelbelColors.kPrimaryContainer,
                 ),
-                label: const Text(
+                label: Text(
                   'Xem thử nhắc nhở trước phiên (D-29) & Màn hình khóa (D-30)',
                   style: TextStyle(
                     fontFamily: 'Be Vietnam Pro',
@@ -2121,7 +2149,7 @@ class PlanLockedScreen extends StatelessWidget {
               children: [
                 Text(
                   title,
-                  style: const TextStyle(
+                  style: TextStyle(
                     fontFamily: 'Be Vietnam Pro',
                     fontSize: 12,
                     color: MelbelColors.kOnSurfaceVariant,
@@ -2130,7 +2158,7 @@ class PlanLockedScreen extends StatelessWidget {
                 const SizedBox(height: 2),
                 Text(
                   desc,
-                  style: const TextStyle(
+                  style: TextStyle(
                     fontFamily: 'Be Vietnam Pro',
                     fontSize: 14,
                     fontWeight: FontWeight.w500,
@@ -2294,7 +2322,7 @@ class AiFallbackScreen extends StatelessWidget {
                     ),
                   ),
                   const SizedBox(height: 16),
-                  const Text(
+                  Text(
                     'Không sao cả, mình cùng đi từng bước nhé',
                     textAlign: TextAlign.center,
                     style: TextStyle(
@@ -2305,7 +2333,7 @@ class AiFallbackScreen extends StatelessWidget {
                     ),
                   ),
                   const SizedBox(height: 6),
-                  const Text(
+                  Text(
                     'Hệ thống chuẩn bị sẵn lịch mẫu tiêu chuẩn cho bạn',
                     textAlign: TextAlign.center,
                     style: TextStyle(
@@ -2343,7 +2371,7 @@ class AiFallbackScreen extends StatelessWidget {
                           ),
                           borderRadius: BorderRadius.circular(999),
                         ),
-                        child: const Row(
+                        child: Row(
                           children: [
                             Icon(
                               Icons.circle,
@@ -2365,7 +2393,7 @@ class AiFallbackScreen extends StatelessWidget {
                       ),
                       Row(
                         children: [
-                          const Icon(
+                          Icon(
                             Icons.schedule,
                             size: 15,
                             color: MelbelColors.kOnSurfaceVariant,
@@ -2373,7 +2401,7 @@ class AiFallbackScreen extends StatelessWidget {
                           const SizedBox(width: 4),
                           Text(
                             task.formatDeadline(task.deadline),
-                            style: const TextStyle(
+                            style: TextStyle(
                               fontFamily: 'Be Vietnam Pro',
                               fontSize: 12,
                               color: MelbelColors.kOnSurfaceVariant,
@@ -2386,7 +2414,7 @@ class AiFallbackScreen extends StatelessWidget {
                   const SizedBox(height: 12),
                   Text(
                     displayTitle,
-                    style: const TextStyle(
+                    style: TextStyle(
                       fontFamily: 'Be Vietnam Pro',
                       fontSize: 18,
                       fontWeight: FontWeight.w600,
@@ -2405,7 +2433,7 @@ class AiFallbackScreen extends StatelessWidget {
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        const Row(
+                        Row(
                           children: [
                             Icon(
                               Icons.spa,
@@ -2438,7 +2466,7 @@ class AiFallbackScreen extends StatelessWidget {
                           ],
                         ),
                         const SizedBox(height: 12),
-                        const Row(
+                        Row(
                           mainAxisAlignment: MainAxisAlignment.spaceBetween,
                           children: [
                             Text(
@@ -2499,7 +2527,7 @@ class AiFallbackScreen extends StatelessWidget {
                   const SizedBox(height: 14),
 
                   // Schedule slot timing
-                  const Row(
+                  Row(
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
                       Row(
@@ -2540,7 +2568,7 @@ class AiFallbackScreen extends StatelessWidget {
                       color: MelbelColors.kSurfaceContainerLow,
                       borderRadius: BorderRadius.circular(8),
                     ),
-                    child: const Row(
+                    child: Row(
                       children: [
                         Icon(
                           Icons.check_circle,
@@ -2587,7 +2615,7 @@ class AiFallbackScreen extends StatelessWidget {
   Widget _cadenceBlock(
     String label,
     Color bg, {
-    Color textColor = MelbelColors.kOnSurfaceVariant,
+    Color? textColor,
   }) {
     return Expanded(
       child: Column(
@@ -2605,7 +2633,7 @@ class AiFallbackScreen extends StatelessWidget {
             style: TextStyle(
               fontFamily: 'Be Vietnam Pro',
               fontSize: 10,
-              color: textColor,
+              color: textColor ?? MelbelColors.kOnSurfaceVariant,
             ),
           ),
         ],
@@ -2675,11 +2703,11 @@ class SessionReminderScreen extends StatelessWidget {
                     child: Container(
                       width: 60,
                       height: 60,
-                      decoration: const BoxDecoration(
+                      decoration: BoxDecoration(
                         color: MelbelColors.kSurfaceContainerHigh,
                         shape: BoxShape.circle,
                       ),
-                      child: const Icon(
+                      child: Icon(
                         Icons.bedtime,
                         size: 30,
                         color: MelbelColors.kPrimaryContainer,
@@ -2687,7 +2715,7 @@ class SessionReminderScreen extends StatelessWidget {
                     ),
                   ),
                   const SizedBox(height: 16),
-                  const Text(
+                  Text(
                     'Sắp đến phiên làm việc',
                     style: TextStyle(
                       fontFamily: 'Be Vietnam Pro',
@@ -2697,7 +2725,7 @@ class SessionReminderScreen extends StatelessWidget {
                     ),
                   ),
                   const SizedBox(height: 4),
-                  const Text(
+                  Text(
                     'Chuẩn bị vào phiên lúc 15:30.',
                     style: TextStyle(
                       fontFamily: 'Be Vietnam Pro',
@@ -2732,7 +2760,7 @@ class SessionReminderScreen extends StatelessWidget {
                           color: MelbelColors.kSurfaceContainerHigh,
                           borderRadius: BorderRadius.circular(999),
                         ),
-                        child: const Row(
+                        child: Row(
                           children: [
                             Icon(
                               Icons.circle,
@@ -2752,7 +2780,7 @@ class SessionReminderScreen extends StatelessWidget {
                           ],
                         ),
                       ),
-                      const Text(
+                      Text(
                         'Hạn chót: 18:00 ngày mai',
                         style: TextStyle(
                           fontFamily: 'Be Vietnam Pro',
@@ -2765,7 +2793,7 @@ class SessionReminderScreen extends StatelessWidget {
                   const SizedBox(height: 14),
                   Text(
                     displayTitle,
-                    style: const TextStyle(
+                    style: TextStyle(
                       fontFamily: 'Be Vietnam Pro',
                       fontSize: 18,
                       fontWeight: FontWeight.w600,
@@ -2773,7 +2801,7 @@ class SessionReminderScreen extends StatelessWidget {
                     ),
                   ),
                   const SizedBox(height: 6),
-                  const Row(
+                  Row(
                     children: [
                       Icon(
                         Icons.subdirectory_arrow_right,
@@ -2793,11 +2821,11 @@ class SessionReminderScreen extends StatelessWidget {
                     ],
                   ),
                   const SizedBox(height: 16),
-                  const Divider(color: MelbelColors.kSurfaceContainerHigh),
+                  Divider(color: MelbelColors.kSurfaceContainerHigh),
                   const SizedBox(height: 8),
 
                   // Psychological Buffer Line (2-minute starter micro-task)
-                  const Row(
+                  Row(
                     children: [
                       Icon(
                         Icons.self_improvement,
@@ -2850,7 +2878,7 @@ class SessionReminderScreen extends StatelessWidget {
             Center(
               child: TextButton(
                 onPressed: () => _open(context, const PlanOverviewScreen()),
-                child: const Text(
+                child: Text(
                   'Dời lịch',
                   style: TextStyle(
                     fontFamily: 'Be Vietnam Pro',
@@ -2866,12 +2894,12 @@ class SessionReminderScreen extends StatelessWidget {
             Center(
               child: TextButton.icon(
                 onPressed: () => _open(context, const LockScreenPreview()),
-                icon: const Icon(
+                icon: Icon(
                   Icons.lock_clock,
                   size: 16,
                   color: MelbelColors.kOutline,
                 ),
-                label: const Text(
+                label: Text(
                   'Xem giao diện thông báo màn hình khóa (D-30)',
                   style: TextStyle(
                     fontFamily: 'Be Vietnam Pro',
@@ -2917,12 +2945,12 @@ class _LockScreenPreviewState extends State<LockScreenPreview> {
                 children: [
                   IconButton(
                     onPressed: () => Navigator.pop(context),
-                    icon: const Icon(
+                    icon: Icon(
                       Icons.close,
                       color: MelbelColors.kOnSurfaceVariant,
                     ),
                   ),
-                  const Text(
+                  Text(
                     'Mô phỏng Màn hình khóa',
                     style: TextStyle(
                       fontFamily: 'Be Vietnam Pro',
@@ -2941,7 +2969,7 @@ class _LockScreenPreviewState extends State<LockScreenPreview> {
                 children: [
                   const SizedBox(height: 12),
                   // Lock Icon
-                  const Center(
+                  Center(
                     child: Row(
                       mainAxisSize: MainAxisSize.min,
                       children: [
@@ -2967,7 +2995,7 @@ class _LockScreenPreviewState extends State<LockScreenPreview> {
                   const SizedBox(height: 8),
 
                   // Clock Display
-                  const Center(
+                  Center(
                     child: Text(
                       '15:25',
                       style: TextStyle(
@@ -2979,7 +3007,7 @@ class _LockScreenPreviewState extends State<LockScreenPreview> {
                       ),
                     ),
                   ),
-                  const Center(
+                  Center(
                     child: Text(
                       'Thứ Năm, 24 tháng 10',
                       style: TextStyle(
@@ -3027,7 +3055,7 @@ class _LockScreenPreviewState extends State<LockScreenPreview> {
                   const SizedBox(height: 48),
 
                   // Swipe indicator
-                  const Center(
+                  Center(
                     child: Column(
                       children: [
                         Icon(
@@ -3091,11 +3119,11 @@ class _LockScreenPreviewState extends State<LockScreenPreview> {
                   Container(
                     width: 48,
                     height: 48,
-                    decoration: const BoxDecoration(
+                    decoration: BoxDecoration(
                       color: MelbelColors.kSurfaceContainer,
                       shape: BoxShape.circle,
                     ),
-                    child: const Icon(
+                    child: Icon(
                       Icons.photo_camera,
                       size: 22,
                       color: MelbelColors.kOnSurface,
@@ -3137,18 +3165,18 @@ class _LockScreenPreviewState extends State<LockScreenPreview> {
                   Container(
                     width: 20,
                     height: 20,
-                    decoration: const BoxDecoration(
+                    decoration: BoxDecoration(
                       color: MelbelColors.kSecondaryContainer,
                       shape: BoxShape.circle,
                     ),
-                    child: const Icon(
+                    child: Icon(
                       Icons.dark_mode,
                       size: 13,
                       color: MelbelColors.kSecondary,
                     ),
                   ),
                   const SizedBox(width: 8),
-                  const Text(
+                  Text(
                     'Melbel',
                     style: TextStyle(
                       fontFamily: 'Be Vietnam Pro',
@@ -3158,7 +3186,7 @@ class _LockScreenPreviewState extends State<LockScreenPreview> {
                     ),
                   ),
                   const SizedBox(width: 4),
-                  const Text(
+                  Text(
                     '•',
                     style: TextStyle(
                       fontSize: 11,
@@ -3168,7 +3196,7 @@ class _LockScreenPreviewState extends State<LockScreenPreview> {
                   const SizedBox(width: 4),
                   Text(
                     timeAgo,
-                    style: const TextStyle(
+                    style: TextStyle(
                       fontFamily: 'Be Vietnam Pro',
                       fontSize: 12,
                       color: MelbelColors.kOnSurfaceVariant,
@@ -3176,7 +3204,7 @@ class _LockScreenPreviewState extends State<LockScreenPreview> {
                   ),
                 ],
               ),
-              const Icon(
+              Icon(
                 Icons.expand_more,
                 size: 18,
                 color: MelbelColors.kOnSurfaceVariant,
@@ -3186,7 +3214,7 @@ class _LockScreenPreviewState extends State<LockScreenPreview> {
           const SizedBox(height: 10),
           Text(
             title,
-            style: const TextStyle(
+            style: TextStyle(
               fontFamily: 'Be Vietnam Pro',
               fontSize: 15,
               fontWeight: FontWeight.w600,
@@ -3196,7 +3224,7 @@ class _LockScreenPreviewState extends State<LockScreenPreview> {
           const SizedBox(height: 4),
           Text(
             body,
-            style: const TextStyle(
+            style: TextStyle(
               fontFamily: 'Be Vietnam Pro',
               fontSize: 13,
               color: MelbelColors.kOnSurfaceVariant,
@@ -3244,7 +3272,7 @@ class _LockScreenPreviewState extends State<LockScreenPreview> {
                   alignment: Alignment.center,
                   child: Text(
                     btn2Text,
-                    style: const TextStyle(
+                    style: TextStyle(
                       fontFamily: 'Be Vietnam Pro',
                       fontSize: 13,
                       color: MelbelColors.kOnSurfaceVariant,

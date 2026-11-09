@@ -240,6 +240,23 @@ class TaskProvider extends ChangeNotifier {
     });
   }
 
+  Future<void> submitClarification(String message) async {
+    final answer = message.trim();
+    if (answer.isEmpty) {
+      throw const ApiException('Nhập câu trả lời trước khi gửi.');
+    }
+    await _runApi((revision) async {
+      final current = await _saveInput(revision);
+      final analyzed = await _accept(
+        _planningApi.analyzeDraft(current, message: answer),
+        revision,
+      );
+      _draft = analyzed;
+      _applyDraftSummary();
+      await _persist();
+    });
+  }
+
   Future<PlanningDraftModel> _saveInput(int revision) async {
     final title = _title.trim(), scope = _scope.trim();
     final input = inputText.trim();

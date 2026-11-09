@@ -151,12 +151,27 @@ class AIService:
         self._settings = app_settings or settings
         self._gemini_client: genai.Client | None = None
         self._groq_client: AsyncGroq | None = None
+        self._cancelling_provider_tasks: set[asyncio.Task[Any]] = set()
+
+    def _cancel_provider_task(self, task: asyncio.Task[Any]) -> None:
+        if not task.done():
+            # Việc dọn kết nối của SDK không được trì hoãn kết quả trả về cho người dùng.
+            self._cancelling_provider_tasks.add(task)
+            task.add_done_callback(self._finish_provider_task)
+            task.cancel()
+        else:
+            self._finish_provider_task(task)
+
+    def _finish_provider_task(self, task: asyncio.Task[Any]) -> None:
+        self._cancelling_provider_tasks.discard(task)
+        if not task.cancelled():
+            task.exception()
 
     def _get_gemini_client(self) -> genai.Client | None:
         """
         Khởi tạo lười (lazy-init) Gemini Client với retry=1 để lỗi là nhảy tầng tức thì:
-        - Ưu tiên 1: File JSON Service Account (`credentials.json`) trên cổng Agent Platform / Vertex Postpay.
-        - Ưu tiên 2: Chuỗi `GEMINI_API_KEY` trên cổng Gemini Developer API.
+        - Ưu tiên 1: Chuỗi `GEMINI_API_KEY` trên cổng Gemini Developer API.
+        - Dự phòng phụ: File JSON Service Account nếu được cấu hình rõ ràng.
         """
         if self._gemini_client is not None:
             return self._gemini_client
@@ -164,6 +179,13 @@ class AIService:
         http_opts = types.HttpOptions(
             retry_options=types.HttpRetryOptions(attempts=1),
         )
+
+        if self._settings.has_gemini_key:
+            self._gemini_client = genai.Client(
+                api_key=self._settings.GEMINI_API_KEY,
+                http_options=http_opts,
+            )
+            return self._gemini_client
 
         cred_file = self._settings.resolved_google_credentials_file
         if cred_file is not None:
@@ -188,16 +210,9 @@ class AIService:
                     return self._gemini_client
             except Exception as exc:
                 logger.warning(
-                    "Không thể nạp credentials.json (%s), chuyển sang kiểm tra GEMINI_API_KEY.",
+                    "Không thể nạp Service Account (%s).",
                     type(exc).__name__,
                 )
-
-        if self._settings.has_gemini_key:
-            self._gemini_client = genai.Client(
-                api_key=self._settings.GEMINI_API_KEY,
-                http_options=http_opts,
-            )
-            return self._gemini_client
 
         return None
 
@@ -245,7 +260,7 @@ class AIService:
         client = self._get_gemini_client()
         if client is None:
             raise RuntimeError(
-                "Chưa cấu hình chứng thực Gemini (credentials.json hoặc GEMINI_API_KEY)."
+                "Chưa cấu hình chứng thực Gemini (GEMINI_API_KEY)."
             )
 
         target_model = model_name or self._settings.GEMINI_FLASH_MODEL
@@ -348,15 +363,20 @@ class AIService:
         if not has_gemini:
             if not has_groq:
                 raise RuntimeError(f"{flow_name}: Không có chứng thực Gemini lẫn Groq.")
-            groq_only = await asyncio.wait_for(
+            groq_only = asyncio.create_task(
                 self._call_groq_structured(
                     system_prompt=system_prompt,
                     user_prompt=user_prompt,
                     schema_cls=schema_cls,
-                ),
-                timeout=profile.hard_timeout,
+                )
             )
-            return groq_only, "tier_2_groq"
+            try:
+                await asyncio.wait({groq_only}, timeout=max(0.0, deadline - loop.time()))
+                if groq_only.done() and loop.time() < deadline:
+                    return groq_only.result(), "tier_2_groq"
+                raise TimeoutError(f"{flow_name} vượt trần thời gian xử lý ({profile.hard_timeout}s).")
+            finally:
+                self._cancel_provider_task(groq_only)
 
         primary_model = self._settings.GEMINI_FLASH_MODEL.strip()
         backup_model = self._settings.GEMINI_BACKUP_MODEL.strip()
@@ -406,6 +426,13 @@ class AIService:
         try:
             while True:
                 now = loop.time()
+
+                if now >= deadline:
+                    if warm_result is not None:
+                        return warm_result
+                    raise TimeoutError(
+                        f"{flow_name} vượt trần thời gian xử lý ({profile.hard_timeout}s)."
+                    )
 
                 # 1. Luôn kiểm tra nhánh Primary (3.8-flash) trước tiên để đảm bảo chất lượng cao nhất
                 if primary_task.done() and not primary_failed:
@@ -471,15 +498,7 @@ class AIService:
                 if now >= priority_deadline and warm_result is not None:
                     return warm_result
 
-                # 5. Ngắt cứng tại trần hard_timeout
-                if now >= deadline:
-                    if warm_result is not None:
-                        return warm_result
-                    raise TimeoutError(
-                        f"{flow_name} vượt trần thời gian xử lý ({profile.hard_timeout}s)."
-                    )
-
-                # 6. Kích hoạt theo mốc thời gian cho Warm Backup & Groq Hedge (chỉ gọi Groq nếu chưa có bản RAM)
+                # 5. Kích hoạt theo mốc thời gian cho Warm Backup & Groq Hedge (chỉ gọi Groq nếu chưa có bản RAM)
                 if backup_task is None and can_use_backup and now >= t0 + profile.warm_backup_at:
                     _start_backup()
                 if (
@@ -490,7 +509,7 @@ class AIService:
                 ):
                     _start_groq()
 
-                # 7. Nếu toàn bộ các nhánh có thể chạy đều đã thất bại -> thoát sớm về Tier 3 Rule-based
+                # 6. Nếu toàn bộ các nhánh có thể chạy đều đã thất bại -> thoát sớm về Tier 3 Rule-based
                 backup_exhausted = not can_use_backup or (
                     backup_task is not None and backup_harvested
                 )
@@ -498,7 +517,7 @@ class AIService:
                 if primary_failed and backup_exhausted and groq_exhausted and warm_result is None:
                     raise RuntimeError(f"{flow_name}: Toàn bộ các tầng AI đều thất bại.")
 
-                # 8. Tính mốc đánh thức gần nhất để không dùng vòng lặp bận (no busy-polling)
+                # 7. Tính mốc đánh thức gần nhất để không dùng vòng lặp bận (no busy-polling)
                 next_wake = deadline
                 if not primary_failed and warm_result is not None and now < priority_deadline:
                     next_wake = min(next_wake, priority_deadline)
@@ -522,13 +541,9 @@ class AIService:
                 else:
                     await asyncio.sleep(sleep_budget)
         finally:
-            pending = [
-                t for t in (primary_task, backup_task, groq_task) if t is not None and not t.done()
-            ]
-            for t in pending:
-                t.cancel()
-            if pending:
-                await asyncio.gather(*pending, return_exceptions=True)
+            for task in (primary_task, backup_task, groq_task):
+                if task is not None:
+                    self._cancel_provider_task(task)
 
     @staticmethod
     def _resolve_current_dt(timezone_name: str, reference_now: datetime | None = None) -> datetime:
@@ -746,7 +761,7 @@ class AIService:
     ) -> TaskDecompositionResult:
         """
         Sinh Default Decomposition Proposal (2–5 bước + Micro-task 2 phút) ở UF2
-        theo khung thời gian B (trần 6.0s, ưu tiên 3.8-flash tới 5.4s, Warm Backup 3.5-flash-lite từ 3.1s).
+        theo khung thời gian B (trần 9.0s, ưu tiên 3.8-flash tới 7.5s, Warm Backup 3.5-flash-lite từ 3.1s).
         Hỗ trợ `user_step_proposal` (O05) nếu người dùng chủ động gợi ý cách chia bước.
         """
         cleaned_title = task_title.strip() or "Công việc cần thực hiện"

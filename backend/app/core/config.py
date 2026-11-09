@@ -40,7 +40,7 @@ class Settings(BaseSettings):
     GEMINI_API_KEY: str = Field(default="", repr=False)
     GROQ_API_KEY: str = Field(default="", repr=False)
     GOOGLE_CREDENTIALS_PATH: str = Field(
-        default="credentials.json",
+        default="",
         repr=False,
         description=(
             "Đường dẫn tương đối (từ backend/) hoặc tuyệt đối tới file JSON Service Account "
@@ -103,9 +103,9 @@ class Settings(BaseSettings):
     AI_GROQ_HEDGE_DELAY_SECONDS: float = Field(default=3.5, ge=0.0, le=20.0)
 
     # Khung thời gian B — Luồng chia nhỏ công việc (UF2 - có màn hình Breathing Circle):
-    # 0.0s chạy 3.8-flash -> 3.1s Warm Backup 3.5-flash-lite -> 4.4s Groq -> ưu tiên 3.8-flash tới 5.4s -> cắt cứng 6.0s
-    AI_UF2_TIMEOUT_SECONDS: float = Field(default=6.0, gt=0.0, le=25.0)
-    AI_UF2_PRIMARY_PRIORITY_SECONDS: float = Field(default=5.4, gt=0.0, le=25.0)
+    # 0.0s chạy 3.8-flash -> 3.1s Warm Backup 3.5-flash-lite -> 4.4s Groq -> ưu tiên 3.8-flash tới 7.5s -> cắt cứng 9.0s
+    AI_UF2_TIMEOUT_SECONDS: float = Field(default=9.0, gt=0.0, le=25.0)
+    AI_UF2_PRIMARY_PRIORITY_SECONDS: float = Field(default=7.5, gt=0.0, le=25.0)
     AI_UF2_WARM_BACKUP_DELAY_SECONDS: float = Field(default=3.1, ge=0.0, le=25.0)
     AI_UF2_GROQ_HEDGE_DELAY_SECONDS: float = Field(default=4.4, ge=0.0, le=25.0)
 

@@ -39,7 +39,7 @@ class MelbelAppBar extends StatelessWidget implements PreferredSizeWidget {
               padding: EdgeInsets.zero,
               constraints: const BoxConstraints(minWidth: 40, minHeight: 40),
               onPressed: onBack ?? () => Navigator.maybePop(context),
-              icon: const Icon(
+              icon: Icon(
                 Icons.arrow_back,
                 color: MelbelColors.kOnSurfaceVariant,
                 size: 22,
@@ -58,7 +58,7 @@ class MelbelAppBar extends StatelessWidget implements PreferredSizeWidget {
               title,
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
-              style: const TextStyle(
+              style: TextStyle(
                 fontFamily: 'Be Vietnam Pro',
                 fontSize: 20,
                 fontWeight: FontWeight.w500,
@@ -72,14 +72,8 @@ class MelbelAppBar extends StatelessWidget implements PreferredSizeWidget {
               tooltip: 'Trợ giúp & Hướng dẫn',
               padding: EdgeInsets.zero,
               constraints: const BoxConstraints(minWidth: 40, minHeight: 40),
-              onPressed: () => showMelbelInfo(
-                context,
-                title: 'Trợ giúp & Ý nghĩa',
-                message:
-                    'Không gian êm dịu giúp bạn hoàn thành công việc theo từng nhịp nhỏ, không áp lực, không phán xét.',
-                icon: Icons.help_outline,
-              ),
-              icon: const Icon(
+              onPressed: () => Navigator.of(context).pushNamed('/help'),
+              icon: Icon(
                 Icons.help_outline,
                 color: MelbelColors.kOnSurfaceVariant,
                 size: 20,
@@ -88,20 +82,15 @@ class MelbelAppBar extends StatelessWidget implements PreferredSizeWidget {
             const SizedBox(width: 4),
             InkWell(
               borderRadius: BorderRadius.circular(16),
-              onTap: () => showMelbelInfo(
-                context,
-                title: 'Không gian cá nhân',
-                message: 'Hồ sơ người dùng và các thiết lập trợ lý cá nhân.',
-                icon: Icons.person_outline,
-              ),
+              onTap: () => Navigator.of(context).pushNamed('/account'),
               child: Container(
                 width: 32,
                 height: 32,
-                decoration: const BoxDecoration(
+                decoration: BoxDecoration(
                   color: MelbelColors.kPrimary,
                   shape: BoxShape.circle,
                 ),
-                child: const Icon(
+                child: Icon(
                   Icons.person,
                   size: 18,
                   color: MelbelColors.kOnPrimary,
@@ -136,7 +125,7 @@ Future<void> showMelbelInfo(
             const SizedBox(height: 12),
             Text(
               title,
-              style: const TextStyle(
+              style: TextStyle(
                 fontFamily: 'Be Vietnam Pro',
                 fontSize: 20,
                 fontWeight: FontWeight.w600,
@@ -146,7 +135,7 @@ Future<void> showMelbelInfo(
             const SizedBox(height: 8),
             Text(
               message,
-              style: const TextStyle(
+              style: TextStyle(
                 fontFamily: 'Be Vietnam Pro',
                 fontSize: 14,
                 color: MelbelColors.kOnSurfaceVariant,
@@ -250,7 +239,7 @@ class PrimaryCta extends StatelessWidget {
             ],
             Text(
               label,
-              style: const TextStyle(
+              style: TextStyle(
                 fontFamily: 'Be Vietnam Pro',
                 fontSize: 16,
                 fontWeight: FontWeight.w600,
@@ -287,7 +276,7 @@ class SecondaryCta extends StatelessWidget {
         style: OutlinedButton.styleFrom(
           backgroundColor: MelbelColors.kSurfaceContainer,
           foregroundColor: MelbelColors.kOnSurface,
-          side: const BorderSide(color: MelbelColors.kOutlineVariant),
+          side: BorderSide(color: MelbelColors.kOutlineVariant),
           shape: RoundedRectangleBorder(
             borderRadius: BorderRadius.circular(12),
           ),
@@ -302,7 +291,7 @@ class SecondaryCta extends StatelessWidget {
             ],
             Text(
               label,
-              style: const TextStyle(
+              style: TextStyle(
                 fontFamily: 'Be Vietnam Pro',
                 fontSize: 14,
                 fontWeight: FontWeight.w500,

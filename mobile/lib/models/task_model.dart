@@ -61,6 +61,7 @@ class SessionModel {
     this.restSeconds = 300,
     this.durationSeconds = 1800,
     this.status = 'scheduled',
+    this.segments = const [],
   });
 
   final String sessionId;
@@ -72,6 +73,7 @@ class SessionModel {
   final int restSeconds;
   final int durationSeconds;
   final String status;
+  final List<SessionSegmentModel> segments;
 
   factory SessionModel.fromJson(Map<String, dynamic> json) {
     return SessionModel(
@@ -84,6 +86,10 @@ class SessionModel {
       restSeconds: json['rest_seconds'] as int? ?? 300,
       durationSeconds: json['duration_seconds'] as int? ?? 1800,
       status: json['status'] as String? ?? 'scheduled',
+      segments: (json['segments'] as List<dynamic>? ?? const [])
+          .whereType<Map<String, dynamic>>()
+          .map(SessionSegmentModel.fromJson)
+          .toList(growable: false),
     );
   }
 
@@ -97,6 +103,32 @@ class SessionModel {
         'rest_seconds': restSeconds,
         'duration_seconds': durationSeconds,
         'status': status,
+        'segments': segments.map((segment) => segment.toJson()).toList(),
+      };
+}
+
+class SessionSegmentModel {
+  const SessionSegmentModel({
+    required this.orderIndex,
+    required this.kind,
+    required this.durationSeconds,
+  });
+
+  final int orderIndex;
+  final String kind;
+  final int durationSeconds;
+
+  factory SessionSegmentModel.fromJson(Map<String, dynamic> json) =>
+      SessionSegmentModel(
+        orderIndex: json['order_index'] as int? ?? 0,
+        kind: json['kind'] as String? ?? 'work',
+        durationSeconds: json['duration_seconds'] as int? ?? 0,
+      );
+
+  Map<String, dynamic> toJson() => {
+        'order_index': orderIndex,
+        'kind': kind,
+        'duration_seconds': durationSeconds,
       };
 }
 
