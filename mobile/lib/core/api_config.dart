@@ -26,7 +26,7 @@ class ApiConfig {
   /// Thời gian chờ kết nối (5 giây)
   static const Duration connectTimeout = Duration(seconds: 5);
 
-  /// Thời gian chờ nhận phản hồi (8 giây - bao quát trần Hedged Execution 6.0s)
+  /// Thời gian chờ nhận phản hồi mặc định (8 giây)
   static const Duration receiveTimeout = Duration(seconds: 8);
 
   /// Sinh mã Idempotency-Key chống gửi trùng cho các lệnh POST/PATCH

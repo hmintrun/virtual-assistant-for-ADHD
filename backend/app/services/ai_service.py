@@ -746,7 +746,7 @@ class AIService:
     ) -> TaskDecompositionResult:
         """
         Sinh Default Decomposition Proposal (2–5 bước + Micro-task 2 phút) ở UF2
-        theo khung thời gian B (trần 6.0s, ưu tiên 3.8-flash tới 5.4s, Warm Backup 3.5-flash-lite từ 3.1s).
+        theo khung thời gian B (trần 9.0s, ưu tiên 3.8-flash tới 7.5s, Warm Backup 3.5-flash-lite từ 3.1s).
         Hỗ trợ `user_step_proposal` (O05) nếu người dùng chủ động gợi ý cách chia bước.
         """
         cleaned_title = task_title.strip() or "Công việc cần thực hiện"

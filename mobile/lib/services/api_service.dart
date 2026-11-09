@@ -176,7 +176,10 @@ class ApiService {
     final response = await _dio.post<Map<String, dynamic>>(
       '/drafts/$draftId/candidates',
       data: payload,
-      options: Options(headers: {'Idempotency-Key': idempotencyKey}),
+      options: Options(
+        headers: {'Idempotency-Key': idempotencyKey},
+        receiveTimeout: const Duration(seconds: 20),
+      ),
     );
 
     final data = response.data!['data'] as Map<String, dynamic>;
