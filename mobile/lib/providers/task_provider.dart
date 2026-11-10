@@ -494,7 +494,13 @@ class TaskProvider extends ChangeNotifier {
   Future<void> startNewDraft() async {
     if (_isApiBusy)
       throw const ApiException('Đang xử lý công việc hiện tại. Vui lòng chờ.');
-    if (_title.trim().isNotEmpty && !_planLocked) await saveDraftToBackend();
+    if (_title.trim().isNotEmpty && !_planLocked) {
+      try {
+        await saveDraftToBackend();
+      } catch (_) {
+        // Bỏ qua lỗi đồng bộ bản nháp cũ (ví dụ 409 Revision Conflict) để không chặn người dùng tạo việc mới
+      }
+    }
     clearDraft();
   }
 

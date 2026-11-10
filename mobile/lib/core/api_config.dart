@@ -1,23 +1,14 @@
-import 'dart:io' show Platform;
 import 'dart:math';
-
-import 'package:flutter/foundation.dart';
 
 class ApiConfig {
   ApiConfig._();
 
-  /// Địa chỉ Backend API tự động thích ứng với nền tảng:
-  /// - Android Emulator: 10.0.2.2:8000/api/v1
-  /// - Windows / Web / iOS Simulator: 127.0.0.1:8000/api/v1
+  /// Địa chỉ Backend API:
+  /// - Hỗ trợ truyền qua --dart-define=API_BASE_URL=http://...
+  /// - Mặc định cho thiết bị thật (qua cáp USB với adb reverse tcp:8000 tcp:8000) và Desktop/Web: 127.0.0.1:8000
   static String get defaultBaseUrl {
-    if (kIsWeb) return 'http://127.0.0.1:8000/api/v1';
-    try {
-      if (Platform.isAndroid) {
-        return 'http://10.0.2.2:8000/api/v1';
-      }
-    } catch (_) {
-      // Fallback for environments where Platform is unsupported
-    }
+    const envUrl = String.fromEnvironment('API_BASE_URL');
+    if (envUrl.isNotEmpty) return envUrl;
     return 'http://127.0.0.1:8000/api/v1';
   }
 
@@ -26,8 +17,8 @@ class ApiConfig {
   /// Thời gian chờ kết nối (5 giây)
   static const Duration connectTimeout = Duration(seconds: 5);
 
-  /// Thời gian chờ nhận phản hồi (8 giây - bao quát trần Hedged Execution 6.0s)
-  static const Duration receiveTimeout = Duration(seconds: 8);
+  /// Thời gian chờ nhận phản hồi (25 giây - bao quát trần Hedged Execution và mạng di động)
+  static const Duration receiveTimeout = Duration(seconds: 25);
 
   /// Sinh mã Idempotency-Key chống gửi trùng cho các lệnh POST/PATCH
   static String generateIdempotencyKey(String prefix) {
