@@ -583,7 +583,6 @@ class FocusProvider extends ChangeNotifier {
       clientThoughtId: now.microsecondsSinceEpoch.toString(),
       createdAt: now,
       undoDeadlineAt: now.add(const Duration(seconds: 5)),
-      sourceRunId: _session?.sessionId,
       inputType: 'audio',
       localAudioPath: recording.path,
       attemptCount: attemptCount,
@@ -643,7 +642,6 @@ class FocusProvider extends ChangeNotifier {
       clientThoughtId: now.microsecondsSinceEpoch.toString(),
       createdAt: now,
       undoDeadlineAt: now.add(const Duration(seconds: 5)),
-      sourceRunId: _session?.id,
       inputType: 'text',
       textContent: normalized,
       attemptCount: 1,
@@ -794,10 +792,9 @@ class FocusProvider extends ChangeNotifier {
       for (final thought in readyToSync) {
         if (_undoneThoughtIds.contains(thought.clientThoughtId)) continue;
         try {
+          // Local runs have no backend run_id. Older entries stored a session ID.
           final payload = {
             'client_thought_id': thought.clientThoughtId,
-            if (thought.sourceRunId != null)
-              'source_run_id': thought.sourceRunId,
             'input_type': thought.inputType,
             if (thought.textContent != null)
               'text_content': thought.textContent,
@@ -810,9 +807,9 @@ class FocusProvider extends ChangeNotifier {
             idempotencyKey: thought.clientThoughtId,
           );
           if (_undoneThoughtIds.contains(thought.clientThoughtId)) continue;
-          final data = response['data'] as Map<String, dynamic>?;
-          final serverId = data?['thought_id'] as String?;
-          await _repository.markThoughtSynced(thought.clientThoughtId);
+          final serverId = response['thought_id'];
+          if (serverId is! String || serverId.isEmpty) continue;
+          await _repository.markThoughtSynced(thought.clientThoughtId, serverId);
           final index = _thoughts
               .indexWhere((t) => t.clientThoughtId == thought.clientThoughtId);
           if (index >= 0) {
@@ -907,7 +904,6 @@ class FocusProvider extends ChangeNotifier {
       clientThoughtId: now.microsecondsSinceEpoch.toString(),
       createdAt: now,
       undoDeadlineAt: now.add(const Duration(seconds: 5)),
-      sourceRunId: _session?.sessionId,
       inputType: 'audio',
       localAudioPath: recording.path,
       attemptCount: (_recordingAttempts + 1).clamp(1, 3),
