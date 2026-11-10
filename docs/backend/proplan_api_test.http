@@ -1,0 +1,161 @@
+### ==============================================================================
+### PROPLAN VA - REST CLIENT API TEST SUITE (VS CODE)
+### Hướng dẫn:
+### 1. Cài extension "REST Client" (Huachao Mao) trên VS Code.
+### 2. Khởi động Backend: uvicorn app.main:app --reload --port 8000
+### 3. Nhấp vào chữ "Send Request" xuất hiện ngay phía trên mỗi request bên dưới.
+### ==============================================================================
+
+@baseUrl = http://127.0.0.1:8000/api/v1
+@contentType = application/json
+
+### ------------------------------------------------------------------------------
+### 0. KIỂM TRA HỆ THỐNG (SYSTEM HEALTH)
+### ------------------------------------------------------------------------------
+# @name healthCheck
+GET {{baseUrl}}/system/health
+
+### ------------------------------------------------------------------------------
+### 1. UF1 - TẠO BẢN NHÁP CÔNG VIỆC (CREATE DRAFT)
+### ------------------------------------------------------------------------------
+# @name createDraft
+POST {{baseUrl}}/drafts
+Idempotency-Key: draft_create_{{$guid}}
+Content-Type: {{contentType}}
+
+{
+  "client_draft_id": "draft-client-{{$timestamp}}",
+  "input_source": "text",
+  "raw_input": "Mình đang bị dí slide thuyết trình môn Trí tuệ nhân tạo phải nộp trước 12:00 trưa Chủ Nhật tuần này. Bài này làm tầm 10 trang slide thôi, tập trung tóm tắt thuật toán A* chứ không cần quay video demo. Mình chỉ rảnh vào sáng thứ Bảy từ 8:00 đến 11:00 và tối thứ Bảy từ 20:00 đến 22:00."
+}
+
+### Tự động trích xuất draft_id từ response của request 'createDraft' ở trên:
+@draftId = {{createDraft.response.body.data.draft_id}}
+@summaryRevision = {{createDraft.response.body.data.summary_revision}}
+
+### ------------------------------------------------------------------------------
+### 2. UF1 - XEM CHI TIẾT BẢN NHÁP VỪA TẠO
+### ------------------------------------------------------------------------------
+GET {{baseUrl}}/drafts/{{draftId}}
+
+### ------------------------------------------------------------------------------
+### 3. UF1 - BỔ SUNG DỮ LIỆU THIẾU (ANALYZE & MERGE 1 VÒNG)
+### ------------------------------------------------------------------------------
+# @name analyzeDraft
+POST {{baseUrl}}/drafts/{{draftId}}/analyze
+Idempotency-Key: draft_analyze_{{$guid}}
+Content-Type: {{contentType}}
+
+{
+  "expected_summary_revision": {{summaryRevision}},
+  "expected_planning_input_revision": 1,
+  "message": "Bổ sung thêm: sáng thứ Bảy mình rảnh từ 08:00 đến 11:00 nhé."
+}
+
+### ------------------------------------------------------------------------------
+### 4. UF1 - XÁC NHẬN BẢNG TÓM TẮT (CONFIRM SUMMARY ĐỂ QUA UF2)
+### ------------------------------------------------------------------------------
+# @name confirmSummary
+POST {{baseUrl}}/drafts/{{draftId}}/confirm-summary
+Idempotency-Key: draft_confirm_{{$guid}}
+Content-Type: {{contentType}}
+
+{
+  "expected_summary_revision": {{summaryRevision}}
+}
+
+### ------------------------------------------------------------------------------
+### 5. UF2 - TẠO PHƯƠNG ÁN LỊCH (GENERATE CANDIDATE - AI + PYTHON SCHEDULER)
+### ------------------------------------------------------------------------------
+# @name generateCandidate
+POST {{baseUrl}}/drafts/{{draftId}}/candidates
+Idempotency-Key: candidate_gen_{{$guid}}
+Content-Type: {{contentType}}
+
+{
+  "client_candidate_id": "cand-client-{{$timestamp}}",
+  "planning_horizon": {
+    "start_at": "2026-11-08T08:00:00+07:00",
+    "end_at": "2026-11-15T12:00:00+07:00"
+  }
+}
+
+### Tự động trích xuất candidate_id và session_id đầu tiên:
+@candidateId = {{generateCandidate.response.body.data.candidate_id}}
+
+### ------------------------------------------------------------------------------
+### 6. UF2 - DUYỆT VÀ LƯU KẾ HOẠCH CHÍNH THỨC (CONFIRM CANDIDATE)
+### ------------------------------------------------------------------------------
+# @name confirmCandidate
+POST {{baseUrl}}/candidates/{{candidateId}}/confirm
+Idempotency-Key: candidate_confirm_{{$guid}}
+Content-Type: {{contentType}}
+
+{
+  "expected_review_revision": 1
+}
+
+### Lấy session ID thực tế sau khi đã lưu vào DB chính thức:
+@firstSessionId = {{confirmCandidate.response.body.data.key_mapping.sessions.session-step-1-0}}
+
+### ------------------------------------------------------------------------------
+### 7. UF3 - BẮT ĐẦU PHIÊN TẬP TRUNG (START SESSION RUN - 1-STEP UI)
+### ------------------------------------------------------------------------------
+# @name startSession
+POST {{baseUrl}}/sessions/{{firstSessionId}}/start
+Idempotency-Key: session_start_{{$guid}}
+Content-Type: {{contentType}}
+
+{
+  "expected_schedule_revision": 1,
+  "device_id": "vscode_rest_client_device",
+  "requested_start_at": "2026-11-14T08:00:00+07:00"
+}
+
+### Lấy run_id đang hoạt động:
+@activeRunId = {{startSession.response.body.data.run_id}}
+
+### ------------------------------------------------------------------------------
+### 8. UF3 - KIỂM CHỨNG BẢO VỆ CHẶN CHẠY 2 PHIÊN ĐỒNG THỜI (EXPECT: 409 CONFLICT)
+### ------------------------------------------------------------------------------
+POST {{baseUrl}}/sessions/{{firstSessionId}}/start
+Idempotency-Key: session_start_conflict_{{$guid}}
+Content-Type: {{contentType}}
+
+{
+  "expected_schedule_revision": 1,
+  "device_id": "vscode_rest_client_device",
+  "requested_start_at": "2026-11-14T08:00:00+07:00"
+}
+
+### ------------------------------------------------------------------------------
+### 9. UF4 - CẤT SUY NGHĨ THÔ (CAPTURE RAW AUDIO THOUGHT)
+### ------------------------------------------------------------------------------
+# @name captureThought
+POST {{baseUrl}}/thoughts
+Idempotency-Key: thought_cap_{{$guid}}
+Content-Type: {{contentType}}
+
+{
+  "client_thought_id": "th-client-{{$timestamp}}",
+  "source_run_id": "{{activeRunId}}",
+  "input_type": "audio",
+  "capture_state": "raw_saved",
+  "attempt_count": 1,
+  "text_content": null
+}
+
+### Lấy thought_id vừa tạo:
+@thoughtId = {{captureThought.response.body.data.thought_id}}
+
+### ------------------------------------------------------------------------------
+### 10. UF4 - KIỂM CHỨNG STRICT GUARDRAIL (CHẶN STT/LLM TRONG PHIÊN - EXPECT: 409)
+### ------------------------------------------------------------------------------
+POST {{baseUrl}}/thoughts/{{thoughtId}}/draft
+Idempotency-Key: illegal_draft_convert_{{$guid}}
+Content-Type: {{contentType}}
+
+{
+  "expected_thought_revision": 1,
+  "text_content": "Cố tình ép phân tích chữ trong khi phiên đang chạy"
+}
