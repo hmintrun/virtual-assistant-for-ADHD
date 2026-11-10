@@ -19,8 +19,10 @@ class AppError(Exception):
         retryable: bool = False,
         field_errors: list[FieldError] | None = None,
         current_revisions: dict[str, int] | None = None,
+        headers: dict[str, str] | None = None,
     ) -> None:
         super().__init__(message)
+        self.headers = headers or {}
         self.status_code = status_code
         self.code = code
         self.message = message
@@ -48,6 +50,7 @@ def register_exception_handlers(app: FastAPI) -> None:
         )
         return JSONResponse(
             status_code=exc.status_code,
+            headers=exc.headers,
             content=envelope.model_dump(mode="json"),
         )
 
@@ -78,4 +81,3 @@ def register_exception_handlers(app: FastAPI) -> None:
             status_code=422,
             content=envelope.model_dump(mode="json"),
         )
-

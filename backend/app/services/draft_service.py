@@ -9,6 +9,7 @@ from sqlalchemy.exc import MultipleResultsFound
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import AppError
+from app.core.security import dev_seed_enabled
 from app.models.base import Base
 from app.models.planning import PlanningDraft as PlanningDraftModel
 from app.models.settings import Availability as AvailabilityModel
@@ -208,6 +209,8 @@ def _row_to_schema(row: PlanningDraftModel, fallback_draft_id: str | None = None
 
 async def ensure_dev_seed_in_db(db: AsyncSession) -> None:
     """Bước 5.1 (F07, T23): Khởi tạo bảng và seed idempotent cho User A, User B cùng các Draft mẫu."""
+    if not dev_seed_enabled():
+        return
     if db.info.get("dev_seed_ready"):
         return
     bind = db.get_bind()

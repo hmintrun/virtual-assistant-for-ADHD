@@ -2,6 +2,7 @@
 from fastapi import APIRouter
 
 from app.api.v1 import (
+    auth,
     calendar,
     checkin,
     drafts,
@@ -17,6 +18,7 @@ from app.api.v1 import (
 from app.core.config import settings as app_settings
 
 api_router = APIRouter(prefix=app_settings.API_V1_STR)
+api_router.include_router(auth.router)
 api_router.include_router(calendar.router)
 api_router.include_router(drafts.router)
 api_router.include_router(voice.router)

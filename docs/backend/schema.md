@@ -10,7 +10,7 @@ Cập nhật nguồn gốc: **30/10/2026**; đồng bộ local và quyết đị
 - [Backend Docs](https://docs.google.com/document/d/1X1zIWny1nOWCfkS4zLEdn71uZLhYLu5OkHlUPKcdoxE/edit): 01 nghiệp vụ; 02 object; 03 cách dùng API; 04 trách nhiệm; 05 kiểm chứng.
 - [Sheet API — tab api](https://docs.google.com/spreadsheets/d/1RTI0Hv0DydDX5S0DMq1clSFmGggCuGkAMORynke6J0w/edit#gid=1522506644): request, success/fail JSON và **ghi chú trong ô** của 62 endpoint, dòng 2–63.
 - Tên trường và biến thể JSON trao đổi theo Sheet; nghiệp vụ theo thẻ 01. Chỗ hai nguồn chưa khớp được ghi tại mục 9; không tự coi một ví dụ là toàn bộ schema hoặc enum.
-- O00 User ở mục 8 là thiết kế tài khoản nội bộ bổ sung theo lựa chọn Google Sign-In; chưa phải object/API đăng nhập đã được công bố trong hai nguồn.
+- O00 User và Auth login/me tại mục8/AUTH_GUIDE là contract bổ sung11/11/2026; mức kiểm chứng runtime xem handoff.
 - schema.md đồng bộ các nguồn trên và các quyết định local được người dùng chốt trong Project/kế hoạch tuần 2. Mục 12 ghi rõ phần thay đổi local còn chờ cập nhật Docs/Sheet và triển khai DTO/code; không coi tài liệu online đã được cập nhật. Các tài liệu trong _temp không phải phụ thuộc để dùng file này.
 
 ### Quy ước kiểu dữ liệu
@@ -1006,22 +1006,26 @@ Bảng này là chỉ mục, không thay request validation. Các trường dư�
 - Bí mật và transcript/audio không ghi log. credential_ref/payload_hash/payload_snapshot nội bộ không trả ra chỉ vì object có chúng.
 - offline_start_supported=false trong capabilities hiện hành; cache/thu âm local không tự đồng nghĩa được start độc lập offline.
 
-## 8. O00 User — tài khoản nội bộ cần nối với Auth
+## 8. O00 User và Authentication — 11/11/2026
 
-**Phạm vi thiết kế bổ sung:** lựa chọn đã thống nhất trong phiên làm việc là Google Sign-In → Backend xác minh Google ID token → cấp app access token. Hai nguồn đang tham chiếu chưa công bố endpoint/DTO Auth app; bảng này không tự thêm endpoint đăng nhập.
+Auth contract triển khai: [AUTH_GUIDE.md](AUTH_GUIDE.md). Google Sign-In đổi Google ID token tại `POST /api/v1/auth/google`; `GET /api/v1/auth/me` và API nghiệp vụ dùng Bearer JWT app, đọc User DB/active. Google Sign-In tách Calendar consent; callback Calendar dùng state riêng.
 
-| Trường nội bộ đề nghị | Kiểu | Ý nghĩa |
-|---|---|---|
-| user_id (API) / id (DB) | string | Mã user nội bộ; app token sub trỏ về user này |
-| google_sub hoặc AuthIdentity(provider,provider_subject) | string | Subject Google đã xác minh; định danh tài khoản, không dùng email thay sub |
-| email | string/null | Hồ sơ lấy từ token đã xác minh nếu có; không mặc định khóa định danh Google là email |
-| display_name | string/null | Hồ sơ hiển thị nếu có, không suy giới hạn 100 ký tự là đã chốt |
-| is_active | boolean | Kiểm user còn được dùng API |
-| created_at/updated_at | date-time | Metadata lưu trữ theo model triển khai |
+| Field | Contract |
+|---|---|
+| user_id / JWT sub | UUID User nội bộ; API trả string |
+| google_sub | unique Google subject đã xác minh, chỉ nội bộ |
+| email | Google verified email bắt buộc, <=320; DB unique; không tự link theo email |
+| display_name | trimmed Google name, fallback email local part, cắt tối đa100 |
+| is_active | DB false →403 ACCOUNT_DISABLED; User đã xóa →401 |
+| preferences | tạo đúng một UserPreference theo defaults khi tạo User; không reset khi login lại |
 
-Google Sign-In và Calendar OAuth là hai luồng riêng; đăng nhập không tự cấp quyền Calendar. Backend kiểm token Google trước liên kết user; các API nghiệp vụ dùng app access token. TTL/refresh/logout/thu hồi token và DTO Auth phải review riêng trước code Mobile–Backend.
+Login200 dùng SuccessEnvelope[GoogleLoginData]: access_token, token_type=bearer, expires_in=3600, user=CurrentUser. Me200 dùng SuccessEnvelope[CurrentUser]. Request GoogleLoginRequest chỉ id_token, extra=forbid, không blank/padded, dài1–16384. Login không cần Idempotency-Key hoặc app Bearer. Chi tiết JSON/lỗi/next_action ở Auth guide và Sheet `api!A65:J66`; không renumber routes cũ.
 
-Các trường streak trong schema cũ (current_streak_days, streak_frozen, streak_freeze_tokens, last_streak_date) là **phần mở rộng chưa có trong Backend Docs/Sheet hiện hành**. Giữ chúng ngoài schema tối thiểu và không áp mặc định 2 freeze tokens hoặc tự phát sinh luật streak từ file cũ. Bản này cũng không tạo yêu cầu đăng nhập mật khẩu/hashed_password khi cơ chế được chọn là Google Sign-In.
+JWT app HS256 allowlist, JWT_SECRET_KEY riêng khỏi SECRET_KEY Calendar; required sub(UUID), exp/iat(integer), iss/aud chính xác, token_type=access. TTL3600s, skew mặc định0 (0–60). Chưa app refresh token/revoke: re-exchange Google ID token; logout local không vô hiệu JWT trước exp. Startup staging/production cấm dev_user; seed/create_all chỉ development/testing và AUTH_MODE=dev_user. Không thêm schema migration vì unique google_sub/email/preferences đã có.
+
+Auth errors:422 VALIDATION_ERROR/fix_fields;401 INVALID_GOOGLE_ID_TOKEN hoặc UNAUTHENTICATED/authenticate;403 ACCOUNT_DISABLED/contact_support;409 ACCOUNT_LINK_CONFLICT/review_account_link;422 GOOGLE_PROFILE_INCOMPLETE/review_google_profile;503 AUTH_PROVIDER_UNAVAILABLE/retry_login (retryable=true). Các lỗi khác retryable=false. ErrorEnvelope giữ field_errors/current_revisions/meta; mọi Auth401 có WWW-Authenticate: Bearer. Đây là contract delta, không phải tuyên bố Google thật/Tester598cases đã đạt.
+
+Password/streak legacy nằm ngoài phạm vi Auth này. File/source snapshot và trạng thái kiểm chứng ở SE_HANDOFF local.
 
 ## 9. Giới hạn và trạng thái triển khai C01 — 03/11/2026
 
