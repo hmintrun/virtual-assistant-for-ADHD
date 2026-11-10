@@ -4,8 +4,15 @@ import 'package:provider/provider.dart';
 import '../core/theme.dart';
 import '../providers/task_provider.dart';
 import '../widgets/melbel_ui.dart';
+import 'task_summary_screen.dart';
 import 'uf2_screens.dart'
-    show DecompositionChoiceScreen, PlanLockedScreen, UnconfirmedPlanScreen;
+    show
+        DecompositionChoiceScreen,
+        FeasibilityAdjustment,
+        FeasibilityScreen,
+        PlanLockedScreen,
+        UnconfirmedPlanScreen,
+        VoiceAssistantModal;
 
 class CandidateReviewScreen extends StatelessWidget {
   const CandidateReviewScreen({super.key});
@@ -52,8 +59,8 @@ class CandidateReviewScreen extends StatelessWidget {
         child: ListView(
           padding: const EdgeInsets.fromLTRB(20, 12, 20, 28),
           children: [
-            const Eyebrow('UF2 · ĐỀ XUẤT CHƯA CHỐT'),
-            const SizedBox(height: 8),
+            const PlanningStageHeader(step: 3, label: 'Xem phương án'),
+            const SizedBox(height: 16),
             Text(title,
                 style: TextStyle(
                     fontSize: 22,
@@ -146,20 +153,35 @@ class CandidateReviewScreen extends StatelessWidget {
                 label: const Text('Tùy chỉnh theo ý tôi'),
               ),
             ),
+            if (candidate.steps.isNotEmpty) ...[
+              TextButton.icon(
+                onPressed: task.isApiBusy ? null : () => _adjustByVoice(context),
+                icon: const Icon(Icons.mic_none),
+                label: const Text('Tùy chỉnh bằng giọng nói'),
+              ),
+              const Eyebrow('Các bước thực hiện'),
+              const SizedBox(height: 8),
+            ],
             for (var i = 0; i < candidate.steps.length; i++) ...[
-              _stepCard(context, candidate.steps[i], i),
+              _stepCard(
+                context,
+                candidate.steps[i],
+                i,
+                candidate.sessions.where((session) =>
+                    session['client_step_key'] ==
+                    candidate.steps[i]['client_step_key']),
+              ),
               const SizedBox(height: 10),
             ],
             if (candidate.sessions.isNotEmpty) ...[
-              const Eyebrow('CÁC PHIÊN DO BACKEND XẾP'),
+              const Eyebrow('Lịch phiên đề xuất'),
               const SizedBox(height: 8),
               for (final session in candidate.sessions) ...[
                 _sessionCard(session),
                 const SizedBox(height: 8),
               ],
             ],
-            if (candidate.planningParts
-                .any((part) => part['decomposition_state'] != 'complete'))
+            if (candidate.isPartiallyDecomposed)
               MelbelCard(
                   child: Text(
                       'Một số phần nằm ngoài phạm vi phân rã chi tiết hiện tại; có thể tiếp tục khi kế hoạch được cập nhật.',
@@ -169,10 +191,10 @@ class CandidateReviewScreen extends StatelessWidget {
               SecondaryCta(
                 label: task.isApiBusy
                     ? 'Đang tính lại…'
-                    : 'Chọn hạn mới và tính lại',
+                    : 'Xem cách điều chỉnh',
                 icon: Icons.edit_calendar,
                 onPressed:
-                    task.isApiBusy ? null : () => _reviseDeadline(context),
+                    task.isApiBusy ? null : () => _openFeasibility(context, deficitSeconds),
               ),
             if (!candidate.isFeasible) const SizedBox(height: 8),
             PrimaryCta(
@@ -216,8 +238,16 @@ class CandidateReviewScreen extends StatelessWidget {
 
   static int _minutes(int seconds) => (seconds / 60).ceil();
 
-  Widget _stepCard(BuildContext context, Map<String, dynamic> step, int index) {
+  Widget _stepCard(
+    BuildContext context,
+    Map<String, dynamic> step,
+    int index,
+    Iterable<Map<String, dynamic>> sessions,
+  ) {
     final seconds = step['estimated_base_seconds'] as int? ?? 0;
+    final output = step['expected_output'] as String?;
+    final firstSession = sessions.firstOrNull;
+    final microTask = firstSession?['micro_task_text'] as String?;
     return MelbelCard(
         child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
       Row(children: [
@@ -233,9 +263,24 @@ class CandidateReviewScreen extends StatelessWidget {
             onPressed: () => _editStep(context, step),
             icon: const Icon(Icons.edit_outlined))
       ]),
-      Text(step['expected_output'] as String? ?? 'Chưa có kết quả đầu ra',
-          style: TextStyle(color: MelbelColors.kOnSurfaceVariant)),
+      const SizedBox(height: 4),
+      const Eyebrow('Đầu ra'),
+      const SizedBox(height: 4),
+      Text(
+        output == null || output.trim().isEmpty
+            ? 'Chưa có kết quả đầu ra'
+            : output,
+        style: Theme.of(context).textTheme.bodyMedium,
+      ),
       const SizedBox(height: 6),
+      if (microTask != null && microTask.trim().isNotEmpty)
+        ListTile(
+          contentPadding: EdgeInsets.zero,
+          leading: const Icon(Icons.spa_outlined),
+          title: const Text('Khởi động 2 phút'),
+          subtitle: Text(microTask),
+        ),
+      if (sessions.isNotEmpty) Text('${sessions.length} phiên đề xuất'),
       Text(
           'Ước tính gốc: ${_minutes(seconds)} phút · hệ số đệm ${step['buffer_multiplier'] ?? '—'}',
           style:
@@ -339,6 +384,27 @@ class CandidateReviewScreen extends StatelessWidget {
     minutes.dispose();
   }
 
+  Future<void> _adjustByVoice(BuildContext context) async {
+    final task = context.read<TaskProvider>();
+    final request = await showModalBottomSheet<String>(
+      context: context,
+      isScrollControlled: true,
+      showDragHandle: true,
+      builder: (sheetContext) => VoiceAssistantModal(
+        onApply: (value) => Navigator.pop(sheetContext, value),
+      ),
+    );
+    if (request == null || !context.mounted || task.isApiBusy) return;
+    try {
+      await task.generateCandidateOnBackend(stepProposal: request);
+    } catch (_) {
+      if (!context.mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Chưa tạo được phương án mới.')),
+      );
+    }
+  }
+
   Future<void> _confirm(BuildContext context) async {
     final task = context.read<TaskProvider>();
     try {
@@ -351,6 +417,26 @@ class CandidateReviewScreen extends StatelessWidget {
         ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(content: Text('Backend chưa chốt được kế hoạch: $error')));
     }
+  }
+
+  Future<void> _openFeasibility(BuildContext context, int? deficitSeconds) async {
+    final choice = await Navigator.push<FeasibilityAdjustment>(
+      context,
+      MaterialPageRoute(
+        builder: (_) => FeasibilityScreen(
+          deficitMinutes: deficitSeconds == null ? null : (deficitSeconds / 60).ceil(),
+        ),
+      ),
+    );
+    if (choice == null || !context.mounted) return;
+    if (choice == FeasibilityAdjustment.deadline) {
+      await _reviseDeadline(context);
+      return;
+    }
+    await Navigator.push<void>(
+      context,
+      MaterialPageRoute(builder: (_) => const TaskSummaryScreen()),
+    );
   }
 
   Future<void> _reviseDeadline(BuildContext context) async {

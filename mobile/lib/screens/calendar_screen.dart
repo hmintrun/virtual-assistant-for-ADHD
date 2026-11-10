@@ -1,7 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../core/api_client.dart';
-import '../core/theme.dart';
 import '../providers/task_provider.dart';
 import '../widgets/melbel_ui.dart';
 import 'support_screens.dart';
@@ -16,6 +15,8 @@ class CalendarScreen extends StatefulWidget {
 
 class _CalendarScreenState extends State<CalendarScreen> {
   late DateTime _month;
+  DateTime? _hoveredDay;
+  DateTime? _focusedDay;
   late final ApiClient _api;
   List<Map<String, dynamic>> _sessions = [];
   bool _loading = true;
@@ -135,84 +136,252 @@ class _CalendarScreenState extends State<CalendarScreen> {
   }
 
   void _changeMonth(int amount) {
-    setState(() => _month = DateTime(_month.year, _month.month + amount));
+    setState(() {
+      _month = DateTime(_month.year, _month.month + amount);
+      _hoveredDay = null;
+      _focusedDay = null;
+    });
     _load();
   }
 
   @override
   Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final colors = theme.colorScheme;
+    final today = DateTime.now();
     final offset = _month.weekday - 1;
     final days = DateTime(_month.year, _month.month + 1, 0).day;
+
     return Scaffold(
-        appBar: const MelbelAppBar(title: 'Lịch', showBack: true),
-        floatingActionButton: FloatingActionButton.extended(
-          onPressed: () => Navigator.of(context).push(
-            MaterialPageRoute<void>(
-              builder: (_) => const CalendarVoiceQuestionScreen(),
-            ),
+      appBar: const MelbelAppBar(title: 'Lịch', showBack: true),
+      floatingActionButton: FloatingActionButton.extended(
+        onPressed: () => Navigator.of(context).push(
+          MaterialPageRoute<void>(
+            builder: (_) => const CalendarVoiceQuestionScreen(),
           ),
-          icon: const Icon(Icons.mic_none),
-          label: const Text('Hỏi lịch'),
         ),
-        body: ListView(padding: const EdgeInsets.all(20), children: [
-          Row(children: [
-            Expanded(
-                child: Text('Tháng ${_month.month}, ${_month.year}',
-                    style: Theme.of(context).textTheme.titleLarge)),
-            IconButton(
-                tooltip: 'Tháng trước',
-                onPressed: () => _changeMonth(-1),
-                icon: const Icon(Icons.chevron_left)),
-            IconButton(
-                tooltip: 'Tháng sau',
-                onPressed: () => _changeMonth(1),
-                icon: const Icon(Icons.chevron_right)),
-          ]),
-          const Text('Các phiên đã xác nhận trong ứng dụng'),
-          const SizedBox(height: 12),
-          const Row(
-              mainAxisAlignment: MainAxisAlignment.spaceAround,
-              children: [
-                Text('T2'),
-                Text('T3'),
-                Text('T4'),
-                Text('T5'),
-                Text('T6'),
-                Text('T7'),
-                Text('CN')
-              ]),
-          GridView.builder(
-              shrinkWrap: true,
-              physics: const NeverScrollableScrollPhysics(),
-              gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-                  crossAxisCount: 7),
-              itemCount: offset + days,
-              itemBuilder: (context, index) {
-                if (index < offset) return const SizedBox.shrink();
-                final date =
-                    DateTime(_month.year, _month.month, index - offset + 1);
-                return InkWell(
-                    onTap: _loading ? null : () => _openDay(date),
-                    child: Column(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        children: [
-                          Text('${date.day}'),
-                          if (_onDate(date).isNotEmpty)
-                            Icon(Icons.circle,
-                                size: 6, color: MelbelColors.kSecondary),
-                        ]));
-              }),
-          if (_loading)
-            const Center(
-                child: Padding(
-                    padding: EdgeInsets.all(20),
-                    child: CircularProgressIndicator())),
-          if (_error != null) ...[
-            Text('Chưa tải được lịch: $_error'),
-            SecondaryCta(label: 'Thử tải lại', onPressed: _load)
+        icon: const Icon(Icons.date_range_rounded),
+        label: const Text('Hỏi lịch'),
+      ),
+      body: SafeArea(
+        child: ListView(
+          padding: const EdgeInsets.fromLTRB(16, 16, 16, 88),
+          children: [
+            MelbelCard(
+              padding: const EdgeInsets.all(12),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          'Tháng ${_month.month}, ${_month.year}',
+                          style: theme.textTheme.titleLarge,
+                        ),
+                      ),
+                      IconButton.outlined(
+                        tooltip: 'Tháng trước',
+                        onPressed: () => _changeMonth(-1),
+                        icon: const Icon(Icons.chevron_left_rounded),
+                      ),
+                      const SizedBox(width: 4),
+                      IconButton.outlined(
+                        tooltip: 'Tháng sau',
+                        onPressed: () => _changeMonth(1),
+                        icon: const Icon(Icons.chevron_right_rounded),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  Divider(color: colors.outlineVariant),
+                  Row(
+                    children: [
+                      for (final day in ['T2', 'T3', 'T4', 'T5', 'T6', 'T7', 'CN'])
+                        Expanded(
+                          child: Padding(
+                            padding: const EdgeInsets.symmetric(vertical: 8),
+                            child: Text(
+                              day,
+                              textAlign: TextAlign.center,
+                              style: theme.textTheme.labelMedium?.copyWith(
+                                color: colors.onSurfaceVariant,
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
+                          ),
+                        ),
+                    ],
+                  ),
+                  GridView.builder(
+                    shrinkWrap: true,
+                    physics: const NeverScrollableScrollPhysics(),
+                    gridDelegate:
+                        const SliverGridDelegateWithFixedCrossAxisCount(
+                      crossAxisCount: 7,
+                      mainAxisExtent: 48,
+                    ),
+                    itemCount: offset + days,
+                    itemBuilder: (context, index) {
+                      if (index < offset) return const SizedBox.shrink();
+                      final date =
+                          DateTime(_month.year, _month.month, index - offset + 1);
+                      final isToday = DateUtils.isSameDay(date, today);
+                      final hasSessions = _onDate(date).isNotEmpty;
+                      final openDay = _loading ? null : () => _openDay(date);
+                      final showPaw = isToday ||
+                          (openDay != null &&
+                              (date == _hoveredDay || date == _focusedDay));
+                      return Semantics(
+                        button: true,
+                        enabled: openDay != null,
+                        onTap: openDay,
+                        label: '${date.day}/${date.month}/${date.year}'
+                            '${isToday ? ', hôm nay' : ''}'
+                            '${hasSessions ? ', có phiên' : ''}',
+                        excludeSemantics: true,
+                        child: Padding(
+                          padding: const EdgeInsets.all(2),
+                          child: Material(
+                            color: hasSessions && !showPaw
+                                ? colors.surfaceContainerHigh
+                                : Colors.transparent,
+                            borderRadius: BorderRadius.circular(10),
+                            child: InkWell(
+                              borderRadius: BorderRadius.circular(10),
+                              onTap: openDay,
+                              hoverColor: Colors.transparent,
+                              focusColor: Colors.transparent,
+                              onHover: (hovering) {
+                                if (!hovering && _hoveredDay != date) return;
+                                setState(() => _hoveredDay = hovering ? date : null);
+                              },
+                              onFocusChange: (focused) {
+                                if (!focused && _focusedDay != date) return;
+                                setState(() => _focusedDay = focused ? date : null);
+                              },
+                              child: Stack(
+                                alignment: Alignment.center,
+                                children: [
+                                  if (showPaw)
+                                    CustomPaint(
+                                      size: const Size(38, 38),
+                                      painter: _TodayPawPainter(
+                                        isToday
+                                            ? colors.primary
+                                            : colors.primary.withValues(alpha: .4),
+                                      ),
+                                    ),
+                                  Text(
+                                    '${date.day}',
+                                    style: theme.textTheme.bodyMedium?.copyWith(
+                                      color: isToday ||
+                                              (showPaw &&
+                                                  colors.brightness == Brightness.dark)
+                                          ? colors.onPrimary
+                                          : colors.onSurface,
+                                      fontWeight: isToday || hasSessions
+                                          ? FontWeight.w700
+                                          : FontWeight.w500,
+                                    ),
+                                  ),
+                                  if (hasSessions)
+                                    Positioned(
+                                      bottom: 5,
+                                      child: Icon(
+                                        Icons.circle,
+                                        size: 5,
+                                        color: colors.onSurface,
+                                      ),
+                                    ),
+                                ],
+                              ),
+                            ),
+                          ),
+                        ),
+                      );
+                    },
+                  ),
+                  const SizedBox(height: 8),
+                  Row(
+                    children: [
+                      Icon(Icons.circle, size: 6, color: colors.onSurface),
+                      const SizedBox(width: 6),
+                      const Expanded(child: Text('Ngày có phiên đã xác nhận')),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 12),
+            if (_loading) const LinearProgressIndicator(),
+            if (_error != null)
+              MelbelCard(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text('Chưa tải được lịch.'),
+                    TextButton(
+                      onPressed: _load,
+                      child: const Text('Thử tải lại'),
+                    ),
+                  ],
+                ),
+              ),
+            if (!_loading && _error == null && _sessions.isEmpty)
+              const MelbelCard(
+                child: Row(
+                  children: [
+                    Icon(Icons.event_available_outlined),
+                    SizedBox(width: 10),
+                    Expanded(child: Text('Tháng này chưa có phiên.')),
+                  ],
+                ),
+              ),
           ],
-          if (!_loading && _error == null && _sessions.isEmpty)
-            const Text('Tháng này chưa có phiên đã xác nhận.'),
-        ]));
+        ),
+      ),
+    );
   }
+}
+
+class _TodayPawPainter extends CustomPainter {
+  const _TodayPawPainter(this.color);
+
+  final Color color;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    canvas.save();
+    final center = size.center(Offset.zero);
+    canvas.translate(center.dx, center.dy - size.height * 0.13);
+    canvas.scale(1.1);
+    canvas.translate(-center.dx, -center.dy);
+    // Fit the large pad behind the fixed, centered date label.
+    canvas.scale(size.width / 38, size.height / 43);
+    final fill = Paint()..color = color;
+    final pad = Path()
+      ..moveTo(19, 15)
+      ..cubicTo(12, 15, 5, 23, 5, 29)
+      ..cubicTo(5, 35, 11, 38, 19, 38)
+      ..cubicTo(27, 38, 33, 35, 33, 29)
+      ..cubicTo(33, 23, 26, 15, 19, 15)
+      ..close();
+    canvas.drawPath(pad, fill);
+    for (final center in const [
+      Offset(5, 13),
+      Offset(14, 7),
+      Offset(24, 7),
+      Offset(33, 13),
+    ]) {
+      canvas.drawOval(
+        Rect.fromCenter(center: center, width: 7, height: 9),
+        fill,
+      );
+    }
+    canvas.restore();
+  }
+
+  @override
+  bool shouldRepaint(_TodayPawPainter oldDelegate) => color != oldDelegate.color;
 }

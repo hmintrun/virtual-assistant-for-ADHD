@@ -1,8 +1,11 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
 import '../core/theme.dart';
 import '../providers/theme_provider.dart';
+import '../services/alarm_service.dart';
+import '../services/dnd_service.dart';
 import '../widgets/melbel_ui.dart';
 
 enum _LoginStep { welcome, connecting, failed }
@@ -48,13 +51,17 @@ class _LoginScreenState extends State<LoginScreen> {
           child: Column(
             children: [
               const Spacer(),
-              const _MelbelMascot(),
+              const MelbelEntrance(child: MelbelMascot()),
               const SizedBox(height: 32),
-              Text('Chào bạn',
-                  style: Theme.of(context).textTheme.headlineMedium),
+              Text(
+                'ProPlan VA',
+                style: Theme.of(context).textTheme.headlineMedium?.copyWith(
+                      fontWeight: FontWeight.w700,
+                    ),
+              ),
               const SizedBox(height: 10),
               Text(
-                'Mình là Melbel, bạn đồng hành cùng bạn hôm nay ✨',
+                'Lên kế hoạch cùng Melbel',
                 textAlign: TextAlign.center,
                 style: Theme.of(context).textTheme.titleMedium?.copyWith(
                       color: MelbelColors.kSecondary,
@@ -62,7 +69,7 @@ class _LoginScreenState extends State<LoginScreen> {
               ),
               const SizedBox(height: 8),
               Text(
-                'Đăng nhập nhẹ nhàng để bắt đầu nhé',
+                'Chia nhỏ công việc và bắt đầu từng bước.',
                 textAlign: TextAlign.center,
                 style: Theme.of(context).textTheme.bodyMedium?.copyWith(
                       color: MelbelColors.kTextSecondary,
@@ -110,7 +117,7 @@ class _SigningInScreen extends StatelessWidget {
               child: Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  const _MelbelMascot(),
+                  const MelbelMascot(),
                   const SizedBox(height: 28),
                   const CircularProgressIndicator(),
                   const SizedBox(height: 20),
@@ -146,7 +153,7 @@ class _LoginErrorScreen extends StatelessWidget {
             child: Column(
               children: [
                 const Spacer(),
-                const _MelbelMascot(),
+                const MelbelMascot(),
                 const SizedBox(height: 32),
                 const _NoticeCard(
                   icon: Icons.help_outline,
@@ -183,7 +190,8 @@ class SetupFlowScreen extends StatefulWidget {
   State<SetupFlowScreen> createState() => _SetupFlowScreenState();
 }
 
-class _SetupFlowScreenState extends State<SetupFlowScreen> {
+class _SetupFlowScreenState extends State<SetupFlowScreen>
+    with WidgetsBindingObserver {
   int _step = 0;
   String _appearance = 'light';
   int _focusMinutes = 25;
@@ -193,11 +201,69 @@ class _SetupFlowScreenState extends State<SetupFlowScreen> {
   bool _microTask = true;
   bool _voiceReadout = true;
   bool _breakReminder = true;
+  bool _requestingPermission = false;
+  bool _waitingForDndSettings = false;
+
+  bool get _isAndroid =>
+      !kIsWeb && defaultTargetPlatform == TargetPlatform.android;
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _appearance = context.read<ThemeProvider>().appearance;
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state != AppLifecycleState.resumed || !_waitingForDndSettings) return;
+    _waitingForDndSettings = false;
+    if (_step == 4) _handlePermission(checkDndOnly: true);
+  }
+
+  Future<void> _handlePermission({bool checkDndOnly = false}) async {
+    final step = _step;
+    if (step < 4 || !_isAndroid) {
+      _next();
+      return;
+    }
+    if (_requestingPermission) return;
+
+    setState(() => _requestingPermission = true);
+    try {
+      final granted = switch (step) {
+        4 => await DndService.instance.hasPermission,
+        5 => await AlarmService.instance.requestExactAlarmPermission(),
+        _ => await AlarmService.instance.requestNotificationPermission(),
+      };
+      if (!mounted || _step != step) return;
+      if (granted) {
+        _next();
+      } else if (step == 4 && !checkDndOnly) {
+        _waitingForDndSettings = true;
+        DndService.instance.openPermissionSettings();
+      } else {
+        _showPermissionMessage('Chưa cấp quyền. Bạn có thể chọn Để sau.');
+      }
+    } catch (_) {
+      if (mounted && _step == step) {
+        _showPermissionMessage('Chưa mở được quyền. Bạn có thể chọn Để sau.');
+      }
+    } finally {
+      if (mounted) setState(() => _requestingPermission = false);
+    }
+  }
+
+  void _showPermissionMessage(String message) {
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(SnackBar(content: Text(message)));
   }
 
   Future<void> _selectAppearance(String value) async {
@@ -254,7 +320,10 @@ class _SetupFlowScreenState extends State<SetupFlowScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: MelbelAppBar(title: _title, showBack: true, onBack: _back),
+      appBar: MelbelAppBar(
+          title: _title,
+          showBack: true,
+          onBack: _requestingPermission ? () {} : _back),
       body: Column(
         children: [
           if (_step >= 4)
@@ -300,19 +369,23 @@ class _SetupFlowScreenState extends State<SetupFlowScreen> {
                   width: double.infinity,
                   height: 56,
                   child: FilledButton(
-                    onPressed: _next,
+                    onPressed: _requestingPermission
+                        ? null
+                        : () => _handlePermission(),
                     child: Text(_step == 3
                         ? 'Bắt đầu dùng'
-                        : _step == 6
-                            ? 'Xong, bắt đầu'
-                            : _step >= 4
-                                ? 'Cho phép'
-                                : 'Tiếp theo'),
+                        : _step >= 4 && _isAndroid
+                            ? 'Cho phép'
+                            : 'Tiếp theo'),
                   ),
                 ),
                 if (_step == 3 || _step >= 4)
                   TextButton(
-                    onPressed: _step == 3 ? _openHome : _next,
+                    onPressed: _requestingPermission
+                        ? null
+                        : _step == 3
+                            ? _openHome
+                            : _next,
                     child: const Text('Để sau'),
                   ),
               ],
@@ -325,7 +398,7 @@ class _SetupFlowScreenState extends State<SetupFlowScreen> {
 
   Widget _appearanceStep(BuildContext context) => Column(
         children: [
-          const _MelbelMascot(),
+          const MelbelMascot(),
           const SizedBox(height: 20),
           Text('Chọn giao diện',
               style: Theme.of(context).textTheme.headlineSmall),
@@ -469,7 +542,7 @@ class _SetupFlowScreenState extends State<SetupFlowScreen> {
 
   Widget _guideStep(BuildContext context) => Column(
         children: [
-          const _MelbelMascot(),
+          const MelbelMascot(),
           const SizedBox(height: 12),
           Text('Melbel luôn đồng hành cùng bạn',
               style: Theme.of(context).textTheme.titleMedium),
@@ -523,8 +596,13 @@ class _SetupFlowScreenState extends State<SetupFlowScreen> {
                 : index == 1
                     ? 'Đúng nhịp phiên làm việc'
                     : 'Tôn trọng không gian riêng',
-            message:
-                'Màn hình quyền đã được tạo. Việc mở hộp thoại Android sẽ được nối khi phần native sẵn sàng.',
+            message: !_isAndroid
+                ? 'Quyền này dùng trên ứng dụng Android.'
+                : switch (index) {
+                    0 => 'Bật quyền cho ProPlan VA trong màn hình hệ thống.',
+                    1 => 'Android có thể yêu cầu cho phép đặt báo thức.',
+                    _ => 'Cho phép ProPlan VA gửi lời nhắc.',
+                  },
           ),
         ],
       );
@@ -608,42 +686,6 @@ class _GuideTile extends StatelessWidget {
               ),
             ],
           ),
-        ),
-      );
-}
-
-class _MelbelMascot extends StatelessWidget {
-  const _MelbelMascot();
-
-  @override
-  Widget build(BuildContext context) => Container(
-        width: 120,
-        height: 100,
-        decoration: BoxDecoration(
-          color: const Color(0xFF1E2029),
-          borderRadius: BorderRadius.circular(44),
-        ),
-        child: const Row(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            _MascotEye(),
-            SizedBox(width: 16),
-            _MascotEye(),
-          ],
-        ),
-      );
-}
-
-class _MascotEye extends StatelessWidget {
-  const _MascotEye();
-
-  @override
-  Widget build(BuildContext context) => Container(
-        width: 12,
-        height: 18,
-        decoration: const BoxDecoration(
-          color: Color(0xFFE9D8A6),
-          borderRadius: BorderRadius.all(Radius.circular(50)),
         ),
       );
 }

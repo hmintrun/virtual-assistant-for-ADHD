@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
 import '../core/theme.dart';
+import '../models/planning_models.dart';
 import '../providers/task_provider.dart';
 import '../widgets/melbel_ui.dart';
 import 'drafts_screen.dart';
@@ -17,6 +18,7 @@ class TaskSummaryScreen extends StatefulWidget {
 class _TaskSummaryScreenState extends State<TaskSummaryScreen> {
   late final TextEditingController _scopeController;
   late final TextEditingController _clarificationController;
+  late final FocusNode _scopeFocusNode;
   bool _isSubmitting = false;
 
   @override
@@ -25,13 +27,28 @@ class _TaskSummaryScreenState extends State<TaskSummaryScreen> {
     _scopeController =
         TextEditingController(text: context.read<TaskProvider>().scope);
     _clarificationController = TextEditingController();
+    _scopeFocusNode = FocusNode();
   }
 
   @override
   void dispose() {
     _scopeController.dispose();
     _clarificationController.dispose();
+    _scopeFocusNode.dispose();
     super.dispose();
+  }
+
+  void _syncScopeFromBackend(String scope) {
+    if (_scopeFocusNode.hasFocus || _scopeController.text == scope) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || _scopeFocusNode.hasFocus) return;
+      final latestScope = context.read<TaskProvider>().scope;
+      if (_scopeController.text == latestScope) return;
+      _scopeController.value = TextEditingValue(
+        text: latestScope,
+        selection: TextSelection.collapsed(offset: latestScope.length),
+      );
+    });
   }
 
   Future<void> _pickAvailability(TaskProvider task) async {
@@ -68,48 +85,70 @@ class _TaskSummaryScreenState extends State<TaskSummaryScreen> {
     final from = instant(start);
     final to = instant(end);
     final deadline = task.deadline;
-    if (!to.isAfter(from) ||
-        !to.isAfter(DateTime.now()) ||
-        (deadline != null && to.isAfter(deadline))) {
+    final invalidReason = !to.isAfter(from)
+        ? 'Giờ kết thúc phải sau giờ bắt đầu.'
+        : !to.isAfter(DateTime.now())
+            ? 'Khung giờ này đã qua. Hãy chọn giờ rảnh khác.'
+            : deadline != null && to.isAfter(deadline)
+                ? 'Khung giờ vượt hạn ${task.formatDeadline(deadline)}. '
+                    'Hãy đổi hạn trước hoặc chọn giờ kết thúc sớm hơn.'
+                : null;
+    if (invalidReason != null) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Chọn giờ kết thúc sau giờ bắt đầu và trước hạn chót.'),
-        ),
+        SnackBar(content: Text(invalidReason)),
       );
       return;
     }
     task.setAvailability(AvailabilitySlot(start: from, end: to));
   }
 
-  Future<void> _continue() async {
+  Future<void> _continue({bool createCandidate = true}) async {
     if (_isSubmitting) return;
     final task = context.read<TaskProvider>();
     if (task.isApiBusy) return;
-    task.setScope(_scopeController.text.trim());
+    final draft = task.draft;
+    final answer = _clarificationController.text.trim();
+    final blockers = draft?.clarificationIssues
+            .where((issue) => issue['blocking'] == true)
+            .toList() ??
+        const <JsonMap>[];
+    final onlyScopeIsMissing = blockers.isNotEmpty &&
+        blockers.every((issue) => issue['field_path'] == 'scope') &&
+        (draft?.scope.trim().isEmpty ?? false);
+    final useAnswerAsScope = onlyScopeIsMissing && answer.isNotEmpty;
+    final hasManualAvailability = task.availability != null &&
+        answer.isEmpty &&
+        blockers.isNotEmpty &&
+        blockers.every((issue) => issue['field_path'] == 'availability');
+    task.setScope(useAnswerAsScope ? answer : _scopeController.text.trim());
     setState(() => _isSubmitting = true);
     try {
-      if (task.draft != null &&
-          !task.canPlan &&
-          _clarificationController.text.trim().isNotEmpty) {
-        await task.submitClarification(_clarificationController.text);
-        _clarificationController.clear();
+      if (draft != null &&
+          (onlyScopeIsMissing && task.scope.trim().isNotEmpty ||
+              hasManualAvailability ||
+              createCandidate && draft.canPlan)) {
+        // Explicit form values already have a field; save them without NLP.
+        await task.updateDraftOnBackend();
+        if (mounted && useAnswerAsScope && task.scope.trim() == answer) {
+          _scopeFocusNode.unfocus();
+          _scopeController.text = task.scope;
+          _clarificationController.clear();
+        }
+      } else if (draft != null && !task.canPlan && answer.isNotEmpty) {
+        await task.submitClarification(answer);
+        if (mounted && task.canPlan) _clarificationController.clear();
       } else {
         await task.prepareDraftAndAnalyze();
       }
       if (!mounted) return;
       if (!task.canPlan) {
-        final questions = task.draft?.clarificationIssues
-            .where((issue) => issue['blocking'] == true)
-            .map((i) => i['question'] ?? i['message'])
-            .whereType<String>()
-            .join('\n');
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-            content: Text(questions == null || questions.isEmpty
-                ? 'Bổ sung thông tin trước khi lập kế hoạch.'
-                : questions)));
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+          content: Text('Chưa đủ thông tin bắt buộc.'),
+        ));
         setState(() {});
         return;
       }
+      if (!createCandidate) return;
       await task.confirmDraftSummaryOnBackend();
       await task.generateCandidateOnBackend();
       if (!mounted) return;
@@ -118,13 +157,43 @@ class _TaskSummaryScreenState extends State<TaskSummaryScreen> {
           MaterialPageRoute<void>(
             builder: (_) => const CandidateReviewScreen(),
           ));
-    } catch (error) {
+    } catch (_) {
       if (mounted)
-        ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('Chưa cập nhật được bản nháp: $error')));
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+            content: Text('Chưa cập nhật được công việc. Thử lại nhé.')));
     } finally {
       if (mounted) setState(() => _isSubmitting = false);
     }
+  }
+
+  Future<void> _pickSummaryDeadline(TaskProvider task) async {
+    final now = DateTime.now();
+    final current = task.deadline;
+    final initial = current != null && current.isAfter(now)
+        ? current
+        : now.add(const Duration(days: 1));
+    final day = await showDatePicker(
+      context: context,
+      initialDate: initial,
+      firstDate: DateUtils.dateOnly(now),
+      lastDate: DateTime(9999, 12, 31),
+      helpText: 'Chọn hạn chót',
+    );
+    if (day == null || !mounted) return;
+    final time = await showTimePicker(
+      context: context,
+      initialTime: TimeOfDay.fromDateTime(initial),
+      initialEntryMode: TimePickerEntryMode.input,
+    );
+    if (time == null || !mounted) return;
+    final deadline = DateTime(day.year, day.month, day.day, time.hour, time.minute);
+    if (!deadline.isAfter(DateTime.now())) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Chọn hạn chót trong tương lai.')),
+      );
+      return;
+    }
+    task.setDeadline(deadline);
   }
 
   Future<void> _saveDraft() async {
@@ -136,10 +205,11 @@ class _TaskSummaryScreenState extends State<TaskSummaryScreen> {
     try {
       try {
         await task.saveDraftToBackend();
-      } catch (error) {
+      } catch (_) {
         if (!mounted) return;
-        ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('Bản nháp chưa đồng bộ máy chủ: $error')));
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+          content: Text('Chưa lưu được bản nháp. Thử lại nhé.'),
+        ));
       }
       if (!mounted) return;
       await Navigator.push(context,
@@ -152,6 +222,19 @@ class _TaskSummaryScreenState extends State<TaskSummaryScreen> {
   @override
   Widget build(BuildContext context) {
     final task = context.watch<TaskProvider>();
+    _syncScopeFromBackend(task.scope);
+    final title = task.title.trim();
+    final original = task.inputText.trim();
+    final firstSentence = original.split(RegExp(r'[.!?](?:\s|$)')).first.trim();
+    final displayTitle = title.isNotEmpty &&
+            original.startsWith(title) &&
+            firstSentence.isNotEmpty &&
+            firstSentence.length < title.length
+        ? firstSentence
+        : title;
+    final missingRequiredQuestions = _requiredQuestions(
+      task.draft?.clarificationIssues ?? const [],
+    );
 
     return Scaffold(
       appBar: const MelbelAppBar(title: 'Tóm tắt công việc', showBack: true),
@@ -160,351 +243,109 @@ class _TaskSummaryScreenState extends State<TaskSummaryScreen> {
         child: ListView(
           padding: const EdgeInsets.fromLTRB(20, 12, 20, 32),
           children: [
-            // Subtle Moon Phase Graphic Header
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                Row(
-                  children: [
-                    Container(
-                      width: 8,
-                      height: 8,
-                      decoration: BoxDecoration(
-                        color: MelbelColors.kSecondary,
-                        shape: BoxShape.circle,
-                      ),
-                    ),
-                    const SizedBox(width: 8),
-                    const Eyebrow('Không gian êm dịu'),
-                  ],
-                ),
-                Row(
-                  children: [
-                    _moonDot(6, MelbelColors.kOutlineVariant),
-                    const SizedBox(width: 6),
-                    _moonDot(8, MelbelColors.kOutlineVariant),
-                    const SizedBox(width: 6),
-                    _moonDot(10, MelbelColors.kPrimaryContainer),
-                    const SizedBox(width: 6),
-                    _moonDot(8, MelbelColors.kOutlineVariant),
-                    const SizedBox(width: 6),
-                    _moonDot(6, MelbelColors.kOutlineVariant),
-                  ],
-                ),
-              ],
-            ),
-            const SizedBox(height: 14),
-
-            // Section 1: Task Summary Card (D-17)
-            Container(
-              padding: const EdgeInsets.all(16),
-              decoration: BoxDecoration(
-                color: MelbelColors.kSurfaceContainer,
-                borderRadius: BorderRadius.circular(12),
-                border: Border.all(color: MelbelColors.kOutlineVariant),
-              ),
+            const PlanningStageHeader(step: 2, label: 'Kiểm tra thông tin'),
+            const SizedBox(height: 16),
+            MelbelCard(
               child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
-                  Row(
-                    crossAxisAlignment: CrossAxisAlignment.start,
+                  const Row(
                     children: [
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(
-                              'Mục tiêu hiện tại',
-                              style: TextStyle(
-                                fontFamily: 'Be Vietnam Pro',
-                                fontSize: 12,
-                                fontWeight: FontWeight.w500,
-                                color: MelbelColors.kSecondary,
-                              ),
-                            ),
-                            const SizedBox(height: 4),
-                            Text(
-                              task.title.isEmpty
-                                  ? 'Chưa có nội dung công việc'
-                                  : task.title,
-                              style: TextStyle(
-                                fontFamily: 'Be Vietnam Pro',
-                                fontSize: 18,
-                                fontWeight: FontWeight.w600,
-                                color: MelbelColors.kOnSurface,
-                              ),
-                            ),
-                          ],
+                      SizedBox(width: 48, height: 48, child: MelbelMascot()),
+                      SizedBox(width: 12),
+                      Expanded(child: Text('Xem lại bốn thông tin để lập kế hoạch.')),
+                    ],
+                  ),
+                  const Divider(),
+                  ExpansionTile(
+                    tilePadding: EdgeInsets.zero,
+                    title: const Text('Tên công việc'),
+                    subtitle: Text(displayTitle.isEmpty ? 'Chưa có tên' : displayTitle),
+                    children: [
+                      TextFormField(
+                        initialValue: title,
+                        decoration: const InputDecoration(
+                          labelText: 'Sửa tên công việc',
+                          border: OutlineInputBorder(),
                         ),
-                      ),
-                      Container(
-                        padding: const EdgeInsets.symmetric(
-                            horizontal: 10, vertical: 5),
-                        decoration: BoxDecoration(
-                          color: MelbelColors.kSurfaceContainerHigh,
-                          borderRadius: BorderRadius.circular(8),
-                        ),
-                        child: Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Icon(
-                              Icons.schedule,
-                              size: 14,
-                              color: MelbelColors.kTertiaryFixedDim,
-                            ),
-                            const SizedBox(width: 4),
-                            Text(
-                              task.formatDeadline(task.deadline),
-                              style: TextStyle(
-                                fontFamily: 'Be Vietnam Pro',
-                                fontSize: 12,
-                                fontWeight: FontWeight.w500,
-                                color: MelbelColors.kTertiaryFixedDim,
-                              ),
-                            ),
-                          ],
-                        ),
+                        onChanged: task.setSummaryTitle,
                       ),
                     ],
                   ),
-                  const SizedBox(height: 14),
-
-                  // Structured Plan Breakdown
-                  Container(
-                    padding: const EdgeInsets.all(12),
-                    decoration: BoxDecoration(
-                      color: MelbelColors.kSurface,
-                      borderRadius: BorderRadius.circular(8),
-                    ),
-                    child: Column(
-                      children: [
-                        Row(
-                          children: [
-                            Container(
-                              width: 20,
-                              height: 20,
-                              decoration: BoxDecoration(
-                                color: MelbelColors.kSurfaceContainerHigh,
-                                shape: BoxShape.circle,
-                              ),
-                              child: Icon(
-                                Icons.timelapse,
-                                size: 14,
-                                color: MelbelColors.kSecondary,
-                              ),
-                            ),
-                            const SizedBox(width: 10),
-                            Text(
-                              'Phiên tập trung sẽ do backend đề xuất',
-                              style: TextStyle(
-                                fontFamily: 'Be Vietnam Pro',
-                                fontSize: 13,
-                                color: MelbelColors.kOnSurfaceVariant,
-                              ),
-                            ),
-                          ],
-                        ),
-                        const SizedBox(height: 8),
-                        Row(
-                          children: [
-                            Container(
-                              width: 20,
-                              height: 20,
-                              decoration: BoxDecoration(
-                                color: MelbelColors.kSurfaceContainerHigh,
-                                shape: BoxShape.circle,
-                              ),
-                              child: Icon(
-                                Icons.spa,
-                                size: 14,
-                                color: MelbelColors.kSecondary,
-                              ),
-                            ),
-                            const SizedBox(width: 10),
-                            Text(
-                              'Có thời gian nghỉ ngắn 5p giữa phiên',
-                              style: TextStyle(
-                                fontFamily: 'Be Vietnam Pro',
-                                fontSize: 13,
-                                color: MelbelColors.kOnSurfaceVariant,
-                              ),
-                            ),
-                          ],
-                        ),
-                      ],
-                    ),
-                  ),
                   const SizedBox(height: 12),
-
-                  // Missing Info Badge
-                  Container(
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                    decoration: BoxDecoration(
-                      color: MelbelColors.kSurfaceContainerHigh,
-                      borderRadius: BorderRadius.circular(8),
-                    ),
-                    child: Row(
-                      children: [
-                        Icon(
-                          Icons.info_outline,
-                          size: 16,
-                          color: MelbelColors.kTertiaryFixedDim,
-                        ),
-                        const SizedBox(width: 8),
-                        Expanded(
-                            child: Text(
-                          'Giờ rảnh: ${task.availabilitySummary}',
-                          style: const TextStyle(
-                            fontFamily: 'Be Vietnam Pro',
-                            fontSize: 13,
-                            color: MelbelColors.kTertiaryFixedDim,
-                          ),
-                        )),
-                      ],
-                    ),
-                  ),
-                ],
-              ),
-            ),
-            const SizedBox(height: 16),
-
-            // Calming Spacer
-            Center(
-              child: Text(
-                'Cứ thong thả, chọn lúc bạn thấy thoải mái nhất',
-                style: TextStyle(
-                  fontFamily: 'Be Vietnam Pro',
-                  fontSize: 12,
-                  color: MelbelColors.kOnSurfaceVariant,
-                ),
-              ),
-            ),
-            const SizedBox(height: 16),
-
-            Container(
-              padding: const EdgeInsets.all(16),
-              decoration: BoxDecoration(
-                color: MelbelColors.kSurfaceContainer,
-                borderRadius: BorderRadius.circular(12),
-                border: Border.all(color: MelbelColors.kOutlineVariant),
-              ),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const Text(
-                    'Giờ rảnh cho công việc này',
-                    style: TextStyle(
-                      fontFamily: 'Be Vietnam Pro',
-                      fontSize: 16,
-                      fontWeight: FontWeight.w600,
-                      color: MelbelColors.kOnSurface,
-                    ),
-                  ),
-                  const SizedBox(height: 10),
-                  Text(
-                    task.availabilitySummary,
-                    style: const TextStyle(
-                      fontFamily: 'Be Vietnam Pro',
-                      fontSize: 14,
-                      color: MelbelColors.kOnSurfaceVariant,
-                    ),
-                  ),
-                  const SizedBox(height: 8),
-                  TextButton(
-                    onPressed: _isSubmitting || task.isApiBusy
-                        ? null
-                        : () => _pickAvailability(task),
-                    child: Text(
-                      task.draft?.summary['availability'] != null
-                          ? 'Thay bằng một khung giờ khác'
-                          : 'Chọn ngày và giờ rảnh',
-                    ),
-                  ),
-                ],
-              ),
-            ),
-            const SizedBox(height: 16),
-
-            for (final issue in task.draft?.clarificationIssues ?? const [])
-              if (issue['code'] == 'AI_FALLBACK_NOTICE')
-                Padding(
-                  padding: const EdgeInsets.only(bottom: 16),
-                  child: Text(
-                    issue['message'] as String,
-                    style:
-                        const TextStyle(color: MelbelColors.kOnSurfaceVariant),
-                  ),
-                ),
-
-            // Section 3: Scope Input Box (Bổ sung phạm vi)
-            Container(
-              padding: const EdgeInsets.all(16),
-              decoration: BoxDecoration(
-                color: MelbelColors.kSurfaceContainer,
-                borderRadius: BorderRadius.circular(12),
-                border: Border.all(color: MelbelColors.kOutlineVariant),
-              ),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    'Phạm vi / Kết quả mong muốn:',
-                    style: TextStyle(
-                      fontFamily: 'Be Vietnam Pro',
-                      fontSize: 14,
-                      fontWeight: FontWeight.w500,
-                      color: MelbelColors.kOnSurface,
-                    ),
-                  ),
-                  const SizedBox(height: 10),
                   TextField(
                     controller: _scopeController,
-                    style: TextStyle(
-                      fontFamily: 'Be Vietnam Pro',
-                      fontSize: 14,
-                      color: MelbelColors.kOnSurface,
+                    focusNode: _scopeFocusNode,
+                    minLines: 1,
+                    maxLines: null,
+                    keyboardType: TextInputType.multiline,
+                    decoration: const InputDecoration(
+                      labelText: 'Phạm vi',
+                      hintText: 'VD: 5 trang Word, kèm biểu đồ',
+                      border: OutlineInputBorder(),
                     ),
-                    decoration: InputDecoration(
-                      hintText: 'Ví dụ: 5 trang Word và biểu đồ tổng kết...',
-                      hintStyle: TextStyle(
-                        fontFamily: 'Be Vietnam Pro',
-                        fontSize: 13,
-                        color: MelbelColors.kOnSurfaceVariant
-                            .withValues(alpha: 0.5),
-                      ),
-                      filled: true,
-                      fillColor: MelbelColors.kSurfaceContainerLow,
-                      contentPadding: const EdgeInsets.symmetric(
-                          horizontal: 14, vertical: 12),
-                      border: OutlineInputBorder(
-                        borderRadius: BorderRadius.circular(10),
-                        borderSide: BorderSide(
-                          color: MelbelColors.kOutlineVariant,
-                        ),
-                      ),
-                      focusedBorder: OutlineInputBorder(
-                        borderRadius: BorderRadius.circular(10),
-                        borderSide: BorderSide(
-                          color: MelbelColors.kPrimaryContainer,
-                        ),
-                      ),
-                    ),
-                    onChanged: (val) => task.setScope(val),
+                    onChanged: task.setScope,
+                  ),
+                  const SizedBox(height: 8),
+                  ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    leading: const Icon(Icons.event_available_outlined),
+                    title: const Text('Giờ rảnh'),
+                    subtitle: Text(task.availabilitySummary),
+                    trailing: Text(task.hasAvailability ? 'Đổi khung giờ' : 'Chọn khung giờ'),
+                    onTap: _isSubmitting || task.isApiBusy
+                        ? null
+                        : () => _pickAvailability(task),
+                  ),
+                  ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    leading: const Icon(Icons.schedule_outlined),
+                    title: const Text('Hạn chót'),
+                    subtitle: Text(task.formatDeadline(task.deadline)),
+                    trailing: const Icon(Icons.edit_outlined),
+                    onTap: _isSubmitting || task.isApiBusy
+                        ? null
+                        : () => _pickSummaryDeadline(task),
                   ),
                 ],
               ),
             ),
-            const SizedBox(height: 24),
+            const SizedBox(height: 16),
+            if (task.hasConflict ||
+                (task.draft?.clarificationIssues.any((issue) =>
+                        issue['blocking'] == true &&
+                        const {
+                          'AI_CONFLICT',
+                          'INVALID_TIME_ORDER',
+                          'END_TIME_PASSED',
+                          'AVAILABILITY_OUTSIDE_TIME_CONSTRAINT',
+                          'CONFLICTS_WITH_BUSY_EVENT',
+                        }.contains(issue['code'])) ??
+                    false)) ...[
+              SecondaryCta(
+                label: 'Điều chỉnh thời gian',
+                onPressed: _isSubmitting || task.isApiBusy
+                    ? null
+                    : () => Navigator.push(
+                          context,
+                          MaterialPageRoute<void>(
+                            builder: (_) => const TimeConflictScreen(),
+                          ),
+                        ),
+              ),
+              const SizedBox(height: 12),
+            ],
 
-            if (task.draft != null && !task.canPlan) ...[
+            if (task.draft != null &&
+                !task.canPlan &&
+                missingRequiredQuestions.isNotEmpty) ...[
               const SizedBox(height: 16),
               MelbelCard(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
-                      'Cùng làm rõ một lượt',
+                      'Cần bổ sung',
                       style: TextStyle(
                         fontFamily: 'Be Vietnam Pro',
                         fontSize: 16,
@@ -513,14 +354,11 @@ class _TaskSummaryScreenState extends State<TaskSummaryScreen> {
                       ),
                     ),
                     const SizedBox(height: 8),
-                    for (final issue in task.draft!.clarificationIssues)
+                    for (final question in missingRequiredQuestions)
                       Padding(
                         padding: const EdgeInsets.only(bottom: 8),
                         child: Text(
-                          (issue['question'] ??
-                                  issue['message'] ??
-                                  'Cần thêm thông tin')
-                              .toString(),
+                          question,
                           style: TextStyle(
                             fontFamily: 'Be Vietnam Pro',
                             fontSize: 14,
@@ -530,10 +368,10 @@ class _TaskSummaryScreenState extends State<TaskSummaryScreen> {
                       ),
                     TextField(
                       controller: _clarificationController,
-                      minLines: 2,
-                      maxLines: 4,
+                      minLines: 1,
+                      maxLines: 3,
                       decoration: const InputDecoration(
-                        hintText: 'Gõ câu trả lời hoặc thông tin còn thiếu…',
+                        hintText: 'Nhập thông tin còn thiếu',
                         border: OutlineInputBorder(),
                       ),
                     ),
@@ -541,19 +379,43 @@ class _TaskSummaryScreenState extends State<TaskSummaryScreen> {
                 ),
               ),
             ],
+            if (task.draft != null &&
+                !task.canPlan &&
+                missingRequiredQuestions.isEmpty) ...[
+              const SizedBox(height: 8),
+              Text(
+                'Chưa đủ điều kiện lập kế hoạch.',
+                style: TextStyle(
+                  fontFamily: 'Be Vietnam Pro',
+                  fontSize: 14,
+                  color: MelbelColors.kOnSurfaceVariant,
+                ),
+              ),
+            ],
             const SizedBox(height: 24),
 
             // Actions
+            if (!task.canPlan) ...[
+              SecondaryCta(
+                label: missingRequiredQuestions.isNotEmpty
+                    ? 'Bổ sung thông tin'
+                    : 'Thử lại',
+                onPressed: _isSubmitting || task.isApiBusy
+                    ? null
+                    : () => _continue(createCandidate: false),
+              ),
+              const SizedBox(height: 8),
+            ],
             PrimaryCta(
-              label: task.draft != null && !task.canPlan
-                  ? 'Cập nhật thông tin'
-                  : 'Xác nhận và tạo phương án',
+              label: 'Tạo phương án',
               icon: Icons.arrow_forward,
-              onPressed: _isSubmitting || task.isApiBusy ? null : _continue,
+              onPressed: _isSubmitting || task.isApiBusy || !task.canPlan
+                  ? null
+                  : _continue,
             ),
             const SizedBox(height: 10),
             SecondaryCta(
-              label: 'Lưu vào Hộp nháp',
+              label: 'Lưu nháp',
               icon: Icons.drafts_outlined,
               height: 48,
               onPressed: _isSubmitting || task.isApiBusy ? null : _saveDraft,
@@ -563,22 +425,42 @@ class _TaskSummaryScreenState extends State<TaskSummaryScreen> {
       ),
     );
   }
-
-  Widget _moonDot(double size, Color color) {
-    return Container(
-      width: size,
-      height: size,
-      decoration: BoxDecoration(
-        color: color,
-        shape: BoxShape.circle,
-      ),
-    );
-  }
 }
 
 // -------------------------------------------------------------
 // D-18 Unclear or Conflicting Info Screen (TimeConflictScreen)
 // -------------------------------------------------------------
+List<String> _requiredQuestions(List<JsonMap> issues) {
+  const genericCodes = {'MISSING_TIME_CONSTRAINT', 'MISSING_AVAILABILITY'};
+  const specificCodes = {
+    'AI_TIME_REVIEW_REQUIRED',
+    'AI_TIME_INCOMPLETE',
+    'AI_AVAILABILITY_INCOMPLETE',
+    'AI_AVAILABILITY_REVIEW_REQUIRED',
+  };
+  final blockers = issues.where((issue) => issue['blocking'] == true).toList();
+  final specificFields = {
+    for (final issue in blockers)
+      if (specificCodes.contains(issue['code']) &&
+          issue['field_path'] is String &&
+          ((issue['question'] ?? issue['message'])?.toString().trim().isNotEmpty ??
+              false))
+        issue['field_path'],
+  };
+  final questions = <String>{};
+  for (final issue in blockers) {
+    if (genericCodes.contains(issue['code']) &&
+        specificFields.contains(issue['field_path'])) {
+      continue;
+    }
+    final question = (issue['question'] ?? issue['message'])?.toString().trim();
+    questions.add(question == null || question.isEmpty
+        ? 'Cần bổ sung thông tin bắt buộc để lập kế hoạch.'
+        : question);
+  }
+  return questions.toList(growable: false);
+}
+
 class TimeConflictScreen extends StatefulWidget {
   const TimeConflictScreen({super.key});
 
@@ -594,7 +476,9 @@ class _TimeConflictScreenState extends State<TimeConflictScreen> {
       final now = DateTime.now();
       final day = await showDatePicker(
         context: context,
-        initialDate: task.deadline ?? now.add(const Duration(days: 1)),
+        initialDate: task.deadline?.isAfter(now) == true
+            ? task.deadline!
+            : now.add(const Duration(days: 1)),
         firstDate: DateTime(now.year, now.month, now.day),
         lastDate: DateTime(9999, 12, 31),
         helpText: 'Chọn hạn chót mới',
@@ -636,6 +520,7 @@ class _TimeConflictScreenState extends State<TimeConflictScreen> {
   Widget build(BuildContext context) {
     final task = context.watch<TaskProvider>();
     final issueText = task.draft?.clarificationIssues
+            .where((issue) => issue['blocking'] == true)
             .map((issue) => issue['question'] ?? issue['message'])
             .whereType<String>()
             .join('\n') ??
@@ -643,7 +528,7 @@ class _TimeConflictScreenState extends State<TimeConflictScreen> {
 
     return Scaffold(
       appBar: const MelbelAppBar(
-        title: 'Clarification Review',
+        title: 'Điều chỉnh thời gian',
         showBack: true,
       ),
       body: SafeArea(
@@ -651,30 +536,6 @@ class _TimeConflictScreenState extends State<TimeConflictScreen> {
         child: ListView(
           padding: const EdgeInsets.fromLTRB(20, 12, 20, 32),
           children: [
-            // Mindful Breathing Note
-            Row(
-              children: [
-                Container(
-                  width: 8,
-                  height: 8,
-                  decoration: BoxDecoration(
-                    color: MelbelColors.kSecondary,
-                    shape: BoxShape.circle,
-                  ),
-                ),
-                const SizedBox(width: 8),
-                Text(
-                  'Không sao cả, hãy điều chỉnh nhịp một chút nhé',
-                  style: TextStyle(
-                    fontFamily: 'Be Vietnam Pro',
-                    fontSize: 13,
-                    color: MelbelColors.kOnSurfaceVariant,
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 16),
-
             // 1. Previous Requirements Card
             Container(
               padding: const EdgeInsets.all(16),
@@ -719,7 +580,7 @@ class _TimeConflictScreenState extends State<TimeConflictScreen> {
                       ),
                       const SizedBox(width: 6),
                       Text(
-                        'Hạn chót: ${task.formatDeadline(task.deadline)}',
+                        'Hạn: ${task.formatDeadline(task.deadline)}',
                         style: TextStyle(
                           fontFamily: 'Be Vietnam Pro',
                           fontSize: 13,
@@ -756,7 +617,7 @@ class _TimeConflictScreenState extends State<TimeConflictScreen> {
                     child: Icon(
                       Icons.info,
                       size: 20,
-                      color: MelbelColors.kOnTertiary,
+                      color: MelbelColors.kOnTertiaryContainer,
                     ),
                   ),
                   const SizedBox(width: 12),
@@ -765,7 +626,7 @@ class _TimeConflictScreenState extends State<TimeConflictScreen> {
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         Text(
-                          'Điểm cần đồng điệu lại',
+                          'Cần điều chỉnh',
                           style: TextStyle(
                             fontFamily: 'Be Vietnam Pro',
                             fontSize: 15,
@@ -776,7 +637,7 @@ class _TimeConflictScreenState extends State<TimeConflictScreen> {
                         SizedBox(height: 4),
                         Text(
                           issueText.isEmpty
-                              ? 'Chưa có chi tiết xung đột từ máy chủ. Bạn có thể cập nhật thông tin hoặc lưu nháp để làm tiếp sau.'
+                              ? task.conflictMessage
                               : issueText,
                           style: TextStyle(
                             fontFamily: 'Be Vietnam Pro',
@@ -795,7 +656,7 @@ class _TimeConflictScreenState extends State<TimeConflictScreen> {
 
             // 3. ONE Clear Question & Quick Direct Resolution
             Text(
-              'Hạn hoặc khoảng thời gian bạn muốn hoàn thành là khi nào?',
+              'Chọn cách điều chỉnh',
               style: TextStyle(
                 fontFamily: 'Be Vietnam Pro',
                 fontSize: 16,
@@ -806,92 +667,48 @@ class _TimeConflictScreenState extends State<TimeConflictScreen> {
             const SizedBox(height: 14),
 
             _ConflictResolutionOption(
-              label: 'Chọn hạn chót mới',
-              subLabel: 'Chọn ngày và giờ phù hợp',
+              label: 'Đổi hạn chót',
               isSelected: _selectedOption == 0,
               onTap: () => setState(() => _selectedOption = 0),
             ),
             const SizedBox(height: 10),
 
             _ConflictResolutionOption(
-              label: 'Sửa thông tin giờ rảnh',
-              subLabel: 'Quay lại bước tóm tắt để cập nhật',
+              label: 'Sửa giờ rảnh',
               isSelected: _selectedOption == 1,
               onTap: () => setState(() => _selectedOption = 1),
             ),
             const SizedBox(height: 10),
 
             _ConflictResolutionOption(
-              label: 'Lưu nháp, làm sau',
-              subLabel: 'Tiếp tục khi bạn sẵn sàng',
+              label: 'Lưu nháp',
               isSelected: _selectedOption == 2,
               onTap: () => setState(() => _selectedOption = 2),
             ),
-            const SizedBox(height: 14),
+            const SizedBox(height: 10),
 
-            // Speech / Free Input Alternative
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-              decoration: BoxDecoration(
-                color: MelbelColors.kSurfaceContainerLow,
-                borderRadius: BorderRadius.circular(12),
-              ),
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                children: [
-                  Row(
-                    children: [
-                      Icon(
-                        Icons.mic,
-                        size: 20,
-                        color: MelbelColors.kOnSurfaceVariant,
-                      ),
-                      SizedBox(width: 8),
-                      Text(
-                        'Nói để chỉnh',
-                        style: TextStyle(
-                          fontFamily: 'Be Vietnam Pro',
-                          fontSize: 13,
-                          color: MelbelColors.kOnSurfaceVariant,
-                        ),
-                      ),
-                    ],
-                  ),
-                  OutlinedButton.icon(
-                    style: OutlinedButton.styleFrom(
-                      backgroundColor: MelbelColors.kSurfaceContainer,
-                      foregroundColor: MelbelColors.kOnSurface,
-                      side: BorderSide(
-                        color: MelbelColors.kOutlineVariant,
-                      ),
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(8),
-                      ),
-                    ),
-                    onPressed: () {},
-                    icon: const Icon(Icons.graphic_eq, size: 16),
-                    label: const Text(
-                      'Bật thu âm',
-                      style: TextStyle(
-                        fontFamily: 'Be Vietnam Pro',
-                        fontSize: 12,
-                      ),
-                    ),
-                  ),
-                ],
-              ),
+            OutlinedButton.icon(
+              onPressed: () {
+                ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+                  content: Text(
+                      'Ghi âm chưa khả dụng. Bạn vẫn có thể sửa giờ rảnh.'),
+                ));
+              },
+              icon: const Icon(Icons.mic_none),
+              label: const Text('Nói để điều chỉnh'),
             ),
+
             const SizedBox(height: 24),
 
             // Confirm Resolution Button
             PrimaryCta(
-              label: 'Xác nhận mốc thời gian',
+              label: 'Xác nhận',
               icon: Icons.check,
               onPressed: _selectedOption < 0 ? null : () => _resolve(task),
             ),
             const SizedBox(height: 10),
             SecondaryCta(
-              label: 'Lưu nháp, làm sau',
+              label: 'Lưu nháp',
               icon: Icons.archive_outlined,
               height: 48,
               onPressed: () async {
@@ -914,13 +731,11 @@ class _TimeConflictScreenState extends State<TimeConflictScreen> {
 class _ConflictResolutionOption extends StatelessWidget {
   const _ConflictResolutionOption({
     required this.label,
-    required this.subLabel,
     required this.isSelected,
     required this.onTap,
   });
 
   final String label;
-  final String subLabel;
   final bool isSelected;
   final VoidCallback onTap;
 
@@ -983,16 +798,6 @@ class _ConflictResolutionOption extends StatelessWidget {
                   ),
                 ),
               ],
-            ),
-            Text(
-              subLabel,
-              style: TextStyle(
-                fontFamily: 'Be Vietnam Pro',
-                fontSize: 12,
-                color: isSelected
-                    ? MelbelColors.kSecondary
-                    : MelbelColors.kOnSurfaceVariant,
-              ),
             ),
           ],
         ),

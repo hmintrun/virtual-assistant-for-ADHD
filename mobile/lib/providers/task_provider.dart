@@ -86,7 +86,14 @@ class TaskProvider extends ChangeNotifier {
   String get scope => _scope;
   DateTime? get deadline => _deadline;
   AvailabilitySlot? get availability => _availability;
+  bool get hasAvailability =>
+      _availability != null ||
+      draft?.summary['availability'] != null ||
+      draft?.summary['availability_ref'] != null;
   bool get draftSaved => _draftSaved;
+  bool get draftPersisted =>
+      _title.trim().isNotEmpty && _savedEditRevision == _editRevision;
+  int? _savedEditRevision;
   bool get confirmed => _confirmed;
   String get voiceQuestion => _voiceQuestion;
   String? get decompositionChoice => _decompositionChoice;
@@ -112,12 +119,12 @@ class TaskProvider extends ChangeNotifier {
         for (final day in overrides.whereType<JsonMap>())
           for (final interval
               in (day['intervals'] as List).whereType<JsonMap>())
-            '${day['date']} ${_intervalLabel(interval)}',
+            '${_availabilityDayLabel(day['date'], availability['timezone'])} ${_intervalLabel(interval)}',
       ];
       if (labels.isNotEmpty) return labels.join(' · ');
     }
     if (summary?['availability_ref'] != null) {
-      return 'Dùng giờ rảnh đã xác nhận trước đây.';
+      return 'Dùng lịch rảnh đã lưu.';
     }
     return 'Chưa chọn khung giờ rảnh cho công việc này.';
   }
@@ -125,8 +132,18 @@ class TaskProvider extends ChangeNotifier {
   static String _weekdayLabel(Object? weekday) =>
       weekday == 7 ? 'Chủ nhật' : 'Thứ ${(weekday as int) + 1}';
 
-  static String _intervalLabel(JsonMap interval) =>
-      '${interval['start_local']}–${interval['end_local']}';
+  static String _intervalLabel(JsonMap interval) {
+    String shortTime(Object? value) =>
+        value is String ? value.split(':').take(2).join(':') : '—';
+    return '${shortTime(interval['start_local'])}–${shortTime(interval['end_local'])}';
+  }
+
+  static String _availabilityDayLabel(Object? date, Object? timezone) {
+    if (date is! String) return '';
+    if (timezone != PlanningApi.defaultTimezone) return date;
+    final day = DateTime.tryParse(date);
+    return day == null ? date : AvailabilitySlot._dayLabel(day);
+  }
 
   JsonMap? get _pendingAvailability {
     final slot = _availability;
@@ -515,10 +532,17 @@ class TaskProvider extends ChangeNotifier {
     final summary = _draft?.summary;
     if (summary == null) return;
     _rawInputText = _draft?.rawInput ?? _rawInputText;
-    _title = summary['title'] as String? ?? _title;
-    _scope = summary['scope'] as String? ?? _scope;
+    final suggestedTitle =
+        summary['title'] ?? summary['goal'] ?? summary['description'];
+    if (suggestedTitle is String && suggestedTitle.trim().isNotEmpty) {
+      _title = suggestedTitle.trim();
+    }
+    if (summary.containsKey('scope')) {
+      _scope = (summary['scope'] as String? ?? '').trim();
+    }
     final timeConstraint = summary['time_constraint'] as Map<String, dynamic>?;
-    final deadline = timeConstraint?['deadline_at'] as String?;
+    final deadline = timeConstraint?['deadline_at'] as String? ??
+        timeConstraint?['finish_by_at'] as String?;
     if (deadline != null) _deadline = DateTime.tryParse(deadline)?.toLocal();
   }
 
@@ -616,23 +640,88 @@ class TaskProvider extends ChangeNotifier {
 
   String formatDeadline(DateTime? value) {
     if (value == null) return 'Chưa đặt hạn chót';
-    final today = DateTime.now();
-    final date = DateTime(value.year, value.month, value.day);
+    final today = AvailabilitySlot._inVietnam(DateTime.now());
+    final localValue = AvailabilitySlot._inVietnam(value);
+    final date = DateTime(localValue.year, localValue.month, localValue.day);
     final todayDate = DateTime(today.year, today.month, today.day);
     final dateLabel = date == todayDate
         ? 'Hôm nay'
         : date == todayDate.add(const Duration(days: 1))
             ? 'Ngày mai'
-            : value.day.toString().padLeft(2, '0') +
+            : date == todayDate.add(const Duration(days: 2))
+                ? 'Ngày kia'
+                : date.day.toString().padLeft(2, '0') +
                 '/' +
-                value.month.toString().padLeft(2, '0') +
+                date.month.toString().padLeft(2, '0') +
                 '/' +
-                value.year.toString();
+                date.year.toString();
     return dateLabel +
         ', ' +
-        value.hour.toString().padLeft(2, '0') +
+        localValue.hour.toString().padLeft(2, '0') +
         ':' +
-        value.minute.toString().padLeft(2, '0');
+        localValue.minute.toString().padLeft(2, '0');
+  }
+
+  /// Prefill only explicit, single clauses in free text. Other wording still
+  /// goes through the normal analysis flow, and existing form values win.
+  void fillExplicitPlanningInput() {
+    final input = inputText;
+    final now = DateTime.now();
+    final vn = AvailabilitySlot._inVietnam(now);
+    final day = DateTime.utc(vn.year, vn.month, vn.day);
+    const relativeDay = r'(hôm nay|ngày mai|ngày kia)';
+    const time = r'([01]?\d|2[0-3]):([0-5]\d)';
+    const clauseStart = r'(?:^|[.!?\n]\s*)';
+    const clauseEnd = r'\s*(?:[.!?\n]|$)';
+
+    RegExpMatch? single(String pattern) {
+      final matches = RegExp(pattern, caseSensitive: false).allMatches(input);
+      final iterator = matches.iterator;
+      if (!iterator.moveNext()) return null;
+      final match = iterator.current;
+      return iterator.moveNext() ? null : match;
+    }
+
+    DateTime instant(String date, String hour, String minute) {
+      final days = switch (date.toLowerCase()) {
+        'ngày mai' => 1,
+        'ngày kia' => 2,
+        _ => 0,
+      };
+      return day.add(Duration(
+        days: days,
+        hours: int.parse(hour) - 7,
+        minutes: int.parse(minute),
+      ));
+    }
+
+    final deadline = single(
+      '${clauseStart}Hạn(?: chót)?(?: lúc)?\\s+$time\\s+$relativeDay$clauseEnd',
+    );
+    if (_deadline == null && deadline != null) {
+      final end = instant(deadline[3]!, deadline[1]!, deadline[2]!);
+      if (end.isAfter(now)) setDeadline(end.toLocal());
+    }
+
+    final available = single(
+      '${clauseStart}Tôi rảnh\\s+$relativeDay\\s+(?:từ\\s+)?'
+      '$time\\s*(?:[-–—]|đến)\\s*$time$clauseEnd',
+    );
+    if (!hasAvailability && available != null) {
+      final start = instant(available[1]!, available[2]!, available[3]!);
+      final end = instant(available[1]!, available[4]!, available[5]!);
+      final limit = _deadline;
+      if (end.isAfter(start) &&
+          end.isAfter(now) &&
+          (limit == null || !end.isAfter(limit))) {
+        setAvailability(AvailabilitySlot(start: start, end: end));
+      }
+    }
+
+    final scope = single(
+      r'(?:^|[.!?\n]\s*)Đầu ra\s*(?:là\s+|:\s*)(.+?)(?=[.!?](?:\s|$)|\n|$)',
+    );
+    if (_scope.trim().isEmpty && scope != null) setScope(scope[1]!.trim());
   }
 
   void setTitle(String value) {
@@ -652,6 +741,14 @@ class TaskProvider extends ChangeNotifier {
     if (_scope == value) return;
     if (_scope != value) _candidate = null;
     _scope = value;
+    _confirmed = false;
+    _changed();
+  }
+
+  void setSummaryTitle(String value) {
+    if (_title == value) return;
+    _title = value;
+    _candidate = null;
     _confirmed = false;
     _changed();
   }
@@ -799,6 +896,7 @@ class TaskProvider extends ChangeNotifier {
       await _deleteDraft();
       return;
     }
+    final revision = _editRevision;
     final data = <String, Object?>{
       'title': _title,
       'raw_input_text': _rawInputText,
@@ -827,6 +925,10 @@ class TaskProvider extends ChangeNotifier {
       );
       _storageTail = write.catchError((Object _) {});
       await write;
+      if (!_disposed && revision == _editRevision && _savedEditRevision != revision) {
+        _savedEditRevision = revision;
+        notifyListeners();
+      }
     } catch (_) {
       // Local storage may be unavailable in an unsupported browser context.
     }

@@ -12,6 +12,7 @@ class FocusSessionInfo {
     required this.microTaskText,
     required this.segments,
     this.deadline,
+    this.expectedOutput,
   });
 
   final String sessionId;
@@ -25,6 +26,7 @@ class FocusSessionInfo {
   final String microTaskText;
   final List<SessionSegmentModel> segments;
   final DateTime? deadline;
+  final String? expectedOutput;
 
   factory FocusSessionInfo.fromJson(Map<String, dynamic> json) =>
       FocusSessionInfo(
@@ -42,6 +44,7 @@ class FocusSessionInfo {
             .map(SessionSegmentModel.fromJson)
             .toList(growable: false),
         deadline: DateTime.tryParse(json['deadline'] as String? ?? ''),
+        expectedOutput: json['expected_output'] as String?,
       );
 
   Map<String, dynamic> toJson() => {
@@ -55,6 +58,7 @@ class FocusSessionInfo {
         'micro_task_text': microTaskText,
         'segments': segments.map((segment) => segment.toJson()).toList(),
         if (deadline != null) 'deadline': deadline!.toIso8601String(),
+        if (expectedOutput != null) 'expected_output': expectedOutput,
       };
 
   List<SessionSegmentModel> get effectiveSegments {

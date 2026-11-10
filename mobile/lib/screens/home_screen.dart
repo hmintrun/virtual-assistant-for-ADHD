@@ -60,6 +60,8 @@ class _HomeScreenState extends State<HomeScreen> {
       sessionId: session.sessionId,
       taskTitle: task.title,
       stepTitle: step?.title ?? 'Bước hiện tại',
+      expectedOutput:
+          matchingSteps.isNotEmpty ? matchingSteps.first.expectedOutput : null,
       scheduledStart: session.scheduledStart,
       scheduledEnd: session.scheduledEnd,
       workSeconds: session.workSeconds,
@@ -103,10 +105,12 @@ class _HomeScreenState extends State<HomeScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final theme = Theme.of(context);
     return Scaffold(
+      backgroundColor: theme.scaffoldBackgroundColor,
       appBar: const MelbelAppBar(
         title: 'Trang Chủ',
-        leadingIcon: Icons.dark_mode_outlined,
+        showThemeToggle: true,
       ),
       bottomNavigationBar: Container(
         height: 64 + MediaQuery.paddingOf(context).bottom,
@@ -127,7 +131,7 @@ class _HomeScreenState extends State<HomeScreen> {
               onTap: () => _onTabSelected(0),
             ),
             _BottomTab(
-              icon: Icons.calendar_month,
+              icon: Icons.date_range_rounded,
               label: 'Lịch',
               isSelected: _selectedTab == 1,
               onTap: () => _onTabSelected(1),
@@ -152,30 +156,35 @@ class _HomeScreenState extends State<HomeScreen> {
         child: ListView(
           padding: const EdgeInsets.fromLTRB(20, 16, 20, 32),
           children: [
-            // Greeting Header
-            Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  _greetingText,
-                  style: TextStyle(
-                    fontFamily: 'Be Vietnam Pro',
-                    fontSize: 14,
-                    color: MelbelColors.kOnSurfaceVariant,
-                  ),
+            MelbelEntrance(
+              child: MelbelCard(
+                color: theme.colorScheme.surfaceContainerHigh,
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Eyebrow(_greetingText),
+                          const SizedBox(height: 6),
+                          Text(
+                            'Không gian hôm nay',
+                            style: theme.textTheme.headlineSmall?.copyWith(
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    const SizedBox(
+                      width: 82,
+                      height: 78,
+                      child: MelbelMascot(),
+                    ),
+                  ],
                 ),
-                const SizedBox(height: 4),
-                Text(
-                  'Không gian hôm nay',
-                  style: TextStyle(
-                    fontFamily: 'Be Vietnam Pro',
-                    fontSize: 24,
-                    fontWeight: FontWeight.w600,
-                    color: MelbelColors.kOnSurface,
-                    letterSpacing: -0.5,
-                  ),
-                ),
-              ],
+              ),
             ),
             const SizedBox(height: 16),
 
@@ -264,10 +273,9 @@ class _HomeScreenState extends State<HomeScreen> {
                       child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
-                        Text('Chưa có phiên được tải cho công việc hiện tại.'),
+                        Eyebrow('Phiên tiếp theo'),
                         SizedBox(height: 8),
-                        Text(
-                            'Mở Lịch để xem các phiên đã xác nhận, hoặc thêm công việc mới.'),
+                        Text('Chưa có phiên cho công việc hiện tại.'),
                       ]));
                 }
 
@@ -280,6 +288,7 @@ class _HomeScreenState extends State<HomeScreen> {
                     : task.formatDeadline(task.deadline);
 
                 return MelbelCard(
+                  color: theme.colorScheme.surfaceContainerHigh,
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
@@ -500,7 +509,7 @@ class _HomeScreenState extends State<HomeScreen> {
                         mainAxisAlignment: MainAxisAlignment.center,
                         children: [
                           Icon(
-                            Icons.calendar_month,
+                            Icons.date_range_rounded,
                             size: 20,
                             color: MelbelColors.kOnSurfaceVariant,
                           ),
@@ -522,12 +531,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 const SizedBox(width: 12),
                 Expanded(
                   child: InkWell(
-                    onTap: () => Navigator.push(
-                      context,
-                      MaterialPageRoute<void>(
-                        builder: (_) => const TaskEntryScreen(),
-                      ),
-                    ),
+                    onTap: _openNewTask,
                     borderRadius: BorderRadius.circular(12),
                     child: Container(
                       height: 56,

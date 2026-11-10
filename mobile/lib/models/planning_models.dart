@@ -65,6 +65,9 @@ class PlanCandidateModel {
   String get feasibilityStatus => feasibility['status'] as String? ?? 'unknown';
   bool get isFeasible => feasibilityStatus == 'feasible' && !stale;
   String? get unexpandedScope => raw['unexpanded_scope'] as String?;
+  bool get isPartiallyDecomposed =>
+      raw['decomposition_state'] == 'partial' ||
+      (unexpandedScope?.trim().isNotEmpty ?? false);
   List<JsonMap> get steps => _maps(raw['steps']);
   List<JsonMap> get sessions => _maps(raw['sessions']);
   JsonMap get sourceRevisions => Map<String, dynamic>.from(

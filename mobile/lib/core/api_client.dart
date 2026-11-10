@@ -42,7 +42,12 @@ class ApiClient {
   final FlutterSecureStorage _storage;
 
   static String newIdempotencyKey(String operation) {
-    final random = Random.secure().nextInt(1 << 32).toRadixString(16);
+    final secureRandom = Random.secure();
+    // Combine two 16-bit values without a 32-bit shift on Dart web.
+    final random = List.generate(
+      2,
+      (_) => secureRandom.nextInt(0x10000).toRadixString(16).padLeft(4, '0'),
+    ).join();
     return '${operation}_${DateTime.now().microsecondsSinceEpoch}_$random';
   }
 

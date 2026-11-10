@@ -21,15 +21,24 @@ class AlarmService {
     await _plugin.initialize(const InitializationSettings(android: android));
   }
 
+  AndroidFlutterLocalNotificationsPlugin? get _android =>
+      _plugin.resolvePlatformSpecificImplementation<
+          AndroidFlutterLocalNotificationsPlugin>();
+
+  Future<bool> requestNotificationPermission() async =>
+      await _android?.requestNotificationsPermission() ?? false;
+
+  Future<bool> requestExactAlarmPermission() async {
+    final android = _android;
+    if (android == null) return false;
+    if (await android.canScheduleExactNotifications() == true) return true;
+    return await android.requestExactAlarmsPermission() ?? false;
+  }
+
   /// Trả về true nếu đủ quyền để chuông kêu đúng giờ.
   Future<bool> requestPermissions() async {
-    final android = _plugin.resolvePlatformSpecificImplementation<
-        AndroidFlutterLocalNotificationsPlugin>();
-    if (android == null) return false;
-
-    final notificationsOk =
-        await android.requestNotificationsPermission() ?? false;
-    final exactOk = await android.requestExactAlarmsPermission() ?? false;
+    final notificationsOk = await requestNotificationPermission();
+    final exactOk = await requestExactAlarmPermission();
     return notificationsOk && exactOk;
   }
 

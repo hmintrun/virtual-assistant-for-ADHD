@@ -1,6 +1,6 @@
 {
-    "name": "proplan_va",
-    "short_name": "proplan_va",
+    "name": "ProPlan VA",
+    "short_name": "ProPlan VA",
     "start_url": ".",
     "display": "standalone",
     "background_color": "#0175C2",

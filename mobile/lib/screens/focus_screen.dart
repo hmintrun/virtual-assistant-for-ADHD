@@ -1,7 +1,9 @@
 import 'dart:async';
+import 'dart:ui' show FontFeature;
 
 import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 
 import '../core/theme.dart';
@@ -212,8 +214,13 @@ class _FocusScreenState extends State<FocusScreen> with WidgetsBindingObserver {
       ),
       const SizedBox(height: 20),
       PrimaryCta(
+        label: 'Bắt đầu phiên ${_minutes(session.workSeconds)} phút',
+        icon: Icons.play_arrow_rounded,
+        onPressed: focus.startRun,
+      ),
+      const SizedBox(height: 8),
+      _SecondaryButton(
         label: 'Xem việc khởi động 2 phút',
-        icon: Icons.spa_outlined,
         onPressed: focus.showMicroTask,
       ),
       const SizedBox(height: 8),
@@ -735,8 +742,8 @@ class _FocusScreenState extends State<FocusScreen> with WidgetsBindingObserver {
       const SizedBox(height: 12),
       TextField(
         controller: _thoughtText,
-        minLines: 4,
-        maxLines: 7,
+        autofocus: true,
+        maxLines: 1,
         textCapitalization: TextCapitalization.sentences,
         decoration: InputDecoration(
           hintText: 'Gõ nhanh suy nghĩ của bạn vào đây…',
@@ -750,7 +757,7 @@ class _FocusScreenState extends State<FocusScreen> with WidgetsBindingObserver {
       ),
       const SizedBox(height: 14),
       PrimaryCta(
-        label: 'Lưu nội dung',
+        label: 'Lưu và tiếp tục',
         icon: Icons.check,
         onPressed: _thoughtText.text.trim().isEmpty
             ? null
@@ -760,6 +767,13 @@ class _FocusScreenState extends State<FocusScreen> with WidgetsBindingObserver {
               },
       ),
       const SizedBox(height: 8),
+      TextButton(
+        onPressed: () {
+          _thoughtText.clear();
+          focus.returnToActive();
+        },
+        child: const Text('Bỏ qua'),
+      ),
       Center(
         child: Text(
           'Nội dung chỉ được lưu trên thiết bị trong bản hiện tại.',
@@ -969,6 +983,10 @@ class _SessionCard extends StatelessWidget {
         const SizedBox(height: 4),
         Text(session.stepTitle,
             style: TextStyle(color: MelbelColors.kSecondary)),
+        if (compact && (session.expectedOutput?.trim().isNotEmpty ?? false)) ...[
+          const SizedBox(height: 8),
+          Text('Đầu ra: ${session.expectedOutput}'),
+        ],
         if (!compact) ...[
           const SizedBox(height: 12),
           Text('Khởi động 2 phút · ${session.microTaskText}',
@@ -997,28 +1015,47 @@ class _ProgressCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final isRest = segment?.kind == 'rest';
+    final theme = Theme.of(context);
     return MelbelCard(
       padding: const EdgeInsets.all(16),
+      color: theme.colorScheme.surfaceContainerHigh,
       child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        Row(
-          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        Wrap(
+          spacing: 12,
+          runSpacing: 4,
+          crossAxisAlignment: WrapCrossAlignment.center,
           children: [
-            const Text('Tiến trình phiên'),
+            Text('Tiến trình phiên', style: theme.textTheme.titleMedium),
             Text(
-              '${isRest ? 'Nghỉ' : 'Khối làm'} ${index + 1}/$count · ${_formatTime(remaining)}',
+              '${isRest ? 'Nghỉ' : 'Khối làm'} ${index + 1}/$count',
               style: TextStyle(color: MelbelColors.kSecondary),
             ),
           ],
         ),
         const SizedBox(height: 12),
-        ClipRRect(
-          borderRadius: BorderRadius.circular(99),
-          child: LinearProgressIndicator(
-            value: progress,
-            minHeight: 10,
-            backgroundColor: MelbelColors.kSurfaceContainerHighest,
-            valueColor: AlwaysStoppedAnimation<Color>(
-              isRest ? MelbelColors.kSecondary : MelbelColors.kPrimaryContainer,
+        Center(
+          child: SizedBox.square(
+            dimension: 152,
+            child: Stack(
+              fit: StackFit.expand,
+              children: [
+                CircularProgressIndicator(
+                  value: 1 - progress.clamp(0.0, 1.0).toDouble(),
+                  strokeWidth: 8,
+                  backgroundColor: theme.colorScheme.outlineVariant,
+                  color: theme.colorScheme.primary,
+                  semanticsLabel: 'Thời gian còn lại',
+                ),
+                Center(
+                  child: Text(
+                    _formatTime(remaining),
+                    style: theme.textTheme.headlineMedium?.copyWith(
+                      fontWeight: FontWeight.w700,
+                      fontFeatures: const [FontFeature.tabularFigures()],
+                    ),
+                  ),
+                ),
+              ],
             ),
           ),
         ),
@@ -1057,12 +1094,17 @@ class _HoldToRecord extends StatelessWidget {
             isRecording ? 'Đang ghi âm, thả để lưu' : '$label, nhấn giữ để nói',
         button: true,
         child: GestureDetector(
-          onLongPressStart: (_) => onStart(),
+          onLongPressStart: (_) async {
+            unawaited(HapticFeedback.selectionClick());
+            await onStart();
+          },
           onLongPressEnd: (_) => onStop(),
           onLongPressCancel: onCancel,
           child: Column(mainAxisSize: MainAxisSize.min, children: [
             AnimatedContainer(
-              duration: const Duration(milliseconds: 180),
+              duration: MediaQuery.disableAnimationsOf(context)
+                  ? Duration.zero
+                  : const Duration(milliseconds: 180),
               width: 92,
               height: 92,
               decoration: BoxDecoration(
@@ -1087,11 +1129,11 @@ class _HoldToRecord extends StatelessWidget {
             ),
             const SizedBox(height: 10),
             Text(
-              isRecording ? 'Đang ghi âm · thả để lưu' : label,
+              isRecording ? 'Đang cất suy nghĩ' : label,
               style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w500),
             ),
             const SizedBox(height: 2),
-            Text('Nhấn giữ để nói',
+            Text(isRecording ? 'Thả tay để lưu' : 'Nhấn giữ để nói',
                 style: TextStyle(color: MelbelColors.kTextSecondary)),
           ]),
         ),

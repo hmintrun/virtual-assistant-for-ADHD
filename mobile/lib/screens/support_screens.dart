@@ -112,7 +112,7 @@ class AccountScreen extends StatelessWidget {
                   CircleAvatar(
                     radius: 38,
                     backgroundColor: MelbelColors.kSurfaceContainerHigh,
-                    child: Icon(Icons.person_outline,
+                    child: CatAccountIcon(
                         size: 38, color: MelbelColors.kTextSecondary),
                   ),
                   const SizedBox(height: 12),

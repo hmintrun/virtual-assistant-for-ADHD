@@ -1,30 +1,54 @@
+import 'package:flutter/foundation.dart';
 import 'package:speech_to_text/speech_to_text.dart';
 
-/// Speech recognition handled by Android/iOS; it does not require the backend.
+/// Speech recognition handled by the browser or the device.
 class OnDeviceSpeechService {
   final SpeechToText _speech = SpeechToText();
-  bool _initialized = false;
+  Future<bool>? _initializing;
+  void Function(String)? _onError;
+  void Function()? _onDone;
 
   bool get isListening => _speech.isListening;
+
+  Future<void> requestAndroidPermission() async {
+    if (kIsWeb || defaultTargetPlatform != TargetPlatform.android) return;
+    try {
+      await _initialize();
+    } catch (error) {
+      debugPrint('Could not initialize Android speech recognition: $error');
+    }
+  }
+
+  Future<bool> _initialize() => _initializing ??= _speech
+      .initialize(
+        onError: (error) => _onError?.call(error.errorMsg),
+        onStatus: (status) {
+          if (status == SpeechToText.doneStatus) _onDone?.call();
+        },
+      )
+      .whenComplete(() => _initializing = null);
 
   Future<bool> start({
     required void Function(String words, bool isFinal) onWords,
     required void Function(String message) onError,
+    required void Function() onDone,
   }) async {
-    if (!_initialized) {
-      _initialized = await _speech.initialize(
-        onError: (error) => onError(error.errorMsg),
-      );
-    }
-    if (!_initialized) return false;
+    _onError = onError;
+    _onDone = onDone;
+    if (!await _initialize()) return false;
 
-    final locales = await _speech.locales();
-    final vietnamese = locales.where(
-      (locale) => locale.localeId.toLowerCase().startsWith('vi'),
-    );
-    if (vietnamese.isEmpty) {
-      onError('Thiết bị chưa có dịch vụ nhận diện tiếng Việt.');
-      return false;
+    // On web, locales() returns the current recognizer language, which may be unset.
+    var localeId = 'vi-VN';
+    if (!kIsWeb) {
+      final locales = await _speech.locales();
+      final vietnamese = locales.where(
+        (locale) => locale.localeId.toLowerCase().startsWith('vi'),
+      );
+      if (vietnamese.isEmpty) {
+        onError('Thiết bị chưa có dịch vụ nhận diện tiếng Việt.');
+        return false;
+      }
+      localeId = vietnamese.first.localeId;
     }
 
     await _speech.listen(
@@ -32,7 +56,7 @@ class OnDeviceSpeechService {
         listenMode: ListenMode.dictation,
         partialResults: true,
         cancelOnError: true,
-        localeId: vietnamese.first.localeId,
+        localeId: localeId,
         listenFor: const Duration(seconds: 45),
         pauseFor: const Duration(seconds: 4),
       ),

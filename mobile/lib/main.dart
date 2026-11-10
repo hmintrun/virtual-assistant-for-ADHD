@@ -46,9 +46,10 @@ class ProPlanApp extends StatelessWidget {
   Widget build(BuildContext context) {
     context.watch<ThemeProvider>();
     return MaterialApp(
-      title: 'Melbel',
+      title: 'ProPlan VA',
       debugShowCheckedModeBanner: false,
       theme: MelbelTheme.currentTheme,
+      themeAnimationDuration: Duration.zero,
       routes: {
         '/login': (_) => const LoginScreen(),
         '/home': (_) => const HomeScreen(),
