@@ -8,9 +8,12 @@ from datetime import datetime
 from typing import Any
 from unittest.mock import patch
 
+from google.genai import types
+
 from app.core.config import Settings
 from app.schemas.schedule import (
     FeasibilityReportSchema,
+    LLMRescheduleEmpathyPayload,
     ProposedSessionSchema,
     RescheduleEmpatheticResult,
     SessionSegmentSchema,
@@ -194,14 +197,13 @@ class TestAIService(unittest.TestCase):
             self.assertIsNotNone(result.encouragement_tip)
 
     def test_timeout_graceful_degradation(self) -> None:
-        """Giả lập cả Primary và Backup đều treo quá AI_TIMEOUT_SECONDS -> rơi êm ái về Tier 3."""
+        """Flash-Lite treo quá hạn UF1 thì dùng Tier 3, không khởi chạy provider khác."""
         fast_timeout_settings = Settings(
             GEMINI_API_KEY="AIzaSyTestKey",
-            GROQ_API_KEY="",
             GOOGLE_CREDENTIALS_PATH="",
-            AI_TIMEOUT_SECONDS=0.06,
-            AI_PRIMARY_PRIORITY_SECONDS=0.04,
-            AI_WARM_BACKUP_DELAY_SECONDS=0.02,
+            AI_UF1_TIMEOUT_SECONDS=0.06,
+            AI_WARM_BACKUP_DELAY_SECONDS=0,
+            AI_GROQ_HEDGE_DELAY_SECONDS=0,
         )
         service = AIService(app_settings=fast_timeout_settings)
 
@@ -216,9 +218,19 @@ class TestAIService(unittest.TestCase):
         class _SlowClient:
             aio = _SlowAio()
 
-        with patch.object(service, "_get_gemini_client", return_value=_SlowClient()):
+        client = _SlowClient()
+        with (
+            patch.object(service, "_get_gemini_client", return_value=client),
+            patch.object(service, "_get_groq_client", return_value=object()),
+            patch.object(client.aio.models, "generate_content", wraps=client.aio.models.generate_content) as gemini,
+            patch.object(service, "_call_groq_structured") as groq,
+        ):
             result = asyncio.run(service.extract_task_intent("Làm bài tập Giải tích chương 2"))
 
+        gemini.assert_awaited_once()
+        self.assertEqual(gemini.call_args.kwargs["model"], "gemini-3.5-flash-lite")
+        self.assertEqual(gemini.call_args.kwargs["config"].thinking_config.thinking_level, types.ThinkingLevel.MINIMAL)
+        groq.assert_not_awaited()
         self.assertEqual(result.generation_tier, "tier_3_rule_based")
         self.assertFalse(result.is_complete)
         self.assertEqual(result.content, "Làm bài tập Giải tích chương 2")
@@ -227,9 +239,7 @@ class TestAIService(unittest.TestCase):
         async def run_case(*, gemini_available: bool) -> None:
             service = AIService(
                 Settings(
-                    AI_TIMEOUT_SECONDS=0.06,
-                    AI_WARM_BACKUP_DELAY_SECONDS=0.02,
-                    AI_GROQ_HEDGE_DELAY_SECONDS=0.03,
+                    AI_UF1_TIMEOUT_SECONDS=0.06,
                 )
             )
             allow_cleanup = asyncio.Event()
@@ -268,8 +278,7 @@ class TestAIService(unittest.TestCase):
 
     def test_primary_preferred_over_faster_warm_backup(self) -> None:
         """
-        Đảm bảo nếu flash-lite (Warm Backup) trả xong trước trong RAM nhưng 3.8-flash (Primary)
-        vẫn kịp hoàn thành trong cửa sổ ưu tiên -> bắt buộc chọn output chất lượng cao của 3.8-flash.
+        UF6 chọn 3.8-flash nếu model chính xong trong cửa sổ ưu tiên dù Flash-Lite trả sớm hơn.
         """
         cfg = Settings(
             GEMINI_API_KEY="AIzaSyTestKey",
@@ -285,41 +294,27 @@ class TestAIService(unittest.TestCase):
             *,
             model_name: str | None = None,
             **_: Any,
-        ) -> LLMTaskExtractionPayload:
+        ) -> LLMRescheduleEmpathyPayload:
             if model_name == "gemini-3.8-flash":
                 await asyncio.sleep(0.09)  # Chậm hơn backup nhưng vẫn < 0.18s priority
-                return LLMTaskExtractionPayload(
-                    title="Bản chuẩn từ 3.8 Flash",
-                    content="Làm slide KTPM",
-                    scope="12 slide PowerPoint",
-                    free_time_slots=["Chiều Chủ nhật 14h-17h"],
-                    deadline=datetime(2026, 11, 4, 9, 0),
-                    is_complete=True,
-                    has_conflict=False,
-                    summary="Output chất lượng cao từ Gemini 3.8 Flash.",
-                    clarification_questions=[],
+                return LLMRescheduleEmpathyPayload(
+                    empathetic_note="Bản chuẩn từ Gemini 3.8 Flash.",
+                    encouragement_tip="Nghỉ một nhịp nhé.",
                 )
             await asyncio.sleep(0.02)  # Xong ở 0.02 + 0.02 = 0.04s (sớm hơn 0.09s)
-            return LLMTaskExtractionPayload(
-                title="Bản dự phòng từ 3.5 Flash-Lite",
-                content="Làm slide KTPM",
-                scope="12 slide",
-                free_time_slots=["Chiều Chủ nhật 14h-17h"],
-                deadline=datetime(2026, 11, 4, 9, 0),
-                is_complete=True,
-                has_conflict=False,
-                summary="Output dự phòng từ Flash-Lite.",
-                clarification_questions=[],
+            return LLMRescheduleEmpathyPayload(
+                empathetic_note="Bản dự phòng từ Flash-Lite.",
+                encouragement_tip="Uống một ngụm nước nhé.",
             )
 
         with (
             patch.object(service, "_get_gemini_client", return_value=object()),
             patch.object(service, "_call_gemini_structured", side_effect=_fake_gemini),
         ):
-            res = asyncio.run(service.extract_task_intent("Làm 12 slide KTPM"))
+            res = asyncio.run(service.generate_reschedule_empathy("busy"))
 
         self.assertEqual(res.generation_tier, "tier_1_gemini")
-        self.assertEqual(res.title, "Bản chuẩn từ 3.8 Flash")
+        self.assertEqual(res.empathetic_note, "Bản chuẩn từ Gemini 3.8 Flash.")
 
     def test_warm_backup_returned_for_giant_task_past_priority_window(self) -> None:
         """
@@ -378,18 +373,11 @@ class TestAIService(unittest.TestCase):
         self.assertIn("Warm Backup", res.reasoning)
 
     def test_fast_fail_cascades_immediately_to_groq(self) -> None:
-        """
-        Khi cả 2 model Google báo lỗi nhanh (ví dụ HTTP 402/403/503), hệ thống nhảy thẳng sang Groq
-        ngay tức khắc mà KHÔNG cần chờ tới mốc AI_GROQ_HEDGE_DELAY_SECONDS (3.5s).
-        """
+        """UF1 chuyển từ Flash-Lite sang Qwen khi nhánh chính lỗi sớm."""
         cfg = Settings(
             GEMINI_API_KEY="AIzaSyTestKey",
             GROQ_API_KEY="gsk_TestKey",
             GOOGLE_CREDENTIALS_PATH="",
-            AI_WARM_BACKUP_DELAY_SECONDS=2.6,
-            AI_GROQ_HEDGE_DELAY_SECONDS=3.5,
-            AI_PRIMARY_PRIORITY_SECONDS=4.0,
-            AI_TIMEOUT_SECONDS=4.5,
         )
         service = AIService(app_settings=cfg)
 
@@ -413,15 +401,36 @@ class TestAIService(unittest.TestCase):
         with (
             patch.object(service, "_get_gemini_client", return_value=object()),
             patch.object(service, "_get_groq_client", return_value=object()),
-            patch.object(service, "_call_gemini_structured", side_effect=_failing_gemini),
-            patch.object(service, "_call_groq_structured", side_effect=_working_groq),
+            patch.object(service, "_call_gemini_structured", side_effect=_failing_gemini) as gemini,
+            patch.object(service, "_call_groq_structured", side_effect=_working_groq) as groq,
         ):
             res = asyncio.run(service.extract_task_intent("Viết tiểu luận Triết"))
         elapsed = (datetime.now() - t_start).total_seconds()
 
         self.assertEqual(res.generation_tier, "tier_2_groq")
         self.assertEqual(res.title, "Cứu hộ tức thì từ Groq Qwen")
-        self.assertLess(elapsed, 0.5, "Phải nhảy sang Groq ngay tức thì thay vì chờ 3.5s")
+        self.assertLess(elapsed, 0.5, "Phải nhảy sang Groq ngay khi Flash-Lite lỗi sớm")
+        gemini.assert_awaited_once()
+        groq.assert_awaited_once()
+        self.assertFalse(groq.call_args.kwargs["allow_secondary"])
+
+    def test_uf1_late_failure_skips_groq(self) -> None:
+        service = AIService(Settings(AI_UF1_GROQ_FAST_FAIL_SECONDS=0.01))
+
+        async def late_failure(**_: Any) -> None:
+            await asyncio.sleep(0.04)
+            raise ConnectionError("Flash-Lite unavailable")
+
+        with (
+            patch.object(service, "_get_gemini_client", return_value=object()),
+            patch.object(service, "_get_groq_client", return_value=object()),
+            patch.object(service, "_call_gemini_structured", side_effect=late_failure),
+            patch.object(service, "_call_groq_structured") as groq,
+        ):
+            result = asyncio.run(service.extract_task_intent("Làm báo cáo"))
+
+        self.assertEqual(result.generation_tier, "tier_3_rule_based")
+        groq.assert_not_awaited()
 
     def test_groq_secondary_fallback_when_primary_groq_rate_limited(self) -> None:
         """Khi qwen/qwen3.8-27b chạm trần 429 TPM, tự động nhảy sang openai/gpt-oss-20b."""
@@ -463,6 +472,13 @@ class TestAIService(unittest.TestCase):
         self.assertEqual(called_models, ["qwen/qwen3.8-27b", "openai/gpt-oss-20b"])
         self.assertEqual(res.generation_tier, "tier_2_groq")
         self.assertIn("thong thả", res.empathetic_note)
+
+        called_models.clear()
+        with patch.object(service, "_get_groq_client", return_value=_FakeGroqClient()):
+            uf1 = asyncio.run(service.extract_task_intent("Làm báo cáo"))
+
+        self.assertEqual(called_models, ["qwen/qwen3.8-27b"])
+        self.assertEqual(uf1.generation_tier, "tier_3_rule_based")
 
     def test_proposed_session_excludes_micro_task_from_duration(self) -> None:
         """O09 Guardrail: Micro-task 2 phút hiển thị trước phiên, KHÔNG cộng vào duration_seconds."""
