@@ -53,6 +53,7 @@ class Settings(BaseSettings):
     # Định danh Model AI & Voice (Đã kiểm chứng thực nghiệm trên Postpay Tier 1 & Groq 2026)
     GEMINI_FLASH_MODEL: str = "gemini-3.8-flash"
     GEMINI_BACKUP_MODEL: str = "gemini-3.5-flash-lite"
+    GEMINI_UF1_MODEL: str = "gemini-3.5-flash-lite"
     GROQ_FALLBACK_MODEL: str = "qwen/qwen3.8-27b"
     GROQ_SECONDARY_FALLBACK_MODEL: str = "openai/gpt-oss-20b"
     GROQ_STT_MODEL: str = "whisper-large-v3-turbo"
@@ -95,7 +96,11 @@ class Settings(BaseSettings):
     VOICE_STT_TIMEOUT_SECONDS: float = Field(default=20.0, gt=0.0, le=120.0)
     VOICE_MAX_AUDIO_BYTES: int = Field(default=10 * 1024 * 1024, gt=0)
 
-    # Khung thời gian A — Luồng tương tác trực tiếp (UF1 & UF6):
+    # UF1: Flash-Lite MINIMAL từ đầu; chỉ gọi Qwen khi Gemini lỗi sớm.
+    AI_UF1_TIMEOUT_SECONDS: float = Field(default=4.5, gt=0.0, le=4.5)
+    AI_UF1_GROQ_FAST_FAIL_SECONDS: float = Field(default=1.0, ge=0.0, le=1.0)
+
+    # Khung thời gian A — Chỉnh kế hoạch bằng ngôn ngữ tự nhiên và UF6:
     # 0.0s chạy 3.8-flash -> 2.6s Warm Backup 3.5-flash-lite -> 3.5s Groq -> ưu tiên 3.8-flash tới 4.0s -> cắt cứng 4.5s
     AI_TIMEOUT_SECONDS: float = Field(default=4.5, gt=0.0, le=20.0)
     AI_PRIMARY_PRIORITY_SECONDS: float = Field(default=4.0, gt=0.0, le=20.0)
