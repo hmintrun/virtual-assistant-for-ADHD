@@ -41,11 +41,11 @@ sequenceDiagram
     participant D as Database
     participant G as Google Calendar
     A->>B: GET connections/:id/events?google_calendar_id=...&from=...&to=...
-    B->>D: Kiểm connection thuộc User; lấy credential mã hóa
-    B->>B: Giải mã; lấy access token còn hạn hoặc refresh khi cần
+    B->>D: Kiểm connection thuộc User, lấy credential mã hóa
+    B->>B: Giải mã, lấy access token còn hạn hoặc refresh khi cần
     B->>G: GET calendars/:calendarId/events
     G-->>B: items + nextPageToken nếu có
-    B->>B: Gom trang; chuẩn hóa và lọc sự kiện
+    B->>B: Gom trang, chuẩn hóa và lọc sự kiện
     B-->>A: SuccessEnvelope với CalendarEvent[]
 ```
 
@@ -122,10 +122,10 @@ sequenceDiagram
     participant G as Google Calendar
     A->>B: POST event-change-previews (payload)
     B->>D: Lưu preview pending, hạn15phút
-    B-->>A: preview để duyệt; chưa ghi Google
+    B-->>A: preview để duyệt, chưa ghi Google
     A->>B: POST preview/:id/confirm
     B->>D: Commit preview confirmed + job queued
-    B-->>A: job_id; chưa bảo đảm đã có event trên Google
+    B-->>A: job_id, chưa bảo đảm đã có event trên Google
     W->>D: Nhận job đã commit
     W->>G: POST calendars/:write_calendar_id/events
     G-->>W: Event đã tạo, có id và etag
