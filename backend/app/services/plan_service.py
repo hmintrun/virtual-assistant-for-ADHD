@@ -1274,6 +1274,31 @@ def _concrete_issues(candidate: PlanCandidate, source: PlanningSources) -> list[
 def _review_feasibility(candidate: PlanCandidate, source: PlanningSources) -> PlanCandidate:
     reasons = _concrete_issues(candidate, source)
     if not reasons:
+        has_deficit = (candidate.feasibility.deficit_seconds or 0) > 0
+        is_partial = (
+            not candidate.feasibility.fully_scheduled
+            or (candidate.feasibility.unscheduled_seconds or 0) > 0
+            or any(
+                r.code in ("TOTAL_DEFICIT", "FRAGMENTED_FREE_SLOTS")
+                for r in candidate.feasibility.blocking_reasons
+            )
+        )
+        if has_deficit or is_partial:
+            return candidate.model_copy(
+                update={
+                    "feasibility": candidate.feasibility.model_copy(
+                        update={
+                            "status": "infeasible" if has_deficit else candidate.feasibility.status,
+                            "fully_scheduled": False,
+                            "required_seconds": candidate.feasibility.required_seconds
+                            or sum(item.duration_seconds for item in candidate.sessions),
+                            "deficit_seconds": candidate.feasibility.deficit_seconds or 0,
+                            "unscheduled_seconds": candidate.feasibility.unscheduled_seconds or 0,
+                        }
+                    )
+                }
+            )
+
         return candidate.model_copy(
             update={
                 "feasibility": candidate.feasibility.model_copy(
@@ -1311,6 +1336,8 @@ def _review_feasibility(candidate: PlanCandidate, source: PlanningSources) -> Pl
             else candidate.feasibility.status,
             "fully_scheduled": False,
             "blocking_reasons": existing,
+            "deficit_seconds": candidate.feasibility.deficit_seconds or 0,
+            "unscheduled_seconds": candidate.feasibility.unscheduled_seconds or 0,
         }
     )
     return candidate.model_copy(update={"feasibility": report})

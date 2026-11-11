@@ -208,6 +208,7 @@ async def _run_to_schema(
     else:
         resolved_checkin = None
 
+    session_snap = resolved_snapshot.session if resolved_snapshot is not None else None
     return SessionRunData(
         run_id=str(run.id),
         session_id=str(run.session_id),
@@ -227,6 +228,8 @@ async def _run_to_schema(
         settings_snapshot=resolved_snapshot,
         check_in=resolved_checkin,
         dnd_release_at=run.dnd_release_at,
+        total_planned_seconds=session_snap.duration_seconds if session_snap is not None else None,
+        segments=list(session_snap.segments) if session_snap is not None else [],
     )
 
 
@@ -615,6 +618,13 @@ async def start_session_run(
             code="RESOURCE_NOT_FOUND",
             message="Không tìm thấy tài nguyên trong phạm vi bạn được phép truy cập.",
             next_action="reload",
+        )
+
+    # 1b. Kiểm tra cửa sổ bắt đầu: chặn bắt đầu quá sớm ngoài Grace Window (sớm hơn 15 phút)
+    early_bound = session.scheduled_start.astimezone(UTC) - timedelta(seconds=START_GRACE_SECONDS)
+    if req_start < early_bound:
+        raise _require_replan(
+            "Thời điểm bắt đầu quá sớm so với lịch hẹn (vượt quá 15 phút). Cần xếp lại lịch."
         )
 
     # 2. Kiểm tra expected_schedule_revision khớp với ScheduleVersion hiện hành hoặc session.schedule_revision
