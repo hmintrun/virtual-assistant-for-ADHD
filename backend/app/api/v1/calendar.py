@@ -105,13 +105,11 @@ async def oauth_callback(
     code: Annotated[str, Query(min_length=1, description="Authorization code do Google cấp")],
     state: Annotated[str, Query(min_length=1, description="State token bảo vệ chống CSRF")],
     db: DbSessionDep,
-    current_user: CurrentUserDep | None = None,
 ) -> RedirectResponse:
     service = CalendarService(db)
-    user_id = current_user.user_id if current_user else None
     try:
         conn, return_target = await service.handle_oauth_callback(
-            user_id=user_id,
+            user_id=None,
             code=code,
             state=state,
         )
@@ -134,9 +132,8 @@ async def oauth2_callback_legacy(
     code: Annotated[str, Query(min_length=1)],
     state: Annotated[str, Query(min_length=1)],
     db: DbSessionDep,
-    current_user: CurrentUserDep | None = None,
 ) -> RedirectResponse:
-    return await oauth_callback(code=code, state=state, db=db, current_user=current_user)
+    return await oauth_callback(code=code, state=state, db=db)
 
 
 # 47 | GET /api/v1/calendar/connections

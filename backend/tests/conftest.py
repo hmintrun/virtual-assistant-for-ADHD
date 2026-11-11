@@ -13,6 +13,12 @@ from app.models import Base
 @pytest.fixture(autouse=True)
 def offline_test_environment(monkeypatch):
     """Chỉ dùng DB thử nghiệm và provider giả; cấm kết nối mạng từ test."""
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "AUTH_MODE", "dev_user")
+    monkeypatch.setattr(settings, "ENVIRONMENT", "testing")
+    monkeypatch.setattr(settings, "TESTING", True)
+    monkeypatch.setattr(settings, "ENABLE_CALENDAR_SYNC_WORKER", False)
     monkeypatch.setenv("DATABASE_URL", "sqlite+aiosqlite:///:memory:")
     for name in ("GEMINI_API_KEY", "GROQ_API_KEY", "GOOGLE_CREDENTIALS_PATH"):
         monkeypatch.setenv(name, "")
@@ -70,3 +76,16 @@ def engine():
     Base.metadata.create_all(engine)
     yield engine
     engine.dispose()
+
+
+@pytest.fixture
+def auth_config(monkeypatch):
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "AUTH_MODE", "google")
+    monkeypatch.setattr(settings, "ENVIRONMENT", "testing")
+    monkeypatch.setattr(settings, "JWT_SECRET_KEY", "0123456789abcdef" * 4)
+    monkeypatch.setattr(
+        settings, "GOOGLE_SIGN_IN_AUDIENCES", ["test-client.apps.googleusercontent.com"]
+    )
+    monkeypatch.setattr(settings, "AUTH_CLOCK_SKEW_SECONDS", 0)

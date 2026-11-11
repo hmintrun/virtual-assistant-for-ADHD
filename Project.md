@@ -247,7 +247,7 @@ Tên object và trường dưới đây theo [schema Backend](docs/backend/schem
 
 ### 6.7. Tài khoản, Calendar & Phạm vi triển khai
 
-- **O00 User:** Thiết kế bổ sung chọn Google Sign-In → Backend xác minh Google ID token → cấp app access token. Định danh Google theo `sub`/AuthIdentity, không dùng email thay subject. Auth endpoint, TTL, refresh/logout và thu hồi token chưa được công bố đầy đủ trong nguồn schema.
+- **O00 User:** Thiết kế bổ sung chọn Google Sign-In → Backend xác minh Google ID token → cấp app access token. Định danh Google theo `sub`/AuthIdentity, không dùng email thay subject. Contract Auth bổ sung11/11/2026 ở docs/backend/AUTH_GUIDE.md và schema mục8: POST /auth/google, GET /auth/me, app JWT TTL3600s, re-exchange Google ID token, logout local chưa revoke JWT. Code/offline verification không thay Google thật/Tester acceptance.
 - **Calendar OAuth tách Auth:** Đăng nhập không tự cấp quyền Calendar. `CalendarConnection` quản lý read/write scopes và lựa chọn lịch; `CalendarContext` là snapshot bận để Python tính lịch. Session ID nội bộ khác Google event ID.
 - **Ghi Calendar:** Tạo/sửa/xóa sự kiện ngoài qua preview/confirm; đổi giờ/xóa event gắn Session phải qua UF6. Worker kiểm etag/revision, phân biệt lưu lịch app thành công với sync Google. Đổi lịch đích xử lý keep/move tường minh; sửa sự kiện lặp phải rõ phạm vi.
 - **Khả năng hiện hành:** `offline_start_supported=false` theo schema; timer của Run đã được chấp nhận, xem lịch cache và thu âm UF4 vẫn phải hoạt động khi mất mạng. Không suy cache đồng nghĩa có thể tự start Run mới offline.

@@ -47,4 +47,9 @@ node scripts/check_postgres_migrations.mjs
 
 Script chạy migration SQL trên PostgreSQL WASM cho DB mới và dữ liệu cũ có Parts, candidate, giờ rảnh và cấu hình cá nhân. Bước này chưa kiểm kết nối `asyncpg` với server PostgreSQL triển khai thực tế.
 
-Service/router UF3–UF4 và CheckIn tối thiểu vẫn cần triển khai. Auth hiện dùng tài khoản demo trong development; kiểm khởi động không thay bằng chứng Android, provider thật hoặc triển khai production.
+Backend có router/service UF3–UF5 và App Auth Google exchange/JWT; phạm vi kiểm chứng thiết bị/provider và tích hợp Mobile phải đọc theo từng báo cáo, không suy từ việc khởi động server.
+
+
+## App authentication
+
+See [Auth setup and contract](../docs/backend/AUTH_GUIDE.md) for Google Sign-In/JWT, independent signing key, startup guards, Mobile client IDs, session limitations, offline test commands and acceptance gates. PR17 delivers Backend/Docs; Flutter login remains a demo in the committed baseline and awaits separate integration. See [PR17 verification](../docs/backend/PR17_AUTH_VERIFICATION.md) for the OpenAPI fix and PostgreSQL/Calendar QA scope. Do not rotate Calendar SECRET_KEY when configuring JWT_SECRET_KEY.
