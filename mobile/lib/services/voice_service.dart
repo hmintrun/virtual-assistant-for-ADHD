@@ -65,9 +65,9 @@ class OnDeviceSpeechService {
     return true;
   }
 
-  Future<void> stop() async {
-    if (_speech.isListening) await _speech.stop();
-  }
+  Future<void> stop() => _speech.stop();
+
+  Future<void> cancel() => _speech.cancel();
 
   Future<void> dispose() => _speech.cancel();
 }

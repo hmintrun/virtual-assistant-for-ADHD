@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 
@@ -12,6 +13,7 @@ import 'providers/theme_provider.dart';
 import 'screens/onboarding_screens.dart';
 import 'screens/support_screens.dart';
 import 'screens/home_screen.dart';
+import 'screens/calendar_screen.dart';
 import 'services/alarm_service.dart';
 import 'services/focus_native_controller.dart';
 
@@ -47,12 +49,16 @@ class ProPlanApp extends StatelessWidget {
     context.watch<ThemeProvider>();
     return MaterialApp(
       title: 'ProPlan VA',
+      locale: const Locale('vi'),
+      supportedLocales: const [Locale('vi')],
+      localizationsDelegates: GlobalMaterialLocalizations.delegates,
       debugShowCheckedModeBanner: false,
       theme: MelbelTheme.currentTheme,
       themeAnimationDuration: Duration.zero,
       routes: {
         '/login': (_) => const LoginScreen(),
         '/home': (_) => const HomeScreen(),
+        '/calendar': (_) => const CalendarScreen(),
         '/help': (_) => const HelpScreen(),
         '/account': (_) => const AccountScreen(),
       },

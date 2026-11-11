@@ -97,21 +97,16 @@ class MelbelAppBar extends StatelessWidget implements PreferredSizeWidget {
               ),
             ),
             const SizedBox(width: 4),
-            InkWell(
-              borderRadius: BorderRadius.circular(16),
-              onTap: () => Navigator.of(context).pushNamed('/account'),
-              child: Container(
-                width: 32,
-                height: 32,
-                decoration: BoxDecoration(
-                  color: MelbelColors.kPrimary,
-                  shape: BoxShape.circle,
-                ),
-                child: Center(
-                  child: CatAccountIcon(
-                    size: 22,
-                    color: MelbelColors.kOnPrimary,
-                  ),
+            IconButton(
+              tooltip: 'Tài khoản',
+              constraints: const BoxConstraints.tightFor(width: 48, height: 48),
+              onPressed: () => Navigator.of(context).pushNamed('/account'),
+              icon: CircleAvatar(
+                radius: 16,
+                backgroundColor: MelbelColors.kPrimary,
+                child: CatAccountIcon(
+                  size: 22,
+                  color: MelbelColors.kOnPrimary,
                 ),
               ),
             ),

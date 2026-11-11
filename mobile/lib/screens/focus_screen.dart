@@ -80,6 +80,14 @@ class _FocusScreenState extends State<FocusScreen> with WidgetsBindingObserver {
               const _OfflineBanner(),
               const SizedBox(height: 12),
             ],
+            if (focus.runCommandBusy)
+              const LinearProgressIndicator(
+                  semanticsLabel: 'Đang đồng bộ phiên'),
+            if (focus.runError != null)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 12),
+                child: Text(focus.runError!),
+              ),
             _buildStage(context, focus, session),
           ],
         ),
@@ -216,7 +224,7 @@ class _FocusScreenState extends State<FocusScreen> with WidgetsBindingObserver {
       PrimaryCta(
         label: 'Bắt đầu phiên ${_minutes(session.workSeconds)} phút',
         icon: Icons.play_arrow_rounded,
-        onPressed: focus.startRun,
+        onPressed: focus.runCommandBusy ? null : focus.startRun,
       ),
       const SizedBox(height: 8),
       _SecondaryButton(
@@ -393,7 +401,7 @@ class _FocusScreenState extends State<FocusScreen> with WidgetsBindingObserver {
       PrimaryCta(
         label: 'Bắt đầu đếm giờ ${_minutes(session.workSeconds)} phút',
         icon: Icons.play_arrow_rounded,
-        onPressed: focus.startRun,
+        onPressed: focus.runCommandBusy ? null : focus.startRun,
       ),
       if (!focus.dndPermission)
         TextButton(
@@ -434,7 +442,7 @@ class _FocusScreenState extends State<FocusScreen> with WidgetsBindingObserver {
       PrimaryCta(
         label: 'Bắt đầu phiên ngay',
         icon: Icons.play_arrow_rounded,
-        onPressed: focus.startLateRun,
+        onPressed: focus.runCommandBusy ? null : focus.startLateRun,
       ),
       TextButton(
         onPressed: () => focus.startSession(session),
@@ -488,28 +496,7 @@ class _FocusScreenState extends State<FocusScreen> with WidgetsBindingObserver {
           accent: MelbelColors.kAmber,
         ),
       ],
-      const SizedBox(height: 20),
-      Center(
-        child: Text(
-          _formatTime(focus.remainingSeconds),
-          style: Theme.of(context).textTheme.displaySmall?.copyWith(
-                color: MelbelColors.kOnSurface,
-                fontWeight: FontWeight.w500,
-                fontFeatures: const [],
-                letterSpacing: 2,
-              ),
-        ),
-      ),
-      const SizedBox(height: 6),
-      Center(
-        child: Text(
-          'Cứ tập trung vào bước đang làm',
-          style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                color: MelbelColors.kOnSurfaceVariant,
-              ),
-        ),
-      ),
-      const SizedBox(height: 18),
+      const SizedBox(height: 14),
       _HoldToRecord(
         isRecording: focus.isRecording,
         onStart: focus.beginRecording,
@@ -517,23 +504,10 @@ class _FocusScreenState extends State<FocusScreen> with WidgetsBindingObserver {
         onCancel: focus.cancelRecording,
       ),
       const SizedBox(height: 18),
-      Row(
-        children: [
-          Expanded(
-            child: TextButton.icon(
-              onPressed: () => _endEarly(context, focus),
-              icon: const Icon(Icons.stop_circle_outlined),
-              label: const Text('Kết thúc phiên'),
-            ),
-          ),
-          Expanded(
-            child: TextButton.icon(
-              onPressed: () => _showThoughts(context, focus),
-              icon: const Icon(Icons.inbox_outlined),
-              label: const Text('Hộp suy nghĩ'),
-            ),
-          ),
-        ],
+      TextButton.icon(
+        onPressed: () => _endEarly(context, focus),
+        icon: const Icon(Icons.stop_circle_outlined),
+        label: const Text('Kết thúc phiên'),
       ),
     ]);
   }
@@ -816,15 +790,70 @@ class _FocusScreenState extends State<FocusScreen> with WidgetsBindingObserver {
             'Bạn có thể mở hộp suy nghĩ để nghe lại ghi âm trên thiết bị.',
       ),
       const SizedBox(height: 20),
+      if (focus.needsEndSync)
+        PrimaryCta(
+          label: 'Đồng bộ kết thúc phiên',
+          onPressed: focus.runCommandBusy ? null : focus.syncRunEnd,
+        ),
+      if (focus.hasPendingCheckInResponse)
+        PrimaryCta(
+          label: 'Gửi lại kết quả phiên',
+          onPressed: focus.runCommandBusy ? null : focus.retryCheckInResponse,
+        ),
+      if (focus.hasOpenCheckIn && !focus.hasPendingCheckInResponse) ...[
+        const Text('Bạn đã làm đến đâu?'),
+        const SizedBox(height: 8),
+        for (final (label, outcome) in const [
+          ('Hoàn thành phiên', 'completed'),
+          ('Chưa xong', 'incomplete'),
+          ('Việc đột xuất', 'busy'),
+        ])
+          OutlinedButton(
+            onPressed: focus.runCommandBusy
+                ? null
+                : () => focus.answerCheckIn(outcome),
+            child: Text(label),
+          ),
+        TextButton(
+          onPressed: focus.runCommandBusy ? null : () => _chooseSkip(focus),
+          child: const Text('Bỏ qua'),
+        ),
+      ],
       PrimaryCta(
-        label: 'Mở hộp suy nghĩ',
-        onPressed: () => _showThoughts(context, focus),
-      ),
-      TextButton(
+        label: 'Quay về trang trước',
         onPressed: () => Navigator.of(context).pop(),
-        child: const Text('Quay về trang trước'),
       ),
+      if (focus.thoughts.isNotEmpty)
+        TextButton(
+          onPressed: () => _showThoughts(context, focus),
+          child: const Text('Mở hộp suy nghĩ'),
+        ),
     ]);
+  }
+
+  Future<void> _chooseSkip(FocusProvider focus) async {
+    final scope = await showModalBottomSheet<String>(
+      context: context,
+      builder: (context) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            for (final (label, value) in const [
+              ('Hoãn phiên này làm sau', 'postpone_session'),
+              ('Bỏ qua phiên này', 'skip_session'),
+              ('Bỏ toàn bộ bước này', 'skip_step'),
+            ])
+              ListTile(
+                title: Text(label),
+                onTap: () => Navigator.pop(context, value),
+              ),
+          ],
+        ),
+      ),
+    );
+    if (scope != null && mounted) {
+      await focus.answerCheckIn('skipped', skipScope: scope);
+    }
   }
 
   Future<void> _leave(BuildContext context, FocusProvider focus) async {
@@ -983,7 +1012,8 @@ class _SessionCard extends StatelessWidget {
         const SizedBox(height: 4),
         Text(session.stepTitle,
             style: TextStyle(color: MelbelColors.kSecondary)),
-        if (compact && (session.expectedOutput?.trim().isNotEmpty ?? false)) ...[
+        if (compact &&
+            (session.expectedOutput?.trim().isNotEmpty ?? false)) ...[
           const SizedBox(height: 8),
           Text('Đầu ra: ${session.expectedOutput}'),
         ],
@@ -1090,6 +1120,7 @@ class _HoldToRecord extends StatelessWidget {
   Widget build(BuildContext context) {
     return Center(
       child: Semantics(
+        container: true,
         label:
             isRecording ? 'Đang ghi âm, thả để lưu' : '$label, nhấn giữ để nói',
         button: true,
@@ -1279,12 +1310,18 @@ String _formatTime(int seconds) {
   return '$mins:$secs';
 }
 
-String _time(DateTime date) =>
-    '${date.hour.toString().padLeft(2, '0')}:${date.minute.toString().padLeft(2, '0')}';
+String _time(DateTime date) {
+  date = date.toLocal();
+  return '${date.hour.toString().padLeft(2, '0')}:${date.minute.toString().padLeft(2, '0')}';
+}
 
-String _dateTime(DateTime date) => '${_time(date)} ${date.day}/${date.month}';
+String _dateTime(DateTime date) {
+  final local = date.toLocal();
+  return '${_time(local)} ${local.day}/${local.month}';
+}
 
 String _weekday(DateTime date) {
+  date = date.toLocal();
   const days = [
     'Thứ 2',
     'Thứ 3',

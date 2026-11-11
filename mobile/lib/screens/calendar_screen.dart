@@ -2,6 +2,10 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../core/api_client.dart';
 import '../providers/task_provider.dart';
+import '../providers/focus_provider.dart';
+import '../models/focus_session_model.dart';
+import '../services/schedule_service.dart';
+import 'focus_screen.dart';
 import '../widgets/melbel_ui.dart';
 import 'support_screens.dart';
 import 'task_entry_screen.dart';
@@ -40,23 +44,11 @@ class _CalendarScreenState extends State<CalendarScreen> {
       _sessions = [];
     });
     try {
-      final sessions = <Map<String, dynamic>>[];
-      String? cursor;
-      final visited = <String>{};
-      do {
-        final data = await _api.getData('/schedule', queryParameters: {
-          'from': month.toUtc().toIso8601String(),
-          'to': DateTime(month.year, month.month + 1).toUtc().toIso8601String(),
-          'limit': 100,
-          if (cursor != null) 'cursor': cursor,
-        });
-        if (!mounted || request != _request) return;
-        sessions.addAll((data['items'] as List<dynamic>? ?? [])
-            .whereType<Map<String, dynamic>>());
-        cursor = data['next_cursor'] as String?;
-        if (cursor != null && !visited.add(cursor))
-          throw const ApiException('Máy chủ trả con trỏ lịch bị lặp.');
-      } while (cursor != null);
+      final sessions = await ScheduleService(_api).loadSessions(
+        month,
+        DateTime(month.year, month.month + 1),
+        includeTitles: true,
+      );
       if (mounted && request == _request) setState(() => _sessions = sessions);
     } catch (error) {
       if (mounted && request == _request)
@@ -80,39 +72,74 @@ class _CalendarScreenState extends State<CalendarScreen> {
   Future<void> _openDay(DateTime day) async {
     if (_loading) return;
     final sessions = _onDate(day);
-    final add = await showModalBottomSheet<bool>(
+    final selected = await showModalBottomSheet<Object>(
         context: context,
         isScrollControlled: true,
         showDragHandle: true,
         builder: (context) => SafeArea(
             child: SizedBox(
                 height: MediaQuery.sizeOf(context).height * .65,
-                child: ListView(padding: const EdgeInsets.all(20), children: [
-                  Text('${day.day}/${day.month}/${day.year}',
-                      style: Theme.of(context).textTheme.titleLarge),
-                  const SizedBox(height: 12),
-                  if (sessions.isEmpty)
-                    const Text('Chưa có phiên đã xác nhận trong ngày này.'),
-                  for (final session in sessions)
-                    Padding(
-                        padding: const EdgeInsets.only(bottom: 10),
-                        child: MelbelCard(
-                            child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                              Text(
-                                  '${_time(session['scheduled_start'])} – ${_time(session['scheduled_end'])}'),
-                              Text(
-                                  'Làm ${((session['work_seconds'] as int? ?? 0) / 60).ceil()} phút'),
-                              Text(session['micro_task_text'] as String? ??
-                                  'Phiên làm việc'),
-                            ]))),
-                  const SizedBox(height: 16),
-                  PrimaryCta(
-                      label: 'Thêm việc vào ngày này',
-                      onPressed: () => Navigator.pop(context, true)),
+                child: Column(children: [
+                  Expanded(
+                      child: ListView(
+                          padding: const EdgeInsets.all(20),
+                          children: [
+                        Text('${day.day}/${day.month}/${day.year}',
+                            style: Theme.of(context).textTheme.titleLarge),
+                        const SizedBox(height: 12),
+                        if (sessions.isEmpty)
+                          const Text(
+                              'Chưa có phiên đã xác nhận trong ngày này.'),
+                        for (final session in sessions)
+                          Padding(
+                              padding: const EdgeInsets.only(bottom: 10),
+                              child: MelbelCard(
+                                  child: ListTile(
+                                      onTap: session['status'] == 'scheduled'
+                                          ? () => Navigator.pop(
+                                              context,
+                                              FocusSessionInfo.fromJson(
+                                                  session))
+                                          : null,
+                                      title: Text(
+                                          session['step_title'] as String? ??
+                                              'Phiên làm việc'),
+                                      subtitle: Column(
+                                          crossAxisAlignment:
+                                              CrossAxisAlignment.start,
+                                          children: [
+                                            Text(
+                                                '${_time(session['scheduled_start'])} – ${_time(session['scheduled_end'])}'),
+                                            Text(
+                                                'Làm ${((session['work_seconds'] as int? ?? 0) / 60).ceil()} phút · Nghỉ ${((session['rest_seconds'] as int? ?? 0) / 60).ceil()} phút'),
+                                            if (session['task_title'] is String)
+                                              Text(session['task_title']
+                                                  as String),
+                                          ])))),
+                      ])),
+                  Padding(
+                    padding: const EdgeInsets.all(16),
+                    child: PrimaryCta(
+                      label: 'Thêm việc ngày này',
+                      onPressed: () => Navigator.pop(context, true),
+                    ),
+                  ),
                 ]))));
-    if (add != true || !mounted) return;
+    if (!mounted) return;
+    if (selected is FocusSessionInfo) {
+      final focus = context.read<FocusProvider>();
+      if (!focus.isActiveRun && !focus.hasUnfinishedServerRun) {
+        await focus.startSession(selected);
+      }
+      await focus.refreshRunCheckIn();
+      if (!mounted) return;
+      await Navigator.of(context).push(MaterialPageRoute<void>(
+        builder: (_) => const FocusScreen(),
+      ));
+      if (mounted) await _load();
+      return;
+    }
+    if (selected != true) return;
     try {
       final task = context.read<TaskProvider>();
       await task.startNewDraft();
@@ -197,7 +224,15 @@ class _CalendarScreenState extends State<CalendarScreen> {
                   Divider(color: colors.outlineVariant),
                   Row(
                     children: [
-                      for (final day in ['T2', 'T3', 'T4', 'T5', 'T6', 'T7', 'CN'])
+                      for (final day in [
+                        'T2',
+                        'T3',
+                        'T4',
+                        'T5',
+                        'T6',
+                        'T7',
+                        'CN'
+                      ])
                         Expanded(
                           child: Padding(
                             padding: const EdgeInsets.symmetric(vertical: 8),
@@ -224,8 +259,8 @@ class _CalendarScreenState extends State<CalendarScreen> {
                     itemCount: offset + days,
                     itemBuilder: (context, index) {
                       if (index < offset) return const SizedBox.shrink();
-                      final date =
-                          DateTime(_month.year, _month.month, index - offset + 1);
+                      final date = DateTime(
+                          _month.year, _month.month, index - offset + 1);
                       final isToday = DateUtils.isSameDay(date, today);
                       final hasSessions = _onDate(date).isNotEmpty;
                       final openDay = _loading ? null : () => _openDay(date);
@@ -254,11 +289,13 @@ class _CalendarScreenState extends State<CalendarScreen> {
                               focusColor: Colors.transparent,
                               onHover: (hovering) {
                                 if (!hovering && _hoveredDay != date) return;
-                                setState(() => _hoveredDay = hovering ? date : null);
+                                setState(
+                                    () => _hoveredDay = hovering ? date : null);
                               },
                               onFocusChange: (focused) {
                                 if (!focused && _focusedDay != date) return;
-                                setState(() => _focusedDay = focused ? date : null);
+                                setState(
+                                    () => _focusedDay = focused ? date : null);
                               },
                               child: Stack(
                                 alignment: Alignment.center,
@@ -269,7 +306,8 @@ class _CalendarScreenState extends State<CalendarScreen> {
                                       painter: _TodayPawPainter(
                                         isToday
                                             ? colors.primary
-                                            : colors.primary.withValues(alpha: .4),
+                                            : colors.primary
+                                                .withValues(alpha: .4),
                                       ),
                                     ),
                                   Text(
@@ -277,7 +315,8 @@ class _CalendarScreenState extends State<CalendarScreen> {
                                     style: theme.textTheme.bodyMedium?.copyWith(
                                       color: isToday ||
                                               (showPaw &&
-                                                  colors.brightness == Brightness.dark)
+                                                  colors.brightness ==
+                                                      Brightness.dark)
                                           ? colors.onPrimary
                                           : colors.onSurface,
                                       fontWeight: isToday || hasSessions
@@ -383,5 +422,6 @@ class _TodayPawPainter extends CustomPainter {
   }
 
   @override
-  bool shouldRepaint(_TodayPawPainter oldDelegate) => color != oldDelegate.color;
+  bool shouldRepaint(_TodayPawPainter oldDelegate) =>
+      color != oldDelegate.color;
 }

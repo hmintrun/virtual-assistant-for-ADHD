@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
+import '../core/api_client.dart';
 import '../core/theme.dart';
 import '../models/planning_models.dart';
 import '../providers/task_provider.dart';
@@ -21,9 +22,12 @@ class _TaskSummaryScreenState extends State<TaskSummaryScreen> {
   late final FocusNode _scopeFocusNode;
   bool _isSubmitting = false;
 
+  DateTime? _initialDeadline;
+
   @override
   void initState() {
     super.initState();
+    _initialDeadline = context.read<TaskProvider>().deadline;
     _scopeController =
         TextEditingController(text: context.read<TaskProvider>().scope);
     _clarificationController = TextEditingController();
@@ -52,7 +56,7 @@ class _TaskSummaryScreenState extends State<TaskSummaryScreen> {
   }
 
   Future<void> _pickAvailability(TaskProvider task) async {
-    final now = DateTime.now().toUtc().add(const Duration(hours: 7));
+    final now = DateTime.now();
     final today = DateTime(now.year, now.month, now.day);
     final date = await showDatePicker(
       context: context,
@@ -64,24 +68,26 @@ class _TaskSummaryScreenState extends State<TaskSummaryScreen> {
     if (date == null || !mounted) return;
     final start = await showTimePicker(
       context: context,
-      helpText: 'Giờ bắt đầu (giờ Việt Nam)',
+      helpText: 'Giờ bắt đầu',
+      initialEntryMode: TimePickerEntryMode.input,
       initialTime: const TimeOfDay(hour: 18, minute: 0),
     );
     if (start == null || !mounted) return;
     final end = await showTimePicker(
       context: context,
-      helpText: 'Giờ kết thúc (giờ Việt Nam)',
+      helpText: 'Giờ kết thúc',
+      initialEntryMode: TimePickerEntryMode.input,
       initialTime: start,
     );
     if (end == null || !mounted) return;
 
-    DateTime instant(TimeOfDay time) => DateTime.utc(
+    DateTime instant(TimeOfDay time) => DateTime(
           date.year,
           date.month,
           date.day,
-          time.hour - 7,
+          time.hour,
           time.minute,
-        );
+        ).toUtc();
     final from = instant(start);
     final to = instant(end);
     final deadline = task.deadline;
@@ -116,19 +122,18 @@ class _TaskSummaryScreenState extends State<TaskSummaryScreen> {
         blockers.every((issue) => issue['field_path'] == 'scope') &&
         (draft?.scope.trim().isEmpty ?? false);
     final useAnswerAsScope = onlyScopeIsMissing && answer.isNotEmpty;
-    final hasManualAvailability = task.availability != null &&
-        answer.isEmpty &&
-        blockers.isNotEmpty &&
-        blockers.every((issue) => issue['field_path'] == 'availability');
-    task.setScope(useAnswerAsScope ? answer : _scopeController.text.trim());
+    final scope = useAnswerAsScope ? answer : _scopeController.text.trim();
+    final hasFormChanges = draft != null &&
+        (scope != draft.scope ||
+            task.availability != null ||
+            task.deadline != _initialDeadline);
+    task.setScope(scope);
     setState(() => _isSubmitting = true);
     try {
       if (draft != null &&
-          (onlyScopeIsMissing && task.scope.trim().isNotEmpty ||
-              hasManualAvailability ||
-              createCandidate && draft.canPlan)) {
-        // Explicit form values already have a field; save them without NLP.
+          (useAnswerAsScope || answer.isEmpty && hasFormChanges)) {
         await task.updateDraftOnBackend();
+        _initialDeadline = task.deadline;
         if (mounted && useAnswerAsScope && task.scope.trim() == answer) {
           _scopeFocusNode.unfocus();
           _scopeController.text = task.scope;
@@ -137,7 +142,7 @@ class _TaskSummaryScreenState extends State<TaskSummaryScreen> {
       } else if (draft != null && !task.canPlan && answer.isNotEmpty) {
         await task.submitClarification(answer);
         if (mounted && task.canPlan) _clarificationController.clear();
-      } else {
+      } else if (draft == null || !task.canPlan) {
         await task.prepareDraftAndAnalyze();
       }
       if (!mounted) return;
@@ -157,10 +162,18 @@ class _TaskSummaryScreenState extends State<TaskSummaryScreen> {
           MaterialPageRoute<void>(
             builder: (_) => const CandidateReviewScreen(),
           ));
+    } on ApiException catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(error.message)),
+        );
+      }
     } catch (_) {
-      if (mounted)
+      if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-            content: Text('Chưa cập nhật được công việc. Thử lại nhé.')));
+          content: Text('Chưa cập nhật được công việc. Thử lại nhé.'),
+        ));
+      }
     } finally {
       if (mounted) setState(() => _isSubmitting = false);
     }
@@ -170,7 +183,7 @@ class _TaskSummaryScreenState extends State<TaskSummaryScreen> {
     final now = DateTime.now();
     final current = task.deadline;
     final initial = current != null && current.isAfter(now)
-        ? current
+        ? current.toLocal()
         : now.add(const Duration(days: 1));
     final day = await showDatePicker(
       context: context,
@@ -186,7 +199,8 @@ class _TaskSummaryScreenState extends State<TaskSummaryScreen> {
       initialEntryMode: TimePickerEntryMode.input,
     );
     if (time == null || !mounted) return;
-    final deadline = DateTime(day.year, day.month, day.day, time.hour, time.minute);
+    final deadline =
+        DateTime(day.year, day.month, day.day, time.hour, time.minute);
     if (!deadline.isAfter(DateTime.now())) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Chọn hạn chót trong tương lai.')),
@@ -236,6 +250,11 @@ class _TaskSummaryScreenState extends State<TaskSummaryScreen> {
       task.draft?.clarificationIssues ?? const [],
     );
 
+    final usedFallback = task.draft?.clarificationIssues.any((issue) =>
+            issue['code'] == 'AI_FALLBACK_NOTICE' &&
+            issue['blocking'] != true) ??
+        false;
+
     return Scaffold(
       appBar: const MelbelAppBar(title: 'Tóm tắt công việc', showBack: true),
       body: SafeArea(
@@ -244,6 +263,10 @@ class _TaskSummaryScreenState extends State<TaskSummaryScreen> {
           padding: const EdgeInsets.fromLTRB(20, 12, 20, 32),
           children: [
             const PlanningStageHeader(step: 2, label: 'Kiểm tra thông tin'),
+            if (usedFallback) ...[
+              const SizedBox(height: 8),
+              const Text('AI đang gián đoạn. Bạn vẫn có thể sửa thông tin.'),
+            ],
             const SizedBox(height: 16),
             MelbelCard(
               child: Column(
@@ -253,14 +276,17 @@ class _TaskSummaryScreenState extends State<TaskSummaryScreen> {
                     children: [
                       SizedBox(width: 48, height: 48, child: MelbelMascot()),
                       SizedBox(width: 12),
-                      Expanded(child: Text('Xem lại bốn thông tin để lập kế hoạch.')),
+                      Expanded(
+                          child:
+                              Text('Xem lại bốn thông tin để lập kế hoạch.')),
                     ],
                   ),
                   const Divider(),
                   ExpansionTile(
                     tilePadding: EdgeInsets.zero,
                     title: const Text('Tên công việc'),
-                    subtitle: Text(displayTitle.isEmpty ? 'Chưa có tên' : displayTitle),
+                    subtitle: Text(
+                        displayTitle.isEmpty ? 'Chưa có tên' : displayTitle),
                     children: [
                       TextFormField(
                         initialValue: title,
@@ -292,7 +318,9 @@ class _TaskSummaryScreenState extends State<TaskSummaryScreen> {
                     leading: const Icon(Icons.event_available_outlined),
                     title: const Text('Giờ rảnh'),
                     subtitle: Text(task.availabilitySummary),
-                    trailing: Text(task.hasAvailability ? 'Đổi khung giờ' : 'Chọn khung giờ'),
+                    trailing: Text(task.hasAvailability
+                        ? 'Đổi khung giờ'
+                        : 'Chọn khung giờ'),
                     onTap: _isSubmitting || task.isApiBusy
                         ? null
                         : () => _pickAvailability(task),
@@ -406,8 +434,13 @@ class _TaskSummaryScreenState extends State<TaskSummaryScreen> {
               ),
               const SizedBox(height: 8),
             ],
+            if (_isSubmitting || task.isApiBusy)
+              const Padding(
+                padding: EdgeInsets.only(bottom: 8),
+                child: LinearProgressIndicator(semanticsLabel: 'Đang xử lý'),
+              ),
             PrimaryCta(
-              label: 'Tạo phương án',
+              label: _isSubmitting ? 'Đang xử lý…' : 'Tạo phương án',
               icon: Icons.arrow_forward,
               onPressed: _isSubmitting || task.isApiBusy || !task.canPlan
                   ? null
@@ -443,7 +476,10 @@ List<String> _requiredQuestions(List<JsonMap> issues) {
     for (final issue in blockers)
       if (specificCodes.contains(issue['code']) &&
           issue['field_path'] is String &&
-          ((issue['question'] ?? issue['message'])?.toString().trim().isNotEmpty ??
+          ((issue['question'] ?? issue['message'])
+                  ?.toString()
+                  .trim()
+                  .isNotEmpty ??
               false))
         issue['field_path'],
   };
@@ -636,9 +672,7 @@ class _TimeConflictScreenState extends State<TimeConflictScreen> {
                         ),
                         SizedBox(height: 4),
                         Text(
-                          issueText.isEmpty
-                              ? task.conflictMessage
-                              : issueText,
+                          issueText.isEmpty ? task.conflictMessage : issueText,
                           style: TextStyle(
                             fontFamily: 'Be Vietnam Pro',
                             fontSize: 14,

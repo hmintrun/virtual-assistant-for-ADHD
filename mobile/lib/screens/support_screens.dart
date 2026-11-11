@@ -1,3 +1,6 @@
+import '../core/api_client.dart';
+import '../services/schedule_service.dart';
+import '../services/voice_service.dart';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
@@ -93,8 +96,15 @@ class HelpScreen extends StatelessWidget {
 }
 
 /// Blank profile state for use without the authentication and profile APIs.
-class AccountScreen extends StatelessWidget {
+class AccountScreen extends StatefulWidget {
   const AccountScreen({super.key});
+
+  @override
+  State<AccountScreen> createState() => _AccountScreenState();
+}
+
+class _AccountScreenState extends State<AccountScreen> {
+  final _connection = ApiClient().getData('/capabilities');
 
   @override
   Widget build(BuildContext context) => Scaffold(
@@ -152,10 +162,17 @@ class AccountScreen extends StatelessWidget {
               title: 'Đồng bộ Google',
               subtitle: 'Chưa liên kết tài khoản',
             ),
-            const _HelpRow(
-              icon: Icons.cloud_off_outlined,
-              title: 'Trạng thái kết nối',
-              subtitle: 'Chưa xác thực với Backend',
+            FutureBuilder<Map<String, dynamic>>(
+              future: _connection,
+              builder: (context, snapshot) => _HelpRow(
+                icon: Icons.cloud_outlined,
+                title: 'Kết nối máy chủ',
+                subtitle: snapshot.connectionState != ConnectionState.done
+                    ? 'Đang kiểm tra…'
+                    : snapshot.hasError
+                        ? 'Chưa kết nối được'
+                        : 'Đã kết nối',
+              ),
             ),
             const SizedBox(height: 18),
             FilledButton.icon(
@@ -176,7 +193,7 @@ class AccountScreen extends StatelessWidget {
             ),
             const SizedBox(height: 8),
             Center(
-              child: Text('Không có dữ liệu tài khoản trong bản demo.',
+              child: Text('Đăng nhập Google đang ở chế độ demo.',
                   style: Theme.of(context).textTheme.bodySmall?.copyWith(
                         color: MelbelColors.kTextSecondary,
                       )),
@@ -245,77 +262,160 @@ class CalendarVoiceQuestionScreen extends StatefulWidget {
 class _CalendarVoiceQuestionScreenState
     extends State<CalendarVoiceQuestionScreen> {
   final _controller = TextEditingController();
-  bool _asked = false;
+  final _speech = OnDeviceSpeechService();
+  final _schedule = ScheduleService(ApiClient());
+  Future<List<Map<String, dynamic>>>? _result;
+  bool _listening = false;
+  bool _starting = false;
+  String? _hint;
 
   @override
   void dispose() {
     _controller.dispose();
+    _speech.dispose();
     super.dispose();
+  }
+
+  Future<void> _toggleMic() async {
+    if (_starting) return;
+    if (_listening) {
+      setState(() => _listening = false);
+      try {
+        await _speech.stop();
+      } catch (_) {
+        if (mounted) setState(() => _hint = 'Bạn có thể nhập bằng chữ.');
+      }
+      return;
+    }
+    setState(() {
+      _starting = true;
+      _listening = true;
+      _hint = null;
+    });
+    void done([String? hint]) {
+      if (!mounted) return;
+      setState(() {
+        _listening = false;
+        _hint = hint;
+      });
+    }
+
+    try {
+      final started = await _speech.start(
+        onWords: (words, _) {
+          if (mounted && _listening) setState(() => _controller.text = words);
+        },
+        onError: (_) =>
+            done('Chưa nhận được giọng nói. Bạn có thể nhập bằng chữ.'),
+        onDone: () => done(_hint),
+      );
+      if (!started) done('Chưa bật được mic. Bạn có thể nhập bằng chữ.');
+    } catch (_) {
+      done('Chưa bật được mic. Bạn có thể nhập bằng chữ.');
+    } finally {
+      if (mounted) setState(() => _starting = false);
+    }
+  }
+
+  void _lookup() {
+    final query = _controller.text.toLowerCase();
+    final now = DateTime.now();
+    final offset = query.contains('ngày kia')
+        ? 2
+        : query.contains('ngày mai')
+            ? 1
+            : query.contains('hôm nay')
+                ? 0
+                : null;
+    final date =
+        RegExp(r'\b(\d{1,2})/(\d{1,2})(?:/(\d{4}))?\b').firstMatch(query);
+    DateTime? day;
+    if (date != null) {
+      final d = int.parse(date[1]!);
+      final m = int.parse(date[2]!);
+      final parsed = DateTime(int.tryParse(date[3] ?? '') ?? now.year, m, d);
+      if (parsed.day == d && parsed.month == m) day = parsed;
+    } else if (offset != null) {
+      day = DateTime(now.year, now.month, now.day + offset);
+    }
+    setState(() {
+      _hint = day == null
+          ? 'Hãy hỏi hôm nay, ngày mai hoặc nhập ngày dạng DD/MM.'
+          : null;
+      _result = day == null
+          ? null
+          : _schedule.loadSessions(
+              day, DateTime(day.year, day.month, day.day + 1),
+              includeTitles: true);
+    });
   }
 
   @override
   Widget build(BuildContext context) => Scaffold(
         appBar: const MelbelAppBar(
-          title: 'Hỏi về lịch',
-          showBack: true,
-          showGlobalActions: false,
-        ),
+            title: 'Hỏi về lịch', showBack: true, showGlobalActions: false),
         body: ListView(
           padding: const EdgeInsets.all(20),
           children: [
-            const SizedBox(height: 12),
-            CircleAvatar(
-              radius: 36,
-              backgroundColor: MelbelColors.kSecondaryContainer,
-              child: Icon(Icons.mic_none,
-                  color: MelbelColors.kSecondary, size: 32),
-            ),
-            const SizedBox(height: 20),
-            Text('Bạn muốn biết gì về lịch?',
-                textAlign: TextAlign.center,
-                style: Theme.of(context).textTheme.titleLarge),
+            Center(
+                child: IconButton.filled(
+              tooltip: _listening ? 'Dừng nghe' : 'Bắt đầu nói',
+              onPressed: _starting ? null : _toggleMic,
+              icon: Icon(_listening ? Icons.stop : Icons.mic_none),
+            )),
             const SizedBox(height: 16),
             TextField(
               controller: _controller,
-              minLines: 2,
-              maxLines: 4,
               decoration: const InputDecoration(
-                hintText: 'Ví dụ: Hôm nay tôi có lịch lúc mấy giờ?',
-                border: OutlineInputBorder(),
+                labelText: 'Hỏi lịch theo ngày',
+                hintText: 'Ngày mai tôi có lịch lúc mấy giờ?',
               ),
-              onChanged: (_) => setState(() => _asked = false),
+              onChanged: (_) => setState(() {
+                _result = null;
+                _hint = null;
+              }),
             ),
             const SizedBox(height: 12),
-            FilledButton.icon(
-              onPressed: _controller.text.trim().isEmpty
-                  ? null
-                  : () => setState(() => _asked = true),
-              icon: const Icon(Icons.search),
-              label: const Text('Tra cứu'),
-            ),
-            if (_asked) ...[
-              const SizedBox(height: 20),
-              MelbelCard(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    const Text('Bạn vừa hỏi:'),
-                    const SizedBox(height: 6),
-                    Text('“${_controller.text.trim()}”'),
-                    const SizedBox(height: 14),
-                    const _NoticeCard(
-                      icon: Icons.calendar_today_outlined,
-                      title: 'Chưa có dữ liệu lịch',
-                      message:
-                          'Kết nối lịch hoặc thêm việc để Melbel có thể tra cứu.',
-                    ),
-                  ],
-                ),
+            PrimaryCta(
+                label: 'Tra cứu',
+                onPressed: _listening || _controller.text.trim().isEmpty
+                    ? null
+                    : _lookup),
+            if (_hint != null) Text(_hint!),
+            if (_result != null)
+              FutureBuilder<List<Map<String, dynamic>>>(
+                future: _result,
+                builder: (context, snapshot) {
+                  if (snapshot.connectionState != ConnectionState.done) {
+                    return const Center(child: CircularProgressIndicator());
+                  }
+                  if (snapshot.hasError)
+                    return const Text('Chưa tải được lịch. Hãy thử lại.');
+                  final sessions = snapshot.data ?? const [];
+                  if (sessions.isEmpty)
+                    return const Text('Ngày này chưa có phiên trong lịch.');
+                  return Column(children: [
+                    for (final session in sessions)
+                      ListTile(
+                        title: Text(session['step_title'] as String? ??
+                            'Phiên làm việc'),
+                        subtitle: Text(
+                            '${_time(context, session['scheduled_start'])} – ${_time(context, session['scheduled_end'])}'),
+                      ),
+                  ]);
+                },
               ),
-            ],
           ],
         ),
       );
+
+  String _time(BuildContext context, Object? value) {
+    final date = DateTime.tryParse(value as String? ?? '')?.toLocal();
+    if (date == null) return '—';
+    return MaterialLocalizations.of(context).formatTimeOfDay(
+        TimeOfDay.fromDateTime(date),
+        alwaysUse24HourFormat: true);
+  }
 }
 
 class _EmptyProfileCard extends StatelessWidget {
@@ -404,49 +504,6 @@ class _Tag extends StatelessWidget {
         child: Padding(
           padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
           child: Text(label, style: TextStyle(color: MelbelColors.kSecondary)),
-        ),
-      );
-}
-
-class _NoticeCard extends StatelessWidget {
-  const _NoticeCard({
-    required this.icon,
-    required this.title,
-    required this.message,
-  });
-  final IconData icon;
-  final String title;
-  final String message;
-
-  @override
-  Widget build(BuildContext context) => DecoratedBox(
-        decoration: BoxDecoration(
-          color: MelbelColors.kSurfaceContainer,
-          borderRadius: BorderRadius.circular(16),
-          border: Border.all(color: MelbelColors.kOutlineVariant),
-        ),
-        child: Padding(
-          padding: const EdgeInsets.all(16),
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Icon(icon, color: MelbelColors.kPrimaryContainer),
-              const SizedBox(width: 12),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(title,
-                        style: const TextStyle(fontWeight: FontWeight.w600)),
-                    const SizedBox(height: 4),
-                    Text(message,
-                        style:
-                            TextStyle(color: MelbelColors.kOnSurfaceVariant)),
-                  ],
-                ),
-              ),
-            ],
-          ),
         ),
       );
 }

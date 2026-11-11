@@ -54,7 +54,7 @@ class _TaskEntryScreenState extends State<TaskEntryScreen> {
     final now = DateTime.now();
     final current = task.deadline;
     final initial = current != null && current.isAfter(now)
-        ? current
+        ? current.toLocal()
         : now.add(const Duration(days: 1));
     final day = await showDatePicker(
         context: context,
@@ -162,11 +162,16 @@ class _TaskEntryScreenState extends State<TaskEntryScreen> {
   Future<void> _toggleListening() async {
     if (_startingSpeech) return;
     if (_isListening) {
+      _startingSpeech = true;
+      _finishSpeechAttempt();
       try {
-        await _speechService.stop();
-        _finishSpeechAttempt();
+        await _speechService.stop().timeout(const Duration(seconds: 2));
       } catch (_) {
-        _finishSpeechAttempt(failed: true);
+        try {
+          await _speechService.cancel().timeout(const Duration(seconds: 2));
+        } catch (_) {}
+      } finally {
+        if (mounted) setState(() => _startingSpeech = false);
       }
       return;
     }
@@ -219,7 +224,9 @@ class _TaskEntryScreenState extends State<TaskEntryScreen> {
                 children: [
                   SizedBox(width: 56, height: 56, child: MelbelMascot()),
                   SizedBox(width: 12),
-                  Expanded(child: Text('Bạn muốn làm việc gì? Có thể gõ cả hạn và giờ rảnh.')),
+                  Expanded(
+                      child: Text(
+                          'Bạn muốn làm việc gì? Có thể gõ cả hạn và giờ rảnh.')),
                 ],
               ),
             ),
@@ -263,7 +270,8 @@ class _TaskEntryScreenState extends State<TaskEntryScreen> {
                         ChoiceChip(
                           label: Text(option.$1),
                           selected: task.deadline == option.$2,
-                          onSelected: busy ? null : (_) => _onQuickDeadline(option.$2),
+                          onSelected:
+                              busy ? null : (_) => _onQuickDeadline(option.$2),
                         ),
                   ],
                 ),
@@ -295,7 +303,8 @@ class _TaskEntryScreenState extends State<TaskEntryScreen> {
   Widget _buildVoicePage(TaskProvider task, bool busy) {
     final transcript = _titleController.text.trim();
     return Scaffold(
-      appBar: const MelbelAppBar(title: 'Thêm việc bằng giọng nói', showBack: true),
+      appBar:
+          const MelbelAppBar(title: 'Thêm việc bằng giọng nói', showBack: true),
       body: SafeArea(
         child: Center(
           child: SingleChildScrollView(
@@ -308,6 +317,13 @@ class _TaskEntryScreenState extends State<TaskEntryScreen> {
                   starting: _isListening && _startingSpeech,
                   onPressed: busy || _startingSpeech ? null : _toggleListening,
                 ),
+                if (!_isListening)
+                  TextButton(
+                    onPressed: busy || _startingSpeech
+                        ? null
+                        : () => setState(() => _showTextEntry = true),
+                    child: const Text('Nhập bằng chữ'),
+                  ),
                 if (!_isListening && transcript.isNotEmpty) ...[
                   const SizedBox(height: 16),
                   MelbelCard(child: Text(transcript)),

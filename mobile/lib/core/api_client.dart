@@ -118,6 +118,25 @@ class ApiClient {
     }
   }
 
+  Future<Map<String, dynamic>> putData(
+    String path, {
+    required Object data,
+    String? idempotencyKey,
+  }) async {
+    try {
+      final response = await dio.put<Map<String, dynamic>>(
+        path,
+        data: data,
+        options: Options(headers: {
+          'Idempotency-Key': idempotencyKey ?? newIdempotencyKey('mobile_put'),
+        }),
+      );
+      return _unwrap(response.data);
+    } on DioException catch (error) {
+      throw ApiException.fromDio(error);
+    }
+  }
+
   Map<String, dynamic> _unwrap(Map<String, dynamic>? body) {
     if (body == null || body['data'] is! Map<String, dynamic>) {
       throw const ApiException('Backend trả về dữ liệu không đúng envelope.');

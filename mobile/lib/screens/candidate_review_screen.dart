@@ -32,6 +32,7 @@ class CandidateReviewScreen extends StatelessWidget {
     final deficitSeconds = feasibility['deficit_seconds'] as int?;
     final scheduledKeys =
         candidate.sessions.map((session) => session['client_step_key']).toSet();
+    final unscheduledSeconds = feasibility['unscheduled_seconds'] as int? ?? 0;
     final unscheduledKeys =
         (feasibility['unscheduled_step_keys'] as List?)?.toSet() ?? const {};
     final stepsWithoutFullSchedule = candidate.steps
@@ -94,16 +95,22 @@ class CandidateReviewScreen extends StatelessWidget {
                                 fontWeight: FontWeight.w600)))
                   ]),
                   const SizedBox(height: 8),
-                  Text(
-                      'Mã phương án ${candidate.candidateId} · bản ${candidate.reviewRevision}',
+                  Text('Phiên bản ${candidate.reviewRevision}',
                       style: TextStyle(color: MelbelColors.kOnSurfaceVariant)),
-                  if (deficitSeconds != null) ...[
+                  if (!candidate.isFeasible &&
+                      deficitSeconds != null &&
+                      deficitSeconds > 0) ...[
                     const SizedBox(height: 8),
                     Text(
                         'Thiếu tối thiểu ${_minutes(deficitSeconds)} phút theo kết quả backend.',
                         style:
                             TextStyle(color: MelbelColors.kOnSurfaceVariant)),
                   ],
+                  if (!candidate.isFeasible &&
+                      (deficitSeconds ?? 0) <= 0 &&
+                      unscheduledSeconds > 0)
+                    Text(
+                        'Còn ${_minutes(unscheduledSeconds)} phút chưa xếp vào giờ rảnh.'),
                   if (candidate.stale) ...[
                     const SizedBox(height: 8),
                     Text(
@@ -154,10 +161,14 @@ class CandidateReviewScreen extends StatelessWidget {
               ),
             ),
             if (candidate.steps.isNotEmpty) ...[
-              TextButton.icon(
-                onPressed: task.isApiBusy ? null : () => _adjustByVoice(context),
-                icon: const Icon(Icons.mic_none),
-                label: const Text('Tùy chỉnh bằng giọng nói'),
+              Align(
+                alignment: Alignment.centerLeft,
+                child: TextButton.icon(
+                  onPressed:
+                      task.isApiBusy ? null : () => _adjustByVoice(context),
+                  icon: const Icon(Icons.mic_none),
+                  label: const Text('Tùy chỉnh bằng giọng nói'),
+                ),
               ),
               const Eyebrow('Các bước thực hiện'),
               const SizedBox(height: 8),
@@ -189,12 +200,12 @@ class CandidateReviewScreen extends StatelessWidget {
             const SizedBox(height: 14),
             if (!candidate.isFeasible)
               SecondaryCta(
-                label: task.isApiBusy
-                    ? 'Đang tính lại…'
-                    : 'Xem cách điều chỉnh',
+                label:
+                    task.isApiBusy ? 'Đang tính lại…' : 'Xem cách điều chỉnh',
                 icon: Icons.edit_calendar,
-                onPressed:
-                    task.isApiBusy ? null : () => _openFeasibility(context, deficitSeconds),
+                onPressed: task.isApiBusy
+                    ? null
+                    : () => _openFeasibility(context, deficitSeconds),
               ),
             if (!candidate.isFeasible) const SizedBox(height: 8),
             PrimaryCta(
@@ -419,12 +430,14 @@ class CandidateReviewScreen extends StatelessWidget {
     }
   }
 
-  Future<void> _openFeasibility(BuildContext context, int? deficitSeconds) async {
+  Future<void> _openFeasibility(
+      BuildContext context, int? deficitSeconds) async {
     final choice = await Navigator.push<FeasibilityAdjustment>(
       context,
       MaterialPageRoute(
         builder: (_) => FeasibilityScreen(
-          deficitMinutes: deficitSeconds == null ? null : (deficitSeconds / 60).ceil(),
+          deficitMinutes:
+              deficitSeconds == null ? null : (deficitSeconds / 60).ceil(),
         ),
       ),
     );

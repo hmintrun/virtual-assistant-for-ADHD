@@ -229,6 +229,10 @@ class _SetupFlowScreenState extends State<SetupFlowScreen>
 
   Future<void> _handlePermission({bool checkDndOnly = false}) async {
     final step = _step;
+    if (step == 3 && !_isAndroid) {
+      _openHome();
+      return;
+    }
     if (step < 4 || !_isAndroid) {
       _next();
       return;
@@ -373,20 +377,20 @@ class _SetupFlowScreenState extends State<SetupFlowScreen>
                         ? null
                         : () => _handlePermission(),
                     child: Text(_step == 3
-                        ? 'Bắt đầu dùng'
+                        ? (_isAndroid ? 'Thiết lập quyền' : 'Vào trang chủ')
                         : _step >= 4 && _isAndroid
                             ? 'Cho phép'
                             : 'Tiếp theo'),
                   ),
                 ),
-                if (_step == 3 || _step >= 4)
+                if ((_step == 3 && _isAndroid) || _step >= 4)
                   TextButton(
                     onPressed: _requestingPermission
                         ? null
                         : _step == 3
                             ? _openHome
                             : _next,
-                    child: const Text('Để sau'),
+                    child: Text(_step == 3 ? 'Vào trang chủ' : 'Để sau'),
                   ),
               ],
             ),

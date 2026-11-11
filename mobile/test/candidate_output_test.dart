@@ -43,7 +43,7 @@ void main() {
         value: task,
         child: const MaterialApp(home: CandidateReviewScreen()),
       ));
-      expect(find.text('Mã phương án demo · bản 2'), findsOneWidget);
+      expect(find.text('Phiên bản 2'), findsOneWidget);
       final output = entry.value['expected_output'] as String?;
       expect(
         find.text(output == null || output.trim().isEmpty

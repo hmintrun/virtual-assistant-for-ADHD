@@ -640,8 +640,8 @@ class TaskProvider extends ChangeNotifier {
 
   String formatDeadline(DateTime? value) {
     if (value == null) return 'Chưa đặt hạn chót';
-    final today = AvailabilitySlot._inVietnam(DateTime.now());
-    final localValue = AvailabilitySlot._inVietnam(value);
+    final today = DateTime.now();
+    final localValue = value.toLocal();
     final date = DateTime(localValue.year, localValue.month, localValue.day);
     final todayDate = DateTime(today.year, today.month, today.day);
     final dateLabel = date == todayDate
@@ -651,10 +651,10 @@ class TaskProvider extends ChangeNotifier {
             : date == todayDate.add(const Duration(days: 2))
                 ? 'Ngày kia'
                 : date.day.toString().padLeft(2, '0') +
-                '/' +
-                date.month.toString().padLeft(2, '0') +
-                '/' +
-                date.year.toString();
+                    '/' +
+                    date.month.toString().padLeft(2, '0') +
+                    '/' +
+                    date.year.toString();
     return dateLabel +
         ', ' +
         localValue.hour.toString().padLeft(2, '0') +
@@ -925,7 +925,9 @@ class TaskProvider extends ChangeNotifier {
       );
       _storageTail = write.catchError((Object _) {});
       await write;
-      if (!_disposed && revision == _editRevision && _savedEditRevision != revision) {
+      if (!_disposed &&
+          revision == _editRevision &&
+          _savedEditRevision != revision) {
         _savedEditRevision = revision;
         notifyListeners();
       }

@@ -506,6 +506,7 @@ class _VoiceAssistantModalState extends State<VoiceAssistantModal> {
         if (error != null) _error = error;
       });
     }
+
     try {
       final started = await _speech.start(
         onWords: (words, isFinal) {
@@ -513,7 +514,8 @@ class _VoiceAssistantModalState extends State<VoiceAssistantModal> {
           _controller.text = words;
           if (isFinal) stop();
         },
-        onError: (_) => stop('Chưa nhận được giọng nói. Bạn có thể gõ yêu cầu.'),
+        onError: (_) =>
+            stop('Chưa nhận được giọng nói. Bạn có thể gõ yêu cầu.'),
         onDone: stop,
       );
       if (!started) stop('Chưa bật được mic. Bạn có thể gõ yêu cầu.');
@@ -528,7 +530,10 @@ class _VoiceAssistantModalState extends State<VoiceAssistantModal> {
   Widget build(BuildContext context) => SafeArea(
         child: SingleChildScrollView(
           padding: EdgeInsets.fromLTRB(
-            20, 8, 20, 20 + MediaQuery.viewInsetsOf(context).bottom,
+            20,
+            8,
+            20,
+            20 + MediaQuery.viewInsetsOf(context).bottom,
           ),
           child: Column(
             mainAxisSize: MainAxisSize.min,
@@ -569,7 +574,6 @@ class _VoiceAssistantModalState extends State<VoiceAssistantModal> {
         ),
       );
 }
-
 
 enum FeasibilityAdjustment { deadline, availability, scope }
 
@@ -626,7 +630,6 @@ class _FeasibilityScreenState extends State<FeasibilityScreen> {
     );
   }
 }
-
 
 // ============================================================================
 // D-25: THÊM THỜI GIAN HOẶC HẠN MỚI (ADD TIME / NEW DEADLINE SCREEN)
@@ -1051,7 +1054,18 @@ class UnconfirmedPlanScreen extends StatelessWidget {
     final candidate = task.candidate;
     final displayTitle = task.title.isEmpty ? 'Công việc' : task.title;
     final sessionCount = candidate?.sessions.length ?? 0;
-    final deficit = candidate?.feasibility['deficit_seconds'] as int?;
+    final deficit = candidate?.feasibility['deficit_seconds'] as int? ?? 0;
+    final unscheduled =
+        candidate?.feasibility['unscheduled_seconds'] as int? ?? 0;
+    final feasibilityText = candidate == null
+        ? 'Chưa có phương án'
+        : candidate.isFeasible
+            ? 'Có thể xếp lịch'
+            : deficit > 0
+                ? 'Cần thêm ít nhất ${(deficit / 60).ceil()} phút'
+                : unscheduled > 0
+                    ? 'Còn ${(unscheduled / 60).ceil()} phút chưa xếp lịch'
+                    : 'Chưa thể xếp lịch với giờ rảnh hiện tại';
 
     return Scaffold(
       appBar: const MelbelAppBar(title: 'Phân Tách Nhiệm Vụ', showBack: true),
@@ -1110,7 +1124,7 @@ class UnconfirmedPlanScreen extends StatelessWidget {
                             width: 8,
                             height: 8,
                             decoration: BoxDecoration(
-                              color: MelbelColors.kTertiaryContainer,
+                              color: MelbelColors.kOnSurfaceVariant,
                               shape: BoxShape.circle,
                             ),
                           ),
@@ -1160,7 +1174,7 @@ class UnconfirmedPlanScreen extends StatelessWidget {
                         Icon(
                           Icons.schedule,
                           size: 15,
-                          color: MelbelColors.kTertiaryContainer,
+                          color: MelbelColors.kOnSurfaceVariant,
                         ),
                         SizedBox(width: 6),
                         Text(
@@ -1169,7 +1183,7 @@ class UnconfirmedPlanScreen extends StatelessWidget {
                             fontFamily: 'Be Vietnam Pro',
                             fontSize: 12,
                             fontWeight: FontWeight.w500,
-                            color: MelbelColors.kTertiaryContainer,
+                            color: MelbelColors.kOnSurfaceVariant,
                           ),
                         ),
                       ],
@@ -1192,7 +1206,7 @@ class UnconfirmedPlanScreen extends StatelessWidget {
                         Icon(
                           Icons.pending_actions,
                           size: 18,
-                          color: MelbelColors.kTertiaryContainer,
+                          color: MelbelColors.kOnSurfaceVariant,
                         ),
                         SizedBox(width: 10),
                         Expanded(
@@ -1209,9 +1223,7 @@ class UnconfirmedPlanScreen extends StatelessWidget {
                               ),
                               SizedBox(height: 2),
                               Text(
-                                deficit == null
-                                    ? 'Trạng thái: ${candidate?.feasibilityStatus ?? 'chưa có phương án'}'
-                                    : 'Backend báo thiếu ${(deficit / 60).ceil()} phút',
+                                feasibilityText,
                                 style: TextStyle(
                                   fontFamily: 'Be Vietnam Pro',
                                   fontSize: 13,
@@ -1320,14 +1332,15 @@ class UnconfirmedPlanScreen extends StatelessWidget {
                     color: MelbelColors.kOnSurfaceVariant,
                   ),
                   SizedBox(width: 6),
-                  Text(
+                  Flexible(
+                      child: Text(
                     'Lưu trữ an toàn trong không gian riêng của bạn',
                     style: TextStyle(
                       fontFamily: 'Be Vietnam Pro',
                       fontSize: 12,
                       color: MelbelColors.kOnSurfaceVariant,
                     ),
-                  ),
+                  )),
                 ],
               ),
             ),
@@ -1362,6 +1375,7 @@ class PlanLockedScreen extends StatelessWidget {
         : (task.steps.isEmpty ? null : task.steps.first);
     final focusSession = FocusSessionInfo(
       sessionId: session.sessionId,
+      scheduleRevision: session.scheduleRevision,
       taskTitle: taskProvider.title,
       stepTitle: step?.title ?? 'Bước hiện tại',
       expectedOutput:
@@ -1746,7 +1760,6 @@ class PlanLockedScreen extends StatelessWidget {
   }
 }
 
-
 // ============================================================================
 // D-28: LỖI AI / PHƯƠNG ÁN DỰ PHÒNG (AI ERROR FALLBACK SCREEN)
 // ============================================================================
@@ -2112,7 +2125,6 @@ class AiFallbackScreen extends StatelessWidget {
     );
   }
 }
-
 
 // ============================================================================
 // D-29: NHẮC TRƯỚC PHIÊN (PRE-SESSION REMINDER SCREEN)

@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 
 import '../core/api_client.dart';
@@ -178,6 +179,23 @@ class FocusProvider extends ChangeNotifier {
 
   FocusSessionInfo? _session;
   DateTime? _runEndsAt;
+  Map<String, dynamic>? _serverRun;
+  Map<String, dynamic>? _pendingEnd;
+  Map<String, dynamic>? _pendingResponse;
+  Map<String, dynamic>? _startRequest;
+  bool _runCommandBusy = false;
+  String? _runError;
+
+  bool get runCommandBusy => _runCommandBusy;
+  String? get runError => _runError;
+  bool get needsEndSync => _pendingEnd != null;
+  Map<String, dynamic>? get _checkIn =>
+      _serverRun?['check_in'] as Map<String, dynamic>?;
+  String? get _focusOwnerId =>
+      _serverRun?['run_id'] as String? ?? _session?.sessionId;
+  bool get hasPendingCheckInResponse => _pendingResponse != null;
+  bool get hasOpenCheckIn => _checkIn?['response_state'] == 'open';
+  bool get hasUnfinishedServerRun => needsEndSync || hasOpenCheckIn;
   FocusStage _stage = FocusStage.ended;
   FocusStage _resumeStage = FocusStage.active;
   List<SessionSegmentModel> _segments = const [];
@@ -191,6 +209,7 @@ class FocusProvider extends ChangeNotifier {
   int _recordingAttempts = 0;
   String? _lastError;
   Timer? _offlineProbe;
+  int _offlineProbeGeneration = 0;
   Timer? _undoExpiry;
   Timer? _deleteUndoExpiry;
   Timer? _toastExpiry;
@@ -260,6 +279,14 @@ class FocusProvider extends ChangeNotifier {
       _session = FocusSessionInfo.fromJson(
         Map<String, dynamic>.from(json['session'] as Map),
       );
+      _serverRun = json['server_run'] as Map<String, dynamic>?;
+      _pendingEnd = json['pending_end'] as Map<String, dynamic>?;
+      _pendingResponse = json['pending_response'] as Map<String, dynamic>?;
+      if (json['stage'] == FocusStage.ended.name) {
+        _stage = FocusStage.ended;
+        _notify();
+        return;
+      }
       _segments = (json['segments'] as List<dynamic>? ?? const [])
           .whereType<Map<String, dynamic>>()
           .map(SessionSegmentModel.fromJson)
@@ -273,7 +300,7 @@ class FocusProvider extends ChangeNotifier {
         orElse: () => FocusStage.active,
       );
       _dndApplied = nativeRecovery == null
-          ? await dnd.pendingOwnerRunId() == _session!.sessionId
+          ? await dnd.pendingOwnerRunId() == _focusOwnerId
           : nativeRecovery.state == FocusRecoveryState.running ||
               nativeRecovery.state == FocusRecoveryState.awaitingCheckIn;
       _stage = _resumeStage;
@@ -289,6 +316,17 @@ class FocusProvider extends ChangeNotifier {
       if (deadline != null && duration > 0) {
         final remainingMs = deadline.difference(_clock.now()).inMilliseconds;
         if (remainingMs <= 0) {
+          final runEndedWhileClosed = _serverRun != null &&
+              _runEndsAt != null &&
+              !_clock.now().isBefore(_runEndsAt!);
+          if (runEndedWhileClosed) {
+            _actualWorkSeconds = _segments
+                .where((segment) => segment.kind == 'work')
+                .fold(0, (total, segment) => total + segment.durationSeconds);
+            _segmentIndex = _segments.length;
+            await _finishLocalRun(awaitCheckIn: true);
+            return;
+          }
           if (nativeRecovery?.state == FocusRecoveryState.checkInExpired) {
             _stage = FocusStage.ended;
             _dndApplied = false;
@@ -322,7 +360,11 @@ class FocusProvider extends ChangeNotifier {
   }
 
   Future<void> startSession(FocusSessionInfo session) async {
+    if (isActiveRun || hasUnfinishedServerRun || _runCommandBusy) return;
     microTaskTimer.stop();
+    _serverRun = null;
+    _startRequest = null;
+    _runError = null;
     _session = session;
     _runEndsAt = null;
     _segments = session.effectiveSegments
@@ -380,6 +422,47 @@ class FocusProvider extends ChangeNotifier {
   Future<void> startLateRun() async => _beginRun();
 
   Future<void> _beginRun() async {
+    final session = _session;
+    if (session == null || _runCommandBusy || isActiveRun) return;
+    _runCommandBusy = true;
+    _runError = null;
+    _notify();
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final device = prefs.getString('focus_device_id') ??
+          ApiClient.newIdempotencyKey('device');
+      await prefs.setString('focus_device_id', device);
+      final request = _startRequest ??= {
+        'device_id': device,
+        'expected_schedule_revision': session.scheduleRevision,
+        'requested_start_at': _clock.now().toUtc().toIso8601String(),
+      };
+      try {
+        _serverRun = await _api.postData(
+          '/sessions/${session.sessionId}/start',
+          data: request,
+          idempotencyKey: ApiClient.stableIdempotencyKey(
+              'start_${session.sessionId}', request.toString()),
+        );
+      } on ApiException catch (error) {
+        if (error.statusCode != null) {
+          _startRequest = null;
+          rethrow;
+        }
+        _isOffline = true;
+        _runError =
+            'Phiên đang chạy trên thiết bị. Chưa xác nhận được với máy chủ.';
+      }
+      await _beginLocalRun();
+    } on ApiException catch (error) {
+      _runError = error.message;
+    } finally {
+      _runCommandBusy = false;
+      _notify();
+    }
+  }
+
+  Future<void> _beginLocalRun() async {
     _lastError = null;
     await _refreshDndPermission();
     if (_usesNativeFocus && _session != null) {
@@ -394,7 +477,7 @@ class FocusProvider extends ChangeNotifier {
           // Timer vẫn chạy nếu alarm permission chưa được cấp.
         }
         final result = await FocusNativeController.instance.start(
-          runId: _session!.sessionId,
+          runId: _focusOwnerId!,
           duration: Duration(seconds: totalSeconds),
           stepTitle: _session!.stepTitle,
         );
@@ -411,7 +494,7 @@ class FocusProvider extends ChangeNotifier {
           .fold<int>(0, (total, segment) => total + segment.durationSeconds);
       _runEndsAt = _clock.now().add(Duration(seconds: totalSeconds));
       try {
-        _dndApplied = await dnd.enable(runId: _session!.sessionId);
+        _dndApplied = await dnd.enable(runId: _focusOwnerId!);
       } catch (_) {
         _dndApplied = false;
       }
@@ -472,6 +555,11 @@ class FocusProvider extends ChangeNotifier {
   }
 
   Future<void> _finishLocalRun({bool awaitCheckIn = false}) async {
+    final restElapsed = _segments
+            .take(_segmentIndex)
+            .where((segment) => segment.kind == 'rest')
+            .fold<int>(0, (total, segment) => total + segment.durationSeconds) +
+        (currentSegment?.kind == 'rest' ? timer.elapsedSeconds : 0);
     timer.stop();
     _stopOfflineProbe();
     if (awaitCheckIn && _usesNativeFocus && _isRecording) {
@@ -486,15 +574,116 @@ class FocusProvider extends ChangeNotifier {
     }
     await _restoreFocusMode(preserveCheckIn: awaitCheckIn);
     _stage = FocusStage.ended;
+    final endedAt = awaitCheckIn ? _runEndsAt ?? _clock.now() : _clock.now();
     _runEndsAt = null;
     // Káº¿t thÃºc Ä‘áº¿m giá» cá»¥c bá»™ KHÃ”NG tá»± Ä‘á»™ng Ä‘Ã¡nh dáº¥u hoÃ n thÃ nh Session/Step/Task (UF5).
-    if (!(awaitCheckIn && _usesNativeFocus)) {
+    final run = _serverRun;
+    if (run != null) {
+      _pendingEnd = {
+        'device_id': run['device_id'],
+        'expected_run_revision': run['run_revision'],
+        'event_id': ApiClient.newIdempotencyKey('end'),
+        'ended_at': endedAt.toUtc().toIso8601String(),
+        'end_reason': awaitCheckIn ? 'timer_elapsed' : 'user_stopped',
+        'work_elapsed_seconds': _actualWorkSeconds,
+        'rest_elapsed_seconds': restElapsed,
+      };
+      await _persistRun();
+      await syncRunEnd();
+    } else if (!(awaitCheckIn && _usesNativeFocus)) {
       await _repository.clearActiveRun();
     }
     _notify();
   }
 
+  Future<void> syncRunEnd() async {
+    final pending = _pendingEnd;
+    if (pending == null || _runCommandBusy) return;
+    _runCommandBusy = true;
+    _runError = null;
+    _notify();
+    try {
+      _serverRun = await _api.postData(
+        '/runs/${_serverRun!['run_id']}/end',
+        data: pending,
+        idempotencyKey: pending['event_id'] as String,
+      );
+      _pendingEnd = null;
+      await _persistRun();
+    } on ApiException catch (error) {
+      _runError = error.message;
+    } finally {
+      _runCommandBusy = false;
+      _notify();
+    }
+  }
+
+  Future<void> refreshRunCheckIn() async {
+    if (!hasOpenCheckIn || needsEndSync || _runCommandBusy) return;
+    try {
+      final id = _serverRun!['run_id'];
+      final run = await _api.getData('/runs/$id');
+      if (_serverRun?['run_id'] != id || _runCommandBusy) return;
+      _serverRun = run;
+      if (!hasOpenCheckIn) {
+        _pendingResponse = null;
+        await _restoreFocusMode();
+        await _repository.clearActiveRun();
+      }
+      _notify();
+    } on ApiException {
+      // Keep the last known check-in available during a connection loss.
+    }
+  }
+
+  Future<void> retryCheckInResponse() async {
+    final pending = _pendingResponse;
+    if (pending == null) return;
+    await answerCheckIn(
+      pending['session_outcome'] as String,
+      skipScope: pending['skip_scope'] as String?,
+    );
+  }
+
+  Future<void> answerCheckIn(String outcome, {String? skipScope}) async {
+    final checkIn = _checkIn;
+    if (checkIn == null || !hasOpenCheckIn || _runCommandBusy) return;
+    _runCommandBusy = true;
+    _runError = null;
+    _notify();
+    try {
+      final pending = _pendingResponse ??= {
+        'expected_response_revision': checkIn['response_revision'],
+        'responded_at': _clock.now().toUtc().toIso8601String(),
+        'session_outcome': outcome,
+        if (skipScope != null) 'skip_scope': skipScope,
+      };
+      await _persistRun();
+      final response = await _api.putData(
+        '/check-ins/${checkIn['checkin_id']}/response',
+        data: pending,
+        idempotencyKey: ApiClient.stableIdempotencyKey(
+            'checkin_${checkIn['checkin_id']}', pending.toString()),
+      );
+      _serverRun = {..._serverRun!, 'check_in': response};
+      _pendingResponse = null;
+      await _restoreFocusMode();
+      await _repository.clearActiveRun();
+    } on ApiException catch (error) {
+      if (error.statusCode != null) {
+        _pendingResponse = null;
+        await _persistRun();
+      }
+      _runError = error.message;
+    } finally {
+      _runCommandBusy = false;
+      _notify();
+    }
+    if (_runError != null) await refreshRunCheckIn();
+  }
+
   Future<void> endEarly() async {
+    if (!isActiveRun || _runCommandBusy || !timer.isRunning) return;
     final segment = currentSegment;
     if (segment != null && segment.kind == 'work') {
       _actualWorkSeconds += timer.elapsedSeconds;
@@ -809,7 +998,8 @@ class FocusProvider extends ChangeNotifier {
           if (_undoneThoughtIds.contains(thought.clientThoughtId)) continue;
           final serverId = response['thought_id'];
           if (serverId is! String || serverId.isEmpty) continue;
-          await _repository.markThoughtSynced(thought.clientThoughtId, serverId);
+          await _repository.markThoughtSynced(
+              thought.clientThoughtId, serverId);
           final index = _thoughts
               .indexWhere((t) => t.clientThoughtId == thought.clientThoughtId);
           if (index >= 0) {
@@ -830,9 +1020,13 @@ class FocusProvider extends ChangeNotifier {
 
   Future<void> _persistRun() async {
     final session = _session;
-    if (session == null || !isActiveRun) return;
+    if (session == null ||
+        (!isActiveRun && !hasUnfinishedServerRun && _serverRun == null)) return;
     await _repository.saveActiveRun({
       'session': session.toJson(),
+      if (_serverRun != null) 'server_run': _serverRun,
+      if (_pendingEnd != null) 'pending_end': _pendingEnd,
+      if (_pendingResponse != null) 'pending_response': _pendingResponse,
       if (_runEndsAt != null) 'run_ends_at': _runEndsAt!.toIso8601String(),
       'segments': _segments.map((segment) => segment.toJson()).toList(),
       'segment_index': _segmentIndex,
@@ -844,30 +1038,33 @@ class FocusProvider extends ChangeNotifier {
   }
 
   void _startOfflineProbe() {
-    _offlineProbe?.cancel();
-    unawaited(_probeBackend());
-    _offlineProbe = Timer.periodic(const Duration(seconds: 12), (_) {
-      unawaited(_probeBackend());
+    _stopOfflineProbe();
+    unawaited(_probeBackend(_offlineProbeGeneration));
+  }
+
+  Future<void> _probeBackend(int generation) async {
+    bool offline;
+    try {
+      await _api.dio.get<Map<String, dynamic>>('/capabilities');
+      offline = false;
+    } catch (_) {
+      offline = true;
+    }
+    if (_disposed || generation != _offlineProbeGeneration) return;
+    if (_isOffline != offline) {
+      _isOffline = offline;
+      _notify();
+    }
+    if (!offline && _thoughts.any((thought) => thought.isPendingSync)) {
+      unawaited(flushOutbox());
+    }
+    _offlineProbe = Timer(Duration(seconds: offline ? 30 : 60), () {
+      unawaited(_probeBackend(generation));
     });
   }
 
-  Future<void> _probeBackend() async {
-    try {
-      await _api.dio.get<Map<String, dynamic>>('/capabilities');
-      if (_isOffline) {
-        _isOffline = false;
-        unawaited(flushOutbox());
-        _notify();
-      }
-    } catch (_) {
-      if (!_isOffline) {
-        _isOffline = true;
-        _notify();
-      }
-    }
-  }
-
   void _stopOfflineProbe() {
+    _offlineProbeGeneration++;
     _offlineProbe?.cancel();
     _offlineProbe = null;
   }
@@ -878,7 +1075,7 @@ class FocusProvider extends ChangeNotifier {
       if (preserveCheckIn) return;
       try {
         final result = await FocusNativeController.instance.stop(
-          runId: session.sessionId,
+          runId: _focusOwnerId!,
         );
         final saved = result.savedRecording;
         if (saved != null) {
@@ -888,7 +1085,7 @@ class FocusProvider extends ChangeNotifier {
       } catch (_) {}
     } else {
       try {
-        final runId = session?.sessionId;
+        final runId = _focusOwnerId;
         if (runId != null) await dnd.restore(runId: runId);
       } catch (_) {}
       try {

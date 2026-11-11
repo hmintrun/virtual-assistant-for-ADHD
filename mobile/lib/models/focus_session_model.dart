@@ -11,6 +11,7 @@ class FocusSessionInfo {
     required this.restSeconds,
     required this.microTaskText,
     required this.segments,
+    this.scheduleRevision = 1,
     this.deadline,
     this.expectedOutput,
   });
@@ -25,6 +26,7 @@ class FocusSessionInfo {
   final int restSeconds;
   final String microTaskText;
   final List<SessionSegmentModel> segments;
+  final int scheduleRevision;
   final DateTime? deadline;
   final String? expectedOutput;
 
@@ -43,12 +45,14 @@ class FocusSessionInfo {
             .whereType<Map<String, dynamic>>()
             .map(SessionSegmentModel.fromJson)
             .toList(growable: false),
+        scheduleRevision: json['schedule_revision'] as int? ?? 1,
         deadline: DateTime.tryParse(json['deadline'] as String? ?? ''),
         expectedOutput: json['expected_output'] as String?,
       );
 
   Map<String, dynamic> toJson() => {
         'session_id': sessionId,
+        'schedule_revision': scheduleRevision,
         'task_title': taskTitle,
         'step_title': stepTitle,
         'scheduled_start': scheduledStart.toIso8601String(),
