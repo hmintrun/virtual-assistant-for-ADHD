@@ -380,3 +380,15 @@ async def test_same_sub_winner_visible_between_subject_and_email_reads(auth_api,
     async with factory() as db:
         assert await db.scalar(select(func.count()).select_from(User)) == 1
         assert await db.scalar(select(func.count()).select_from(UserPreference)) == 1
+
+
+@pytest.mark.parametrize("header", ["", "Basic abc", "Bearer", "Bearer ", "Bearer a b", "Bearer wrong"])
+async def test_dev_malformed_headers_never_seed(auth_api, monkeypatch, header):
+    client, factory, _, _ = auth_api
+    monkeypatch.setattr(settings, "AUTH_MODE", "dev_user")
+    response = await client.get("/api/v1/auth/me", headers={"Authorization": header})
+    assert response.status_code == 401
+    assert response.headers["www-authenticate"] == "Bearer"
+    assert response.json()["error"]["code"] == "UNAUTHENTICATED"
+    async with factory() as db:
+        assert await db.scalar(select(func.count()).select_from(User)) == 0

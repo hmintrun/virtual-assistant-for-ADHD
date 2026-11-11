@@ -1008,7 +1008,7 @@ Bảng này là chỉ mục, không thay request validation. Các trường dư�
 
 ## 8. O00 User và Authentication — 11/11/2026
 
-Auth contract triển khai: [AUTH_GUIDE.md](AUTH_GUIDE.md). Google Sign-In đổi Google ID token tại `POST /api/v1/auth/google`; `GET /api/v1/auth/me` và API nghiệp vụ dùng Bearer JWT app, đọc User DB/active. Google Sign-In tách Calendar consent; callback Calendar dùng state riêng.
+Auth contract triển khai: [AUTH_GUIDE.md](AUTH_GUIDE.md). PR17 bàn giao Backend/Docs; Mobile Google login chờ tích hợp riêng. OpenAPI khai báo AppBearer (HTTP bearer, JWT) cho CurrentUserDep; login và callback Calendar không yêu cầu app Bearer, alias callback vẫn ẩn có chủ ý. Google Sign-In đổi Google ID token tại `POST /api/v1/auth/google`; `GET /api/v1/auth/me` và API nghiệp vụ dùng Bearer JWT app, đọc User DB/active. Google Sign-In tách Calendar consent; callback Calendar dùng state riêng.
 
 | Field | Contract |
 |---|---|
@@ -1025,7 +1025,7 @@ JWT app HS256 allowlist, JWT_SECRET_KEY riêng khỏi SECRET_KEY Calendar; requi
 
 Auth errors:422 VALIDATION_ERROR/fix_fields;401 INVALID_GOOGLE_ID_TOKEN hoặc UNAUTHENTICATED/authenticate;403 ACCOUNT_DISABLED/contact_support;409 ACCOUNT_LINK_CONFLICT/review_account_link;422 GOOGLE_PROFILE_INCOMPLETE/review_google_profile;503 AUTH_PROVIDER_UNAVAILABLE/retry_login (retryable=true). Các lỗi khác retryable=false. ErrorEnvelope giữ field_errors/current_revisions/meta; mọi Auth401 có WWW-Authenticate: Bearer. Đây là contract delta, không phải tuyên bố Google thật/Tester598cases đã đạt.
 
-Password/streak legacy nằm ngoài phạm vi Auth này. File/source snapshot và trạng thái kiểm chứng ở SE_HANDOFF local.
+Password/streak legacy nằm ngoài phạm vi Auth này. Bằng chứng/lệnh tái lập và phạm vi PostgreSQL/Calendar QA mới ở [PR17_AUTH_VERIFICATION.md](PR17_AUTH_VERIFICATION.md); không cần handoff local để review.
 
 ## 9. Giới hạn và trạng thái triển khai C01 — 03/11/2026
 
