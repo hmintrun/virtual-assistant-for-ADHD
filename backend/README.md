@@ -50,7 +50,10 @@ git rev-parse HEAD
 uv run --frozen python -m alembic heads
 uv run --frozen python -m alembic upgrade head
 uv run --frozen python -m alembic current
+uv run --frozen python scripts/seed_staging.py
 ```
+
+> Lưu ý: `DatabaseSettings` đọc `backend/.env` (không đọc `.env.staging`). Nếu chạy `uvicorn` ở một terminal mới, hãy set lại `$env:DATABASE_URL` hoặc cập nhật `DATABASE_URL` trong `backend/.env`.
 
 C01 chặn downgrade qua revision chuyển dữ liệu. Khi thử trên dữ liệu cũ, dùng bản sao và giữ snapshot DB trước khi nâng cấp để phục hồi về phiên bản trước C01.
 

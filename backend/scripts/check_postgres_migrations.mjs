@@ -15,6 +15,17 @@ function sql(target) {
   if (result.status !== 0) throw new Error(result.stderr || 'Failed to export migration SQL');
   return result.stdout;
 }
+function resolveSingleHead() {
+  const result = spawnSync(process.env.PYTHON || 'python', ['-m', 'alembic', 'heads'], {
+    cwd: backend, encoding: 'utf8', timeout: 60000,
+    env: {...process.env, DATABASE_URL: 'postgresql+asyncpg://unused:unused@localhost/test'},
+  });
+  if (result.status !== 0) throw new Error(result.stderr || 'Failed to read alembic heads');
+  const heads = result.stdout.trim().split(/\r?\n/).filter(Boolean);
+  assert.equal(heads.length, 1, `Expected 1 alembic head, found ${heads.length}: ${heads.join(', ')}`);
+  return heads[0].split(/\s+/)[0];
+}
+const expectedHead = resolveSingleHead();
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 const db = new PGlite();
@@ -56,11 +67,11 @@ const savedSteps=(await db.query('SELECT title,order_index FROM steps ORDER BY o
 assert.deepEqual(savedSteps,[{title:'stepA',order_index:0},{title:'stepB',order_index:1}]);
 const pref=(await db.query('SELECT micro_task_seconds,reminder_offsets FROM user_preferences')).rows[0];
 assert.equal(pref.micro_task_seconds,120); assert.deepEqual(pref.reminder_offsets,[300]);
-assert.equal((await db.query('SELECT version_num FROM alembic_version')).rows[0].version_num,'20261107_01');
+assert.equal((await db.query('SELECT version_num FROM alembic_version')).rows[0].version_num,expectedHead);
 await db.close();
 const fresh=new PGlite();
 await fresh.exec(sql('head'));
-assert.equal((await fresh.query('SELECT version_num FROM alembic_version')).rows[0].version_num,'20261107_01');
+assert.equal((await fresh.query('SELECT version_num FROM alembic_version')).rows[0].version_num,expectedHead);
 await fresh.close();
 const legacy=new PGlite();
 await legacy.exec(sql('20261030_01'));

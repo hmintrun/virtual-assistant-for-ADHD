@@ -1,6 +1,7 @@
 services:
   postgres-staging:
     image: postgres:16
+    restart: unless-stopped
     environment:
       POSTGRES_USER: proplan_staging
       POSTGRES_PASSWORD: ${PROPLAN_STAGING_PASSWORD:?Set PROPLAN_STAGING_PASSWORD}
