@@ -30,6 +30,7 @@ abstract class LocalOutboxRepository {
     String clientEventId, {
     required int nextRetrySeconds,
     String? error,
+    DateTime? asOf,
   });
 
   Future<OutboxRecord?> getRecord(String clientEventId);
@@ -99,7 +100,7 @@ class SqliteOutboxRepository extends LocalOutboxRepository {
     DateTime? asOf,
   }) async {
     final db = await _getDb();
-    final checkTimeIso = (asOf ?? DateTime.now()).toIso8601String();
+    final checkTimeIso = (asOf ?? DateTime.now()).toUtc().toIso8601String();
 
     final rows = await db.query(
       'local_outbox',
@@ -119,6 +120,7 @@ class SqliteOutboxRepository extends LocalOutboxRepository {
       'local_outbox',
       {
         'status': OutboxStatus.synced,
+        'synced_at': DateTime.now().toUtc().toIso8601String(),
         'last_error': null,
       },
       where: 'client_event_id = ?',
@@ -159,11 +161,12 @@ class SqliteOutboxRepository extends LocalOutboxRepository {
     String clientEventId, {
     required int nextRetrySeconds,
     String? error,
+    DateTime? asOf,
   }) async {
     final db = await _getDb();
     final current = await getRecord(clientEventId);
     final nextRetryCount = (current?.retryCount ?? 0) + 1;
-    final nextHoldUntil = DateTime.now().add(Duration(seconds: nextRetrySeconds));
+    final nextHoldUntil = (asOf ?? DateTime.now()).toUtc().add(Duration(seconds: nextRetrySeconds));
 
     await db.update(
       'local_outbox',
@@ -274,7 +277,8 @@ class InMemoryOutboxRepository extends LocalOutboxRepository {
     if (existing != null) {
       _storage[clientEventId] = existing.copyWith(
         status: OutboxStatus.synced,
-        lastError: null,
+        syncedAt: DateTime.now().toUtc(),
+        clearLastError: true,
       );
     }
   }
@@ -306,10 +310,11 @@ class InMemoryOutboxRepository extends LocalOutboxRepository {
     String clientEventId, {
     required int nextRetrySeconds,
     String? error,
+    DateTime? asOf,
   }) async {
     final existing = _storage[clientEventId];
     if (existing != null) {
-      final nextHoldUntil = DateTime.now().add(Duration(seconds: nextRetrySeconds));
+      final nextHoldUntil = (asOf ?? DateTime.now()).toUtc().add(Duration(seconds: nextRetrySeconds));
       _storage[clientEventId] = existing.copyWith(
         status: OutboxStatus.failed,
         retryCount: existing.retryCount + 1,

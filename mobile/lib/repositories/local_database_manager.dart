@@ -22,6 +22,7 @@ class LocalDatabaseManager {
 
   Database? _db;
   String? _currentOwnerId;
+  Completer<Database>? _openCompleter;
 
   Database? get currentDatabase => _db;
   String? get currentOwnerId => _currentOwnerId;
@@ -44,23 +45,41 @@ class LocalDatabaseManager {
       return _db!;
     }
 
-    if (_db != null && _db!.isOpen) {
-      await closeCurrentDatabase();
+    while (_openCompleter != null) {
+      await _openCompleter!.future;
+      if (_db != null && _db!.isOpen && _currentOwnerId == ownerId) {
+        return _db!;
+      }
     }
 
-    final dbPath = await _resolveDatabasePath(ownerId);
-    final factory = _databaseFactory ?? databaseFactory;
+    final completer = Completer<Database>();
+    _openCompleter = completer;
 
-    _db = await factory.openDatabase(
-      dbPath,
-      options: OpenDatabaseOptions(
-        version: 1,
-        onCreate: _onCreate,
-        onUpgrade: _onUpgrade,
-      ),
-    );
-    _currentOwnerId = ownerId;
-    return _db!;
+    try {
+      if (_db != null && _db!.isOpen) {
+        await closeCurrentDatabase();
+      }
+
+      final dbPath = await _resolveDatabasePath(ownerId);
+      final factory = _databaseFactory ?? databaseFactory;
+
+      _db = await factory.openDatabase(
+        dbPath,
+        options: OpenDatabaseOptions(
+          version: 1,
+          onCreate: _onCreate,
+          onUpgrade: _onUpgrade,
+        ),
+      );
+      _currentOwnerId = ownerId;
+      completer.complete(_db!);
+      return _db!;
+    } catch (e, st) {
+      completer.completeError(e, st);
+      rethrow;
+    } finally {
+      _openCompleter = null;
+    }
   }
 
   /// Lấy database đang mở hoặc tự động mở theo session hiện hành.
@@ -110,14 +129,17 @@ class LocalDatabaseManager {
       CREATE TABLE IF NOT EXISTS local_outbox (
         client_event_id TEXT PRIMARY KEY,
         event_type TEXT NOT NULL,
+        target_resource_id TEXT,
         endpoint TEXT NOT NULL,
         http_method TEXT NOT NULL,
         payload TEXT NOT NULL,
         occurred_at TEXT NOT NULL,
         hold_until TEXT NOT NULL,
-        status TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending',
         retry_count INTEGER NOT NULL DEFAULT 0,
-        last_error TEXT
+        last_error TEXT,
+        created_at TEXT NOT NULL,
+        synced_at TEXT
       );
     ''');
     batch.execute('''

@@ -125,6 +125,10 @@ class OutboxReplayWorker {
         } on DioException catch (dioError) {
           final statusCode = dioError.response?.statusCode;
           final errorMessage = dioError.message ?? dioError.toString();
+          final isConnectionError = dioError.type == DioExceptionType.connectionTimeout ||
+              dioError.type == DioExceptionType.sendTimeout ||
+              dioError.type == DioExceptionType.receiveTimeout ||
+              dioError.type == DioExceptionType.connectionError;
 
           if (statusCode == 401) {
             _isPausedAuth = true;
@@ -134,6 +138,10 @@ class OutboxReplayWorker {
               session?.onUnauthorized?.call();
             }
             break; // Tạm dừng lô hiện tại chờ token mới
+          } else if (dioError.type == DioExceptionType.cancel) {
+            // Yêu cầu bị hủy do phiên đăng xuất hoặc chuyển tài khoản
+            _isPausedAuth = true;
+            break;
           } else if (statusCode == 409) {
             await _repository.markConflict(
               record.clientEventId,
@@ -141,20 +149,31 @@ class OutboxReplayWorker {
             );
             conflictIds.add(record.clientEventId);
             // 409 là xung đột logic (revision conflict), không làm nghẽn bản ghi tiếp theo
-          } else if (statusCode == 400 || statusCode == 404 || statusCode == 422) {
-            // Lỗi client terminal: payload sai contract hoặc không thể xử lý lại
+          } else if (statusCode != null && statusCode >= 400 && statusCode < 500 && statusCode != 429) {
+            // Lỗi client terminal (400, 403, 404, 405, 422...): payload sai contract, không thể thử lại
             await _repository.markFailedTerminal(
               record.clientEventId,
               'HTTP $statusCode: $errorMessage',
             );
             terminalFailedIds.add(record.clientEventId);
+          } else if (isConnectionError || statusCode == null) {
+            // Lỗi mất mạng ngoại tuyến hoặc timeout:
+            // Tuân thủ Zero Data Loss: KHÔNG bao giờ dead-letter dữ liệu của người dùng khi offline.
+            final delaySec = min(60, (pow(2, min(record.retryCount, 4)) * 2).toInt());
+            await _repository.scheduleRetry(
+              record.clientEventId,
+              nextRetrySeconds: delaySec,
+              error: 'Network unreachable: $errorMessage',
+            );
+            transientFailedIds.add(record.clientEventId);
+            break; // Mất mạng, tạm ngắt đợt replay hiện tại để chờ kết nối
           } else {
-            // Lỗi 5xx hoặc mất mạng tạm thời
+            // Lỗi 5xx hoặc 429 từ phía máy chủ
             final nextRetry = record.retryCount + 1;
             if (nextRetry >= 5) {
               await _repository.markFailedTerminal(
                 record.clientEventId,
-                'Exceeded max retries (5): $errorMessage',
+                'Exceeded max server retries (5): HTTP $statusCode $errorMessage',
               );
               terminalFailedIds.add(record.clientEventId);
             } else {
@@ -162,11 +181,10 @@ class OutboxReplayWorker {
               await _repository.scheduleRetry(
                 record.clientEventId,
                 nextRetrySeconds: delaySec,
-                error: errorMessage,
+                error: 'HTTP $statusCode: $errorMessage',
               );
               transientFailedIds.add(record.clientEventId);
             }
-            // Gặp lỗi mạng, tạm ngắt đợt replay hiện tại để chờ kết nối ổn định
             break;
           }
         } catch (otherError) {

@@ -39,14 +39,14 @@ class CachedScheduleItem {
         'run_id': runId,
         'task_id': taskId,
         'step_id': stepId,
-        'planned_start': plannedStart.toIso8601String(),
-        'planned_end': plannedEnd.toIso8601String(),
+        'planned_start': plannedStart.toUtc().toIso8601String(),
+        'planned_end': plannedEnd.toUtc().toIso8601String(),
         'duration_min': durationMin,
         'step_title': stepTitle,
         'task_title': taskTitle,
         'status': status,
         'schedule_revision': scheduleRevision,
-        'updated_at': updatedAt.toIso8601String(),
+        'updated_at': updatedAt.toUtc().toIso8601String(),
       };
 
   factory CachedScheduleItem.fromMap(Map<String, dynamic> map) =>
@@ -95,7 +95,7 @@ class CachedProposalResult {
   final String proposalId;
   final String status;
   final int baseScheduleRevision;
-  final List<int> sourceRevisions;
+  final Map<String, dynamic> sourceRevisions;
   final bool isLocalPreview;
   final Map<String, dynamic> payload;
   final DateTime createdAt;
@@ -108,20 +108,19 @@ class CachedProposalResult {
         'source_revisions': jsonEncode(sourceRevisions),
         'is_local_preview': isLocalPreview ? 1 : 0,
         'payload': jsonEncode(payload),
-        'created_at': createdAt.toIso8601String(),
-        'updated_at': updatedAt.toIso8601String(),
+        'created_at': createdAt.toUtc().toIso8601String(),
+        'updated_at': updatedAt.toUtc().toIso8601String(),
       };
 
   factory CachedProposalResult.fromMap(Map<String, dynamic> map) {
     dynamic rawSources = map['source_revisions'];
-    List<int> sources = [];
+    Map<String, dynamic> sources = {};
     if (rawSources is String) {
       try {
-        final decoded = jsonDecode(rawSources) as List<dynamic>;
-        sources = decoded.whereType<int>().toList();
+        sources = jsonDecode(rawSources) as Map<String, dynamic>;
       } catch (_) {}
-    } else if (rawSources is List<dynamic>) {
-      sources = rawSources.whereType<int>().toList();
+    } else if (rawSources is Map<String, dynamic>) {
+      sources = rawSources;
     }
 
     dynamic rawPayload = map['payload'];
@@ -219,13 +218,13 @@ class SqliteScheduleRepository extends LocalScheduleRepository {
 
     if (from != null && to != null) {
       whereClause = 'planned_start >= ? AND planned_start <= ?';
-      whereArgs = [from.toIso8601String(), to.toIso8601String()];
+      whereArgs = [from.toUtc().toIso8601String(), to.toUtc().toIso8601String()];
     } else if (from != null) {
       whereClause = 'planned_start >= ?';
-      whereArgs = [from.toIso8601String()];
+      whereArgs = [from.toUtc().toIso8601String()];
     } else if (to != null) {
       whereClause = 'planned_start <= ?';
-      whereArgs = [to.toIso8601String()];
+      whereArgs = [to.toUtc().toIso8601String()];
     }
 
     final rows = await db.query(
@@ -354,10 +353,10 @@ class InMemoryScheduleRepository extends LocalScheduleRepository {
   }) async {
     var filtered = _items;
     if (from != null) {
-      filtered = filtered.where((item) => !item.plannedStart.isBefore(from)).toList();
+      filtered = filtered.where((item) => !item.plannedStart.toUtc().isBefore(from.toUtc())).toList();
     }
     if (to != null) {
-      filtered = filtered.where((item) => !item.plannedStart.isAfter(to)).toList();
+      filtered = filtered.where((item) => !item.plannedStart.toUtc().isAfter(to.toUtc())).toList();
     }
     return CachedScheduleResult(
       items: List.unmodifiable(filtered),

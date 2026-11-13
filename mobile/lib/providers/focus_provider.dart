@@ -726,6 +726,7 @@ class FocusProvider extends ChangeNotifier {
           OutboxRecord(
             clientEventId: clientEventId,
             eventType: OutboxEventType.checkinResponse,
+            targetResourceId: checkIn['checkin_id'] as String?,
             endpoint: '/check-ins/${checkIn['checkin_id']}/response',
             httpMethod: 'PUT',
             payload: pending,
@@ -734,18 +735,26 @@ class FocusProvider extends ChangeNotifier {
           ),
           holdDuration: const Duration(seconds: 5),
         );
+        Timer(const Duration(milliseconds: 5200), () {
+          _outboxWorker?.triggerReplay();
+        });
+        _checkInDeadline?.cancel();
+        _pendingResponse = null;
+        await _restoreFocusMode();
+        await _repository.clearActiveRun();
+      } else {
+        final response = await _api.putData(
+          '/check-ins/${checkIn['checkin_id']}/response',
+          data: pending,
+          idempotencyKey: ApiClient.stableIdempotencyKey(
+              'checkin_${checkIn['checkin_id']}', pending.toString()),
+        );
+        _serverRun = {..._serverRun!, 'check_in': response};
+        _checkInDeadline?.cancel();
+        _pendingResponse = null;
+        await _restoreFocusMode();
+        await _repository.clearActiveRun();
       }
-      final response = await _api.putData(
-        '/check-ins/${checkIn['checkin_id']}/response',
-        data: pending,
-        idempotencyKey: ApiClient.stableIdempotencyKey(
-            'checkin_${checkIn['checkin_id']}', pending.toString()),
-      );
-      _serverRun = {..._serverRun!, 'check_in': response};
-      _checkInDeadline?.cancel();
-      _pendingResponse = null;
-      await _restoreFocusMode();
-      await _repository.clearActiveRun();
     } on ApiException catch (error) {
       if (error.statusCode != null) {
         _pendingResponse = null;

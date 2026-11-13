@@ -24,6 +24,7 @@ class OutboxRecord {
   const OutboxRecord({
     required this.clientEventId,
     required this.eventType,
+    this.targetResourceId,
     required this.endpoint,
     required this.httpMethod,
     required this.payload,
@@ -32,10 +33,13 @@ class OutboxRecord {
     this.status = OutboxStatus.pending,
     this.retryCount = 0,
     this.lastError,
+    this.createdAt,
+    this.syncedAt,
   });
 
   final String clientEventId;
   final String eventType;
+  final String? targetResourceId;
   final String endpoint;
   final String httpMethod;
   final Map<String, dynamic> payload;
@@ -44,6 +48,8 @@ class OutboxRecord {
   final String status;
   final int retryCount;
   final String? lastError;
+  final DateTime? createdAt;
+  final DateTime? syncedAt;
 
   /// Tạo một client_event_id ngẫu nhiên chuẩn an toàn cho cả Web và Native.
   static String generateId([String prefix = 'evt']) {
@@ -57,28 +63,31 @@ class OutboxRecord {
 
   /// Kiểm tra xem bản ghi đã hết thời gian giam giữ (hold_until) và sẵn sàng replay hay chưa.
   bool isReadyForReplay({DateTime? asOf}) {
-    final checkTime = asOf ?? DateTime.now();
+    final checkTime = (asOf ?? DateTime.now()).toUtc();
     final isAllowedStatus = status == OutboxStatus.pending || status == OutboxStatus.failed;
-    return isAllowedStatus && !checkTime.isBefore(holdUntil);
+    return isAllowedStatus && !checkTime.isBefore(holdUntil.toUtc());
   }
 
   /// Kiểm tra xem bản ghi còn trong cửa sổ cho phép hủy (Undo 5s) hay không.
   bool isCancellable({DateTime? asOf}) {
-    final checkTime = asOf ?? DateTime.now();
-    return status == OutboxStatus.pending && checkTime.isBefore(holdUntil);
+    final checkTime = (asOf ?? DateTime.now()).toUtc();
+    return status == OutboxStatus.pending && checkTime.isBefore(holdUntil.toUtc());
   }
 
   Map<String, dynamic> toMap() => {
         'client_event_id': clientEventId,
         'event_type': eventType,
+        'target_resource_id': targetResourceId,
         'endpoint': endpoint,
         'http_method': httpMethod,
         'payload': jsonEncode(payload),
-        'occurred_at': occurredAt.toIso8601String(),
-        'hold_until': holdUntil.toIso8601String(),
+        'occurred_at': occurredAt.toUtc().toIso8601String(),
+        'hold_until': holdUntil.toUtc().toIso8601String(),
         'status': status,
         'retry_count': retryCount,
         'last_error': lastError,
+        'created_at': (createdAt ?? occurredAt).toUtc().toIso8601String(),
+        'synced_at': syncedAt?.toUtc().toIso8601String(),
       };
 
   factory OutboxRecord.fromMap(Map<String, dynamic> map) {
@@ -97,6 +106,7 @@ class OutboxRecord {
     return OutboxRecord(
       clientEventId: map['client_event_id'] as String,
       eventType: map['event_type'] as String,
+      targetResourceId: map['target_resource_id'] as String?,
       endpoint: map['endpoint'] as String,
       httpMethod: map['http_method'] as String,
       payload: parsedPayload,
@@ -105,6 +115,8 @@ class OutboxRecord {
       status: map['status'] as String? ?? OutboxStatus.pending,
       retryCount: map['retry_count'] as int? ?? 0,
       lastError: map['last_error'] as String?,
+      createdAt: map['created_at'] != null ? DateTime.parse(map['created_at'] as String) : null,
+      syncedAt: map['synced_at'] != null ? DateTime.parse(map['synced_at'] as String) : null,
     );
   }
 
@@ -112,12 +124,17 @@ class OutboxRecord {
     String? status,
     int? retryCount,
     String? lastError,
+    bool clearLastError = false,
     DateTime? holdUntil,
     Map<String, dynamic>? payload,
+    String? targetResourceId,
+    DateTime? createdAt,
+    DateTime? syncedAt,
   }) =>
       OutboxRecord(
         clientEventId: clientEventId,
         eventType: eventType,
+        targetResourceId: targetResourceId ?? this.targetResourceId,
         endpoint: endpoint,
         httpMethod: httpMethod,
         payload: payload ?? this.payload,
@@ -125,6 +142,8 @@ class OutboxRecord {
         holdUntil: holdUntil ?? this.holdUntil,
         status: status ?? this.status,
         retryCount: retryCount ?? this.retryCount,
-        lastError: lastError ?? this.lastError,
+        lastError: clearLastError ? null : (lastError ?? this.lastError),
+        createdAt: createdAt ?? this.createdAt,
+        syncedAt: syncedAt ?? this.syncedAt,
       );
 }

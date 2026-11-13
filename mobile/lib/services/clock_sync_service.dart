@@ -53,16 +53,16 @@ class ClockSyncService {
   /// Cập nhật thủ công độ lệch đồng hồ (dùng cho Unit Test hoặc Mocking).
   void setOffsetMs(int offsetMs) {
     _offsetMs = offsetMs;
-    _lastSyncAt = _clock();
+    _lastSyncAt = _clock().toUtc();
   }
 
-  /// Trả về thời gian hiện tại đã được bù lệch chuẩn theo giờ máy chủ.
+  /// Trả về thời gian hiện tại đã được bù lệch chuẩn theo giờ máy chủ (luôn ở chuẩn UTC).
   DateTime nowAdjusted([DateTime? deviceNow]) {
-    final base = deviceNow ?? _clock();
+    final base = (deviceNow ?? _clock()).toUtc();
     return base.add(Duration(milliseconds: _offsetMs));
   }
 
-  /// Định dạng chuỗi ISO-8601 của thời gian đã bù lệch.
+  /// Định dạng chuỗi ISO-8601 có múi giờ chuẩn UTC của thời gian đã bù lệch.
   String nowAdjustedIso([DateTime? deviceNow]) {
     return nowAdjusted(deviceNow).toIso8601String();
   }
@@ -72,14 +72,14 @@ class ClockSyncService {
     ApiClient client, {
     String endpoint = '/capabilities',
   }) async {
-    final t0 = _clock();
+    final t0 = _clock().toUtc();
     Response<Map<String, dynamic>> response;
     try {
       response = await client.dio.get<Map<String, dynamic>>(endpoint);
     } on DioException catch (e) {
       throw ApiException.fromDio(e);
     }
-    final t1 = _clock();
+    final t1 = _clock().toUtc();
 
     final data = response.data;
     final meta = data?['meta'] as Map<String, dynamic>?;
@@ -92,7 +92,7 @@ class ClockSyncService {
       throw const ApiException('Phản hồi từ máy chủ thiếu trường meta.server_time.');
     }
 
-    final serverTime = DateTime.parse(rawServerTime);
+    final serverTime = DateTime.parse(rawServerTime).toUtc();
     final rttMs = t1.difference(t0).inMilliseconds;
 
     // Ước lượng server_time tại mốc t1: server_time + (RTT / 2)
