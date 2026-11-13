@@ -18,15 +18,15 @@ class ThoughtBase(ApiModel):
     attempt_count: int = Field(ge=1, le=5)
     text_content: str | None = None
 
+
+class ThoughtCreateRequest(ThoughtBase):
     @field_validator("client_thought_id", mode="before")
     @classmethod
     def validate_client_thought_id(cls, v: Any) -> str:
         if not isinstance(v, str) or not v.strip():
             raise ValueError("Mã client_thought_id không được để trống hoặc chỉ chứa khoảng trắng.")
-        return v.strip()
+        return v
 
-
-class ThoughtCreateRequest(ThoughtBase):
     @model_validator(mode="after")
     def validate_create_input_content(self) -> ThoughtCreateRequest:
         if self.input_type == "audio":

@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
-from typing import Literal
+from typing import Any, Literal
 
-from pydantic import AwareDatetime, Field, computed_field, model_validator
+from pydantic import AwareDatetime, Field, model_validator
 
 from app.schemas.common import ApiModel, SessionSegment
 
