@@ -114,10 +114,17 @@ class _TaskSummaryScreenState extends State<TaskSummaryScreen> {
     if (task.isApiBusy) return;
     final draft = task.draft;
     final answer = _clarificationController.text.trim();
+    final optionalRequirement = task.canPlan ? answer : '';
+
     final blockers = draft?.clarificationIssues
             .where((issue) => issue['blocking'] == true)
             .toList() ??
         const <JsonMap>[];
+    final onlyAvailabilityIsMissing = blockers.isNotEmpty &&
+        blockers.every((issue) => const {
+              'availability',
+              'availability_ref',
+            }.contains(issue['field_path']));
     final onlyScopeIsMissing = blockers.isNotEmpty &&
         blockers.every((issue) => issue['field_path'] == 'scope') &&
         (draft?.scope.trim().isEmpty ?? false);
@@ -130,9 +137,20 @@ class _TaskSummaryScreenState extends State<TaskSummaryScreen> {
     task.setScope(scope);
     setState(() => _isSubmitting = true);
     try {
+      final useAnswerAsAvailability = onlyAvailabilityIsMissing &&
+          answer.isNotEmpty &&
+          task.applyExplicitAvailabilityAnswer(answer);
       if (draft != null &&
-          (useAnswerAsScope || answer.isEmpty && hasFormChanges)) {
-        await task.updateDraftOnBackend();
+          (useAnswerAsAvailability ||
+              useAnswerAsScope ||
+              optionalRequirement.isNotEmpty ||
+              answer.isEmpty && hasFormChanges)) {
+        await task.updateDraftOnBackend(extraRequirement: optionalRequirement);
+        if (mounted &&
+            (optionalRequirement.isNotEmpty ||
+                useAnswerAsAvailability && task.canPlan)) {
+          _clarificationController.clear();
+        }
         _initialDeadline = task.deadline;
         if (mounted && useAnswerAsScope && task.scope.trim() == answer) {
           _scopeFocusNode.unfocus();
@@ -246,9 +264,19 @@ class _TaskSummaryScreenState extends State<TaskSummaryScreen> {
             firstSentence.length < title.length
         ? firstSentence
         : title;
+    final issues = task.draft?.clarificationIssues ?? const <JsonMap>[];
     final missingRequiredQuestions = _requiredQuestions(
-      task.draft?.clarificationIssues ?? const [],
+      issues
+          .where((issue) => issue['code'] != 'AI_FIELD_REVIEW_REQUIRED')
+          .toList(),
     );
+    final reviewQuestions = _requiredQuestions(
+      issues
+          .where((issue) => issue['code'] == 'AI_FIELD_REVIEW_REQUIRED')
+          .toList(),
+    );
+    final hasQuestions =
+        missingRequiredQuestions.isNotEmpty || reviewQuestions.isNotEmpty;
 
     final usedFallback = task.draft?.clarificationIssues.any((issue) =>
             issue['code'] == 'AI_FALLBACK_NOTICE' &&
@@ -364,16 +392,16 @@ class _TaskSummaryScreenState extends State<TaskSummaryScreen> {
               const SizedBox(height: 12),
             ],
 
-            if (task.draft != null &&
-                !task.canPlan &&
-                missingRequiredQuestions.isNotEmpty) ...[
+            if (task.draft != null && !task.canPlan && hasQuestions) ...[
               const SizedBox(height: 16),
               MelbelCard(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
-                      'Cần bổ sung',
+                      missingRequiredQuestions.isEmpty
+                          ? 'Cần xác nhận'
+                          : 'Cần bổ sung',
                       style: TextStyle(
                         fontFamily: 'Be Vietnam Pro',
                         fontSize: 16,
@@ -394,6 +422,14 @@ class _TaskSummaryScreenState extends State<TaskSummaryScreen> {
                           ),
                         ),
                       ),
+                    if (missingRequiredQuestions.isNotEmpty &&
+                        reviewQuestions.isNotEmpty)
+                      const Text('Thông tin cần xác nhận'),
+                    for (final question in reviewQuestions)
+                      Padding(
+                        padding: const EdgeInsets.only(bottom: 8),
+                        child: Text(question),
+                      ),
                     TextField(
                       controller: _clarificationController,
                       minLines: 1,
@@ -407,9 +443,7 @@ class _TaskSummaryScreenState extends State<TaskSummaryScreen> {
                 ),
               ),
             ],
-            if (task.draft != null &&
-                !task.canPlan &&
-                missingRequiredQuestions.isEmpty) ...[
+            if (task.draft != null && !task.canPlan && !hasQuestions) ...[
               const SizedBox(height: 8),
               Text(
                 'Chưa đủ điều kiện lập kế hoạch.',
@@ -422,12 +456,27 @@ class _TaskSummaryScreenState extends State<TaskSummaryScreen> {
             ],
             const SizedBox(height: 24),
 
+            if (task.canPlan) ...[
+              TextField(
+                controller: _clarificationController,
+                minLines: 1,
+                maxLines: 3,
+                decoration: const InputDecoration(
+                  labelText: 'Yêu cầu thêm (không bắt buộc)',
+                  border: OutlineInputBorder(),
+                ),
+              ),
+              const SizedBox(height: 16),
+            ],
+
             // Actions
             if (!task.canPlan) ...[
               SecondaryCta(
                 label: missingRequiredQuestions.isNotEmpty
                     ? 'Bổ sung thông tin'
-                    : 'Thử lại',
+                    : reviewQuestions.isNotEmpty
+                        ? 'Gửi xác nhận'
+                        : 'Thử lại',
                 onPressed: _isSubmitting || task.isApiBusy
                     ? null
                     : () => _continue(createCandidate: false),

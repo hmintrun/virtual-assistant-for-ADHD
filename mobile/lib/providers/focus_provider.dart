@@ -154,10 +154,10 @@ class FocusProvider extends ChangeNotifier {
     this.timer.addListener(_onTimerChanged);
     this.microTaskTimer.onElapsed = _onMicroTaskElapsed;
     this.microTaskTimer.addListener(_onTimerChanged);
-    this.recorder.onAutoStopped = (recording) {
+    _recordingStopped = (recording) {
       unawaited(_onAutoRecordingSaved(recording));
     };
-    this.recorder.onAutoStopFailed = (error) {
+    _recordingFailedCallback = (error) {
       _isRecording = false;
       _lastError = error.message;
       if (error.countsAsFailure) {
@@ -166,8 +166,12 @@ class FocusProvider extends ChangeNotifier {
         _notify();
       }
     };
+    this.recorder.onAutoStopped = _recordingStopped;
+    this.recorder.onAutoStopFailed = _recordingFailedCallback;
   }
 
+  late final void Function(ThoughtRecording) _recordingStopped;
+  late final void Function(RecorderException) _recordingFailedCallback;
   final Clock _clock;
   final FocusTimerService timer;
   final FocusTimerService microTaskTimer;
@@ -195,7 +199,10 @@ class FocusProvider extends ChangeNotifier {
       _serverRun?['run_id'] as String? ?? _session?.sessionId;
   bool get hasPendingCheckInResponse => _pendingResponse != null;
   bool get hasOpenCheckIn => _checkIn?['response_state'] == 'open';
-  bool get hasUnfinishedServerRun => needsEndSync || hasOpenCheckIn;
+  bool get missedCheckIn => _checkIn?['response_state'] == 'no_respond';
+  bool get canAnswerCheckIn => hasOpenCheckIn || missedCheckIn;
+  bool get hasUnfinishedServerRun =>
+      needsEndSync || hasOpenCheckIn || hasPendingCheckInResponse;
   FocusStage _stage = FocusStage.ended;
   FocusStage _resumeStage = FocusStage.active;
   List<SessionSegmentModel> _segments = const [];
@@ -209,6 +216,7 @@ class FocusProvider extends ChangeNotifier {
   int _recordingAttempts = 0;
   String? _lastError;
   Timer? _offlineProbe;
+  Timer? _checkInDeadline;
   int _offlineProbeGeneration = 0;
   Timer? _undoExpiry;
   Timer? _deleteUndoExpiry;
@@ -284,6 +292,7 @@ class FocusProvider extends ChangeNotifier {
       _pendingResponse = json['pending_response'] as Map<String, dynamic>?;
       if (json['stage'] == FocusStage.ended.name) {
         _stage = FocusStage.ended;
+        _watchCheckInDeadline();
         _notify();
         return;
       }
@@ -362,6 +371,7 @@ class FocusProvider extends ChangeNotifier {
   Future<void> startSession(FocusSessionInfo session) async {
     if (isActiveRun || hasUnfinishedServerRun || _runCommandBusy) return;
     microTaskTimer.stop();
+    _checkInDeadline?.cancel();
     _serverRun = null;
     _startRequest = null;
     _runError = null;
@@ -610,12 +620,30 @@ class FocusProvider extends ChangeNotifier {
       );
       _pendingEnd = null;
       await _persistRun();
+      _watchCheckInDeadline();
     } on ApiException catch (error) {
       _runError = error.message;
     } finally {
       _runCommandBusy = false;
       _notify();
     }
+  }
+
+  Future<void> restAfterCheckIn() async {
+    if (_stage != FocusStage.ended || _runCommandBusy) return;
+    await _restoreFocusMode();
+    _notify();
+  }
+
+  void _watchCheckInDeadline() {
+    _checkInDeadline?.cancel();
+    if (!hasOpenCheckIn) return;
+    final deadline =
+        DateTime.tryParse(_serverRun?['checkin_timeout_at'] as String? ?? '');
+    if (deadline == null) return;
+    final delay =
+        deadline.difference(_clock.now()) + const Duration(seconds: 1);
+    _checkInDeadline = Timer(delay, () => unawaited(refreshRunCheckIn()));
   }
 
   Future<void> refreshRunCheckIn() async {
@@ -625,7 +653,8 @@ class FocusProvider extends ChangeNotifier {
       final run = await _api.getData('/runs/$id');
       if (_serverRun?['run_id'] != id || _runCommandBusy) return;
       _serverRun = run;
-      if (!hasOpenCheckIn) {
+      await _persistRun();
+      if (!canAnswerCheckIn) {
         _pendingResponse = null;
         await _restoreFocusMode();
         await _repository.clearActiveRun();
@@ -642,12 +671,19 @@ class FocusProvider extends ChangeNotifier {
     await answerCheckIn(
       pending['session_outcome'] as String,
       skipScope: pending['skip_scope'] as String?,
+      remainingNote: pending['remaining_note'] as String?,
+      stepCompleted: pending['step_completed'] as bool?,
     );
   }
 
-  Future<void> answerCheckIn(String outcome, {String? skipScope}) async {
+  Future<void> answerCheckIn(
+    String outcome, {
+    String? skipScope,
+    String? remainingNote,
+    bool? stepCompleted,
+  }) async {
     final checkIn = _checkIn;
-    if (checkIn == null || !hasOpenCheckIn || _runCommandBusy) return;
+    if (checkIn == null || !canAnswerCheckIn || _runCommandBusy) return;
     _runCommandBusy = true;
     _runError = null;
     _notify();
@@ -657,6 +693,9 @@ class FocusProvider extends ChangeNotifier {
         'responded_at': _clock.now().toUtc().toIso8601String(),
         'session_outcome': outcome,
         if (skipScope != null) 'skip_scope': skipScope,
+        if (stepCompleted != null) 'step_completed': stepCompleted,
+        if (remainingNote?.trim().isNotEmpty == true)
+          'remaining_note': remainingNote!.trim(),
       };
       await _persistRun();
       final response = await _api.putData(
@@ -666,6 +705,7 @@ class FocusProvider extends ChangeNotifier {
             'checkin_${checkIn['checkin_id']}', pending.toString()),
       );
       _serverRun = {..._serverRun!, 'check_in': response};
+      _checkInDeadline?.cancel();
       _pendingResponse = null;
       await _restoreFocusMode();
       await _repository.clearActiveRun();
@@ -1126,17 +1166,19 @@ class FocusProvider extends ChangeNotifier {
   @override
   void dispose() {
     _disposed = true;
+    _checkInDeadline?.cancel();
     _stopOfflineProbe();
     _undoExpiry?.cancel();
     _deleteUndoExpiry?.cancel();
     _toastExpiry?.cancel();
-    recorder.onAutoStopped = null;
-    recorder.onAutoStopFailed = null;
+    if (identical(recorder.onAutoStopped, _recordingStopped)) {
+      recorder.onAutoStopped = null;
+      recorder.onAutoStopFailed = null;
+    }
     timer.removeListener(_onTimerChanged);
     microTaskTimer.removeListener(_onTimerChanged);
     timer.dispose();
     microTaskTimer.dispose();
-    unawaited(recorder.dispose());
     super.dispose();
   }
 }

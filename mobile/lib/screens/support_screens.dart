@@ -1,3 +1,7 @@
+import '../services/auth_service.dart';
+import '../providers/focus_provider.dart';
+import '../providers/task_provider.dart';
+import '../widgets/google_login_button.dart';
 import '../core/api_client.dart';
 import '../services/schedule_service.dart';
 import '../services/voice_service.dart';
@@ -107,100 +111,126 @@ class _AccountScreenState extends State<AccountScreen> {
   final _connection = ApiClient().getData('/capabilities');
 
   @override
-  Widget build(BuildContext context) => Scaffold(
-        appBar: const MelbelAppBar(
-          title: 'Không gian cá nhân',
-          showBack: true,
-          showGlobalActions: false,
-        ),
-        body: ListView(
-          padding: const EdgeInsets.all(20),
-          children: [
-            Center(
-              child: Column(
-                children: [
-                  CircleAvatar(
-                    radius: 38,
-                    backgroundColor: MelbelColors.kSurfaceContainerHigh,
-                    child: CatAccountIcon(
-                        size: 38, color: MelbelColors.kTextSecondary),
-                  ),
-                  const SizedBox(height: 12),
-                  Text('Hồ sơ của bạn',
-                      style: Theme.of(context).textTheme.titleMedium),
-                ],
-              ),
+  Widget build(BuildContext context) {
+    final auth = context.watch<AuthService>();
+    final focus = context.watch<FocusProvider>();
+    final canSignOut = !focus.isActiveRun &&
+        !focus.isRecording &&
+        !focus.runCommandBusy &&
+        !focus.hasUnfinishedServerRun &&
+        !context.watch<TaskProvider>().isApiBusy;
+    return Scaffold(
+      appBar: const MelbelAppBar(
+        title: 'Không gian cá nhân',
+        showBack: true,
+        showGlobalActions: false,
+      ),
+      body: ListView(
+        padding: const EdgeInsets.all(20),
+        children: [
+          Center(
+            child: Column(
+              children: [
+                CircleAvatar(
+                  radius: 38,
+                  backgroundColor: MelbelColors.kSurfaceContainerHigh,
+                  child: CatAccountIcon(
+                      size: 38, color: MelbelColors.kTextSecondary),
+                ),
+                const SizedBox(height: 12),
+                Text('Hồ sơ của bạn',
+                    style: Theme.of(context).textTheme.titleMedium),
+              ],
             ),
-            const SizedBox(height: 16),
-            const _AppearanceSettingsPanel(),
-            const SizedBox(height: 16),
-            const _EmptyProfileCard(),
-            const SizedBox(height: 20),
-            Text('Nhật ký thầm lặng',
-                style: Theme.of(context).textTheme.titleMedium),
-            const SizedBox(height: 8),
-            const _HelpRow(
-              icon: Icons.nightlight_outlined,
-              title: 'Chuỗi ngày',
-              subtitle: '— · Chưa có dữ liệu',
+          ),
+          const SizedBox(height: 16),
+          const _AppearanceSettingsPanel(),
+          const SizedBox(height: 16),
+          if (auth.user case final user?)
+            MelbelCard(
+                child: ListTile(
+              title:
+                  Text(user['display_name'] as String? ?? 'Tài khoản Google'),
+              subtitle: Text(user['email'] as String? ?? ''),
+            ))
+          else
+            const MelbelCard(child: Text('Đang dùng tài khoản phát triển.')),
+          const SizedBox(height: 20),
+          Text('Nhật ký thầm lặng',
+              style: Theme.of(context).textTheme.titleMedium),
+          const SizedBox(height: 8),
+          const _HelpRow(
+            icon: Icons.nightlight_outlined,
+            title: 'Chuỗi ngày',
+            subtitle: '— · Chưa có dữ liệu',
+          ),
+          const _HelpRow(
+            icon: Icons.hourglass_top,
+            title: 'Thời gian tập trung',
+            subtitle: '— · Chưa có dữ liệu',
+          ),
+          const _HelpRow(
+            icon: Icons.all_inbox_outlined,
+            title: 'Hòm thư nháp',
+            subtitle: '— · Chưa có dữ liệu tài khoản',
+          ),
+          const SizedBox(height: 20),
+          Text('Tài khoản và lịch Google',
+              style: Theme.of(context).textTheme.titleMedium),
+          const _HelpRow(
+            icon: Icons.cloud_sync_outlined,
+            title: 'Đồng bộ Google',
+            subtitle: 'Chưa liên kết tài khoản',
+          ),
+          FutureBuilder<Map<String, dynamic>>(
+            future: _connection,
+            builder: (context, snapshot) => _HelpRow(
+              icon: Icons.cloud_outlined,
+              title: 'Kết nối máy chủ',
+              subtitle: snapshot.connectionState != ConnectionState.done
+                  ? 'Đang kiểm tra…'
+                  : snapshot.hasError
+                      ? 'Chưa kết nối được'
+                      : 'Đã kết nối',
             ),
-            const _HelpRow(
-              icon: Icons.hourglass_top,
-              title: 'Thời gian tập trung',
-              subtitle: '— · Chưa có dữ liệu',
-            ),
-            const _HelpRow(
-              icon: Icons.all_inbox_outlined,
-              title: 'Hòm thư nháp',
-              subtitle: '— · Chưa có dữ liệu tài khoản',
-            ),
-            const SizedBox(height: 20),
-            Text('Tài khoản và lịch Google',
-                style: Theme.of(context).textTheme.titleMedium),
-            const _HelpRow(
-              icon: Icons.cloud_sync_outlined,
-              title: 'Đồng bộ Google',
-              subtitle: 'Chưa liên kết tài khoản',
-            ),
-            FutureBuilder<Map<String, dynamic>>(
-              future: _connection,
-              builder: (context, snapshot) => _HelpRow(
-                icon: Icons.cloud_outlined,
-                title: 'Kết nối máy chủ',
-                subtitle: snapshot.connectionState != ConnectionState.done
-                    ? 'Đang kiểm tra…'
-                    : snapshot.hasError
-                        ? 'Chưa kết nối được'
-                        : 'Đã kết nối',
-              ),
-            ),
-            const SizedBox(height: 18),
-            FilledButton.icon(
-              onPressed: () => Navigator.of(context).pushNamedAndRemoveUntil(
-                '/login',
-                (_) => false,
-              ),
-              icon: const Icon(Icons.login),
-              label: const Text('Đăng nhập Google'),
-            ),
-            const SizedBox(height: 8),
-            OutlinedButton(
-              onPressed: () => Navigator.of(context).push(
-                MaterialPageRoute<void>(
-                    builder: (_) => const SetupFlowScreen()),
-              ),
-              child: const Text('Mở thiết lập ban đầu'),
-            ),
-            const SizedBox(height: 8),
-            Center(
-              child: Text('Đăng nhập Google đang ở chế độ demo.',
-                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                        color: MelbelColors.kTextSecondary,
-                      )),
-            ),
+          ),
+          const SizedBox(height: 18),
+          ListTile(
+            leading: const Icon(Icons.settings_outlined),
+            title: const Text('Cài đặt trợ lý'),
+            trailing: const Icon(Icons.chevron_right),
+            onTap: () => Navigator.of(context).pushNamed('/settings'),
+          ),
+          ListTile(
+            leading: const Icon(Icons.inbox_outlined),
+            title: const Text('Suy nghĩ đã cất'),
+            trailing: const Icon(Icons.chevron_right),
+            onTap: () => Navigator.of(context).pushNamed('/thoughts'),
+          ),
+          if (auth.needsSignIn) ...[
+            const Text('Hãy đăng nhập lại bằng tài khoản hiện tại để đồng bộ.'),
+            const GoogleLoginButton(),
           ],
-        ),
-      );
+          if (auth.error != null) Text(auth.error!),
+          if (!AuthService.isDev) ...[
+            OutlinedButton(
+              onPressed: canSignOut && !auth.busy ? auth.signOut : null,
+              child: const Text('Đăng xuất'),
+            ),
+            if (!canSignOut)
+              const Text(
+                  'Hãy kết thúc phiên hoặc đợi thao tác hiện tại hoàn tất trước khi đăng xuất.'),
+          ],
+          OutlinedButton(
+            onPressed: () => Navigator.of(context).push(
+              MaterialPageRoute<void>(builder: (_) => const SetupFlowScreen()),
+            ),
+            child: const Text('Mở thiết lập ban đầu'),
+          ),
+        ],
+      ),
+    );
+  }
 }
 
 class _AppearanceSettingsPanel extends StatelessWidget {
@@ -416,26 +446,6 @@ class _CalendarVoiceQuestionScreenState
         TimeOfDay.fromDateTime(date),
         alwaysUse24HourFormat: true);
   }
-}
-
-class _EmptyProfileCard extends StatelessWidget {
-  const _EmptyProfileCard();
-
-  @override
-  Widget build(BuildContext context) => MelbelCard(
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text('Chưa đăng nhập',
-                style: Theme.of(context).textTheme.titleMedium),
-            const SizedBox(height: 6),
-            const Text('Tên: —'),
-            const Text('Email: —'),
-            const SizedBox(height: 12),
-            const _Tag('Chưa liên kết Google'),
-          ],
-        ),
-      );
 }
 
 class _HelpRow extends StatelessWidget {

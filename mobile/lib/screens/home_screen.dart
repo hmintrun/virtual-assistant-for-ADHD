@@ -87,7 +87,9 @@ class _HomeScreenState extends State<HomeScreen> {
 
   Future<void> _reopenFocus(FocusProvider focus) async {
     if (focus.session == null ||
-        (!focus.isActiveRun && !focus.hasUnfinishedServerRun)) return;
+        (!focus.isActiveRun &&
+            !focus.hasUnfinishedServerRun &&
+            !focus.missedCheckIn)) return;
     await focus.refreshRunCheckIn();
     if (!mounted) return;
     await Navigator.push(
@@ -197,7 +199,9 @@ class _HomeScreenState extends State<HomeScreen> {
             Consumer<FocusProvider>(
               builder: (context, focus, _) {
                 if (focus.session == null ||
-                    (!focus.isActiveRun && !focus.hasUnfinishedServerRun)) {
+                    (!focus.isActiveRun &&
+                        !focus.hasUnfinishedServerRun &&
+                        !focus.missedCheckIn)) {
                   return const SizedBox.shrink();
                 }
                 return Padding(
@@ -217,7 +221,8 @@ class _HomeScreenState extends State<HomeScreen> {
                         ),
                         const SizedBox(height: 12),
                         PrimaryCta(
-                          label: focus.hasUnfinishedServerRun
+                          label: focus.hasUnfinishedServerRun ||
+                                  focus.missedCheckIn
                               ? 'Xem kết quả phiên'
                               : focus.stage == FocusStage.recovery
                                   ? 'Khôi phục phiên'
@@ -264,14 +269,16 @@ class _HomeScreenState extends State<HomeScreen> {
                 return Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    const Eyebrow('Phiên tiếp theo'),
+                    const _HomeSectionTitle('Phiên tiếp theo',
+                        icon: Icons.nightlight_round),
                     const SizedBox(height: 8),
                     if (sessions.isEmpty)
                       const MelbelCard(child: Text('Chưa có phiên sắp tới.'))
                     else
                       _sessionTile(sessions.first, showDate: true),
                     const SizedBox(height: 20),
-                    const Eyebrow('Còn lại hôm nay'),
+                    const _HomeSectionTitle('Còn lại hôm nay',
+                        icon: Icons.today_outlined),
                     const SizedBox(height: 8),
                     if (today.isEmpty)
                       const MelbelCard(
@@ -291,21 +298,109 @@ class _HomeScreenState extends State<HomeScreen> {
 
   Widget _sessionTile(FocusSessionInfo session, {bool showDate = false}) {
     final start = session.scheduledStart.toLocal();
-    final time = MaterialLocalizations.of(context).formatTimeOfDay(
-        TimeOfDay.fromDateTime(start),
-        alwaysUse24HourFormat: true);
-    final date = showDate ? '${start.day}/${start.month} · ' : '';
-    final deadline =
-        context.read<TaskProvider>().formatDeadline(session.deadline);
+    final end = session.scheduledEnd.toLocal();
+    final localizations = MaterialLocalizations.of(context);
+    String clock(DateTime date) => localizations.formatTimeOfDay(
+          TimeOfDay.fromDateTime(date),
+          alwaysUse24HourFormat: true,
+        );
+
+    final date = showDate && !DateUtils.isSameDay(start, DateTime.now())
+        ? '${start.day}/${start.month} · '
+        : '';
+    final deadline = session.deadline;
+    final deadlineLabel = deadline == null
+        ? 'Chưa có hạn chót'
+        : 'Hạn ${context.read<TaskProvider>().formatDeadline(deadline)}';
+    final colors = Theme.of(context).colorScheme;
+    final text = Theme.of(context).textTheme;
+    final showTaskTitle = session.taskTitle != session.stepTitle &&
+        session.taskTitle != 'Phiên tập trung';
     return Padding(
       padding: const EdgeInsets.only(bottom: 8),
       child: MelbelCard(
-        child: ListTile(
-          title: Text(session.stepTitle),
-          subtitle: Text('$date$time · ${session.taskTitle}\nHạn: $deadline'),
-          trailing: const Icon(Icons.chevron_right),
+        padding: EdgeInsets.zero,
+        color: showDate ? colors.surfaceContainerHigh : colors.surfaceContainer,
+        borderColor: showDate ? colors.outline : null,
+        child: InkWell(
+          borderRadius: BorderRadius.circular(16),
           onTap: () => _openFocus(session),
+          child: Padding(
+            padding: const EdgeInsets.all(14),
+            child: Row(
+              children: [
+                CircleAvatar(
+                  radius: 21,
+                  backgroundColor: colors.onSurface,
+                  foregroundColor: colors.surface,
+                  child: Icon(
+                      showDate ? Icons.pets_rounded : Icons.nightlight_round,
+                      size: 19),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text('$date${clock(start)}–${clock(end)}',
+                          style: text.labelMedium?.copyWith(
+                            color: colors.onSurface,
+                            fontWeight: FontWeight.w700,
+                          )),
+                      const SizedBox(height: 4),
+                      Text(session.stepTitle,
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                          style: text.titleSmall?.copyWith(
+                            color: colors.onSurface,
+                            fontWeight: FontWeight.w700,
+                          )),
+                      if (showTaskTitle)
+                        Text(session.taskTitle,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: text.bodySmall
+                                ?.copyWith(color: colors.onSurfaceVariant)),
+                      const SizedBox(height: 5),
+                      Text(deadlineLabel,
+                          style: text.labelSmall
+                              ?.copyWith(color: colors.onSurfaceVariant)),
+                    ],
+                  ),
+                ),
+                const SizedBox(width: 6),
+                Icon(Icons.chevron_right_rounded, color: colors.onSurface),
+              ],
+            ),
+          ),
         ),
+      ),
+    );
+  }
+}
+
+class _HomeSectionTitle extends StatelessWidget {
+  const _HomeSectionTitle(this.label, {required this.icon});
+
+  final String label;
+  final IconData icon;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Semantics(
+      header: true,
+      child: Row(
+        children: [
+          Icon(icon, size: 20, color: theme.colorScheme.onSurface),
+          const SizedBox(width: 8),
+          Expanded(
+              child: Text(label,
+                  style: theme.textTheme.titleLarge?.copyWith(
+                    color: theme.colorScheme.onSurface,
+                    fontWeight: FontWeight.w800,
+                  ))),
+        ],
       ),
     );
   }

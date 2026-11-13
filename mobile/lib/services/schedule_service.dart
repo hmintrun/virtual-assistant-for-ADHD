@@ -17,6 +17,7 @@ class ScheduleService {
     if (!includeTitles || sessions.isEmpty) return sessions;
 
     final steps = <String, Map<String, dynamic>>{};
+    final lastSessionIds = <Object?>{};
     try {
       for (final task in await _loadPages('/tasks', const {})) {
         for (final step in (task['steps'] as List? ?? const [])
@@ -24,6 +25,17 @@ class ScheduleService {
           final stepId = step['step_id'] as String?;
           if (stepId == null) continue;
           final time = task['time_constraint'] as Map?;
+          final remaining = (task['sessions'] as List? ?? const [])
+              .whereType<Map<String, dynamic>>()
+              .where((session) =>
+                  session['step_id'] == stepId &&
+                  session['status'] == 'scheduled')
+              .toList()
+            ..sort((a, b) => DateTime.parse(a['scheduled_start'] as String)
+                .compareTo(DateTime.parse(b['scheduled_start'] as String)));
+          if (remaining.isNotEmpty) {
+            lastSessionIds.add(remaining.last['session_id']);
+          }
           steps[stepId] = {
             'step_title': step['title'],
             'task_title': task['title'],
@@ -37,7 +49,12 @@ class ScheduleService {
     }
     return [
       for (final session in sessions)
-        {...?steps[session['step_id']], ...session},
+        {
+          ...?steps[session['step_id']],
+          ...session,
+          'is_last_session_of_step':
+              lastSessionIds.contains(session['session_id']),
+        },
     ];
   }
 

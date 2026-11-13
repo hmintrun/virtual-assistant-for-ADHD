@@ -5,45 +5,17 @@ import 'package:provider/provider.dart';
 import '../core/theme.dart';
 import '../providers/theme_provider.dart';
 import '../services/alarm_service.dart';
+import '../services/auth_service.dart';
+import '../widgets/google_login_button.dart';
 import '../services/dnd_service.dart';
 import '../widgets/melbel_ui.dart';
 
-enum _LoginStep { welcome, connecting, failed }
-
-/// D-01–D-03. Google auth is intentionally a clear demo placeholder until the
-/// team supplies an authentication API/provider.
-class LoginScreen extends StatefulWidget {
+class LoginScreen extends StatelessWidget {
   const LoginScreen({super.key});
 
   @override
-  State<LoginScreen> createState() => _LoginScreenState();
-}
-
-class _LoginScreenState extends State<LoginScreen> {
-  _LoginStep _step = _LoginStep.welcome;
-
-  Future<void> _tryGoogleSignIn() async {
-    setState(() => _step = _LoginStep.connecting);
-    await Future<void>.delayed(const Duration(milliseconds: 900));
-    if (mounted) setState(() => _step = _LoginStep.failed);
-  }
-
-  void _continueAsGuest() {
-    Navigator.of(context).pushReplacement(
-      MaterialPageRoute<void>(builder: (_) => const SetupFlowScreen()),
-    );
-  }
-
-  @override
   Widget build(BuildContext context) {
-    if (_step == _LoginStep.connecting) return const _SigningInScreen();
-    if (_step == _LoginStep.failed) {
-      return _LoginErrorScreen(
-        onRetry: () => setState(() => _step = _LoginStep.welcome),
-        onContinueAsGuest: _continueAsGuest,
-      );
-    }
-
+    final auth = context.watch<AuthService>();
     return Scaffold(
       body: SafeArea(
         child: Padding(
@@ -76,109 +48,17 @@ class _LoginScreenState extends State<LoginScreen> {
                     ),
               ),
               const Spacer(flex: 2),
-              SizedBox(
-                width: double.infinity,
-                height: 58,
-                child: OutlinedButton.icon(
-                  onPressed: _tryGoogleSignIn,
-                  icon: const Text('G', style: TextStyle(fontSize: 20)),
-                  label: const Text('Tiếp tục với Google'),
-                ),
-              ),
-              const SizedBox(height: 10),
-              TextButton(
-                onPressed: _continueAsGuest,
-                child: const Text('Dùng thử không cần đăng nhập'),
-              ),
-              const SizedBox(height: 6),
-              Text(
-                'Điều khoản và quyền riêng tư',
-                style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                      color: MelbelColors.kTextSecondary,
-                    ),
-              ),
+              const GoogleLoginButton(),
+              if (auth.error != null) ...[
+                const SizedBox(height: 12),
+                Text(auth.error!, textAlign: TextAlign.center),
+              ],
             ],
           ),
         ),
       ),
     );
   }
-}
-
-class _SigningInScreen extends StatelessWidget {
-  const _SigningInScreen();
-
-  @override
-  Widget build(BuildContext context) => Scaffold(
-        body: SafeArea(
-          child: Center(
-            child: Padding(
-              padding: const EdgeInsets.all(28),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  const MelbelMascot(),
-                  const SizedBox(height: 28),
-                  const CircularProgressIndicator(),
-                  const SizedBox(height: 20),
-                  Text('Đang đăng nhập...',
-                      style: Theme.of(context).textTheme.titleLarge),
-                  const SizedBox(height: 8),
-                  const Text('Đang kết nối với Google...'),
-                  const SizedBox(height: 4),
-                  const Text('Bạn đợi Melbel một xíu nhé ✨'),
-                ],
-              ),
-            ),
-          ),
-        ),
-      );
-}
-
-class _LoginErrorScreen extends StatelessWidget {
-  const _LoginErrorScreen({
-    required this.onRetry,
-    required this.onContinueAsGuest,
-  });
-
-  final VoidCallback onRetry;
-  final VoidCallback onContinueAsGuest;
-
-  @override
-  Widget build(BuildContext context) => Scaffold(
-        appBar: AppBar(leading: BackButton(onPressed: onRetry)),
-        body: SafeArea(
-          child: Padding(
-            padding: const EdgeInsets.all(24),
-            child: Column(
-              children: [
-                const Spacer(),
-                const MelbelMascot(),
-                const SizedBox(height: 32),
-                const _NoticeCard(
-                  icon: Icons.help_outline,
-                  title: 'Đăng nhập chưa được',
-                  message:
-                      'Bản demo chưa kết nối xác thực Google. Bạn có thể thử lại sau hoặc dùng thử không cần tài khoản.',
-                ),
-                const Spacer(),
-                FilledButton.icon(
-                  onPressed: onRetry,
-                  icon: const Text('G'),
-                  label: const Text('Thử lại với Google'),
-                  style: FilledButton.styleFrom(
-                    minimumSize: const Size.fromHeight(56),
-                  ),
-                ),
-                TextButton(
-                  onPressed: onContinueAsGuest,
-                  child: const Text('Dùng thử không cần đăng nhập'),
-                ),
-              ],
-            ),
-          ),
-        ),
-      );
 }
 
 /// D-04–D-10. Preferences and permission choices stay local in this prototype;

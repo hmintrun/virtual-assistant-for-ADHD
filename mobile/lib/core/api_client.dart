@@ -2,12 +2,12 @@ import 'dart:math';
 
 import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart';
-import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import 'api_session.dart';
 
 /// Dio client for the FastAPI v1 envelope contract.
 class ApiClient {
-  ApiClient({Dio? dio, FlutterSecureStorage? secureStorage})
-      : _storage = secureStorage ?? const FlutterSecureStorage(),
+  ApiClient({Dio? dio, bool bindSession = true})
+      : _session = bindSession ? ApiSession.current : null,
         dio = dio ??
             Dio(BaseOptions(
               baseUrl: _baseUrl,
@@ -18,14 +18,60 @@ class ApiClient {
               headers: const {'Accept': 'application/json'},
             )) {
     this.dio.interceptors.add(InterceptorsWrapper(
-      onRequest: (options, handler) async {
-        final token = await _storage.read(key: 'access_token');
-        if (token != null && token.isNotEmpty) {
-          options.headers['Authorization'] = 'Bearer $token';
-        }
-        handler.next(options);
-      },
-    ));
+          onRequest: (options, handler) {
+            final session = _session;
+            if (session != null && !session.active) {
+              handler.reject(DioException(
+                  requestOptions: options, type: DioExceptionType.cancel));
+              return;
+            }
+            final token = session?.token;
+            if (token != null)
+              options.headers['Authorization'] = 'Bearer $token';
+            handler.next(options);
+          },
+          onResponse: (response, handler) {
+            if (_session?.active == false) {
+              handler.reject(DioException(
+                requestOptions: response.requestOptions,
+                type: DioExceptionType.cancel,
+              ));
+              return;
+            }
+            handler.next(response);
+          },
+          onError: (error, handler) async {
+            final session = _session;
+            final request = error.requestOptions;
+            if (session == null ||
+                !session.active ||
+                error.response?.statusCode != 401 ||
+                request.extra['auth_retried'] == true) {
+              handler.next(error);
+              return;
+            }
+            final sentToken = request.headers['Authorization'];
+            final tokenChanged =
+                session.token != null && sentToken != 'Bearer ${session.token}';
+            final renewed =
+                tokenChanged || (await session.renew?.call() ?? false);
+            if (!renewed || !session.active) {
+              if (session.active) session.onUnauthorized?.call();
+              handler.next(error);
+              return;
+            }
+            try {
+              handler.resolve(await this.dio.fetch<dynamic>(request.copyWith(
+                    extra: {...request.extra, 'auth_retried': true},
+                  )));
+            } on DioException catch (retryError) {
+              if (session.active && retryError.response?.statusCode == 401) {
+                session.onUnauthorized?.call();
+              }
+              handler.next(retryError);
+            }
+          },
+        ));
   }
 
   static const _configuredBaseUrl = String.fromEnvironment('API_BASE_URL');
@@ -39,7 +85,7 @@ class ApiClient {
   }
 
   final Dio dio;
-  final FlutterSecureStorage _storage;
+  final ApiSession? _session;
 
   static String newIdempotencyKey(String operation) {
     final secureRandom = Random.secure();

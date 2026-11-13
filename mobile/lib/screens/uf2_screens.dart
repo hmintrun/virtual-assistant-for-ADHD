@@ -1376,6 +1376,10 @@ class PlanLockedScreen extends StatelessWidget {
     final focusSession = FocusSessionInfo(
       sessionId: session.sessionId,
       scheduleRevision: session.scheduleRevision,
+      isLastSessionOfStep: !task.sessions.any((other) =>
+          other.stepId == session.stepId &&
+          other.status == 'scheduled' &&
+          other.scheduledStart.isAfter(session.scheduledStart)),
       taskTitle: taskProvider.title,
       stepTitle: step?.title ?? 'Bước hiện tại',
       expectedOutput:

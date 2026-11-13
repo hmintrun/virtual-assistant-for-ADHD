@@ -12,13 +12,16 @@ class PlanningApi {
   PlanningApi(
       {ApiClient? client,
       FlutterSecureStorage? storage,
+      String? ownerId,
       DateTime Function()? now})
       : _client = client ?? ApiClient(),
         _storage = storage ?? const FlutterSecureStorage(),
+        _ownerId = ownerId,
         _now = now ?? DateTime.now;
 
   final ApiClient _client;
   final FlutterSecureStorage _storage;
+  final String? _ownerId;
   final DateTime Function() _now;
 
   // Một lệnh chưa biết kết quả giữ nguyên cả body và key, kể cả khi mở lại app.
@@ -30,7 +33,10 @@ class PlanningApi {
     String? fixedKey,
     bool retainCompleted = false,
   }) async {
-    final slot = 'planning_command_$operation';
+    final owner = _ownerId;
+    final slot = owner == null
+        ? 'planning_command_$operation'
+        : 'planning_command_${owner}_$operation';
     final signature = jsonEncode(intent);
     final stored = await _storage.read(key: slot);
     JsonMap? command;
@@ -56,6 +62,7 @@ class PlanningApi {
       if (status != null &&
           status >= 400 &&
           status < 500 &&
+          status != 401 &&
           status != 408 &&
           status != 429) {
         await _storage.delete(key: slot);
@@ -147,7 +154,20 @@ class PlanningApi {
           'message': message.trim(),
       },
     );
-    return PlanningDraftModel.fromJson(json);
+    final analyzed = json['summary'] as JsonMap? ?? const {};
+    return PlanningDraftModel.fromJson({
+      ...json,
+      'raw_input': json['raw_input'] ?? draft.rawInput,
+      'input_source': json['input_source'] ?? draft.inputSource,
+      'client_draft_id': json['client_draft_id'] ?? draft.clientDraftId,
+      'summary': {
+        ...draft.summary,
+        // Validation is always owned by the latest analysis response.
+        'can_plan': false,
+        'clarification_issues': const [],
+        ...analyzed,
+      },
+    });
   }
 
   Future<PlanningDraftModel> updateSummary({
@@ -156,12 +176,28 @@ class PlanningApi {
     required String scope,
     required DateTime? deadline,
     JsonMap? availability,
+    List<String>? extraRequirements,
   }) async {
     final oldTime = draft.summary['time_constraint'] as Map<String, dynamic>?;
     final oldEnd = DateTime.tryParse(
         (oldTime?['deadline_at'] ?? oldTime?['finish_by_at']) as String? ?? '');
     final deadlineChanged = deadline != null &&
         (oldEnd == null || !deadline.isAtSameMomentAs(oldEnd));
+    final changes = <String, dynamic>{
+      if (title.length <= 100 && title != draft.title) 'title': title,
+      if (scope != draft.scope) 'scope': scope,
+      if (availability != null) 'availability': availability,
+      if (extraRequirements != null) 'extra_requirements': extraRequirements,
+      if (deadlineChanged)
+        'time_constraint': {
+          'kind': 'deadline',
+          'start_at': oldTime?['start_at'] ?? _vnIso(_now()),
+          'deadline_at': _vnIso(deadline),
+          'finish_by_at': null,
+          'input_timezone': oldTime?['input_timezone'] ?? defaultTimezone,
+        },
+    };
+    if (changes.isEmpty) return draft;
     final intent = <String, dynamic>{
       'summary_revision': draft.summaryRevision,
       'input_revision': draft.planningInputRevision,
@@ -170,6 +206,7 @@ class PlanningApi {
       'deadline': deadline?.toUtc().toIso8601String(),
       if (availability != null) 'availability': availability,
       'previous_time_constraint': oldTime,
+      if (extraRequirements != null) 'extra_requirements': extraRequirements,
     };
     final json = await _command(
       operation: 'patch_${draft.draftId}',
@@ -177,23 +214,7 @@ class PlanningApi {
       buildBody: () => {
         'expected_summary_revision': draft.summaryRevision,
         'expected_planning_input_revision': draft.planningInputRevision,
-        'changes': {
-          'summary': {
-            if (title.length <= 100) 'title': title,
-            'scope': scope,
-            if (availability != null) 'availability': availability,
-            // Chỉ sửa thời gian khi user đổi hạn; không đổi start/window khi sửa chữ.
-            if (deadlineChanged)
-              'time_constraint': {
-                'kind': 'deadline',
-                'start_at': oldTime?['start_at'] ?? _vnIso(_now()),
-                'deadline_at': _vnIso(deadline),
-                'finish_by_at': null,
-                'input_timezone':
-                    oldTime?['input_timezone'] ?? defaultTimezone,
-              },
-          }
-        },
+        'changes': {'summary': changes},
       },
       send: (body, key) => _client.patchData(
           '/drafts/${Uri.encodeComponent(draft.draftId)}',

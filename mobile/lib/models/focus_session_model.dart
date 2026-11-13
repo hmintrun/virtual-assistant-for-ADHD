@@ -12,6 +12,7 @@ class FocusSessionInfo {
     required this.microTaskText,
     required this.segments,
     this.scheduleRevision = 1,
+    this.isLastSessionOfStep = false,
     this.deadline,
     this.expectedOutput,
   });
@@ -27,6 +28,7 @@ class FocusSessionInfo {
   final String microTaskText;
   final List<SessionSegmentModel> segments;
   final int scheduleRevision;
+  final bool isLastSessionOfStep;
   final DateTime? deadline;
   final String? expectedOutput;
 
@@ -46,6 +48,7 @@ class FocusSessionInfo {
             .map(SessionSegmentModel.fromJson)
             .toList(growable: false),
         scheduleRevision: json['schedule_revision'] as int? ?? 1,
+        isLastSessionOfStep: json['is_last_session_of_step'] == true,
         deadline: DateTime.tryParse(json['deadline'] as String? ?? ''),
         expectedOutput: json['expected_output'] as String?,
       );
@@ -53,6 +56,7 @@ class FocusSessionInfo {
   Map<String, dynamic> toJson() => {
         'session_id': sessionId,
         'schedule_revision': scheduleRevision,
+        'is_last_session_of_step': isLastSessionOfStep,
         'task_title': taskTitle,
         'step_title': stepTitle,
         'scheduled_start': scheduledStart.toIso8601String(),

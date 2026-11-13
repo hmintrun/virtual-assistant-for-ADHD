@@ -49,11 +49,14 @@ class DeadlineOption {
 }
 
 class TaskProvider extends ChangeNotifier {
-  static const _storageKey = 'proplan.uf1.current_draft.v1';
+  final String _storageKey;
   static const _storage = FlutterSecureStorage();
 
-  TaskProvider({PlanningApi? planningApi})
-      : _planningApi = planningApi ?? PlanningApi();
+  TaskProvider({PlanningApi? planningApi, String? ownerId})
+      : _storageKey = ownerId == null
+            ? 'proplan.uf1.current_draft.v1'
+            : 'proplan.uf1.current_draft.v1.$ownerId',
+        _planningApi = planningApi ?? PlanningApi(ownerId: ownerId);
 
   final PlanningApi _planningApi;
 
@@ -111,7 +114,12 @@ class TaskProvider extends ChangeNotifier {
     final summary = _draft?.summary;
     final availability = summary?['availability'] as JsonMap?;
     if (availability != null) {
-      final weekly = (availability['weekly_rules'] as List?) ?? const [];
+      final weekly = (availability['weekly_rules'] as List?) ??
+          (availability['rules'] as List?)
+              ?.whereType<JsonMap>()
+              .where((rule) => rule['kind'] == 'weekly_rule')
+              .toList() ??
+          const [];
       final overrides = (availability['date_overrides'] as List?) ?? const [];
       final labels = [
         for (final rule in weekly.whereType<JsonMap>())
@@ -317,6 +325,7 @@ class TaskProvider extends ChangeNotifier {
       );
     }
     _draft = current;
+    _applyDraftSummary();
     _availability = null;
     _candidate = null;
     await _persist();
@@ -331,11 +340,17 @@ class TaskProvider extends ChangeNotifier {
     });
   }
 
-  Future<void> updateDraftOnBackend() async {
+  Future<void> updateDraftOnBackend({String? extraRequirement}) async {
     final draft = _draft;
     final availability = _pendingAvailability;
     if (draft == null)
       throw const ApiException('Chưa có bản nháp trên máy chủ.');
+    final extras = (draft.summary['extra_requirements'] as List? ?? const [])
+        .whereType<String>()
+        .toSet();
+    final extra = extraRequirement?.trim() ?? '';
+    final extraRequirements =
+        extra.isNotEmpty && extras.add(extra) ? extras.toList() : null;
     await _runApi((revision) async {
       final current = await _accept(
         _planningApi.updateSummary(
@@ -344,6 +359,7 @@ class TaskProvider extends ChangeNotifier {
           scope: _scope.trim(),
           deadline: _deadline,
           availability: availability,
+          extraRequirements: extraRequirements,
         ),
         revision,
       );
@@ -662,6 +678,44 @@ class TaskProvider extends ChangeNotifier {
         localValue.minute.toString().padLeft(2, '0');
   }
 
+  bool applyExplicitAvailabilityAnswer(String answer) {
+    final text = answer.trim();
+    const day = r'(hôm nay|ngày mai|ngày kia)';
+    const hours = r'(?:từ\s+)?([01]?\d|2[0-3]):([0-5]\d)\s*(?:đến|[-–—])\s*'
+        r'([01]?\d|2[0-3]):([0-5]\d)';
+    final dayFirst =
+        RegExp('^$day\\s+$hours[.!]?\$', caseSensitive: false).firstMatch(text);
+    final dayLast =
+        RegExp('^$hours\\s+$day[.!]?\$', caseSensitive: false).firstMatch(text);
+    final match = dayFirst ?? dayLast;
+    if (match == null) return false;
+    final hourIndex = dayFirst == null ? 1 : 2;
+    final dayIndex = dayFirst == null ? 5 : 1;
+    final now = DateTime.now();
+    final vn = AvailabilitySlot._inVietnam(now);
+    final offset = switch (match[dayIndex]!.toLowerCase()) {
+      'ngày mai' => 1,
+      'ngày kia' => 2,
+      _ => 0,
+    };
+    final date = DateTime.utc(vn.year, vn.month, vn.day + offset);
+    DateTime instant(int hourIndex, int minuteIndex) => date.add(Duration(
+          hours: int.parse(match[hourIndex]!) - 7,
+          minutes: int.parse(match[minuteIndex]!),
+        ));
+    final start = instant(hourIndex, hourIndex + 1);
+    final end = instant(hourIndex + 2, hourIndex + 3);
+    if (!end.isAfter(start) || !end.isAfter(now)) {
+      throw const ApiException(
+          'Chọn khung giờ còn hiệu lực, kết thúc sau giờ bắt đầu.');
+    }
+    if (_deadline case final deadline? when end.isAfter(deadline)) {
+      throw const ApiException('Giờ kết thúc phải trước hoặc bằng hạn chót.');
+    }
+    setAvailability(AvailabilitySlot(start: start, end: end));
+    return true;
+  }
+
   /// Prefill only explicit, single clauses in free text. Other wording still
   /// goes through the normal analysis flow, and existing form values win.
   void fillExplicitPlanningInput() {
@@ -704,17 +758,13 @@ class TaskProvider extends ChangeNotifier {
     }
 
     final available = single(
-      '${clauseStart}Tôi rảnh\\s+$relativeDay\\s+(?:từ\\s+)?'
-      '$time\\s*(?:[-–—]|đến)\\s*$time$clauseEnd',
+      '${clauseStart}Tôi rảnh\\s+([^.!?\\n]+)$clauseEnd',
     );
     if (!hasAvailability && available != null) {
-      final start = instant(available[1]!, available[2]!, available[3]!);
-      final end = instant(available[1]!, available[4]!, available[5]!);
-      final limit = _deadline;
-      if (end.isAfter(start) &&
-          end.isAfter(now) &&
-          (limit == null || !end.isAfter(limit))) {
-        setAvailability(AvailabilitySlot(start: start, end: end));
+      try {
+        applyExplicitAvailabilityAnswer(available[1]!);
+      } on ApiException {
+        // Leave invalid ranges to the summary review.
       }
     }
 

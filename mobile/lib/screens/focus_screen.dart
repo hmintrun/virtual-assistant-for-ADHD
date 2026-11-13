@@ -10,7 +10,10 @@ import '../core/theme.dart';
 import '../models/focus_session_model.dart';
 import '../models/task_model.dart';
 import '../providers/focus_provider.dart';
+import '../providers/task_provider.dart';
+import 'task_entry_screen.dart';
 import '../widgets/melbel_ui.dart';
+import 'focus_review_screens.dart';
 
 /// UF3–UF4 flow for an already scheduled Session. The session comes from the
 /// confirmed plan; this screen does not create or complete Tasks/Steps.
@@ -23,8 +26,6 @@ class FocusScreen extends StatefulWidget {
 
 class _FocusScreenState extends State<FocusScreen> with WidgetsBindingObserver {
   final TextEditingController _thoughtText = TextEditingController();
-  final AudioPlayer _audioPlayer = AudioPlayer();
-  String? _playingThoughtId;
 
   @override
   void initState() {
@@ -38,6 +39,7 @@ class _FocusScreenState extends State<FocusScreen> with WidgetsBindingObserver {
       final focus = context.read<FocusProvider>();
       focus.refreshDndPermission();
       focus.handleAppResume();
+      if (focus.stage == FocusStage.ended) focus.refreshRunCheckIn();
     }
   }
 
@@ -45,7 +47,6 @@ class _FocusScreenState extends State<FocusScreen> with WidgetsBindingObserver {
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _thoughtText.dispose();
-    _audioPlayer.dispose();
     super.dispose();
   }
 
@@ -766,30 +767,22 @@ class _FocusScreenState extends State<FocusScreen> with WidgetsBindingObserver {
     FocusSessionInfo session,
   ) {
     return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-      _StatusPill(label: 'Đã dừng đồng hồ', icon: Icons.pause_circle_outline),
-      const SizedBox(height: 20),
-      Text(
-        'Phiên đã dừng',
-        style: Theme.of(context).textTheme.headlineSmall?.copyWith(
-              color: MelbelColors.kOnSurface,
-              fontWeight: FontWeight.w600,
-            ),
+      ReviewHeader(
+        focus.missedCheckIn
+            ? 'Chưa phản hồi'
+            : focus.hasOpenCheckIn
+                ? 'Bạn làm đến đâu rồi?'
+                : 'Phiên đã dừng',
+        focus.missedCheckIn
+            ? 'Bạn có thể báo tiến độ khi sẵn sàng.'
+            : 'Ghi nhận kết quả của phiên này.',
+        expression:
+            focus.missedCheckIn ? CatExpression.sleepy : CatExpression.neutral,
       ),
-      const SizedBox(height: 8),
-      Text(
-        'Kết quả chưa được xác nhận. Session, bước và công việc chưa được đánh dấu hoàn thành.',
-        style: Theme.of(context).textTheme.bodyLarge?.copyWith(
-              color: MelbelColors.kOnSurfaceVariant,
-            ),
-      ),
-      const SizedBox(height: 20),
-      _InfoCard(
-        icon: Icons.inbox_outlined,
-        title: 'Suy nghĩ đã cất: ${focus.thoughts.length}',
-        subtitle:
-            'Bạn có thể mở hộp suy nghĩ để nghe lại ghi âm trên thiết bị.',
-      ),
-      const SizedBox(height: 20),
+      const SizedBox(height: 16),
+      ReviewSessionCard(
+          session: session, actualSeconds: focus.actualWorkSeconds),
+      const SizedBox(height: 16),
       if (focus.needsEndSync)
         PrimaryCta(
           label: 'Đồng bộ kết thúc phiên',
@@ -800,23 +793,41 @@ class _FocusScreenState extends State<FocusScreen> with WidgetsBindingObserver {
           label: 'Gửi lại kết quả phiên',
           onPressed: focus.runCommandBusy ? null : focus.retryCheckInResponse,
         ),
-      if (focus.hasOpenCheckIn && !focus.hasPendingCheckInResponse) ...[
-        const Text('Bạn đã làm đến đâu?'),
-        const SizedBox(height: 8),
-        for (final (label, outcome) in const [
-          ('Hoàn thành phiên', 'completed'),
-          ('Chưa xong', 'incomplete'),
-          ('Việc đột xuất', 'busy'),
+      if (focus.canAnswerCheckIn && !focus.hasPendingCheckInResponse) ...[
+        for (final (label, outcome, icon) in const [
+          ('Hoàn thành phiên', 'completed', Icons.check_circle_outline),
+          ('Chưa xong', 'incomplete', Icons.timelapse_outlined),
+          ('Việc đột xuất', 'busy', Icons.pause_circle_outline),
+          ('Bỏ qua phiên', 'skipped', Icons.skip_next_outlined),
         ])
-          OutlinedButton(
-            onPressed: focus.runCommandBusy
-                ? null
-                : () => focus.answerCheckIn(outcome),
-            child: Text(label),
+          Padding(
+            padding: const EdgeInsets.only(bottom: 8),
+            child: MelbelCard(
+              padding: EdgeInsets.zero,
+              child: ListTile(
+                leading: Icon(icon),
+                title: Text(label),
+                trailing: const Icon(Icons.chevron_right),
+                enabled: !focus.runCommandBusy,
+                onTap: focus.runCommandBusy
+                    ? null
+                    : () => outcome == 'skipped'
+                        ? _chooseSkip(focus)
+                        : _reviewOutcome(focus, session, outcome),
+              ),
+            ),
           ),
         TextButton(
-          onPressed: focus.runCommandBusy ? null : () => _chooseSkip(focus),
-          child: const Text('Bỏ qua'),
+          onPressed: focus.runCommandBusy
+              ? null
+              : () async {
+                  await focus.restAfterCheckIn();
+                  if (!context.mounted) return;
+                  await Navigator.of(context).push(MaterialPageRoute<void>(
+                    builder: (_) => const FocusRestScreen(),
+                  ));
+                },
+          child: const Text('Nghỉ giải lao'),
         ),
       ],
       PrimaryCta(
@@ -832,28 +843,78 @@ class _FocusScreenState extends State<FocusScreen> with WidgetsBindingObserver {
   }
 
   Future<void> _chooseSkip(FocusProvider focus) async {
-    final scope = await showModalBottomSheet<String>(
-      context: context,
-      builder: (context) => SafeArea(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            for (final (label, value) in const [
-              ('Hoãn phiên này làm sau', 'postpone_session'),
-              ('Bỏ qua phiên này', 'skip_session'),
-              ('Bỏ toàn bộ bước này', 'skip_step'),
-            ])
-              ListTile(
-                title: Text(label),
-                onTap: () => Navigator.pop(context, value),
-              ),
-          ],
-        ),
-      ),
+    final session = focus.session;
+    if (session == null) return;
+    final scope = await Navigator.of(context).push<String>(
+      MaterialPageRoute(
+          builder: (context) => FocusReviewPage(
+                title: 'Bỏ qua phiên',
+                children: [
+                  const ReviewHeader('Bạn muốn bỏ qua thế nào?',
+                      'Chọn phạm vi cho phiên này.'),
+                  ReviewSessionCard(session: session),
+                  for (final (label, value) in const [
+                    ('Hoãn phiên này làm sau', 'postpone_session'),
+                    ('Bỏ qua phiên này', 'skip_session'),
+                    ('Bỏ toàn bộ bước này', 'skip_step'),
+                  ])
+                    ListTile(
+                      title: Text(label),
+                      onTap: () => Navigator.pop(context, value),
+                    ),
+                ],
+              )),
     );
     if (scope != null && mounted) {
       await focus.answerCheckIn('skipped', skipScope: scope);
+      if (mounted && !focus.canAnswerCheckIn && scope == 'postpone_session') {
+        await Navigator.of(context).push(MaterialPageRoute<void>(
+          builder: (_) => ScheduleChangeReasonScreen(session: session),
+        ));
+      }
     }
+  }
+
+  Future<void> _reviewOutcome(
+    FocusProvider focus,
+    FocusSessionInfo session,
+    String outcome,
+  ) async {
+    String? note;
+    bool? stepCompleted;
+    if (outcome == 'incomplete') {
+      note = await Navigator.of(context).push<String>(MaterialPageRoute(
+        builder: (_) => UnfinishedReviewScreen(session: session),
+      ));
+      if (!mounted || note == null) return;
+    }
+    if (outcome == 'completed' && session.isLastSessionOfStep) {
+      stepCompleted = await Navigator.of(context).push<bool>(MaterialPageRoute(
+        builder: (context) => FocusReviewPage(
+          title: 'Phiên cuối của bước',
+          children: [
+            const ReviewHeader(
+                'Bước này đã xong chưa?', 'Ghi nhận riêng kết quả của bước.'),
+            ReviewSessionCard(session: session),
+            PrimaryCta(
+                label: 'Đã xong bước',
+                onPressed: () => Navigator.pop(context, true)),
+            SecondaryCta(
+                label: 'Bước chưa xong',
+                onPressed: () => Navigator.pop(context, false)),
+          ],
+        ),
+      ));
+      if (!mounted || stepCompleted == null) return;
+    }
+    await focus.answerCheckIn(outcome,
+        remainingNote: note, stepCompleted: stepCompleted);
+    if (!mounted || focus.canAnswerCheckIn || focus.runError != null) return;
+    await Navigator.of(context).push(MaterialPageRoute<void>(
+      builder: (_) => outcome == 'completed'
+          ? NextFocusActionScreen(session: session)
+          : ScheduleChangeReasonScreen(session: session),
+    ));
   }
 
   Future<void> _leave(BuildContext context, FocusProvider focus) async {
@@ -869,85 +930,89 @@ class _FocusScreenState extends State<FocusScreen> with WidgetsBindingObserver {
     await focus.endEarly();
   }
 
-  Future<void> _showThoughts(BuildContext context, FocusProvider focus) async {
-    await showModalBottomSheet<void>(
-      context: context,
-      isScrollControlled: true,
-      showDragHandle: true,
-      backgroundColor: MelbelColors.kSurfaceContainer,
-      builder: (sheetContext) => SafeArea(
-        child: Padding(
-          padding: EdgeInsets.fromLTRB(
-            20,
-            8,
-            20,
-            20 + MediaQuery.viewInsetsOf(sheetContext).bottom,
-          ),
-          child: ConstrainedBox(
-            constraints: BoxConstraints(
-              maxHeight: MediaQuery.sizeOf(sheetContext).height * .65,
-            ),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text('Hộp suy nghĩ',
-                    style: Theme.of(sheetContext).textTheme.titleLarge),
-                const SizedBox(height: 8),
-                const Text('Ghi âm và ghi chú được lưu cục bộ trên thiết bị.'),
-                const SizedBox(height: 12),
-                Expanded(
-                  child: focus.thoughts.isEmpty
-                      ? const Center(
-                          child: Text('Chưa có suy nghĩ nào được cất.'))
-                      : ListView.builder(
-                          itemCount: focus.thoughts.length,
-                          itemBuilder: (context, index) {
-                            final thought = focus.thoughts[index];
-                            return Padding(
-                              padding: const EdgeInsets.only(bottom: 8),
-                              child: _ThoughtTile(
-                                thought: thought,
-                                isPlaying: _playingThoughtId == thought.id,
-                                onPlay: thought.audioPath == null
-                                    ? null
-                                    : () => _playThought(thought),
-                                onDelete: () async {
-                                  await focus.deleteThought(thought);
-                                  if (sheetContext.mounted) {
-                                    ScaffoldMessenger.of(sheetContext)
-                                        .showSnackBar(
-                                      SnackBar(
-                                        content: const Text('Đã xóa ghi chú'),
-                                        duration: const Duration(seconds: 5),
-                                        action: SnackBarAction(
-                                          label: 'Hoàn tác',
-                                          onPressed: () {
-                                            unawaited(
-                                              focus.undoDeletedThought(),
-                                            );
-                                          },
-                                        ),
-                                      ),
-                                    );
-                                  }
-                                },
-                              ),
-                            );
-                          },
-                        ),
-                ),
-                const SizedBox(height: 8),
-                if (focus.stage == FocusStage.ended &&
-                    focus.thoughts.isNotEmpty)
-                  Text(
-                    'Chuyển ghi âm thành bản nháp UF1 sẽ được nối với API sau khi backend bàn giao endpoint.',
-                    style: TextStyle(color: MelbelColors.kTextSecondary),
-                  ),
-              ],
-            ),
-          ),
+  Future<void> _showThoughts(BuildContext context, FocusProvider focus) =>
+      Navigator.of(context).push<void>(
+        MaterialPageRoute(builder: (_) => const ThoughtInboxScreen()),
+      );
+}
+
+class ThoughtInboxScreen extends StatefulWidget {
+  const ThoughtInboxScreen({super.key});
+
+  @override
+  State<ThoughtInboxScreen> createState() => _ThoughtInboxScreenState();
+}
+
+class _ThoughtInboxScreenState extends State<ThoughtInboxScreen> {
+  final _audioPlayer = AudioPlayer();
+  String? _playingThoughtId;
+  bool _showDraft = false;
+
+  @override
+  void dispose() {
+    _audioPlayer.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final focus = context.watch<FocusProvider>();
+    final task = context.watch<TaskProvider>();
+    return FocusReviewPage(
+      title: 'Hộp nháp',
+      children: [
+        const ReviewHeader('Hộp suy nghĩ',
+            'Nghe lại ghi âm hoặc xem ghi chú khi bạn sẵn sàng.'),
+        SegmentedButton<bool>(
+          segments: const [
+            ButtonSegment(value: true, label: Text('Công việc nháp')),
+            ButtonSegment(value: false, label: Text('Suy nghĩ đã cất')),
+          ],
+          selected: {_showDraft},
+          onSelectionChanged: (value) =>
+              setState(() => _showDraft = value.single),
         ),
-      ),
+        if (_showDraft && task.title.isNotEmpty && !task.planLocked)
+          MelbelCard(
+            child: ListTile(
+              title: Text(task.title),
+              subtitle: Text(task.formatDeadline(task.deadline)),
+              trailing: const Icon(Icons.chevron_right),
+              onTap: () => Navigator.of(context).push(MaterialPageRoute<void>(
+                builder: (_) => const TaskEntryScreen(),
+              )),
+            ),
+          )
+        else if (_showDraft)
+          const MelbelCard(child: Text('Chưa có công việc nháp.')),
+        if (!_showDraft && focus.thoughts.isEmpty)
+          const MelbelCard(child: Text('Chưa có suy nghĩ nào được cất.')),
+        if (!_showDraft)
+          for (final thought in focus.thoughts)
+            _ThoughtTile(
+              thought: thought,
+              isPlaying: _playingThoughtId == thought.id,
+              onPlay: thought.audioPath == null
+                  ? null
+                  : () => _playThought(thought),
+              onDelete: () async {
+                if (_playingThoughtId == thought.id) {
+                  await _audioPlayer.stop();
+                  if (mounted) setState(() => _playingThoughtId = null);
+                }
+                await focus.deleteThought(thought);
+                if (!context.mounted) return;
+                ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                  content: const Text('Đã xóa ghi chú'),
+                  duration: const Duration(seconds: 5),
+                  action: SnackBarAction(
+                    label: 'Hoàn tác',
+                    onPressed: () => unawaited(focus.undoDeletedThought()),
+                  ),
+                ));
+              },
+            ),
+      ],
     );
   }
 
