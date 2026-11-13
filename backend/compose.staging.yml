@@ -1,0 +1,19 @@
+services:
+  postgres-staging:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: proplan_staging
+      POSTGRES_PASSWORD: ${PROPLAN_STAGING_PASSWORD:?Set PROPLAN_STAGING_PASSWORD}
+      POSTGRES_DB: proplan_staging
+    ports:
+      - "127.0.0.1:5433:5432"
+    volumes:
+      - postgres-staging:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-h", "127.0.0.1", "-U", "proplan_staging", "-d", "proplan_staging"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  postgres-staging:
