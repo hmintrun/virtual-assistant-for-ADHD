@@ -1240,7 +1240,7 @@ def upgrade():
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("revision", sa.Integer(), nullable=False),
-        sa.CheckConstraint("attempt_count BETWEEN 1 AND 5", name=op.f("ck_thoughts_attempt_limit")),
+        sa.CheckConstraint("attempt_count BETWEEN 1 AND 3", name=op.f("ck_thoughts_attempt_limit")),
         sa.CheckConstraint("revision >= 1", name=op.f("ck_thoughts_revision_positive")),
         sa.ForeignKeyConstraint(
             ["source_run_id", "user_id"],

@@ -491,3 +491,36 @@ async def test_thought_link_reflects_task_only_after_candidate_confirm(w05_clien
     listing = (await w05_client.get("/api/v1/thoughts")).json()["data"]["items"]
     assert listing[0]["converted_task_id"] == task_id
     assert (await delete(w05_client, row, revision=detail["thought_revision"])).status_code == 409
+
+
+async def test_thought_text_fallback_attempts_4_and_5_succeed_and_persist_in_db(
+    w05_client, w05_env
+):
+    for attempt in (4, 5):
+        res = await capture(
+            w05_client,
+            input_type="text",
+            attempt_count=attempt,
+            text_content=f"Suy nghĩ nhập tay lần {attempt}",
+        )
+        assert res.status_code == 201, res.text
+        data = res.json()["data"]
+        assert data["attempt_count"] == attempt
+        assert data["input_type"] == "text"
+        async with w05_env["sessions"]() as db:
+            saved = await db.scalar(select(Thought).where(Thought.id == UUID(data["thought_id"])))
+            assert saved is not None
+            assert saved.attempt_count == attempt
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"input_type": "audio", "attempt_count": 4, "text_content": None},
+        {"input_type": "audio", "attempt_count": 1, "text_content": "Không được có text"},
+        {"input_type": "text", "attempt_count": 1, "text_content": "Hợp lệ", "client_thought_id": "   "},
+    ],
+)
+async def test_thought_validation_rejects_audio_over_3_zero_ai_and_blank_id(w05_client, changes):
+    res = await capture(w05_client, **changes)
+    assert res.status_code == 422, res.text

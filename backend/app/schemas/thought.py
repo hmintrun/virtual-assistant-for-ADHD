@@ -1,5 +1,7 @@
 """DTO Thought; đường dẫn audio và Undo outbox được quản lý trên thiết bị."""
 
+from __future__ import annotations
+
 from typing import Any, Literal
 
 from pydantic import AwareDatetime, Field, field_validator, model_validator
