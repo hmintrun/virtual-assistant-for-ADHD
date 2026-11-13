@@ -1436,3 +1436,19 @@ async def test_e2e_uf1_uf2_uf3_w04_system_flow(w04_env, w04_client):
     assert r_cmd.json()["data"]["result_reference"]["run_id"] == run_id
     assert r_cmd.json()["data"]["result_reference"]["session_id"] == official_session_id
 
+
+@pytest.mark.asyncio
+async def test_w04_start_session_earlier_than_15m_grace_requires_replan(w04_client, w04_env):
+    too_early = (w04_env["scheduled_start"] - timedelta(seconds=901)).isoformat()
+    res = await w04_client.post(
+        f"/api/v1/sessions/{w04_env['session_id']}/start",
+        headers={"Idempotency-Key": str(uuid4())},
+        json={
+            "expected_schedule_revision": 1,
+            "device_id": "device-early-check",
+            "requested_start_at": too_early,
+        },
+    )
+    assert res.status_code == 409, res.text
+    assert res.json()["error"]["code"] == "START_REQUIRES_REPLAN"
+

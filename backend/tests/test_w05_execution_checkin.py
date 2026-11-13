@@ -1517,3 +1517,28 @@ async def test_w05_restart_durability_and_cross_resource_key_reuse(sqlite_migrat
     finally:
         app.dependency_overrides.pop(get_db, None)
         app.dependency_overrides.pop(get_current_user, None)
+
+
+@pytest.mark.asyncio
+async def test_w05_run_event_future_clock_skew_over_300s_rejected(w05_client, w05_env):
+    run = await _start_run(w05_client, w05_env)
+    future_at = (datetime.now(UTC) + timedelta(seconds=360)).isoformat()
+    res = await w05_client.post(
+        f"/api/v1/runs/{run['run_id']}/events",
+        headers={"Idempotency-Key": str(uuid4())},
+        json={
+            "device_id": run["device_id"],
+            "expected_run_revision": run["run_revision"],
+            "events": [
+                {
+                    "event_id": "ev-future-skew",
+                    "event_type": "progress",
+                    "occurred_at": future_at,
+                    "segment_index": 0,
+                    "work_elapsed_seconds": 10,
+                    "rest_elapsed_seconds": 0,
+                }
+            ],
+        },
+    )
+    assert res.status_code == 422, res.text

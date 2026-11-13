@@ -19,7 +19,7 @@ class Thought(OwnedMixin, RecordMixin, Base):
     __tablename__ = "thoughts"
     __table_args__ = (
         UniqueConstraint("user_id", "client_thought_id"),
-        CheckConstraint("attempt_count BETWEEN 1 AND 3", name="attempt_limit"),
+        CheckConstraint("attempt_count BETWEEN 1 AND 5", name="attempt_limit"),
     )
     client_thought_id: Mapped[str] = mapped_column(String(128))
     source_run_id: Mapped[UUID | None] = mapped_column(

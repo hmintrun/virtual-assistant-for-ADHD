@@ -1,5 +1,6 @@
 """Router UF3: wire contract và điểm nối run_service/device_service của W03."""
 
+from datetime import UTC, datetime, timedelta
 from typing import Annotated
 
 from fastapi import APIRouter, Path, Query, Request
@@ -161,11 +162,14 @@ async def get_reminders(
     current_user: CurrentUserDep,
     db: DbSessionDep,
     device_id: Annotated[str, Query(min_length=1)],
-    from_time: Annotated[AwareDatetime, Query(alias="from")],
-    to_time: Annotated[AwareDatetime, Query(alias="to")],
+    from_time: Annotated[AwareDatetime | None, Query(alias="from")] = None,
+    to_time: Annotated[AwareDatetime | None, Query(alias="to")] = None,
     schedule_revision: Annotated[int | None, Query(ge=0)] = None,
 ) -> SuccessEnvelope[ReminderListResult]:
-    if from_time >= to_time:
+    now_utc = datetime.now(UTC)
+    effective_from = from_time or now_utc
+    effective_to = to_time or (effective_from + timedelta(hours=24))
+    if effective_from >= effective_to:
         raise AppError(
             status_code=422,
             code="VALIDATION_ERROR",
@@ -176,8 +180,8 @@ async def get_reminders(
         db=db,
         user_id=current_user.user_id,
         device_id=device_id,
-        from_time=from_time,
-        to_time=to_time,
+        from_time=effective_from,
+        to_time=effective_to,
         schedule_revision=schedule_revision,
     )
     return success(request, data)
