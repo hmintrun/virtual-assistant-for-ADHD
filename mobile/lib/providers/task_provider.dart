@@ -62,6 +62,7 @@ class TaskProvider extends ChangeNotifier {
 
   String _title = '';
   String _rawInputText = '';
+  String _entrySource = 'text';
   String _scope = '';
   DateTime? _deadline;
   AvailabilitySlot? _availability;
@@ -74,6 +75,14 @@ class TaskProvider extends ChangeNotifier {
   PlanningDraftModel? _draft;
   PlanCandidateModel? _candidate;
   TaskModel? _confirmedTask;
+  String? _calendarSyncState;
+  int? _confirmedScheduleRevision;
+  bool get canRefreshCalendarSync =>
+      _confirmedScheduleRevision != null &&
+      (_confirmedTask?.sessions.isNotEmpty ?? false) &&
+      (_calendarSyncState == 'pending' ||
+          _calendarSyncState == 'outbox_queued');
+  String? get calendarSyncState => _calendarSyncState;
   bool _isApiBusy = false;
   String? _apiError;
   String? _clientDraftId;
@@ -265,6 +274,42 @@ class TaskProvider extends ChangeNotifier {
     });
   }
 
+  bool get hasUnconfirmedDraft =>
+      !_planLocked && (_draft != null || _title.trim().isNotEmpty);
+
+  Future<void> analyzeThoughtDraft(PlanningDraftModel draft) async {
+    if (draft.stage == 'confirmed') {
+      throw const ApiException('Suy nghĩ này đã được tạo thành công việc.');
+    }
+    if (hasUnconfirmedDraft) {
+      throw const ApiException('Hãy lưu hoặc hoàn tất bản nháp đang mở.');
+    }
+    await _runApi((revision) async {
+      _draft = draft;
+      _rawInputText = draft.rawInput ?? draft.title;
+      _entrySource = 'text';
+      _clientDraftId = draft.clientDraftId;
+      _clientDraftFingerprint = null;
+      _title = draft.title.isEmpty ? _rawInputText : draft.title;
+      _draftSaved = true;
+      _scope = '';
+      _deadline = null;
+      _availability = null;
+      _confirmedTask = null;
+      _calendarSyncState = null;
+      _confirmedScheduleRevision = null;
+      _candidate = null;
+      _confirmed = false;
+      _planLocked = false;
+      _planSavedForLater = false;
+      _applyDraftSummary();
+      await _persist();
+      _draft = await _accept(_planningApi.analyzeDraft(draft), revision);
+      _applyDraftSummary();
+      await _persist();
+    });
+  }
+
   Future<void> submitClarification(String message) async {
     final answer = message.trim();
     if (answer.isEmpty) {
@@ -305,6 +350,7 @@ class TaskProvider extends ChangeNotifier {
         _planningApi.createDraft(
           clientDraftId: _clientDraftId!,
           rawInput: input,
+          inputSource: _entrySource,
           title: title,
           scope: scope,
           deadline: deadline,
@@ -483,10 +529,37 @@ class TaskProvider extends ChangeNotifier {
       if (saved.taskId.isEmpty)
         throw const ApiException('Máy chủ chưa trả công việc đã lưu.');
       _confirmedTask = saved;
+      _calendarSyncState = receipt['calendar_sync_summary'] as String?;
+      _confirmedScheduleRevision =
+          (receipt['schedule_version'] as Map?)?['version_number'] as int?;
       _planLocked = true;
       _planSavedForLater = false;
       _confirmed = true;
       await _persist();
+    });
+  }
+
+  Future<void> refreshCalendarSync() async {
+    if (!canRefreshCalendarSync) return;
+    final sessions = _confirmedTask!.sessions;
+    final from = sessions
+        .map((item) => item.scheduledStart)
+        .reduce((a, b) => a.isBefore(b) ? a : b);
+    final to = sessions
+        .map((item) => item.scheduledEnd)
+        .reduce((a, b) => a.isAfter(b) ? a : b);
+    await _runApi((revision) async {
+      final state = await _accept(
+          _planningApi.refreshCalendarSync(
+            scheduleRevision: _confirmedScheduleRevision!,
+            from: from,
+            to: to,
+          ),
+          revision);
+      if (state != null) {
+        _calendarSyncState = state;
+        await _persist();
+      }
     });
   }
 
@@ -774,8 +847,12 @@ class TaskProvider extends ChangeNotifier {
     if (_scope.trim().isEmpty && scope != null) setScope(scope[1]!.trim());
   }
 
-  void setTitle(String value) {
+  void setTitle(String value, {bool fromVoice = false}) {
     if (_title == value) return;
+    _entrySource =
+        fromVoice || (_entrySource == 'voice' && value.trim().isNotEmpty)
+            ? 'voice'
+            : 'text';
     if (_title != value) {
       _candidate = null;
       _confirmedTask = null;
@@ -863,10 +940,13 @@ class TaskProvider extends ChangeNotifier {
               start: DateTime.parse(start),
               end: DateTime.parse(end),
             );
+      _entrySource = data['entry_source'] == 'voice' ? 'voice' : 'text';
       _draftSaved = data['draft_saved'] as bool? ?? true;
       _confirmed = data['confirmed'] as bool? ?? false;
       _decompositionChoice = data['decomposition_choice'] as String?;
       _planLocked = data['plan_locked'] as bool? ?? false;
+      _calendarSyncState = data['calendar_sync_state'] as String?;
+      _confirmedScheduleRevision = data['confirmed_schedule_revision'] as int?;
       _planSavedForLater = data['plan_saved_for_later'] as bool? ?? false;
       // A cached Task is not proof of a backend confirmation. It is restored
       // only after GET /tasks/{task_id} succeeds in restoreBackendState().
@@ -920,6 +1000,7 @@ class TaskProvider extends ChangeNotifier {
     _decompositionChoice = null;
     _title = '';
     _rawInputText = '';
+    _entrySource = 'text';
     _scope = '';
     _deadline = null;
     _availability = null;
@@ -928,6 +1009,8 @@ class TaskProvider extends ChangeNotifier {
     _draft = null;
     _candidate = null;
     _confirmedTask = null;
+    _calendarSyncState = null;
+    _confirmedScheduleRevision = null;
     _planLocked = false;
     _planSavedForLater = false;
     unawaited(_deleteDraft());
@@ -950,6 +1033,7 @@ class TaskProvider extends ChangeNotifier {
     final data = <String, Object?>{
       'title': _title,
       'raw_input_text': _rawInputText,
+      'entry_source': _entrySource,
       'scope': _scope,
       'deadline': _deadline?.toIso8601String(),
       'availability_start': _availability?.start.toIso8601String(),
@@ -960,6 +1044,8 @@ class TaskProvider extends ChangeNotifier {
       'plan_locked': _planLocked,
       'plan_saved_for_later': _planSavedForLater,
       'confirmed_task': _confirmedTask?.toJson(),
+      'calendar_sync_state': _calendarSyncState,
+      'confirmed_schedule_revision': _confirmedScheduleRevision,
       'backend_draft_id': _draft?.draftId,
       'client_draft_id': _clientDraftId,
       'client_draft_fingerprint': _clientDraftFingerprint,

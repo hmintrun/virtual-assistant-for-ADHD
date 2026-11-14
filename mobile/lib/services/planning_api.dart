@@ -71,6 +71,30 @@ class PlanningApi {
     }
   }
 
+  Future<String?> refreshCalendarSync({
+    required int scheduleRevision,
+    required DateTime from,
+    required DateTime to,
+  }) async {
+    final connections = await _client.getListData('/calendar/connections');
+    final connection = connections
+        .where((item) =>
+            item['connection_state'] == 'connected' &&
+            item['write_calendar_id'] != null &&
+            item['connection_id'] is String)
+        .firstOrNull;
+    if (connection == null) return null;
+    final id = Uri.encodeComponent(connection['connection_id'] as String);
+    await _client.postData('/calendar/connections/$id/refresh',
+        data: const <String, dynamic>{}, idempotent: false);
+    final schedule = await _client.getData('/schedule', queryParameters: {
+      'from': from.toUtc().toIso8601String(),
+      'to': to.toUtc().toIso8601String(),
+    });
+    if (schedule['schedule_revision'] != scheduleRevision) return null;
+    return schedule['calendar_sync_summary'] as String?;
+  }
+
   Future<PlanningDraftModel> getDraft(String draftId) async =>
       PlanningDraftModel.fromJson(await _client.getData(
         '/drafts/${Uri.encodeComponent(draftId)}',

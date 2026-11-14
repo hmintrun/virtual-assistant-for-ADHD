@@ -7,6 +7,7 @@ import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 
 import '../core/theme.dart';
+import 'task_summary_screen.dart';
 import '../models/focus_session_model.dart';
 import '../models/task_model.dart';
 import '../providers/focus_provider.dart';
@@ -947,6 +948,7 @@ class _ThoughtInboxScreenState extends State<ThoughtInboxScreen> {
   final _audioPlayer = AudioPlayer();
   String? _playingThoughtId;
   bool _showDraft = false;
+  bool _isConverting = false;
 
   @override
   void dispose() {
@@ -989,31 +991,90 @@ class _ThoughtInboxScreenState extends State<ThoughtInboxScreen> {
           const MelbelCard(child: Text('Chưa có suy nghĩ nào được cất.')),
         if (!_showDraft)
           for (final thought in focus.thoughts)
-            _ThoughtTile(
-              thought: thought,
-              isPlaying: _playingThoughtId == thought.id,
-              onPlay: thought.audioPath == null
-                  ? null
-                  : () => _playThought(thought),
-              onDelete: () async {
-                if (_playingThoughtId == thought.id) {
-                  await _audioPlayer.stop();
-                  if (mounted) setState(() => _playingThoughtId = null);
-                }
-                await focus.deleteThought(thought);
-                if (!context.mounted) return;
-                ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-                  content: const Text('Đã xóa ghi chú'),
-                  duration: const Duration(seconds: 5),
-                  action: SnackBarAction(
-                    label: 'Hoàn tác',
-                    onPressed: () => unawaited(focus.undoDeletedThought()),
-                  ),
-                ));
-              },
-            ),
+            Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+              _ThoughtTile(
+                thought: thought,
+                isPlaying: _playingThoughtId == thought.id,
+                onPlay: thought.audioPath == null
+                    ? null
+                    : () => _playThought(thought),
+                onDelete: () async {
+                  if (_playingThoughtId == thought.id) {
+                    await _audioPlayer.stop();
+                    if (mounted) setState(() => _playingThoughtId = null);
+                  }
+                  await focus.deleteThought(thought);
+                  if (!context.mounted) return;
+                  ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                    content: const Text('Đã xóa ghi chú'),
+                    duration: const Duration(seconds: 5),
+                    action: SnackBarAction(
+                      label: 'Hoàn tác',
+                      onPressed: () => unawaited(focus.undoDeletedThought()),
+                    ),
+                  ));
+                },
+              ),
+              if (!focus.isActiveRun &&
+                  !focus.needsEndSync &&
+                  !focus.runCommandBusy &&
+                  !task.hasUnconfirmedDraft &&
+                  thought.serverThoughtId != null)
+                TextButton.icon(
+                  onPressed: _isConverting || task.isApiBusy
+                      ? null
+                      : () => _convertThought(focus, task, thought),
+                  icon: const Icon(Icons.edit_note_outlined),
+                  label: const Text('Tạo việc từ suy nghĩ'),
+                ),
+            ]),
       ],
     );
+  }
+
+  Future<void> _convertThought(
+    FocusProvider focus,
+    TaskProvider task,
+    ThoughtRecord thought,
+  ) async {
+    final text = await Navigator.of(context).push<String>(
+      MaterialPageRoute(
+          builder: (_) => _ThoughtDraftEntry(
+                initialText: thought.text ?? '',
+                transcribe: thought.localAudioPath == null
+                    ? null
+                    : () => focus.transcribeThought(thought),
+              )),
+    );
+    if (!mounted ||
+        text == null ||
+        task.isApiBusy ||
+        task.hasUnconfirmedDraft) {
+      return;
+    }
+    setState(() => _isConverting = true);
+    try {
+      final draft = await focus.convertThoughtToDraft(thought, text);
+      if (!mounted) return;
+      // An existing draft belongs in the summary even when analysis is unavailable.
+      try {
+        await task.analyzeThoughtDraft(draft);
+      } catch (_) {
+        if (!mounted || task.draft?.draftId != draft.draftId) rethrow;
+      }
+      if (!mounted) return;
+      await Navigator.of(context).push<void>(
+        MaterialPageRoute(builder: (_) => const TaskSummaryScreen()),
+      );
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(error.toString())),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _isConverting = false);
+    }
   }
 
   Future<void> _playThought(ThoughtRecord thought) async {
@@ -1039,6 +1100,71 @@ class _ThoughtInboxScreenState extends State<ThoughtInboxScreen> {
       }
     }
   }
+}
+
+class _ThoughtDraftEntry extends StatefulWidget {
+  const _ThoughtDraftEntry({required this.initialText, this.transcribe});
+  final String initialText;
+  final Future<String> Function()? transcribe;
+
+  @override
+  State<_ThoughtDraftEntry> createState() => _ThoughtDraftEntryState();
+}
+
+class _ThoughtDraftEntryState extends State<_ThoughtDraftEntry> {
+  late final _text = TextEditingController(text: widget.initialText);
+  bool _transcribing = false;
+
+  Future<void> _transcribe() async {
+    setState(() => _transcribing = true);
+    try {
+      final text = await widget.transcribe!();
+      if (mounted) _text.text = text;
+    } catch (_) {
+      if (mounted)
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+              content: Text('Chưa chuyển được ghi âm. Bạn có thể nhập chữ.')),
+        );
+    } finally {
+      if (mounted) setState(() => _transcribing = false);
+    }
+  }
+
+  @override
+  void dispose() {
+    _text.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => FocusReviewPage(
+        title: 'Tạo việc từ suy nghĩ',
+        children: [
+          if (widget.transcribe != null)
+            SecondaryCta(
+              label: _transcribing ? 'Đang chuyển…' : 'Chuyển ghi âm thành chữ',
+              onPressed: _transcribing ? null : _transcribe,
+            ),
+          TextField(
+            enabled: !_transcribing,
+            controller: _text,
+            minLines: 3,
+            maxLines: 6,
+            onChanged: (_) => setState(() {}),
+            decoration: const InputDecoration(
+              labelText: 'Nội dung công việc',
+              hintText: 'Nhập nội dung từ ghi âm hoặc suy nghĩ của bạn.',
+            ),
+          ),
+          PrimaryCta(
+            label: 'Tạo bản nháp',
+            onPressed: _transcribing || _text.text.trim().isEmpty
+                ? null
+                : () => Navigator.pop(context, _text.text.trim()),
+          ),
+        ],
+      );
 }
 
 class _SessionCard extends StatelessWidget {

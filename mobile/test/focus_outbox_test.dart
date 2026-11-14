@@ -22,45 +22,51 @@ class _Repository extends InMemoryRunRepository {
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
-  test('UF4 syncs legacy local notes and persists the unwrapped thought ID',
-      () async {
-    debugDefaultTargetPlatformOverride = TargetPlatform.windows;
-    addTearDown(() => debugDefaultTargetPlatformOverride = null);
-    SharedPreferences.setMockInitialValues({});
-    final repository = _Repository();
-    final created = DateTime.now().subtract(const Duration(minutes: 1));
-    await repository.queueThought(ThoughtRecord(
-      clientThoughtId: 'local-note',
-      createdAt: created,
-      undoDeadlineAt: created.add(const Duration(seconds: 5)),
-      sourceRunId: 'legacy-session-id',
-      textContent: 'Ghi chú thử',
-    ));
+  for (final serverRunId in [null, 'backend-run-id']) {
+    test('UF4 sends only the real run ID (serverRunId=$serverRunId)', () async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+      SharedPreferences.setMockInitialValues({});
+      final repository = _Repository();
+      final created = DateTime.now().subtract(const Duration(minutes: 1));
+      await repository.queueThought(ThoughtRecord(
+        clientThoughtId: 'local-note',
+        createdAt: created,
+        undoDeadlineAt: created.add(const Duration(seconds: 5)),
+        sourceRunId: 'legacy-session-id',
+        serverRunId: serverRunId,
+        textContent: 'Ghi chú thử',
+      ));
 
-    RequestOptions? sent;
-    final dio = Dio()
-      ..interceptors.add(InterceptorsWrapper(onRequest: (request, handler) {
-        sent = request;
-        handler.resolve(Response(
-          requestOptions: request,
-          statusCode: 201,
-          data: {
-            'data': {'thought_id': 'server-note'},
-          },
-        ));
-      }));
-    final provider =
-        FocusProvider(api: ApiClient(dio: dio), repository: repository);
-    addTearDown(provider.dispose);
+      RequestOptions? sent;
+      final dio = Dio()
+        ..interceptors.add(InterceptorsWrapper(onRequest: (request, handler) {
+          sent = request;
+          handler.resolve(Response(
+            requestOptions: request,
+            statusCode: 201,
+            data: {
+              'data': {'thought_id': 'server-note'},
+            },
+          ));
+        }));
+      final provider =
+          FocusProvider(api: ApiClient(dio: dio), repository: repository);
+      addTearDown(provider.dispose);
 
-    await provider.restore();
-    await repository.synced.future.timeout(const Duration(seconds: 3));
+      await provider.restore();
+      await repository.synced.future.timeout(const Duration(seconds: 3));
 
-    expect(sent?.path, '/thoughts');
-    expect(sent?.data, isNot(contains('source_run_id')));
-    final saved = (await repository.loadThoughts()).single;
-    expect(saved.isPendingSync, isFalse);
-    expect(saved.serverThoughtId, 'server-note');
-    expect(provider.thoughts.single.serverThoughtId, 'server-note');
-  });
+      expect(sent?.path, '/thoughts');
+      if (serverRunId == null) {
+        expect(sent?.data, isNot(contains('source_run_id')));
+      } else {
+        expect(sent?.data, containsPair('source_run_id', serverRunId));
+      }
+      final saved = (await repository.loadThoughts()).single;
+      expect(saved.isPendingSync, isFalse);
+      expect(saved.serverThoughtId, 'server-note');
+      expect(provider.thoughts.single.serverThoughtId, 'server-note');
+    });
+  }
 }

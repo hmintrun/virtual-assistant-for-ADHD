@@ -62,6 +62,9 @@ class ApiClient {
             }
             try {
               handler.resolve(await this.dio.fetch<dynamic>(request.copyWith(
+                    data: request.data is FormData
+                        ? (request.data as FormData).clone()
+                        : request.data,
                     extra: {...request.extra, 'auth_retried': true},
                   )));
             } on DioException catch (retryError) {
@@ -115,6 +118,19 @@ class ApiClient {
         queryParameters: queryParameters,
       );
       return _unwrap(response.data);
+    } on DioException catch (error) {
+      throw ApiException.fromDio(error);
+    }
+  }
+
+  Future<List<Map<String, dynamic>>> getListData(String path) async {
+    try {
+      final response = await dio.get<Map<String, dynamic>>(path);
+      final items = response.data?['data'];
+      if (items is! List) {
+        throw const ApiException('Backend trả về danh sách không hợp lệ.');
+      }
+      return items.whereType<Map<String, dynamic>>().toList(growable: false);
     } on DioException catch (error) {
       throw ApiException.fromDio(error);
     }

@@ -131,7 +131,8 @@ class _TaskSummaryScreenState extends State<TaskSummaryScreen> {
     final useAnswerAsScope = onlyScopeIsMissing && answer.isNotEmpty;
     final scope = useAnswerAsScope ? answer : _scopeController.text.trim();
     final hasFormChanges = draft != null &&
-        (scope != draft.scope ||
+        (task.title.trim() != draft.title.trim() ||
+            scope != draft.scope ||
             task.availability != null ||
             task.deadline != _initialDeadline);
     task.setScope(scope);
@@ -382,12 +383,17 @@ class _TaskSummaryScreenState extends State<TaskSummaryScreen> {
                 label: 'Điều chỉnh thời gian',
                 onPressed: _isSubmitting || task.isApiBusy
                     ? null
-                    : () => Navigator.push(
+                    : () async {
+                        final editAvailability = await Navigator.push<bool>(
                           context,
-                          MaterialPageRoute<void>(
+                          MaterialPageRoute<bool>(
                             builder: (_) => const TimeConflictScreen(),
                           ),
-                        ),
+                        );
+                        if (mounted && editAvailability == true) {
+                          await _pickAvailability(task);
+                        }
+                      },
               ),
               const SizedBox(height: 12),
             ],
@@ -562,7 +568,7 @@ class _TimeConflictScreenState extends State<TimeConflictScreen> {
       final day = await showDatePicker(
         context: context,
         initialDate: task.deadline?.isAfter(now) == true
-            ? task.deadline!
+            ? task.deadline!.toLocal()
             : now.add(const Duration(days: 1)),
         firstDate: DateTime(now.year, now.month, now.day),
         lastDate: DateTime(9999, 12, 31),
@@ -573,7 +579,7 @@ class _TimeConflictScreenState extends State<TimeConflictScreen> {
         context: context,
         initialTime: task.deadline == null
             ? const TimeOfDay(hour: 18, minute: 0)
-            : TimeOfDay.fromDateTime(task.deadline!),
+            : TimeOfDay.fromDateTime(task.deadline!.toLocal()),
       );
       if (time == null || !mounted) return;
       final newDeadline =
@@ -589,7 +595,7 @@ class _TimeConflictScreenState extends State<TimeConflictScreen> {
       return;
     }
     if (_selectedOption == 1) {
-      Navigator.pop(context);
+      Navigator.pop(context, true);
       return;
     }
     if (_selectedOption == 2) {
@@ -737,6 +743,16 @@ class _TimeConflictScreenState extends State<TimeConflictScreen> {
             ),
             const SizedBox(height: 20),
 
+            MelbelCard(
+              child: ListTile(
+                contentPadding: EdgeInsets.zero,
+                leading: const Icon(Icons.event_available_outlined),
+                title: const Text('Giờ rảnh đã khai báo'),
+                subtitle: Text(task.availabilitySummary),
+              ),
+            ),
+            const SizedBox(height: 16),
+
             // 3. ONE Clear Question & Quick Direct Resolution
             Text(
               'Chọn cách điều chỉnh',
@@ -770,39 +786,13 @@ class _TimeConflictScreenState extends State<TimeConflictScreen> {
             ),
             const SizedBox(height: 10),
 
-            OutlinedButton.icon(
-              onPressed: () {
-                ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-                  content: Text(
-                      'Ghi âm chưa khả dụng. Bạn vẫn có thể sửa giờ rảnh.'),
-                ));
-              },
-              icon: const Icon(Icons.mic_none),
-              label: const Text('Nói để điều chỉnh'),
-            ),
-
-            const SizedBox(height: 24),
+            const SizedBox(height: 16),
 
             // Confirm Resolution Button
             PrimaryCta(
               label: 'Xác nhận',
               icon: Icons.check,
               onPressed: _selectedOption < 0 ? null : () => _resolve(task),
-            ),
-            const SizedBox(height: 10),
-            SecondaryCta(
-              label: 'Lưu nháp',
-              icon: Icons.archive_outlined,
-              height: 48,
-              onPressed: () async {
-                task.saveDraft();
-                await Navigator.push(
-                  context,
-                  MaterialPageRoute<void>(
-                    builder: (_) => const DraftSavedScreen(),
-                  ),
-                );
-              },
             ),
           ],
         ),

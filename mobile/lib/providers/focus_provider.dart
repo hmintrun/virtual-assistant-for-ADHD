@@ -8,12 +8,14 @@ import 'package:wakelock_plus/wakelock_plus.dart';
 import '../core/api_client.dart';
 import '../models/focus_session_model.dart';
 import '../models/task_model.dart';
+import '../models/planning_models.dart';
 import '../repositories/local_run_repository.dart';
 import '../services/audio_recorder_service.dart';
 import '../services/alarm_service.dart';
 import '../services/dnd_service.dart';
 import '../services/focus_native_controller.dart';
 import '../services/timer_service.dart';
+import '../services/voice_service.dart';
 
 enum FocusStage {
   reminder,
@@ -36,6 +38,7 @@ class ThoughtRecord {
     required this.createdAt,
     required this.undoDeadlineAt,
     this.sourceRunId,
+    this.serverRunId,
     this.inputType = 'text',
     this.textContent,
     this.localAudioPath,
@@ -54,6 +57,7 @@ class ThoughtRecord {
   final DateTime createdAt;
   final DateTime undoDeadlineAt;
   final String? sourceRunId;
+  final String? serverRunId;
   final String inputType;
   final String? textContent;
   final String? localAudioPath;
@@ -67,6 +71,7 @@ class ThoughtRecord {
         'created_at': createdAt.toIso8601String(),
         'undo_deadline_at': undoDeadlineAt.toIso8601String(),
         if (sourceRunId != null) 'source_run_id': sourceRunId,
+        if (serverRunId != null) 'server_run_id': serverRunId,
         'input_type': inputType,
         if (textContent != null) 'text_content': textContent,
         if (localAudioPath != null) 'local_audio_path': localAudioPath,
@@ -96,6 +101,7 @@ class ThoughtRecord {
       createdAt: created,
       undoDeadlineAt: deadline,
       sourceRunId: json['source_run_id'] as String?,
+      serverRunId: json['server_run_id'] as String?,
       inputType: normalizedType,
       textContent: (json['text_content'] ?? json['text']) as String?,
       localAudioPath:
@@ -120,6 +126,7 @@ class ThoughtRecord {
         createdAt: createdAt,
         undoDeadlineAt: undoDeadlineAt,
         sourceRunId: sourceRunId,
+        serverRunId: serverRunId,
         inputType: inputType,
         textContent: textContent ?? this.textContent,
         localAudioPath: localAudioPath ?? this.localAudioPath,
@@ -812,6 +819,7 @@ class FocusProvider extends ChangeNotifier {
       clientThoughtId: now.microsecondsSinceEpoch.toString(),
       createdAt: now,
       undoDeadlineAt: now.add(const Duration(seconds: 5)),
+      serverRunId: _serverRun?['run_id'] as String?,
       inputType: 'audio',
       localAudioPath: recording.path,
       attemptCount: attemptCount,
@@ -871,6 +879,7 @@ class FocusProvider extends ChangeNotifier {
       clientThoughtId: now.microsecondsSinceEpoch.toString(),
       createdAt: now,
       undoDeadlineAt: now.add(const Duration(seconds: 5)),
+      serverRunId: _serverRun?['run_id'] as String?,
       inputType: 'text',
       textContent: normalized,
       attemptCount: 1,
@@ -1021,9 +1030,11 @@ class FocusProvider extends ChangeNotifier {
       for (final thought in readyToSync) {
         if (_undoneThoughtIds.contains(thought.clientThoughtId)) continue;
         try {
-          // Local runs have no backend run_id. Older entries stored a session ID.
+          // Older entries stored a Session ID; only serverRunId is safe to send.
           final payload = {
             'client_thought_id': thought.clientThoughtId,
+            if (thought.serverRunId != null)
+              'source_run_id': thought.serverRunId,
             'input_type': thought.inputType,
             if (thought.textContent != null)
               'text_content': thought.textContent,
@@ -1056,6 +1067,56 @@ class FocusProvider extends ChangeNotifier {
     } finally {
       _isFlushingOutbox = false;
     }
+  }
+
+  Future<String> transcribeThought(ThoughtRecord thought) async {
+    if (isActiveRun || isRecording || runCommandBusy || needsEndSync) {
+      throw const ApiException('Hãy kết thúc phiên trước khi chuyển ghi âm.');
+    }
+    final path = thought.localAudioPath;
+    final id = thought.serverThoughtId;
+    if (kIsWeb || path == null || id == null) {
+      throw const ApiException(
+          'Chưa có ghi âm đã đồng bộ để chuyển thành chữ.');
+    }
+    return VoiceTranscriptionService(api: _api).transcribeM4a(
+      path,
+      recordingId: thought.clientThoughtId,
+      thoughtId: id,
+    );
+  }
+
+  Future<PlanningDraftModel> convertThoughtToDraft(
+    ThoughtRecord thought,
+    String text,
+  ) async {
+    if (isActiveRun || isRecording || runCommandBusy || needsEndSync) {
+      throw const ApiException('Hãy kết thúc phiên trước khi tạo việc.');
+    }
+    final id = thought.serverThoughtId;
+    if (id == null) {
+      throw const ApiException('Ghi chú chưa đồng bộ. Hãy thử lại sau.');
+    }
+    final path = '/thoughts/${Uri.encodeComponent(id)}';
+    final current = await _api.getData(path);
+    final linked = current['linked_draft_id'] as String?;
+    if (linked != null) {
+      return PlanningDraftModel.fromJson(
+        await _api.getData('/drafts/${Uri.encodeComponent(linked)}'),
+      );
+    }
+    final payload = {
+      'expected_thought_revision': current['thought_revision'],
+      'text_content': text.trim(),
+    };
+    final response = await _api.postData(
+      '$path/draft',
+      data: payload,
+      idempotencyKey: ApiClient.stableIdempotencyKey(
+          'thought_draft_$id', payload.toString()),
+    );
+    return PlanningDraftModel.fromJson(
+        response['draft'] as Map<String, dynamic>);
   }
 
   Future<void> _persistRun() async {
@@ -1141,6 +1202,7 @@ class FocusProvider extends ChangeNotifier {
       clientThoughtId: now.microsecondsSinceEpoch.toString(),
       createdAt: now,
       undoDeadlineAt: now.add(const Duration(seconds: 5)),
+      serverRunId: _serverRun?['run_id'] as String?,
       inputType: 'audio',
       localAudioPath: recording.path,
       attemptCount: (_recordingAttempts + 1).clamp(1, 3),
