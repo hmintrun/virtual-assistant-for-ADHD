@@ -19,6 +19,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   int? _work;
   int? _rest;
   List<int>? _reminders;
+  String? _reminderStyle;
   bool _busy = false;
   String? _error;
 
@@ -41,6 +42,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
         _work = data['work_interval_seconds'] as int?;
         _rest = data['rest_interval_seconds'] as int?;
         _reminders = (data['reminder_offsets'] as List?)?.cast<int>();
+        _reminderStyle = data['reminder_style'] as String?;
       });
     } on ApiException catch (error) {
       if (mounted) setState(() => _error = error.message);
@@ -61,6 +63,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
           _reminders!.join(',') !=
               (current['reminder_offsets'] as List?)?.join(','))
         'reminder_offsets': _reminders,
+      if (_reminderStyle != null && _reminderStyle != current['reminder_style'])
+        'reminder_style': _reminderStyle,
     };
   }
 
@@ -171,7 +175,34 @@ class _SettingsScreenState extends State<SettingsScreen> {
         if (_error != null) Text(_error!),
         if (_preferences == null && !_busy)
           SecondaryCta(label: 'Tải lại cài đặt', onPressed: _load),
-        if (_preferences != null) ...[
+        if (_preferences case final preferences?) ...[
+          MelbelCard(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text('Giọng nhắc',
+                    style: Theme.of(context).textTheme.titleMedium),
+                Wrap(
+                  spacing: 8,
+                  children: [
+                    for (final entry in const {
+                      'gentle': 'Nhẹ nhàng',
+                      'upbeat': 'Tươi vui',
+                    }.entries)
+                      ChoiceChip(
+                        label: Text(entry.value),
+                        selected: _reminderStyle == entry.key,
+                        onSelected: _busy
+                            ? null
+                            : (_) => setState(() => _reminderStyle = entry.key),
+                      ),
+                  ],
+                ),
+                if (preferences['buffer_multiplier'] case final num buffer)
+                  Text('Hệ số đệm đang dùng: ×$buffer'),
+              ],
+            ),
+          ),
           if (pending)
             const MelbelCard(
                 child: Text(

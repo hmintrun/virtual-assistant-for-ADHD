@@ -768,6 +768,23 @@ class _FocusScreenState extends State<FocusScreen> with WidgetsBindingObserver {
     FocusSessionInfo session,
   ) {
     return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      Row(
+        children: [
+          Expanded(
+            child: Text(
+              'Kết thúc phiên ${_minutes(session.workSeconds)} phút',
+              style: Theme.of(context).textTheme.titleLarge,
+            ),
+          ),
+          if (focus.dndApplied)
+            _StatusPill(
+              label: 'DND bật',
+              icon: Icons.do_not_disturb_on_outlined,
+              color: MelbelColors.kSecondary,
+            ),
+        ],
+      ),
+      const SizedBox(height: 12),
       ReviewHeader(
         focus.missedCheckIn
             ? 'Chưa phản hồi'
@@ -854,15 +871,21 @@ class _FocusScreenState extends State<FocusScreen> with WidgetsBindingObserver {
                   const ReviewHeader('Bạn muốn bỏ qua thế nào?',
                       'Chọn phạm vi cho phiên này.'),
                   ReviewSessionCard(session: session),
-                  for (final (label, value) in const [
-                    ('Hoãn phiên này làm sau', 'postpone_session'),
-                    ('Bỏ qua phiên này', 'skip_session'),
-                    ('Bỏ toàn bộ bước này', 'skip_step'),
-                  ])
-                    ListTile(
-                      title: Text(label),
-                      onTap: () => Navigator.pop(context, value),
-                    ),
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 8,
+                    children: [
+                      for (final (label, value) in const [
+                        ('Hoãn phiên này', 'postpone_session'),
+                        ('Bỏ qua phiên này', 'skip_session'),
+                        ('Bỏ toàn bộ bước', 'skip_step'),
+                      ])
+                        ActionChip(
+                          label: Text(label),
+                          onPressed: () => Navigator.pop(context, value),
+                        ),
+                    ],
+                  ),
                 ],
               )),
     );

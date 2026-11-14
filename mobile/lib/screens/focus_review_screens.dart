@@ -27,10 +27,14 @@ class ReviewHeader extends StatelessWidget {
 
 class ReviewSessionCard extends StatelessWidget {
   const ReviewSessionCard(
-      {required this.session, this.actualSeconds, super.key});
+      {required this.session,
+      this.actualSeconds,
+      this.showSchedule = false,
+      super.key});
 
   final FocusSessionInfo session;
   final int? actualSeconds;
+  final bool showSchedule;
 
   @override
   Widget build(BuildContext context) {
@@ -48,6 +52,16 @@ class ReviewSessionCard extends StatelessWidget {
           const SizedBox(height: 4),
           Text(session.stepTitle),
           const SizedBox(height: 12),
+          if (showSchedule) ...[
+            Text(
+              '${labels.formatCompactDate(session.scheduledStart.toLocal())} '
+              '${labels.formatTimeOfDay(TimeOfDay.fromDateTime(session.scheduledStart.toLocal()), alwaysUse24HourFormat: true)}'
+              ' – '
+              '${labels.formatCompactDate(session.scheduledEnd.toLocal())} '
+              '${labels.formatTimeOfDay(TimeOfDay.fromDateTime(session.scheduledEnd.toLocal()), alwaysUse24HourFormat: true)}',
+            ),
+            const SizedBox(height: 4),
+          ],
           Text('Hạn chót: $deadlineText'),
           if (actualSeconds case final actual?) ...[
             const SizedBox(height: 8),
@@ -323,12 +337,12 @@ class ScheduleComparisonScreen extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => FocusReviewPage(
-        title: 'So sánh lịch',
+        title: 'Điều chỉnh lịch',
         children: [
           ReviewHeader('Xem lại lịch', reason),
           const Eyebrow('Lịch hiện tại'),
           if (session case final current?)
-            ReviewSessionCard(session: current)
+            ReviewSessionCard(session: current, showSchedule: true)
           else
             SecondaryCta(
                 label: 'Mở lịch hiện tại',
@@ -340,6 +354,11 @@ class ScheduleComparisonScreen extends StatelessWidget {
           PrimaryCta(
               label: 'Giữ lịch hiện tại',
               onPressed: () => Navigator.pop(context)),
+          if (session != null)
+            SecondaryCta(
+              label: 'Xem lịch',
+              onPressed: () => Navigator.of(context).pushNamed('/calendar'),
+            ),
         ],
       );
 }
