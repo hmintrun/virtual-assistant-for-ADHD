@@ -32,6 +32,10 @@ class _FocusScreenState extends State<FocusScreen> with WidgetsBindingObserver {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted)
+        context.read<FocusProvider>().reportAppVisibility(foreground: true);
+    });
   }
 
   @override
@@ -40,7 +44,10 @@ class _FocusScreenState extends State<FocusScreen> with WidgetsBindingObserver {
       final focus = context.read<FocusProvider>();
       focus.refreshDndPermission();
       focus.handleAppResume();
+      focus.reportAppVisibility(foreground: true);
       if (focus.stage == FocusStage.ended) focus.refreshRunCheckIn();
+    } else if (state == AppLifecycleState.paused) {
+      context.read<FocusProvider>().reportAppVisibility(foreground: false);
     }
   }
 

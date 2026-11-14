@@ -29,6 +29,15 @@ class DndService {
     }
   }
 
+  Future<bool> isAppliedFor(String? runId) async {
+    if (runId == null || await pendingOwnerRunId() != runId) return false;
+    try {
+      return await FlutterDnd.getCurrentInterruptionFilter() == _focusFilter;
+    } on PlatformException {
+      return false;
+    }
+  }
+
   void openPermissionSettings() => FlutterDnd.gotoPolicySettings();
 
   /// Bật DND cho phiên `runId`. Trả về true nếu CHÍNH APP vừa bật (app là owner).
@@ -68,13 +77,14 @@ class DndService {
 
   /// Trả lại DND khi phiên `runId` kết thúc. Gọi nhiều lần vẫn an toàn
   /// (idempotent): lần sau không còn snapshot nên thoát ngay.
-  Future<void> restore({required String runId}) async {
+  Future<String> restore({required String runId}) async {
     final prefs = await SharedPreferences.getInstance();
     final raw = prefs.getString(_snapshotKey);
-    if (raw == null) return; // app không bật gì → không đụng
+    if (raw == null) return 'not_needed'; // app không bật gì → không đụng
     final snapshot = jsonDecode(raw) as Map<String, dynamic>;
-    if (snapshot['run_id'] != runId) return; // không phải owner
+    if (snapshot['run_id'] != runId) return 'not_needed'; // không phải owner
 
+    var state = 'not_needed';
     try {
       final current = await FlutterDnd.getCurrentInterruptionFilter();
       // Người dùng đã tự đổi DND giữa phiên → tôn trọng, không ghi đè.
@@ -84,12 +94,15 @@ class DndService {
                 previous == FlutterDnd.INTERRUPTION_FILTER_UNKNOWN)
             ? FlutterDnd.INTERRUPTION_FILTER_ALL
             : previous;
-        await FlutterDnd.setInterruptionFilter(target);
+        final restored = await FlutterDnd.setInterruptionFilter(target);
+        state = restored == true ? 'restored' : 'failed';
       }
     } on PlatformException {
+      state = 'failed';
       // Mất quyền giữa phiên → không khôi phục được, vẫn xóa snapshot.
     }
     await prefs.remove(_snapshotKey);
+    return state;
   }
 
   /// Chuyển "quyền chủ" DND từ phiên `fromRunId` sang `toRunId` mà KHÔNG tắt

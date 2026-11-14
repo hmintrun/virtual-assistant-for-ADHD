@@ -19,9 +19,11 @@ void main() {
 
     final commands = <RequestOptions>[];
     var endAttempts = 0;
+    RequestOptions? checkInRead;
     final dio = Dio()
       ..interceptors.add(InterceptorsWrapper(onRequest: (request, handler) {
         if (request.method != 'GET') commands.add(request);
+        if (request.path == '/runs/server-run/check-ins') checkInRead = request;
         final run = {
           'run_id': 'server-run',
           'device_id': 'test-device',
@@ -42,6 +44,11 @@ void main() {
         final data = switch (request.path) {
           '/sessions/calendar-session/start' => run,
           '/runs/server-run/end' => {...run, 'check_in': checkIn},
+          '/runs/server-run/check-ins' => {
+              'items': [
+                {...checkIn, 'response_revision': 1}
+              ],
+            },
           '/check-ins/final-checkin/response' => {
               ...checkIn,
               'response_state': 'answered',
@@ -82,6 +89,7 @@ void main() {
     expect((await repository.loadActiveRun())?['pending_end'], isNotNull);
     await focus.syncRunEnd();
     expect(focus.hasOpenCheckIn, isTrue);
+    expect(checkInRead?.queryParameters['kind'], 'final');
     expect(commands[1].path, '/runs/server-run/end');
     expect(commands[2].data, commands[1].data);
     expect(commands[2].headers['Idempotency-Key'],
@@ -91,6 +99,7 @@ void main() {
     expect(commands.last.method, 'PUT');
     expect(commands.last.path, '/check-ins/final-checkin/response');
     expect(commands.last.data['session_outcome'], 'incomplete');
+    expect(commands.last.data['expected_response_revision'], 1);
     expect(focus.hasUnfinishedServerRun, isFalse);
     expect(await repository.loadActiveRun(), isNull);
   });

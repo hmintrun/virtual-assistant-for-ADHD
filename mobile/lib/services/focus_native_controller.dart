@@ -35,7 +35,12 @@ class FocusStartResult {
 
 /// Kết quả khi kết thúc phiên.
 class FocusStopResult {
-  const FocusStopResult({this.savedRecording});
+  const FocusStopResult({
+    this.savedRecording,
+    this.dndRestoreState = 'not_needed',
+  });
+
+  final String dndRestoreState;
 
   /// Nếu phiên kết thúc lúc user đang giữ "Cất suy nghĩ", bản thu được LƯU
   /// (không hủy) để không mất suy nghĩ. UI chuyển nó vào Hộp nháp như bình thường.
@@ -159,12 +164,15 @@ class FocusNativeController {
       await _alarm.cancelEnd();
       await AndroidAlarmManager.cancel(_checkInTimeoutAlarmId);
     }
-    await _dnd.restore(runId: runId);
+    final dndRestoreState = await _dnd.restore(runId: runId);
     if (isActiveRun) {
       await _setWakelock(false);
       await _clearActiveRun();
     }
-    return FocusStopResult(savedRecording: saved);
+    return FocusStopResult(
+      savedRecording: saved,
+      dndRestoreState: dndRestoreState,
+    );
   }
 
   /// Gọi 1 lần khi mở app (sau khi giao diện hiện lên). Khôi phục hoặc dọn dẹp
