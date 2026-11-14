@@ -24,6 +24,15 @@ from app.services.google_calendar_client import CalendarAuthError, CalendarConfl
 logger = logging.getLogger(__name__)
 
 
+async def _rollback_and_reload(db: AsyncSession, *objs) -> None:
+    """Rollback làm hết hạn mọi thuộc tính ORM; đọc lại chúng bằng await để không
+    bị lazy-load đồng bộ (MissingGreenlet → 500) khi ghi trạng thái lỗi của job."""
+    await db.rollback()
+    for obj in objs:
+        if obj is not None:
+            await db.refresh(obj)
+
+
 async def process_sync_job(
     db: AsyncSession,
     job: CalendarSyncJob,
@@ -80,13 +89,23 @@ async def process_sync_job(
         link = await db.get(CalendarEventLink, job.event_link_id)
 
     # 4. Thực thi theo loại operation
+    job_id = job.id
     try:
         if job.operation == "create":
-            res = await client.create_event(
-                access_token=access_token,
-                calendar_id=conn.write_calendar_id,
-                event_payload=job.payload_snapshot,
-            )
+            try:
+                res = await client.create_event(
+                    access_token=access_token,
+                    calendar_id=conn.write_calendar_id,
+                    event_payload=job.payload_snapshot,
+                )
+            except CalendarConflictError:
+                # Event id cố định theo session: 409 khi tạo nghĩa là lần thử trước
+                # đã tạo thành công nhưng mất phản hồi → coi là đã đồng bộ, không
+                # tạo thêm bản trùng (W3-15: retry giữ nguyên số sự kiện).
+                payload_id = (job.payload_snapshot or {}).get("id")
+                if not payload_id:
+                    raise
+                res = {"id": payload_id, "etag": link.google_etag if link else None}
             created_event_id = res.get("id")
             if link:
                 link.google_event_id = created_event_id
@@ -170,9 +189,9 @@ async def process_sync_job(
 
     except CalendarConflictError as exc:
         # BUG-17: Rollback any failed partial session state before updating job metadata
-        await db.rollback()
+        await _rollback_and_reload(db, job, link)
         # Xung đột phiên bản (412 Precondition Failed / Etag mismatch)
-        logger.warning("[CalendarWorker] 412 Conflict on job %s: %s", job.id, exc)
+        logger.warning("[CalendarWorker] 412 Conflict on job %s: %s", job_id, exc)
         job.job_state = "conflict"
         job.last_error_code = "ETAG_CONFLICT_412"
         if link:
@@ -182,8 +201,8 @@ async def process_sync_job(
 
     except CalendarAuthError as exc:
         # BUG-15 & BUG-17: Token hết hạn/thu hồi trong lúc gọi Google (401)
-        await db.rollback()
-        logger.warning("[CalendarWorker] Auth failure on job %s: %s", job.id, exc)
+        await _rollback_and_reload(db, job, link, conn)
+        logger.warning("[CalendarWorker] Auth failure on job %s: %s", job_id, exc)
         conn.connection_state = "needs_reconnect"
         job.attempt_count += 1
         if job.attempt_count >= 5:
@@ -199,12 +218,12 @@ async def process_sync_job(
 
     except Exception as exc:
         # BUG-17: Rollback any failed partial session state before updating job metadata
-        await db.rollback()
+        await _rollback_and_reload(db, job, link)
         # Lỗi mạng hoặc lỗi tạm thời -> tăng attempt_count và retry backoff
         job.attempt_count += 1
         logger.warning(
             "[CalendarWorker] Error processing job %s (attempt %d): %s",
-            job.id,
+            job_id,
             job.attempt_count,
             exc,
         )
