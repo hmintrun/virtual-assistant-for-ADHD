@@ -7,6 +7,7 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import '../core/api_client.dart';
 import '../models/planning_models.dart';
 import '../models/task_model.dart';
+import '../services/calendar_api.dart';
 import '../services/planning_api.dart';
 
 class AvailabilitySlot {
@@ -52,10 +53,12 @@ class TaskProvider extends ChangeNotifier {
   static const _storageKey = 'proplan.uf1.current_draft.v1';
   static const _storage = FlutterSecureStorage();
 
-  TaskProvider({PlanningApi? planningApi})
-      : _planningApi = planningApi ?? PlanningApi();
+  TaskProvider({PlanningApi? planningApi, CalendarApi? calendarApi})
+      : _planningApi = planningApi ?? PlanningApi(),
+        _calendarApi = calendarApi ?? CalendarApi();
 
   final PlanningApi _planningApi;
+  final CalendarApi _calendarApi;
 
   String _title = '';
   String _rawInputText = '';
@@ -389,13 +392,41 @@ class TaskProvider extends ChangeNotifier {
         );
         _draft = current;
       }
+      // Chụp lịch bận Google (nếu user đã chọn lịch đọc) để thuật toán xếp
+      // phiên né giờ bận. Không có lịch nào → null, xếp theo giờ rảnh như cũ.
+      final calendarContextRef = await _createCalendarContext(current);
       final generated = await _accept(
-        _planningApi.createCandidate(current),
+        _planningApi.createCandidate(
+          current,
+          calendarContextRef: calendarContextRef,
+        ),
         revision,
       );
       _candidate = generated;
       await _persist();
     });
+  }
+
+  /// Khoảng chụp lịch bận = [start_at, hạn chót] của Draft: luôn phủ trọn
+  /// phạm vi Backend xếp lịch, và giữ cố định giữa các lần xếp lại (Backend
+  /// không cho bản chụp mới hẹp hơn bản cũ).
+  Future<Map<String, dynamic>?> _createCalendarContext(
+    PlanningDraftModel draft,
+  ) async {
+    final constraint = draft.summary['time_constraint'];
+    if (constraint is! Map) return null;
+    DateTime? read(String key) =>
+        DateTime.tryParse(constraint[key] as String? ?? '');
+    final end = read('deadline_at') ?? read('finish_by_at');
+    if (end == null) return null;
+    final start = read('start_at') ?? DateTime.now();
+    if (!start.isBefore(end)) return null;
+    return _calendarApi.createPlanningContextForDraft(
+      draftId: draft.draftId,
+      summaryRevision: draft.summaryRevision,
+      from: start,
+      to: end,
+    );
   }
 
   Future<void> refreshCandidateFromBackend() async {

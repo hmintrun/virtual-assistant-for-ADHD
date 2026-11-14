@@ -158,6 +158,43 @@ class CalendarApi {
     return items.map(CalendarBusyEvent.fromJson).toList();
   }
 
+  /// UF2: chụp lịch bận của các lịch đã chọn cho một Draft, để thuật toán
+  /// Python loại các khe bận khi xếp phiên.
+  ///
+  /// Trả về null khi user chưa chọn lịch đọc nào → Backend xếp theo giờ rảnh
+  /// nhập tay như cũ. Lỗi đọc lịch ném [ApiException] (KHÔNG coi là "rảnh").
+  Future<Map<String, dynamic>?> createPlanningContextForDraft({
+    required String draftId,
+    required int summaryRevision,
+    required DateTime from,
+    required DateTime to,
+  }) async {
+    final sources = [
+      for (final connection in await listConnections())
+        if (connection.state == 'connected')
+          for (final calendarId in connection.readCalendarIds)
+            {
+              'connection_id': connection.connectionId,
+              'google_calendar_id': calendarId,
+            },
+    ];
+    if (sources.isEmpty) return null;
+    final context = await _api.postData(
+      '/planning-contexts',
+      data: {
+        'source_draft_id': draftId,
+        'expected_summary_revision': summaryRevision,
+        'from': from.toUtc().toIso8601String(),
+        'to': to.toUtc().toIso8601String(),
+        'selected_calendar_sources': sources,
+      },
+    );
+    return {
+      'context_id': context['context_id'] as String,
+      'revision': context['revision'] as int,
+    };
+  }
+
   /// ApiClient.getData chỉ nhận `data` là Map; vài endpoint trả `data` là List.
   Future<List<Map<String, dynamic>>> _getList(
     String path, {
