@@ -78,18 +78,23 @@ class _CalendarConnectScreenState extends State<CalendarConnectScreen>
       _error = null;
     });
     try {
+      // Kết nối đã ngắt thì coi như chưa kết nối; needs_reconnect (quyền bị
+      // thu hồi/hết hạn) vẫn hiện để user biết tình trạng và kết nối lại.
       final connections = (await _api.listConnections())
-          .where((c) => c.state == 'connected')
+          .where((c) => c.state != 'disconnected')
           .toList();
       CalendarConnection? connection;
       if (connections.isNotEmpty) {
         connection = connections.firstWhere(
           (c) => c.connectionId == preferredConnectionId,
-          orElse: () => connections.last,
+          orElse: () => connections.firstWhere(
+            (c) => c.state == 'connected',
+            orElse: () => connections.last,
+          ),
         );
       }
       var calendars = const <CalendarItem>[];
-      if (connection != null) {
+      if (connection != null && connection.state == 'connected') {
         calendars = await _api.listCalendars(connection.connectionId);
       }
       if (!mounted) return;
@@ -155,6 +160,36 @@ class _CalendarConnectScreenState extends State<CalendarConnectScreen>
     }
   }
 
+  /// Ngắt ngay, không hỏi lại (AGENTS.md mục 4: không dùng hộp thoại xác nhận).
+  /// Lựa chọn lịch vẫn được Backend giữ, kết nối lại là dùng tiếp.
+  Future<void> _disconnect() async {
+    final connection = _connection;
+    if (connection == null) return;
+    setState(() {
+      _working = true;
+      _error = null;
+    });
+    try {
+      await _api.disconnect(connection.connectionId);
+      if (!mounted) return;
+      setState(() {
+        _connection = null;
+        _calendars = const [];
+        _busyEvents = const [];
+      });
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Đã ngắt Google Calendar. ProPlan sẽ xếp theo giờ '
+              'rảnh bạn nhập. Bấm Kết nối lại khi cần.'),
+        ),
+      );
+    } on ApiException catch (e) {
+      if (mounted) setState(() => _error = e.message);
+    } finally {
+      if (mounted) setState(() => _working = false);
+    }
+  }
+
   /// Lịch ghi phiên Focus sau khi duyệt: giữ lựa chọn cũ nếu có, không thì
   /// lịch chính (primary) có quyền ghi.
   String? _pickWriteCalendarId() {
@@ -169,7 +204,9 @@ class _CalendarConnectScreenState extends State<CalendarConnectScreen>
 
   Future<void> _loadBusyEvents() async {
     final connection = _connection;
-    if (connection == null || connection.readCalendarIds.isEmpty) {
+    if (connection == null ||
+        connection.state != 'connected' ||
+        connection.readCalendarIds.isEmpty) {
       if (mounted) setState(() => _busyEvents = const []);
       return;
     }
@@ -246,6 +283,31 @@ class _CalendarConnectScreenState extends State<CalendarConnectScreen>
     CalendarConnection connection,
   ) {
     final textTheme = Theme.of(context).textTheme;
+    if (connection.state != 'connected') {
+      // Quyền bị thu hồi/hết hạn: báo tình trạng nguồn, cho kết nối lại.
+      // Trong lúc đó lập kế hoạch vẫn dùng được giờ rảnh nhập tay.
+      return [
+        Text('Mất quyền đọc lịch: ${connection.accountRef}',
+            style: textTheme.titleMedium),
+        const SizedBox(height: 8),
+        Text(
+          'ProPlan chưa đọc được giờ bận từ tài khoản này. Khi lập kế hoạch, '
+          'bạn có thể dùng giờ rảnh nhập tay.',
+          style: textTheme.bodySmall
+              ?.copyWith(color: MelbelColors.kTextSecondary),
+        ),
+        const SizedBox(height: 20),
+        PrimaryCta(
+          label: 'Kết nối lại Google Calendar',
+          icon: Icons.refresh,
+          onPressed: _working ? null : _connect,
+        ),
+        TextButton(
+          onPressed: _working ? null : _disconnect,
+          child: const Text('Ngắt kết nối'),
+        ),
+      ];
+    }
     return [
       Text('Đã kết nối: ${connection.accountRef}',
           style: textTheme.titleMedium),
@@ -285,6 +347,12 @@ class _CalendarConnectScreenState extends State<CalendarConnectScreen>
                 ?.copyWith(color: MelbelColors.kTextSecondary))
       else
         for (final event in _busyEvents) _BusyEventRow(event: event),
+      const SizedBox(height: 24),
+      TextButton.icon(
+        onPressed: _working ? null : _disconnect,
+        icon: const Icon(Icons.link_off),
+        label: const Text('Ngắt kết nối Google Calendar'),
+      ),
     ];
   }
 }
@@ -298,10 +366,16 @@ class _BusyEventRow extends StatelessWidget {
   Widget build(BuildContext context) {
     // Không dùng locale 'vi' của intl vì app chưa initializeDateFormatting.
     const weekdays = ['T2', 'T3', 'T4', 'T5', 'T6', 'T7', 'CN'];
-    final day = '${weekdays[event.startAt.weekday - 1]} '
-        '${DateFormat('dd/MM').format(event.startAt)}';
-    final time = '${DateFormat.Hm().format(event.startAt)}–'
-        '${DateFormat.Hm().format(event.endAt)}';
+    String dayOf(DateTime t) =>
+        '${weekdays[t.weekday - 1]} ${DateFormat('dd/MM').format(t)}';
+    final day = dayOf(event.startAt);
+    final sameDay = DateUtils.isSameDay(event.startAt, event.endAt);
+    // Sự kiện qua ngày hôm sau: ghi rõ ngày kết thúc, tránh "03:30–02:30".
+    final time = sameDay
+        ? '${DateFormat.Hm().format(event.startAt)}–'
+            '${DateFormat.Hm().format(event.endAt)}'
+        : '${DateFormat.Hm().format(event.startAt)} → '
+            '${DateFormat.Hm().format(event.endAt)} ${dayOf(event.endAt)}';
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 6),
       child: Row(

@@ -376,7 +376,12 @@ class TaskProvider extends ChangeNotifier {
     });
   }
 
-  Future<void> generateCandidateOnBackend({String? stepProposal}) async {
+  /// [useManualAvailability]: user đã thấy lỗi đọc Google Calendar và chủ động
+  /// chọn xếp theo giờ rảnh nhập tay (W3-15: thu hồi quyền vẫn lập được lịch).
+  Future<void> generateCandidateOnBackend({
+    String? stepProposal,
+    bool useManualAvailability = false,
+  }) async {
     final source = _draft;
     if (source == null ||
         source.summaryConfirmedRevision != source.summaryRevision) {
@@ -394,7 +399,10 @@ class TaskProvider extends ChangeNotifier {
       }
       // Chụp lịch bận Google (nếu user đã chọn lịch đọc) để thuật toán xếp
       // phiên né giờ bận. Không có lịch nào → null, xếp theo giờ rảnh như cũ.
-      final calendarContextRef = await _createCalendarContext(current);
+      final calendarContextRef = await _createCalendarContext(
+        current,
+        useManualAvailability: useManualAvailability,
+      );
       final generated = await _accept(
         _planningApi.createCandidate(
           current,
@@ -411,8 +419,9 @@ class TaskProvider extends ChangeNotifier {
   /// phạm vi Backend xếp lịch, và giữ cố định giữa các lần xếp lại (Backend
   /// không cho bản chụp mới hẹp hơn bản cũ).
   Future<Map<String, dynamic>?> _createCalendarContext(
-    PlanningDraftModel draft,
-  ) async {
+    PlanningDraftModel draft, {
+    bool useManualAvailability = false,
+  }) async {
     final constraint = draft.summary['time_constraint'];
     if (constraint is! Map) return null;
     DateTime? read(String key) =>
@@ -426,6 +435,7 @@ class TaskProvider extends ChangeNotifier {
       summaryRevision: draft.summaryRevision,
       from: start,
       to: end,
+      useManualAvailability: useManualAvailability,
     );
   }
 

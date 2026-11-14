@@ -93,6 +93,12 @@ class CalendarApi {
   /// Deep link Backend redirect về sau khi user cấp quyền xong.
   static const String returnTarget = 'proplan://calendar/connected';
 
+  /// Mã lỗi Backend khi không đọc được lịch đã chọn (thu hồi quyền, mất mạng).
+  static const String calendarUnavailableCode = 'CALENDAR_UNAVAILABLE';
+
+  static const String manualFallbackReason =
+      'Không đọc được Google Calendar; user chọn xếp theo giờ rảnh nhập tay.';
+
   /// B1: xin URL trang đồng ý của Google. App mở URL này bằng trình duyệt.
   Future<Uri> startAuthorization() async {
     final data = await _api.postData(
@@ -158,20 +164,37 @@ class CalendarApi {
     return items.map(CalendarBusyEvent.fromJson).toList();
   }
 
+  /// Ngắt kết nối: Backend thôi đọc/ghi lịch của tài khoản này. Kết nối lại
+  /// bằng [startAuthorization] như lần đầu.
+  Future<void> disconnect(String connectionId) async {
+    await _api.postData(
+      '/calendar/connections/$connectionId/disconnect',
+      data: const {},
+    );
+  }
+
   /// UF2: chụp lịch bận của các lịch đã chọn cho một Draft, để thuật toán
   /// Python loại các khe bận khi xếp phiên.
   ///
   /// Trả về null khi user chưa chọn lịch đọc nào → Backend xếp theo giờ rảnh
-  /// nhập tay như cũ. Lỗi đọc lịch ném [ApiException] (KHÔNG coi là "rảnh").
+  /// nhập tay như cũ. Lỗi đọc lịch ném [ApiException] với code
+  /// [calendarUnavailableCode] (KHÔNG coi là "rảnh").
+  ///
+  /// [useManualAvailability] = true khi user đã bấm "Xếp theo giờ rảnh nhập
+  /// tay" sau lỗi đọc lịch: mọi nguồn được gửi kèm trong `excluded_sources`
+  /// cùng lý do và thời điểm user xác nhận, Backend xếp theo giờ rảnh đã nhập.
   Future<Map<String, dynamic>?> createPlanningContextForDraft({
     required String draftId,
     required int summaryRevision,
     required DateTime from,
     required DateTime to,
+    bool useManualAvailability = false,
   }) async {
     final sources = [
       for (final connection in await listConnections())
-        if (connection.state == 'connected')
+        // needs_reconnect (quyền bị thu hồi/hết hạn) vẫn là nguồn đã chọn:
+        // gửi lên để Backend báo lỗi rõ thay vì âm thầm coi là rảnh.
+        if (connection.state != 'disconnected')
           for (final calendarId in connection.readCalendarIds)
             {
               'connection_id': connection.connectionId,
@@ -179,6 +202,7 @@ class CalendarApi {
             },
     ];
     if (sources.isEmpty) return null;
+    final confirmedAt = DateTime.now().toUtc().toIso8601String();
     final context = await _api.postData(
       '/planning-contexts',
       data: {
@@ -187,6 +211,15 @@ class CalendarApi {
         'from': from.toUtc().toIso8601String(),
         'to': to.toUtc().toIso8601String(),
         'selected_calendar_sources': sources,
+        if (useManualAvailability)
+          'excluded_sources': [
+            for (final source in sources)
+              {
+                ...source,
+                'reason': manualFallbackReason,
+                'user_confirmed_at': confirmedAt,
+              },
+          ],
       },
     );
     return {
