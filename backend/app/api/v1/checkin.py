@@ -18,7 +18,11 @@ from app.schemas.execution import (
 router = APIRouter(tags=["CheckIn - UF5"])
 
 
-@router.get("/runs/{run_id}/check-ins", response_model=SuccessEnvelope[CheckInListResult])
+@router.get(
+    "/runs/{run_id}/check-ins",
+    response_model=SuccessEnvelope[CheckInListResult],
+    summary="List Check-Ins",
+)
 async def get_run_checkins(
     request: Request,
     run_id: Annotated[str, Path(min_length=1)],
@@ -33,7 +37,10 @@ async def get_run_checkins(
 
 
 @router.post(
-    "/runs/{run_id}/check-ins", status_code=201, response_model=SuccessEnvelope[CheckInData]
+    "/runs/{run_id}/check-ins",
+    status_code=201,
+    response_model=SuccessEnvelope[CheckInData],
+    summary="Create Check-In",
 )
 async def create_run_checkin(
     request: Request,
@@ -54,7 +61,10 @@ async def create_run_checkin(
 
 
 @router.put(
-    "/check-ins/{checkin_id}/response", status_code=200, response_model=SuccessEnvelope[CheckInData]
+    "/check-ins/{checkin_id}/response",
+    status_code=200,
+    response_model=SuccessEnvelope[CheckInData],
+    summary="Respond to Check-In",
 )
 async def submit_checkin_response(
     request: Request,

@@ -2,11 +2,12 @@
 from datetime import datetime
 from typing import Annotated
 
-from fastapi import APIRouter, Header, Query, Request
+from fastapi import APIRouter, Header, Path, Query, Request
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import CurrentUserDep, DbSessionDep
+from app.api.v1.service_dispatch import service_handler, success
 from app.core.errors import AppError
 from app.models.settings import SettingChangeRequest
 from app.models.task import Task as TaskRow
@@ -18,6 +19,7 @@ from app.schemas.common import (
 )
 from app.schemas.settings import (
     Availability,
+    CancelSettingsChangeRequest,
     SettingsChangeRequest,
     SettingsChangeResult,
     UserPreference,
@@ -39,7 +41,7 @@ router = APIRouter(tags=["UF7 - Settings & Availability"])
             "description": "Chưa đăng nhập hoặc thiếu Bearer Token",
         },
     },
-    summary="Đọc cài đặt trợ lý (Dòng 39 trên API Sheet)",
+    summary="Get Preferences",
 )
 async def get_preferences(
     request: Request,
@@ -315,3 +317,29 @@ async def create_settings_change(
         user_id=current_user.user_id, idempotency_key=idempotency_key, payload=payload, db=db
     )
     return SuccessEnvelope(data=result, meta=build_response_meta())
+
+
+@router.post(
+    "/settings/change-requests/{change_request_id}/cancel",
+    response_model=SuccessEnvelope[SettingsChangeResult],
+    responses={
+        status: {"model": ErrorEnvelope} for status in (401, 404, 409, 422, 503)
+    },
+    summary="Hủy yêu cầu thay đổi cài đặt theo revision",
+)
+async def cancel_settings_change(
+    request: Request,
+    change_request_id: Annotated[str, Path(min_length=1)],
+    payload: CancelSettingsChangeRequest,
+    current_user: CurrentUserDep,
+    db: DbSessionDep,
+    idempotency_key: Annotated[str, Header(alias="Idempotency-Key", min_length=1)],
+) -> SuccessEnvelope[SettingsChangeResult]:
+    data = await service_handler("settings_service", "cancel_settings_change_request")(
+        db=db,
+        user_id=current_user.user_id,
+        change_request_id=change_request_id,
+        payload=payload,
+        idempotency_key=idempotency_key,
+    )
+    return success(request, data)

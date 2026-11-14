@@ -8,8 +8,10 @@ from app.api.v1 import (
     drafts,
     focus,
     planning,
+    reschedule,
     schedule,
     settings,
+    suggestions,
     system,
     tasks,
     thoughts,
@@ -26,6 +28,8 @@ api_router.include_router(planning.router)
 api_router.include_router(tasks.router)
 api_router.include_router(schedule.router)
 api_router.include_router(settings.router)
+api_router.include_router(reschedule.router)
+api_router.include_router(suggestions.router)
 api_router.include_router(system.router)
 api_router.include_router(focus.router)
 api_router.include_router(thoughts.router)

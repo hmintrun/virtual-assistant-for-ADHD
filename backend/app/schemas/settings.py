@@ -145,3 +145,9 @@ class SettingsChangeResult(ApiModel):
     target_task_id: str | None = None
     summary_revision: int | None = None
     planning_input_revision: int | None = None
+
+
+class CancelSettingsChangeRequest(ApiModel):
+    """Dòng 42: hủy yêu cầu cài đặt theo đúng revision hiện hành."""
+
+    expected_request_revision: int = Field(ge=0)
