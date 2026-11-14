@@ -46,6 +46,9 @@ class ApiClient {
             if (session == null ||
                 !session.active ||
                 error.response?.statusCode != 401 ||
+                (request.path.startsWith('/calendar/') &&
+                    error.response?.data is Map &&
+                    (error.response?.data as Map)['detail'] is String) ||
                 request.extra['auth_retried'] == true) {
               handler.next(error);
               return;
@@ -123,9 +126,15 @@ class ApiClient {
     }
   }
 
-  Future<List<Map<String, dynamic>>> getListData(String path) async {
+  Future<List<Map<String, dynamic>>> getListData(
+    String path, {
+    Map<String, dynamic>? queryParameters,
+  }) async {
     try {
-      final response = await dio.get<Map<String, dynamic>>(path);
+      final response = await dio.get<Map<String, dynamic>>(
+        path,
+        queryParameters: queryParameters,
+      );
       final items = response.data?['data'];
       if (items is! List) {
         throw const ApiException('Backend trả về danh sách không hợp lệ.');
@@ -229,7 +238,9 @@ class ApiException implements Exception {
     final detail = body is Map<String, dynamic>
         ? body['error'] as Map<String, dynamic>?
         : null;
-    final serverMessage = detail?['message'] as String?;
+    final legacyDetail = body is Map<String, dynamic> ? body['detail'] : null;
+    final serverMessage = detail?['message'] as String? ??
+        (legacyDetail is String ? legacyDetail : null);
     final message = serverMessage ??
         switch (error.type) {
           DioExceptionType.connectionTimeout =>

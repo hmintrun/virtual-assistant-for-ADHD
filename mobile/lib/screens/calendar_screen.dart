@@ -194,6 +194,12 @@ class _CalendarScreenState extends State<CalendarScreen> {
         child: ListView(
           padding: const EdgeInsets.fromLTRB(16, 16, 16, 88),
           children: [
+            TextButton.icon(
+              icon: const Icon(Icons.event_available_outlined),
+              label: const Text('Google Calendar'),
+              onPressed: () =>
+                  Navigator.of(context).pushNamed('/google-calendar'),
+            ),
             MelbelCard(
               padding: const EdgeInsets.all(12),
               child: Column(

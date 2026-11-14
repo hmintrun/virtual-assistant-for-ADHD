@@ -17,6 +17,7 @@ import 'screens/onboarding_screens.dart';
 import 'screens/support_screens.dart';
 import 'screens/home_screen.dart';
 import 'screens/calendar_screen.dart';
+import 'screens/google_calendar_screen.dart';
 import 'screens/focus_screen.dart';
 import 'screens/settings_screen.dart';
 import 'screens/focus_review_screens.dart';
@@ -112,6 +113,7 @@ class ProPlanApp extends StatelessWidget {
               '/login': (_) => const HomeScreen(),
               '/home': (_) => const HomeScreen(),
               '/calendar': (_) => const CalendarScreen(),
+              '/google-calendar': (_) => const GoogleCalendarScreen(),
               '/settings': (_) => const SettingsScreen(),
               '/thoughts': (_) => const ThoughtInboxScreen(),
               '/schedule-change': (_) => const ScheduleChangeReasonScreen(),
