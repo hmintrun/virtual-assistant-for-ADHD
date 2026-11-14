@@ -253,13 +253,15 @@ async def get_preferences(*, user_id: str, db: AsyncSession) -> UserPreference:
     )
 
 
-async def _availability(db: AsyncSession, user_id: str) -> Availability:
-    row = await db.scalar(
+async def _availability(db: AsyncSession, user_id: str, *, for_update: bool = True) -> Availability:
+    stmt = (
         select(AvailabilityRow)
         .where(AvailabilityRow.user_id == draft_service.resolve_user_uuid(user_id))
-        .with_for_update()
         .execution_options(populate_existing=True)
     )
+    if for_update:
+        stmt = stmt.with_for_update()
+    row = await db.scalar(stmt)
     if row is None:
         raise _error("SOURCE_CHANGED", "Không tìm thấy nguồn giờ rảnh đã chọn.")
     return Availability(
@@ -324,6 +326,81 @@ async def get_planning_context(
     return _context_schema(row, source_draft_id=source_draft_id)
 
 
+async def _validate_context_sources_and_overlaps(
+    db: AsyncSession,
+    *,
+    user_id: str,
+    payload: PlanningContextCreateRequest,
+    selected: set[tuple[str, str]],
+    for_update: bool,
+) -> PlanningDraft | None:
+    """Validate draft/availability, selected calendar connections, and non-narrowing overlaps."""
+    draft: PlanningDraft | None = None
+    if payload.source_draft_id is not None:
+        _, draft = await _read_draft(db, user_id, payload.source_draft_id)
+        if draft.summary_revision != payload.expected_summary_revision:
+            raise _error("REVISION_CONFLICT", "Bản tóm tắt đã thay đổi.")
+        _require_draft(draft, draft.summary_revision, draft.planning_input_revision)
+        if draft.summary.availability is None:
+            raise _error("PLAN_NOT_CONFIRMABLE", "Draft chưa có giờ rảnh riêng được xác nhận.")
+    else:
+        if payload.availability_ref is None:
+            raise _invalid("Thiếu nguồn giờ của Context.", "availability_ref")
+        availability = await _availability(db, user_id, for_update=for_update)
+        if (
+            payload.availability_ref.availability_id != availability.availability_id
+            or payload.availability_ref.revision != availability.revision
+            or availability.confirmed_at is None
+        ):
+            raise _error("SOURCE_CHANGED", "Nguồn giờ rảnh cũ đã thay đổi.")
+
+    owner_uuid = draft_service.resolve_user_uuid(user_id)
+    for connection_id, calendar_id in selected:
+        connection = await db.scalar(
+            select(CalendarConnection)
+            .where(
+                CalendarConnection.id == _uuid(connection_id),
+                CalendarConnection.user_id == owner_uuid,
+            )
+            .execution_options(populate_existing=True)
+        )
+        if connection is None or calendar_id not in connection.read_calendar_ids:
+            raise _error(
+                "RESOURCE_NOT_FOUND", "Không tìm thấy nguồn lịch được phép đọc.", 404, "reload"
+            )
+        if connection.connection_state == "disconnected":
+            raise _error(
+                "CALENDAR_CONTEXT_UNAVAILABLE",
+                "Kết nối Google Calendar đã bị ngắt. Vui lòng kết nối lại.",
+                action="connect_calendar",
+            )
+
+    if draft is not None:
+        overlaps = (
+            await db.scalars(
+                select(PlanningContext).where(
+                    PlanningContext.user_id == owner_uuid,
+                    PlanningContext.source_draft_id
+                    == draft_service.resolve_draft_uuid(draft.draft_id),
+                    PlanningContext.source_summary_revision == draft.summary_revision,
+                    PlanningContext.query_start < payload.to_at,
+                    PlanningContext.query_end > payload.from_at,
+                    PlanningContext.sync_state == "valid",
+                )
+            )
+        ).all()
+        if any(
+            (row.busy_intervals or row.manual_busy_intervals or row.selected_calendar_sources)
+            and (row.query_start < payload.from_at or row.query_end > payload.to_at)
+            for row in overlaps
+        ):
+            raise _invalid(
+                "Ngữ cảnh mới cần bao phủ ngữ cảnh cũ để không làm mất lịch bận ngoài khoảng cập nhật.",
+                "from/to",
+            )
+    return draft
+
+
 async def create_planning_context(
     *, user_id: str, payload: PlanningContextCreateRequest, idempotency_key: str, db: AsyncSession
 ) -> CalendarContext:
@@ -338,84 +415,93 @@ async def create_planning_context(
         payload.manual_busy_intervals
     ):
         raise _invalid("Mã khoảng bận nhập tay bị trùng.", "manual_busy_intervals")
+
+    selected = {
+        (item.connection_id, item.google_calendar_id)
+        for item in payload.selected_calendar_sources
+    }
+    excluded = {
+        (item.connection_id, item.google_calendar_id) for item in payload.excluded_sources
+    }
+    if (
+        len(selected) != len(payload.selected_calendar_sources)
+        or len(excluded) != len(payload.excluded_sources)
+        or not excluded.issubset(selected)
+    ):
+        raise _invalid(
+            "Nguồn lịch bị trùng hoặc loại trừ nguồn chưa được chọn.",
+            "selected_calendar_sources",
+        )
+    validation_now = datetime.now(UTC)
+    if any(
+        item.user_confirmed_at.utcoffset() is None
+        or item.user_confirmed_at > validation_now
+        or not item.reason.strip()
+        for item in payload.excluded_sources
+    ):
+        raise _invalid(
+            "Cần lý do và thời điểm user đã xác nhận loại nguồn lịch.", "excluded_sources"
+        )
+
+    # Phase 1: kiểm tra điều kiện tiên quyết ở chế độ đọc, không giữ lock/transaction khi gọi Google HTTP.
     await db.rollback()
+    saved = await _receipt(db, user_id, idempotency_key, digest)
+    if saved is not None:
+        await db.rollback()
+        return CalendarContext.model_validate(saved)
+    initial_draft = await _validate_context_sources_and_overlaps(
+        db,
+        user_id=user_id,
+        payload=payload,
+        selected=selected,
+        for_update=False,
+    )
+    await db.rollback()
+
+    # Phase 2: gọi Google Calendar HTTP và cập nhật token (nếu refresh/lỗi) ngoài transaction chính.
+    ingestion = await ingest_calendar_sources(
+        db=db,
+        user_id=user_id,
+        selected_sources=payload.selected_calendar_sources,
+        excluded_sources=payload.excluded_sources,
+        query_start=payload.from_at,
+        query_end=payload.to_at,
+        manual_busy_intervals=payload.manual_busy_intervals,
+        target_task_id=initial_draft.confirmed_task_id if initial_draft else None,
+    )
+    await db.rollback()
+    if ingestion.coverage_state == "degraded":
+        raise _error(
+            "CALENDAR_UNAVAILABLE",
+            "Không thể đọc một hoặc nhiều nguồn lịch đã chọn. Vui lòng thử lại hoặc xác nhận loại trừ nguồn lỗi.",
+            503,
+            "retry_or_review_calendar_sources",
+        )
+
+    # Phase 3: khóa user và ghi PlanningContext + CommandReceipt nguyên tử.
     async with db.begin():
         await _lock_user(db, user_id)
         saved = await _receipt(db, user_id, idempotency_key, digest)
         if saved is not None:
             return CalendarContext.model_validate(saved)
-        draft = None
-        if payload.source_draft_id is not None:
-            _, draft = await _read_draft(db, user_id, payload.source_draft_id)
-            if draft.summary_revision != payload.expected_summary_revision:
-                raise _error("REVISION_CONFLICT", "Bản tóm tắt đã thay đổi.")
-            _require_draft(draft, draft.summary_revision, draft.planning_input_revision)
-            if draft.summary.availability is None:
-                raise _error("PLAN_NOT_CONFIRMABLE", "Draft chưa có giờ rảnh riêng được xác nhận.")
-        else:
-            if payload.availability_ref is None:
-                raise _invalid("Thiếu nguồn giờ của Context.", "availability_ref")
-            availability = await _availability(db, user_id)
-            if (
-                payload.availability_ref.availability_id != availability.availability_id
-                or payload.availability_ref.revision != availability.revision
-                or availability.confirmed_at is None
-            ):
-                raise _error("SOURCE_CHANGED", "Nguồn giờ rảnh cũ đã thay đổi.")
-        selected = {
-            (item.connection_id, item.google_calendar_id)
-            for item in payload.selected_calendar_sources
-        }
-        excluded = {
-            (item.connection_id, item.google_calendar_id) for item in payload.excluded_sources
-        }
-        if (
-            len(selected) != len(payload.selected_calendar_sources)
-            or len(excluded) != len(payload.excluded_sources)
-            or not excluded.issubset(selected)
-        ):
-            raise _invalid(
-                "Nguồn lịch bị trùng hoặc loại trừ nguồn chưa được chọn.",
-                "selected_calendar_sources",
-            )
-        for connection_id, calendar_id in selected:
-            connection = await db.scalar(
-                select(CalendarConnection).where(
-                    CalendarConnection.id == _uuid(connection_id),
-                    CalendarConnection.user_id == draft_service.resolve_user_uuid(user_id),
-                )
-            )
-            if connection is None or calendar_id not in connection.read_calendar_ids:
-                raise _error(
-                    "RESOURCE_NOT_FOUND", "Không tìm thấy nguồn lịch được phép đọc.", 404, "reload"
-                )
-        now = datetime.now(UTC)
-        if any(
-            item.user_confirmed_at.utcoffset() is None
-            or item.user_confirmed_at > now
-            or not item.reason.strip()
-            for item in payload.excluded_sources
-        ):
-            raise _invalid(
-                "Cần lý do và thời điểm user đã xác nhận loại nguồn lịch.", "excluded_sources"
-            )
-        ingestion = await ingest_calendar_sources(
-            db=db,
+        draft = await _validate_context_sources_and_overlaps(
+            db,
             user_id=user_id,
-            selected_sources=payload.selected_calendar_sources,
-            excluded_sources=payload.excluded_sources,
-            query_start=payload.from_at,
-            query_end=payload.to_at,
-            manual_busy_intervals=payload.manual_busy_intervals,
-            target_task_id=draft.confirmed_task_id if draft else None,
+            payload=payload,
+            selected=selected,
+            for_update=True,
         )
-        if ingestion.coverage_state == "degraded":
-            raise _error(
-                "CALENDAR_UNAVAILABLE",
-                "Không thể đọc một hoặc nhiều nguồn lịch đã chọn. Vui lòng thử lại hoặc xác nhận loại trừ nguồn lỗi.",
-                503,
-                "retry_or_review_calendar_sources",
+        if (
+            initial_draft is not None
+            and draft is not None
+            and (
+                draft.summary.availability != initial_draft.summary.availability
+                or draft.confirmed_task_id != initial_draft.confirmed_task_id
             )
+        ):
+            raise _error("SOURCE_CHANGED", "Nguồn lập lịch đã thay đổi trong lúc đọc Google Calendar.")
+
+        now = datetime.now(UTC)
         result = CalendarContext(
             context_id=str(uuid4()),
             revision=1,
@@ -438,28 +524,6 @@ async def create_planning_context(
             coverage_state=ingestion.coverage_state,
         )
         if draft is not None:
-            overlaps = (
-                await db.scalars(
-                    select(PlanningContext).where(
-                        PlanningContext.user_id == draft_service.resolve_user_uuid(user_id),
-                        PlanningContext.source_draft_id
-                        == draft_service.resolve_draft_uuid(draft.draft_id),
-                        PlanningContext.source_summary_revision == draft.summary_revision,
-                        PlanningContext.query_start < payload.to_at,
-                        PlanningContext.query_end > payload.from_at,
-                        PlanningContext.sync_state == "valid",
-                    )
-                )
-            ).all()
-            if any(
-                (row.busy_intervals or row.manual_busy_intervals or row.selected_calendar_sources)
-                and (row.query_start < payload.from_at or row.query_end > payload.to_at)
-                for row in overlaps
-            ):
-                raise _invalid(
-                    "Ngữ cảnh mới cần bao phủ ngữ cảnh cũ để không làm mất lịch bận ngoài khoảng cập nhật.",
-                    "from/to",
-                )
             await db.execute(
                 update(PlanningContext)
                 .where(
@@ -650,7 +714,7 @@ async def _sources(
         if (
             context_ref is not None
             or not create_manual
-            or any(c.read_calendar_ids for c in configured)
+            or any(c.connection_state == "connected" and c.read_calendar_ids for c in configured)
         ):
             raise _error(
                 "CALENDAR_CONTEXT_UNAVAILABLE",
@@ -690,7 +754,10 @@ async def _sources(
         not excluded.issubset(selected)
         or errors - excluded
         or (excluded and context.coverage_state != "manual_fallback")
-        or (selected - excluded)
+        or (
+            ((selected - excluded) or (context.selected_calendar_ids and not excluded))
+            and context.coverage_state not in {"complete", "manual_fallback"}
+        )
     ):
         # A22.1 làm sau: không coi một nguồn Google chưa đọc là không bận.
         raise _error(
