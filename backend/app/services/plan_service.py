@@ -385,7 +385,11 @@ async def create_planning_context(
                     CalendarConnection.user_id == draft_service.resolve_user_uuid(user_id),
                 )
             )
-            if connection is None or calendar_id not in connection.read_calendar_ids:
+            if (
+                connection is None
+                or connection.connection_state == "disconnected"
+                or calendar_id not in connection.read_calendar_ids
+            ):
                 raise _error(
                     "RESOURCE_NOT_FOUND", "Không tìm thấy nguồn lịch được phép đọc.", 404, "reload"
                 )
@@ -644,8 +648,16 @@ async def _sources(
                 "Đã có lịch bận nhưng ngữ cảnh chưa đủ phạm vi hoặc đã hết hạn. Hãy cập nhật lịch bận trước khi xếp lại.",
                 action="create_planning_context",
             )
+        # Kết nối user đã chủ động ngắt không còn là nguồn lịch → được xếp theo giờ
+        # rảnh nhập tay. Kết nối lỗi/thu hồi (needs_reconnect) vẫn chặn cho tới khi
+        # user xác nhận loại nguồn (excluded_sources) qua planning-context.
         configured = (
-            await db.scalars(select(CalendarConnection).where(CalendarConnection.user_id == owner))
+            await db.scalars(
+                select(CalendarConnection).where(
+                    CalendarConnection.user_id == owner,
+                    CalendarConnection.connection_state != "disconnected",
+                )
+            )
         ).all()
         if (
             context_ref is not None
