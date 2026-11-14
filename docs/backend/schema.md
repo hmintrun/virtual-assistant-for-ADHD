@@ -77,7 +77,7 @@ API liên quan: [dòng 39](https://docs.google.com/spreadsheets/d/1RTI0Hv0DydDX5
 | `reminder_offsets` | array<integer> | Đích tuần 2 đã chốt: 1–3 integer giây không âm, không trùng, chuẩn hóa giảm dần; default mới `[900, 600, 300]`, giữ cấu hình user đã lưu. Code nền vẫn một offset `[900]`, chưa gửi mảng ba phần tử vào API cho tới khi DTO/validation được mở rộng. Micro-task hiển thị cùng lời nhắc, không tự start Run. |
 | `requested_revision` | integer \| null | Phiên bản cài đặt mới được yêu cầu, có thể đang chờ đổi lịch. |
 | `effective_revision` | integer | Phiên bản đã có hiệu lực; dùng tạo lịch hoặc snapshot thực thi. |
-| `buffer_multiplier` | number | Hệ số dự phòng đang có hiệu lực; chỉ áp một lần lên làm chính. Giá trị cụ thể cần nghiên cứu/pilot. |
+| `buffer_multiplier` | number | Hệ số dự phòng đang có hiệu lực; chỉ áp một lần lên làm chính. Theo policy Pilot A20 Tuần 3: miền `[1.0, 2.0]`, bước `0.05`, ưu tiên 100% cấu hình thủ công của user. |
 | `reminder_style` | string | Giọng, cách diễn đạt và hình thức nhắc người dùng đã chọn; không tự thay thời lượng phiên. |
 | `requested_changes` | PreferenceChanges \| null | Các giá trị mới được yêu cầu; chưa dùng thay bản hiệu lực khi còn chờ phương án lịch. |
 | `pending_proposal_id` | string \| null | Phương án UF6 liên quan nếu thay cài đặt làm ảnh hưởng lịch; null khi không cần đổi lịch. |
@@ -391,7 +391,7 @@ API liên quan: [dòng 33](https://docs.google.com/spreadsheets/d/1RTI0Hv0DydDX5
 | `base_schedule_revision` | integer | Bản lịch nền; dùng ngăn áp một phương án đã cũ. |
 | `proposed_changes` | ProposedChanges | Các phần mới được chia, Steps/Sessions mới, phiên thêm/hủy/dời và giờ trước–sau. Mở rộng dùng cùng Task, không ghi đè phần đã thực hiện. |
 | `feasibility` | O10 | Kết quả kiểm cả collision, thời hạn và khoảng cách 15 phút. |
-| `explanation` | string | Lý do ngắn gọn để người dùng hiểu phương án. |
+| `explanation` | string | Lý do ngắn gọn, không phán xét để người dùng hiểu phương án; Python dựng lựa chọn đã kiểm chứng theo trạng thái, LLM chỉ chọn câu hợp lệ hoặc dùng fallback khớp trạng thái (không tự bịa mốc giờ/deadline). |
 | `status` | string enum | Đang chờ, được duyệt, bị từ chối hoặc bị bản mới thay thế. |
 | `proposal_revision` | integer | Phiên bản phương án; duyệt phải đúng bản đã xem. |
 | `allowed_task_ids` | array<string> | Phạm vi người dùng cho phép dời; affected_task_ids là tập thực sự bị tác động và không được vượt phạm vi này. |
@@ -475,7 +475,7 @@ API liên quan: [dòng 43](https://docs.google.com/spreadsheets/d/1RTI0Hv0DydDX5
 | `current_value` | number \| array<integer> | Theo kind: buffer_multiplier dùng number dương trong miền policy; reminder_offset đích đồng bộ theo cấu hình nhắc tuần 2: mảng 1–3 integer >=0, không trùng; code/contract gợi ý UF7 hiện chưa được xác nhận hỗ trợ nhiều mốc, phải review khi triển khai UF7. Không nhận object cấu hình tùy ý chưa có schema. |
 | `suggested_value` | number \| array<integer> | Giá trị gợi ý cùng biến thể với current_value; edited_value/accepted_value của API cũng theo kind này. |
 | `reason` | string | Giải thích vì sao có gợi ý; không suy diễn chẩn đoán. |
-| `policy_revision` | string | Quy tắc hoặc thuật toán đã tạo gợi ý. |
+| `policy_revision` | string | Quy tắc hoặc thuật toán đã tạo gợi ý (ví dụ Pilot A20 `v2_step_median_checked_inputs`: tối thiểu 5/15 Step sạch, `[1.0, 2.0]`, bước `0.05`, `>= 0.20`). |
 | `status` | string enum | Gợi ý đang chờ, được chấp nhận, bị từ chối hoặc thay thế. |
 | `sample_refs` | array<ResourceRef> | Tham chiếu các Step hoàn tất cùng phạm vi và actual hợp lệ; một Step nhiều Session vẫn chỉ một mẫu. |
 | `model_revision` | string \| null | Phiên bản model nếu gợi ý có dùng AI; null khi chỉ dùng quy tắc hoặc thống kê. |
@@ -992,7 +992,7 @@ Bảng này là chỉ mục, không thay request validation. Các trường dư�
 12. **Giờ rảnh và Google:** user xác nhận giờ rảnh, Calendar bổ sung bận. Query availability không có from/to → effective_intervals=null. Có query nhưng thực sự không rảnh mới []. Context giữ cặp nguồn, coverage, errors; không đổi Google lỗi thành [] để cho kế hoạch qua kiểm.
 13. **Proposal:** allowed_task_ids là phạm vi user cho phép dời; affected_task_ids là tập con thực tế bị ảnh hưởng. Một proposal hiện hành/user; revisions chống duyệt cũ. Đóng app giữ lịch đã chốt và phương án chờ, gửi một thông báo theo quy tắc; mở lại kiểm nguồn/thời gian trước duyệt.
 14. **Calendar CRUD:** tạo/sửa/xóa qua preview/confirm; event gắn Session đổi giờ/xóa qua UF6. Phân biệt app_save_state với sync Google; worker dùng etag và revision, không làm sống lại Session đã hủy hoặc ghi đè bản mới. Đổi lịch đích phải xử lý keep/move tường minh.
-15. **Cấu hình và học buffer:** requested khác effective, giữ snapshot Run hiện tại. Chỉ học từ Step hoàn tất cùng phạm vi với actual có nguồn; một Step là một mẫu. Miền k, cỡ mẫu, chu kỳ gợi ý và độ nhỏ micro-task cần nghiên cứu/policy, không mặc định 1.2, 2 phút, 7–10 phiên hoặc mỗi tuần.
+15. **Cấu hình và học buffer:** requested khác effective, giữ snapshot Run hiện tại. Chỉ học từ Step hoàn tất sạch cùng phạm vi (`scope_modified=false`, có `actual_source` thuộc `timer_proxy`/`self_report`); một Step là một mẫu. Thông số Pilot A20 Tuần 3: tối thiểu 5 mẫu trong cửa sổ 15 Step sạch gần nhất, trung vị `Decimal` làm tròn bước `0.05` (`ROUND_HALF_UP`), kẹp miền `[1.0, 2.0]`, ngưỡng chênh tuyệt đối `>= 0.20`, kèm `cooldown_seconds` và chu kỳ kiểm tra tham chiếu cuối tuần; luôn ưu tiên 100% cấu hình thủ công của user (không tự ghi đè `k_user` hoặc dùng mặc định Moving Average 7–10 phiên). Độ nhỏ micro-task và các mở rộng sau pilot tiếp tục đối chiếu policy/capabilities.
 16. **Retry/quyền:** user_id từ app token; Idempotency-Key giữ nguyên cùng ý định/payload, khác nội dung cùng khóa bị từ chối. Confirm lưu dữ liệu+receipt+outbox nguyên tử, gọi Google sau commit. Không tự thêm Task khác vào phạm vi UF2 hoặc UF6.
 
 ## 7. Tách API, DB và dữ liệu local

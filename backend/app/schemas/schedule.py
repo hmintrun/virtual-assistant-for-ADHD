@@ -202,14 +202,14 @@ class LLMRescheduleEmpathyPayload(BaseModel):
         min_length=5,
         max_length=400,
         description=(
-            "1 câu giải thích ngắn gọn lý do dời lịch kèm lời động viên không gây áp lực "
-            "(Guilt-free Adaptive Rescheduling), xóa bỏ cảm giác tự trách của người ADHD."
+            "Chọn nguyên văn đúng 1 câu từ danh sách allowed_notes do hệ thống cung cấp "
+            "(Guilt-free Adaptive Rescheduling), không tự viết lại hoặc bịa thêm giờ, ngày, hạn chót."
         ),
     )
     encouragement_tip: str | None = Field(
         default=None,
         max_length=250,
-        description="Gợi ý nhẹ nhàng chăm sóc bản thân (ví dụ: uống ngụm nước, hít thở sâu).",
+        description="Giữ nguyên văn allowed_tip từ đầu vào hoặc trả null (không tự bịa gợi ý mới).",
     )
 
 
@@ -224,6 +224,25 @@ class RescheduleEmpatheticResult(LLMRescheduleEmpathyPayload):
     )
 
 
+class UF5SkipChipSchema(ApiModel):
+    """Một lựa chọn bỏ qua rõ phạm vi ở UF5 (W3C COGA 3 Skip Chips)."""
+
+    skip_scope: Literal["postpone_session", "skip_session", "skip_step"]
+    label: str = Field(min_length=1)
+    description: str = Field(min_length=1)
+
+
+class UF5CheckInPromptData(ApiModel):
+    """Nội dung prompt Check-in UF5 tách biệt câu hỏi Session với xác nhận Step và 3 chip Bỏ qua."""
+
+    kind: Literal["mid", "final"]
+    prompt_text: str = Field(min_length=1)
+    asks_step_completion: bool
+    skip_chips: list[UF5SkipChipSchema] = Field(min_length=3, max_length=3)
+    undo_notice: str = Field(min_length=1)
+    undo_timeout_seconds: int = Field(default=5, ge=1)
+
+
 __all__ = [
     "FeasibilityReportSchema",
     "FeasibilityStatus",
@@ -236,5 +255,7 @@ __all__ = [
     "SegmentKind",
     "Session",
     "SessionSegmentSchema",
+    "UF5CheckInPromptData",
+    "UF5SkipChipSchema",
     "VerificationScope",
 ]
