@@ -50,7 +50,10 @@ def _resolve_uuid(value: str | UUID) -> UUID:
     try:
         return UUID(str(value))
     except ValueError:
-        return uuid5(NAMESPACE_DNS, f"proplan.identifier:{value}")
+        # Phải trùng namespace với draft_service.resolve_user_uuid: nếu khác,
+        # ở AUTH_MODE=dev_user kết nối Calendar và Draft thuộc 2 user khác nhau
+        # → /planning-contexts không tìm thấy lịch đã chọn (404).
+        return uuid5(NAMESPACE_DNS, f"proplan.user:{value}")
 
 
 async def _ensure_user_exists(db: AsyncSession, user_id: UUID) -> None:

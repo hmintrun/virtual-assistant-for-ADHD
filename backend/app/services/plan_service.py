@@ -690,9 +690,11 @@ async def _sources(
         not excluded.issubset(selected)
         or errors - excluded
         or (excluded and context.coverage_state != "manual_fallback")
-        or (selected - excluded)
+        or ((selected - excluded) and context.coverage_state != "complete")
     ):
-        # A22.1 làm sau: không coi một nguồn Google chưa đọc là không bận.
+        # Không coi một nguồn Google chưa đọc trọn là không bận. Nguồn đã đọc
+        # thành công (coverage complete) thì khoảng bận của nó được trừ khỏi giờ
+        # rảnh trong compute_effective_free_intervals.
         raise _error(
             "CALENDAR_CONTEXT_UNAVAILABLE",
             "Nguồn Google chưa được kiểm; cần xem lại phạm vi nguồn.",
