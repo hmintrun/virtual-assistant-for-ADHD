@@ -4,6 +4,7 @@ import 'package:provider/provider.dart';
 import '../core/theme.dart';
 import '../providers/theme_provider.dart';
 import '../widgets/melbel_ui.dart';
+import 'calendar_connect_screen.dart';
 import 'onboarding_screens.dart';
 
 /// Supporting Help flow attached to the global help icon.
@@ -156,6 +157,15 @@ class AccountScreen extends StatelessWidget {
               icon: Icons.cloud_off_outlined,
               title: 'Trạng thái kết nối',
               subtitle: 'Chưa xác thực với Backend',
+            ),
+            const SizedBox(height: 12),
+            OutlinedButton.icon(
+              onPressed: () => Navigator.of(context).push(
+                MaterialPageRoute<void>(
+                    builder: (_) => const CalendarConnectScreen()),
+              ),
+              icon: const Icon(Icons.calendar_month_outlined),
+              label: const Text('Kết nối Google Calendar'),
             ),
             const SizedBox(height: 18),
             FilledButton.icon(

@@ -95,6 +95,8 @@ build/
 
 # Flutter Android
 mobile/android/.gradle/
+mobile/packages/flutter_dnd/android/.gradle/
+mobile/packages/flutter_dnd/android/.settings/
 mobile/android/local.properties
 mobile/android/gradle/
 mobile/android/app/build/
