@@ -55,7 +55,7 @@ class SessionSnapshot(ApiModel):
     step_id: str = Field(min_length=1)
     scheduled_start: datetime
     scheduled_end: datetime
-    micro_task_text: str = Field(min_length=1)
+    micro_task_text: str | None = Field(default=None)
     micro_task_seconds: int | None = Field(default=None, ge=0)
     work_seconds: int = Field(gt=0)
     rest_seconds: int = Field(ge=0)
@@ -126,6 +126,7 @@ class SessionRunData(ApiModel):
     dnd_release_at: datetime | None = None
     total_planned_seconds: int | None = Field(default=None, ge=0)
     segments: list[SessionSegment] = Field(default_factory=list)
+    continuation_of_run_id: str | None = None
 
 
 SessionRun = SessionRunData

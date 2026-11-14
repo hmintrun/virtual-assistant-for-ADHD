@@ -81,6 +81,10 @@ def _parse_iso_datetime(value: Any) -> datetime | None:
     return None
 
 
+def _current_utc_now(now: datetime | None = None) -> datetime:
+    return (now or datetime.now(UTC)).astimezone(UTC)
+
+
 def _require_replan(message: str) -> AppError:
     return AppError(
         status_code=409,
@@ -125,7 +129,8 @@ async def _resolve_settings_snapshot(
     raw = run.settings_snapshot or {}
     if isinstance(raw, dict) and "effective_revision" in raw and isinstance(raw.get("session"), dict):
         try:
-            return SettingsSnapshot.model_validate(raw)
+            clean_raw = {k: v for k, v in raw.items() if not k.startswith("_")}
+            return SettingsSnapshot.model_validate(clean_raw)
         except Exception:
             pass
 
@@ -230,6 +235,9 @@ async def _run_to_schema(
         dnd_release_at=run.dnd_release_at,
         total_planned_seconds=session_snap.duration_seconds if session_snap is not None else None,
         segments=list(session_snap.segments) if session_snap is not None else [],
+        continuation_of_run_id=(run.settings_snapshot or {}).get("_continuation_of_run_id")
+        if isinstance(run.settings_snapshot, dict)
+        else None,
     )
 
 
@@ -247,7 +255,7 @@ async def reconcile_expired_checkins(
     - Khi được gọi từ luồng đọc (commit_if_read=True): thực hiện lock_owner + CAS + await db.commit().
     """
     user_uuid = command_service.owner_uuid(user_id)
-    ref_now = (now or datetime.now(UTC)).astimezone(UTC)
+    ref_now = _current_utc_now(now)
 
     expired_checkin_ids = list(
         await db.scalars(
@@ -1100,17 +1108,12 @@ async def end_session_run(
     run.dnd_release_at = timeout_at
     run.updated_at = datetime.now(UTC)
 
-    # Đối soát trường hợp đồng bộ offline muộn (khi caller truyền now >= timeout_at
-    # hoặc ended_at thuộc cửa sổ gần với wall-clock hiện tại nhưng đã trôi qua >= 300s)
-    initial_response_state = "open"
-    timeout_utc = timeout_at.astimezone(UTC)
-    if now is not None:
-        if now.astimezone(UTC) >= timeout_utc:
-            initial_response_state = "no_respond"
-    else:
-        wall_diff = (datetime.now(UTC) - timeout_utc).total_seconds()
-        if 0 <= wall_diff <= 3600:
-            initial_response_state = "no_respond"
+    # Đối soát trường hợp đồng bộ offline muộn: tính trạng thái timeout (ended_at + 300s)
+    # nhất quán theo clock nội bộ/now, không giới hạn cửa sổ 1 giờ.
+    ref_now = _current_utc_now(now)
+    initial_response_state = (
+        "no_respond" if ref_now >= timeout_at.astimezone(UTC) else "open"
+    )
 
     checkin = CheckIn(
         user_id=user_uuid,
