@@ -67,6 +67,7 @@ class PlanCandidateModel {
   String? get unexpandedScope => raw['unexpanded_scope'] as String?;
   List<JsonMap> get steps => _maps(raw['steps']);
   List<JsonMap> get sessions => _maps(raw['sessions']);
+  List<JsonMap> get planningParts => _maps(raw['planning_parts']);
   JsonMap get sourceRevisions => Map<String, dynamic>.from(
       raw['source_revisions'] as Map<String, dynamic>);
 

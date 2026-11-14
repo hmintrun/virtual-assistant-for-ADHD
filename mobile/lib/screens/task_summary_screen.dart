@@ -355,7 +355,7 @@ class _TaskSummaryScreenState extends State<TaskSummaryScreen> {
                         Expanded(
                             child: Text(
                           'Giờ rảnh: ${task.availabilitySummary}',
-                          style: const TextStyle(
+                          style: TextStyle(
                             fontFamily: 'Be Vietnam Pro',
                             fontSize: 13,
                             color: MelbelColors.kTertiaryFixedDim,
@@ -392,7 +392,7 @@ class _TaskSummaryScreenState extends State<TaskSummaryScreen> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  const Text(
+                  Text(
                     'Giờ rảnh cho công việc này',
                     style: TextStyle(
                       fontFamily: 'Be Vietnam Pro',
@@ -404,7 +404,7 @@ class _TaskSummaryScreenState extends State<TaskSummaryScreen> {
                   const SizedBox(height: 10),
                   Text(
                     task.availabilitySummary,
-                    style: const TextStyle(
+                    style: TextStyle(
                       fontFamily: 'Be Vietnam Pro',
                       fontSize: 14,
                       color: MelbelColors.kOnSurfaceVariant,
@@ -433,7 +433,7 @@ class _TaskSummaryScreenState extends State<TaskSummaryScreen> {
                   child: Text(
                     issue['message'] as String,
                     style:
-                        const TextStyle(color: MelbelColors.kOnSurfaceVariant),
+                        TextStyle(color: MelbelColors.kOnSurfaceVariant),
                   ),
                 ),
 
