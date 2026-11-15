@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -19,6 +21,8 @@ void main() {
 
     final commands = <RequestOptions>[];
     var endAttempts = 0;
+    var responseAttempts = 0;
+    final replayed = Completer<void>();
     RequestOptions? checkInRead;
     final dio = Dio()
       ..interceptors.add(InterceptorsWrapper(onRequest: (request, handler) {
@@ -40,6 +44,16 @@ void main() {
             type: DioExceptionType.connectionError,
           ));
           return;
+        }
+        if (request.path == '/check-ins/final-checkin/response') {
+          if (++responseAttempts == 1) {
+            handler.reject(DioException(
+              requestOptions: request,
+              type: DioExceptionType.connectionError,
+            ));
+            return;
+          }
+          if (!replayed.isCompleted) replayed.complete();
         }
         final data = switch (request.path) {
           '/sessions/calendar-session/start' => run,
@@ -104,11 +118,32 @@ void main() {
     expect(focus.hasPendingCheckInResponse, isFalse);
     expect((await repository.loadActiveRun())?['pending_response'], isNull);
     await focus.answerCheckIn('incomplete');
+    expect(focus.hasPendingCheckInResponse, isTrue);
+    expect((await repository.loadActiveRun())?['pending_response'], isNotNull);
+
+    final recovered =
+        FocusProvider(api: ApiClient(dio: dio), repository: repository);
+    addTearDown(recovered.dispose);
+    final settled = Completer<void>();
+    recovered.addListener(() {
+      if (!recovered.hasUnfinishedServerRun &&
+          responseAttempts == 2 &&
+          !recovered.runCommandBusy &&
+          !settled.isCompleted) {
+        settled.complete();
+      }
+    });
+    await recovered.restore();
+    await replayed.future.timeout(const Duration(seconds: 5));
+    await settled.future.timeout(const Duration(seconds: 5));
+    expect(commands[commands.length - 2].data, commands.last.data);
+    expect(commands[commands.length - 2].headers['Idempotency-Key'],
+        commands.last.headers['Idempotency-Key']);
     expect(commands.last.method, 'PUT');
     expect(commands.last.path, '/check-ins/final-checkin/response');
     expect(commands.last.data['session_outcome'], 'incomplete');
     expect(commands.last.data['expected_response_revision'], 1);
-    expect(focus.hasUnfinishedServerRun, isFalse);
+    expect(recovered.hasUnfinishedServerRun, isFalse);
     expect(await repository.loadActiveRun(), isNull);
   });
 }

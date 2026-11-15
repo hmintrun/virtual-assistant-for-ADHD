@@ -281,42 +281,57 @@ class ScheduleChangeReasonScreen extends StatefulWidget {
 
 class _ScheduleChangeReasonScreenState
     extends State<ScheduleChangeReasonScreen> {
-  String? _reason;
+  late final String? _checkInReason = switch (widget.initialReason) {
+    'checkin_incomplete' => 'Chưa xong',
+    'checkin_busy' => 'Bận việc khác',
+    'checkin_skipped' => 'Hoãn phiên',
+    _ => null,
+  };
+  String? _selectedReason;
+  String? get _reason => _checkInReason ?? _selectedReason;
 
   @override
   Widget build(BuildContext context) => FocusReviewPage(
         title: 'Đổi lịch',
         children: [
-          const ReviewHeader(
-              'Vì sao cần đổi lịch?', 'Chọn lý do để xem bước tiếp theo.'),
+          if (_checkInReason case final reason?)
+            ReviewHeader('Điều chỉnh lịch', reason)
+          else
+            const ReviewHeader(
+                'Vì sao cần đổi lịch?', 'Chọn lý do để xem bước tiếp theo.'),
           if (widget.session case final session?)
             ReviewSessionCard(session: session),
-          for (final (reason, detail, icon) in const [
-            (
-              'Chưa xong',
-              'Cần thêm thời gian cho bước này.',
-              Icons.edit_note_outlined
-            ),
-            (
-              'Bận việc khác',
-              'Đổi sang một khung giờ phù hợp hơn.',
-              Icons.schedule_outlined
-            ),
-            ('Hoãn phiên', 'Xem lịch để tiếp tục sau.', Icons.update_outlined),
-          ])
-            MelbelCard(
-              padding: EdgeInsets.zero,
-              child: ListTile(
-                selected: _reason == reason,
-                leading: Icon(icon),
-                title: Text(reason),
-                subtitle: Text(detail),
-                trailing: Icon(_reason == reason
-                    ? Icons.radio_button_checked
-                    : Icons.radio_button_unchecked),
-                onTap: () => setState(() => _reason = reason),
+          if (_checkInReason == null)
+            for (final (reason, detail, icon) in const [
+              (
+                'Chưa xong',
+                'Cần thêm thời gian cho bước này.',
+                Icons.edit_note_outlined
               ),
-            ),
+              (
+                'Bận việc khác',
+                'Đổi sang một khung giờ phù hợp hơn.',
+                Icons.schedule_outlined
+              ),
+              (
+                'Hoãn phiên',
+                'Xem lịch để tiếp tục sau.',
+                Icons.update_outlined
+              ),
+            ])
+              MelbelCard(
+                padding: EdgeInsets.zero,
+                child: ListTile(
+                  selected: _reason == reason,
+                  leading: Icon(icon),
+                  title: Text(reason),
+                  subtitle: Text(detail),
+                  trailing: Icon(_reason == reason
+                      ? Icons.radio_button_checked
+                      : Icons.radio_button_unchecked),
+                  onTap: () => setState(() => _selectedReason = reason),
+                ),
+              ),
           PrimaryCta(
               label: 'Xem thay đổi',
               onPressed: _reason == null
@@ -364,7 +379,8 @@ class ScheduleComparisonScreen extends StatefulWidget {
       _ScheduleComparisonScreenState();
 }
 
-class _ScheduleComparisonScreenState extends State<ScheduleComparisonScreen> {
+class _ScheduleComparisonScreenState extends State<ScheduleComparisonScreen>
+    with WidgetsBindingObserver {
   late final _api = widget.api ?? AdaptationApi(ApiClient());
   Map<String, dynamic>? _proposal;
   String? _error;
@@ -374,11 +390,26 @@ class _ScheduleComparisonScreenState extends State<ScheduleComparisonScreen> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     if (widget.proposalId != null ||
         widget.runId != null ||
         widget.trigger == 'resume') {
       _load();
     }
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed &&
+        _proposal?['status'] == 'pending') {
+      _load();
+    }
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
   }
 
   Future<void> _perform(Future<void> Function() operation) async {
@@ -410,8 +441,8 @@ class _ScheduleComparisonScreenState extends State<ScheduleComparisonScreen> {
   }
 
   Future<void> _load() => _perform(() async {
-        final id = widget.proposalId;
-        final run = widget.runId;
+        final id = _proposal?['proposal_id'] as String? ?? widget.proposalId;
+        final run = id == null ? widget.runId : null;
         final current = id != null
             ? await _api.proposal(id)
             : run != null
@@ -511,11 +542,11 @@ class _ScheduleComparisonScreenState extends State<ScheduleComparisonScreen> {
           PrimaryCta(
               label: 'Áp dụng lịch mới',
               onPressed: _busy ? null : () => _act('approve')),
-        if (pending && !canApply)
+        if (pending && !canApply && _error == null)
           SecondaryCta(
               label: 'Tính lại phương án',
               onPressed: _busy ? null : () => _act('rebuild')),
-        if (_error != null && (proposal == null || _cached))
+        if (_error != null)
           SecondaryCta(label: 'Thử lại', onPressed: _busy ? null : _load),
         if (widget.session == null &&
             proposal == null &&

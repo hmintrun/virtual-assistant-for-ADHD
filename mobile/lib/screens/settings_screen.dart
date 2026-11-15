@@ -22,6 +22,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   Map<String, dynamic>? _preferences;
   int? _work;
   int? _rest;
+  double? _bufferMultiplier;
   List<int>? _reminders;
   String? _reminderStyle;
   bool _busy = false;
@@ -45,6 +46,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
         _preferences = data;
         _work = data['work_interval_seconds'] as int?;
         _rest = data['rest_interval_seconds'] as int?;
+        _bufferMultiplier = (data['buffer_multiplier'] as num?)?.toDouble();
         _reminders = (data['reminder_offsets'] as List?)?.cast<int>();
         _reminderStyle = data['reminder_style'] as String?;
       });
@@ -106,7 +108,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
           .join(', ')
       : '×$value';
 
-  Future<void> _editSuggestion(Object value) async {
+  Future<String?> _showPreferenceEditor(Object value) async {
     final controller = TextEditingController(
       text: value is List
           ? value.whereType<int>().map((s) => s ~/ 60).join(', ')
@@ -135,6 +137,26 @@ class _SettingsScreenState extends State<SettingsScreen> {
       )),
     );
     WidgetsBinding.instance.addPostFrameCallback((_) => controller.dispose());
+    return result;
+  }
+
+  double? _parseBuffer(String text) {
+    final value = double.tryParse(text.replaceAll(',', '.'));
+    return value != null && value.isFinite && value > 0 ? value : null;
+  }
+
+  Future<void> _editBuffer(double current) async {
+    final result = await _showPreferenceEditor(current);
+    if (!mounted || result == null) return;
+    final value = _parseBuffer(result);
+    setState(() {
+      _error = value == null ? 'Nhập hệ số đệm lớn hơn 0.' : null;
+      if (value != null) _bufferMultiplier = value;
+    });
+  }
+
+  Future<void> _editSuggestion(Object value) async {
+    final result = await _showPreferenceEditor(value);
     if (!mounted || result == null) return;
     Object? parsed;
     if (value is List) {
@@ -144,8 +166,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
         parsed = minutes.map((v) => v! * 60).toList();
       }
     } else {
-      parsed = double.tryParse(result.replaceAll(',', '.'));
-      if (parsed is double && (!parsed.isFinite || parsed <= 0)) parsed = null;
+      parsed = _parseBuffer(result);
     }
     if (parsed == null) {
       setState(() => _suggestionError = 'Giá trị chưa hợp lệ.');
@@ -162,6 +183,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
         'work_interval_seconds': _work,
       if (_rest != null && _rest != current['rest_interval_seconds'])
         'rest_interval_seconds': _rest,
+      if (_bufferMultiplier != null &&
+          _bufferMultiplier != current['buffer_multiplier'])
+        'buffer_multiplier': _bufferMultiplier,
       if (_reminders != null &&
           _reminders!.join(',') !=
               (current['reminder_offsets'] as List?)?.join(','))
@@ -282,7 +306,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
         if (_error != null) Text(_error!),
         if (_preferences == null && !_busy)
           SecondaryCta(label: 'Tải lại cài đặt', onPressed: _load),
-        if (_preferences case final preferences?) ...[
+        if (_preferences != null) ...[
           MelbelCard(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -305,8 +329,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
                       ),
                   ],
                 ),
-                if (preferences['buffer_multiplier'] case final num buffer)
-                  Text('Hệ số đệm đang dùng: ×$buffer'),
+                if (_bufferMultiplier case final buffer?)
+                  TextButton(
+                    onPressed: _busy ? null : () => _editBuffer(buffer),
+                    child: Text('Hệ số đệm: ×$buffer'),
+                  ),
               ],
             ),
           ),

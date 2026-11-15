@@ -93,15 +93,38 @@ class _OwnerApp extends StatelessWidget {
       );
 }
 
-class ProPlanApp extends StatelessWidget {
+class ProPlanApp extends StatefulWidget {
   const ProPlanApp({super.key, required this.signedIn});
 
   final bool signedIn;
 
   @override
+  State<ProPlanApp> createState() => _ProPlanAppState();
+}
+
+class _ProPlanAppState extends State<ProPlanApp> {
+  final _navigatorKey = GlobalKey<NavigatorState>();
+  bool _reauthAccountOpen = false;
+
+  Future<void> _openAccount() async {
+    final navigator = _navigatorKey.currentState;
+    if (navigator == null || _reauthAccountOpen) return;
+    _reauthAccountOpen = true;
+    try {
+      await navigator.pushNamed('/account');
+    } finally {
+      _reauthAccountOpen = false;
+    }
+  }
+
+  @override
   Widget build(BuildContext context) {
     context.watch<ThemeProvider>();
+    final signedIn = widget.signedIn;
+    final needsSignIn =
+        signedIn && (context.watch<AuthService?>()?.needsSignIn ?? false);
     return MaterialApp(
+      navigatorKey: _navigatorKey,
       title: 'ProPlan VA',
       locale: const Locale('vi'),
       supportedLocales: const [Locale('vi')],
@@ -148,7 +171,26 @@ class ProPlanApp extends StatelessWidget {
           child: Center(
             child: ConstrainedBox(
               constraints: const BoxConstraints(maxWidth: 430),
-              child: child ?? const SizedBox.shrink(),
+              child: Column(
+                children: [
+                  Expanded(child: child ?? const SizedBox.shrink()),
+                  if (needsSignIn)
+                    Material(
+                      color: MelbelColors.kSurface,
+                      child: SafeArea(
+                        top: false,
+                        child: ListTile(
+                          leading: const Icon(Icons.info_outline),
+                          title: const Text('Phiên đăng nhập đã hết hạn'),
+                          trailing: TextButton(
+                            onPressed: _openAccount,
+                            child: const Text('Đăng nhập lại'),
+                          ),
+                        ),
+                      ),
+                    ),
+                ],
+              ),
             ),
           ),
         ),

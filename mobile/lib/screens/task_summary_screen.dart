@@ -553,6 +553,13 @@ List<String> _requiredQuestions(List<JsonMap> issues) {
     'AI_AVAILABILITY_INCOMPLETE',
     'AI_AVAILABILITY_REVIEW_REQUIRED',
   };
+  String fieldGroup(JsonMap issue) {
+    final path = (issue['field_path'] as String?) ?? '';
+    final field = path.startsWith('summary.') ? path.substring(8) : path;
+    final root = field.split('.').first;
+    return root == 'availability_ref' ? 'availability' : root;
+  }
+
   final blockers = issues.where((issue) => issue['blocking'] == true).toList();
   final specificFields = {
     for (final issue in blockers)
@@ -563,12 +570,12 @@ List<String> _requiredQuestions(List<JsonMap> issues) {
                   .trim()
                   .isNotEmpty ??
               false))
-        issue['field_path'],
+        fieldGroup(issue),
   };
   final questions = <String>{};
   for (final issue in blockers) {
     if (genericCodes.contains(issue['code']) &&
-        specificFields.contains(issue['field_path'])) {
+        specificFields.contains(fieldGroup(issue))) {
       continue;
     }
     final question = (issue['question'] ?? issue['message'])?.toString().trim();

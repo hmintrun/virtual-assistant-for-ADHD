@@ -97,6 +97,13 @@ class _FocusScreenState extends State<FocusScreen> with WidgetsBindingObserver {
                 padding: const EdgeInsets.only(bottom: 12),
                 child: Text(focus.runError!),
               ),
+            if (focus.startRequiresReplan)
+              TextButton(
+                onPressed: () => Navigator.of(context).pushReplacementNamed(
+                  '/calendar',
+                ),
+                child: const Text('Xem lịch'),
+              ),
             _buildStage(context, focus, session),
           ],
         ),
@@ -396,23 +403,25 @@ class _FocusScreenState extends State<FocusScreen> with WidgetsBindingObserver {
       const SizedBox(height: 20),
       _SessionCard(session: session),
       const SizedBox(height: 12),
-      _InfoCard(
-        icon:
-            focus.dndPermission ? Icons.do_not_disturb_on : Icons.info_outline,
-        title: focus.dndPermission
-            ? 'Quyền Không làm phiền đã sẵn sàng'
-            : 'Chưa cấp quyền Không làm phiền',
-        subtitle: focus.dndPermission
-            ? 'Khi bắt đầu, Melbel sẽ bật chế độ tập trung.'
-            : 'Bạn vẫn có thể bắt đầu. Có thể cấp quyền trong Cài đặt Android.',
-      ),
+      if (focus.supportsDnd)
+        _InfoCard(
+          icon: focus.dndPermission
+              ? Icons.do_not_disturb_on
+              : Icons.info_outline,
+          title: focus.dndPermission
+              ? 'Quyền Không làm phiền đã sẵn sàng'
+              : 'Chưa cấp quyền Không làm phiền',
+          subtitle: focus.dndPermission
+              ? 'Khi bắt đầu, Melbel sẽ bật chế độ tập trung.'
+              : 'Bạn vẫn có thể bắt đầu. Có thể cấp quyền trong Cài đặt Android.',
+        ),
       const SizedBox(height: 20),
       PrimaryCta(
         label: 'Bắt đầu đếm giờ ${_minutes(session.workSeconds)} phút',
         icon: Icons.play_arrow_rounded,
         onPressed: focus.runCommandBusy ? null : focus.startRun,
       ),
-      if (!focus.dndPermission)
+      if (focus.supportsDnd && !focus.dndPermission)
         TextButton(
           onPressed: focus.openDndSettings,
           child: const Text('Cấp quyền Không làm phiền'),

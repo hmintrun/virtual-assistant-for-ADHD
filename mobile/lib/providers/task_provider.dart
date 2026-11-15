@@ -890,7 +890,12 @@ class TaskProvider extends ChangeNotifier {
   }
 
   void setTitle(String value, {bool fromVoice = false}) {
-    if (_title == value) return;
+    if (inputText.trim() == value.trim()) return;
+    if (_draft != null) {
+      _scope = '';
+      _deadline = null;
+      _availability = null;
+    }
     _entrySource =
         fromVoice || (_entrySource == 'voice' && value.trim().isNotEmpty)
             ? 'voice'
