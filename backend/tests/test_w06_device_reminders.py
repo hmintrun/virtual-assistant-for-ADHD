@@ -274,3 +274,9 @@ async def test_session_revision_change_cancels_old_reminders_persistently(w05_cl
     await w05_env["engine"].dispose()
     async with w05_env["sessions"]() as db:
         assert (await db.get(Reminder, UUID(rows[0]["reminder_id"]))).delivery_state == "cancelled"
+
+
+async def test_get_reminders_without_from_to_uses_default_24h_window(w05_client):
+    res = await w05_client.get("/api/v1/reminders", params={"device_id": "android_pixel_8"})
+    assert res.status_code == 200, res.text
+    assert isinstance(res.json()["data"]["items"], list)

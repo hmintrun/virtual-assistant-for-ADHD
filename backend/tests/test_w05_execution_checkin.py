@@ -739,7 +739,7 @@ async def test_w05_mid_checkin_does_not_close_run(w05_client, w05_env):
 
 @pytest.mark.asyncio
 async def test_w05_end_session_actual_correction_early_final_checkin_and_invariant_2_1(
-    w05_client, w05_env
+    w05_client, w05_env, monkeypatch
 ):
     """Kiểm thử D4, D5, D6 & Invariant 2.1:
     - End Session -> awaiting_checkin (nhả slot uq_user_live_run để Start ngay phiên tiếp theo!)
@@ -752,6 +752,11 @@ async def test_w05_end_session_actual_correction_early_final_checkin_and_invaria
     run_id = run["run_id"]
     start_at = cast(datetime, w05_env["scheduled_start"])
     ended_at = start_at + timedelta(minutes=30)
+    monkeypatch.setattr(
+        run_service,
+        "_current_utc_now",
+        lambda now=None: (now or ended_at).astimezone(UTC),
+    )
 
     # 1. Trước khi kết thúc phiên, gọi actual-corrections phải bị từ chối 409 INVALID_RUN_STATE
     early_corr = await w05_client.post(
@@ -1038,12 +1043,20 @@ async def test_w05_final_checkin_all_outcomes_and_3_skip_chips(w05_client, w05_e
 
 
 @pytest.mark.asyncio
-async def test_w05_late_final_checkin_response_after_no_respond(w05_client, w05_env):
+async def test_w05_late_final_checkin_response_after_no_respond(
+    w05_client, w05_env, monkeypatch
+):
     """Kiểm thử D6: Phản hồi muộn sau khi CheckIn đã quá hạn 300s (no_respond -> answered)."""
     run = await _start_run(w05_client, w05_env)
     run_id = run["run_id"]
     start_at = cast(datetime, w05_env["scheduled_start"])
     ended_at = start_at + timedelta(minutes=30)
+    clock = [ended_at]
+    monkeypatch.setattr(
+        run_service,
+        "_current_utc_now",
+        lambda now=None: (now or clock[0]).astimezone(UTC),
+    )
 
     # 1. Kết thúc phiên -> awaiting_checkin
     end_res = await w05_client.post(
@@ -1065,6 +1078,7 @@ async def test_w05_late_final_checkin_response_after_no_respond(w05_client, w05_
     timeout_at = ended_at + timedelta(seconds=300)
 
     # 2. Kích hoạt lazy timeout tại t = ended_at + 301s (có commit_if_read=True)
+    clock[0] = ended_at + timedelta(seconds=301)
     sessions = w05_env["sessions"]
     user_id = str(w05_env["user_id"])
     async with sessions() as db:
@@ -1517,3 +1531,660 @@ async def test_w05_restart_durability_and_cross_resource_key_reuse(sqlite_migrat
     finally:
         app.dependency_overrides.pop(get_db, None)
         app.dependency_overrides.pop(get_current_user, None)
+
+
+@pytest.mark.asyncio
+async def test_w05_run_event_future_clock_skew_over_300s_rejected(w05_client, w05_env):
+    run = await _start_run(w05_client, w05_env)
+    future_at = (datetime.now(UTC) + timedelta(seconds=360)).isoformat()
+    res = await w05_client.post(
+        f"/api/v1/runs/{run['run_id']}/events",
+        headers={"Idempotency-Key": str(uuid4())},
+        json={
+            "device_id": run["device_id"],
+            "expected_run_revision": run["run_revision"],
+            "events": [
+                {
+                    "event_id": "ev-future-skew",
+                    "event_type": "progress",
+                    "occurred_at": future_at,
+                    "segment_index": 0,
+                    "work_elapsed_seconds": 10,
+                    "rest_elapsed_seconds": 0,
+                }
+            ],
+        },
+    )
+    assert res.status_code == 422, res.text
+
+
+# ==============================================================================
+# PHẦN 4: W3-06 TESTS (Guard Final trước End, Correction, Cascade/Scope R01, Timeout +300s)
+# ==============================================================================
+
+
+@pytest.mark.asyncio
+async def test_w306_guard_final_checkin_before_end_and_invalid_legacy_final(
+    w05_client, w05_env, monkeypatch
+):
+    """Kiểm thử W3-06 [P0]:
+    - Chặn tạo final CheckIn khi Run còn running hoặc paused (409 INVALID_RUN_STATE), không sinh record/receipt.
+    - Bảo vệ cả trường hợp có sẵn bản ghi final sai trên Run chưa End (PUT response trả 409 INVALID_RUN_STATE, không đóng Run).
+    - Sau khi End hợp lệ, tạo thêm final trả 409 FINAL_CHECKIN_EXISTS và PUT response hoạt động bình thường.
+    """
+    run = await _start_run(w05_client, w05_env)
+    run_id = run["run_id"]
+    start_at = cast(datetime, w05_env["scheduled_start"])
+    asked_at = start_at + timedelta(seconds=30)
+
+    # 1. Đang running -> POST final CheckIn bị từ chối 409 INVALID_RUN_STATE
+    r_running = await w05_client.post(
+        f"/api/v1/runs/{run_id}/check-ins",
+        headers={"Idempotency-Key": "cmd-w306-final-while-running"},
+        json={
+            "kind": "final",
+            "asked_at": asked_at.isoformat(),
+            "expected_run_revision": 1,
+        },
+    )
+    assert r_running.status_code == 409
+    assert r_running.json()["error"]["code"] == "INVALID_RUN_STATE"
+
+    # 2. Chuyển sang paused -> POST final CheckIn vẫn bị từ chối 409 INVALID_RUN_STATE
+    r_pause = await w05_client.post(
+        f"/api/v1/runs/{run_id}/events",
+        headers={"Idempotency-Key": "cmd-w306-pause"},
+        json={
+            "device_id": "android_pixel_8",
+            "expected_run_revision": 1,
+            "events": [
+                {
+                    "event_id": "ev-w306-pause",
+                    "event_type": "pause",
+                    "occurred_at": (start_at + timedelta(minutes=5)).isoformat(),
+                    "segment_index": 0,
+                    "work_elapsed_seconds": 300,
+                    "rest_elapsed_seconds": 0,
+                }
+            ],
+        },
+    )
+    assert r_pause.status_code == 200
+
+    r_paused = await w05_client.post(
+        f"/api/v1/runs/{run_id}/check-ins",
+        headers={"Idempotency-Key": "cmd-w306-final-while-paused"},
+        json={
+            "kind": "final",
+            "asked_at": (start_at + timedelta(minutes=6)).isoformat(),
+            "expected_run_revision": 2,
+        },
+    )
+    assert r_paused.status_code == 409
+    assert r_paused.json()["error"]["code"] == "INVALID_RUN_STATE"
+
+    async with w05_env["sessions"]() as db:
+        cis = list(await db.scalars(select(CheckIn).where(CheckIn.run_id == UUID(run_id))))
+        assert len(cis) == 0
+
+        # 3. Giả lập bản ghi final bất hợp lệ đã tồn tại khi Run chưa End (ended_at=None, run_state='paused')
+        bogus_ci = CheckIn(
+            user_id=w05_env["user_id"],
+            run_id=UUID(run_id),
+            kind="final",
+            response_state="open",
+            session_outcome="unknown",
+            asked_at=start_at + timedelta(minutes=6),
+            response_revision=0,
+        )
+        db.add(bogus_ci)
+        await db.commit()
+        bogus_ci_id = str(bogus_ci.id)
+
+    r_ans_bogus = await w05_client.put(
+        f"/api/v1/check-ins/{bogus_ci_id}/response",
+        headers={"Idempotency-Key": "cmd-w306-ans-bogus-final"},
+        json={
+            "expected_response_revision": 0,
+            "responded_at": (start_at + timedelta(minutes=7)).isoformat(),
+            "session_outcome": "completed",
+            "step_completed": True,
+            "task_completed": False,
+        },
+    )
+    assert r_ans_bogus.status_code == 409
+    assert r_ans_bogus.json()["error"]["code"] == "INVALID_RUN_STATE"
+
+    detail = (await w05_client.get(f"/api/v1/runs/{run_id}")).json()["data"]
+    assert detail["run_state"] == "paused"
+    assert detail["ended_at"] is None
+    assert detail["actual_work_seconds"] is None
+
+    # Chuyển bogus_ci sang mid để kiểm tiếp luồng End hợp lệ
+    async with w05_env["sessions"]() as db:
+        ci_row = await db.get(CheckIn, UUID(bogus_ci_id))
+        assert ci_row is not None and ci_row.response_revision == 0
+        ci_row.kind = "mid"
+        await db.commit()
+
+    ended_at = start_at + timedelta(minutes=30)
+    monkeypatch.setattr(
+        run_service,
+        "_current_utc_now",
+        lambda now=None: (now or ended_at).astimezone(UTC),
+    )
+    r_end = await w05_client.post(
+        f"/api/v1/runs/{run_id}/end",
+        headers={"Idempotency-Key": "cmd-w306-end-ok"},
+        json={
+            "device_id": "android_pixel_8",
+            "expected_run_revision": 2,
+            "event_id": "ev-w306-end-ok",
+            "ended_at": ended_at.isoformat(),
+            "end_reason": "timer_elapsed",
+            "work_elapsed_seconds": 1500,
+            "rest_elapsed_seconds": 300,
+        },
+    )
+    assert r_end.status_code == 200
+    final_ci_id = r_end.json()["data"]["check_in"]["checkin_id"]
+
+    # Gọi tạo thêm final sau khi End -> 409 FINAL_CHECKIN_EXISTS
+    r_dup_final = await w05_client.post(
+        f"/api/v1/runs/{run_id}/check-ins",
+        headers={"Idempotency-Key": "cmd-w306-dup-final-after-end"},
+        json={
+            "kind": "final",
+            "asked_at": ended_at.isoformat(),
+            "expected_run_revision": 3,
+        },
+    )
+    assert r_dup_final.status_code == 409
+    assert r_dup_final.json()["error"]["code"] == "FINAL_CHECKIN_EXISTS"
+
+    r_ans_ok = await w05_client.put(
+        f"/api/v1/check-ins/{final_ci_id}/response",
+        headers={"Idempotency-Key": "cmd-w306-ans-ok"},
+        json={
+            "expected_response_revision": 0,
+            "responded_at": (ended_at + timedelta(seconds=15)).isoformat(),
+            "session_outcome": "completed",
+            "step_completed": False,
+            "task_completed": False,
+        },
+    )
+    assert r_ans_ok.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_w306_correction_reverts_projection_and_protects_other_run_confirmation(
+    w05_client, w05_env, monkeypatch
+):
+    """Kiểm thử W3-06 [P1]:
+    - Sửa phản hồi trên cùng checkin_id (completed -> incomplete, skip_step -> incomplete)
+      hoàn tác đúng trạng thái Session/Step/Task và khôi phục chính xác remaining_base_seconds trước đó
+      (không đoán từ estimated_base_seconds).
+    - Giữ nguyên ended_at, work_elapsed_seconds, rest_elapsed_seconds, actual_work_seconds.
+    - Không xóa xác nhận hợp lệ nếu một Run/CheckIn khác đã xác nhận hoàn thành Step/Task.
+    """
+    # Đặt remaining_base_seconds != estimated_base_seconds (2100 != 4500) để chứng minh không đoán từ estimated_base_seconds
+    async with w05_env["sessions"]() as db:
+        step_row = await db.get(Step, w05_env["step_id"])
+        assert step_row is not None
+        step_row.estimated_base_seconds = 4500
+        step_row.remaining_base_seconds = 2100
+        await db.commit()
+
+    run = await _start_run(w05_client, w05_env)
+    run_id = run["run_id"]
+    start_at = cast(datetime, w05_env["scheduled_start"])
+    ended_at = start_at + timedelta(minutes=30)
+    monkeypatch.setattr(
+        run_service,
+        "_current_utc_now",
+        lambda now=None: (now or ended_at).astimezone(UTC),
+    )
+
+    r_end = await w05_client.post(
+        f"/api/v1/runs/{run_id}/end",
+        headers={"Idempotency-Key": "cmd-w306-corr-end-1"},
+        json={
+            "device_id": "android_pixel_8",
+            "expected_run_revision": 1,
+            "event_id": "ev-w306-corr-end-1",
+            "ended_at": ended_at.isoformat(),
+            "end_reason": "timer_elapsed",
+            "work_elapsed_seconds": 1500,
+            "rest_elapsed_seconds": 300,
+        },
+    )
+    assert r_end.status_code == 200
+    cid = r_end.json()["data"]["check_in"]["checkin_id"]
+
+    # Rev 0 -> 1: Báo xong toàn Step & Task
+    r_rev1 = await w05_client.put(
+        f"/api/v1/check-ins/{cid}/response",
+        headers={"Idempotency-Key": "cmd-w306-corr-rev-1"},
+        json={
+            "expected_response_revision": 0,
+            "responded_at": (ended_at + timedelta(seconds=10)).isoformat(),
+            "session_outcome": "completed",
+            "step_completed": True,
+            "task_completed": True,
+        },
+    )
+    assert r_rev1.status_code == 200
+    async with w05_env["sessions"]() as db:
+        st = await db.get(Step, w05_env["step_id"])
+        tk = await db.get(Task, w05_env["task_id"])
+        assert st is not None and st.status == "completed" and st.remaining_base_seconds == 0
+        assert tk is not None and tk.status == "completed"
+
+    # Rev 1 -> 2: Sửa thành skip_step
+    r_rev2 = await w05_client.put(
+        f"/api/v1/check-ins/{cid}/response",
+        headers={"Idempotency-Key": "cmd-w306-corr-rev-2"},
+        json={
+            "expected_response_revision": 1,
+            "responded_at": (ended_at + timedelta(seconds=20)).isoformat(),
+            "session_outcome": "skipped",
+            "step_completed": False,
+            "task_completed": False,
+            "skip_scope": "skip_step",
+        },
+    )
+    assert r_rev2.status_code == 200
+    async with w05_env["sessions"]() as db:
+        st = await db.get(Step, w05_env["step_id"])
+        tk = await db.get(Task, w05_env["task_id"])
+        assert st is not None and st.status == "skipped" and st.remaining_base_seconds == 0
+        assert tk is not None and tk.status == "pending"
+
+    # Rev 2 -> 3: Sửa thành incomplete -> khôi phục step.status='pending' và remaining_base_seconds=2100!
+    r_rev3 = await w05_client.put(
+        f"/api/v1/check-ins/{cid}/response",
+        headers={"Idempotency-Key": "cmd-w306-corr-rev-3"},
+        json={
+            "expected_response_revision": 2,
+            "responded_at": (ended_at + timedelta(seconds=30)).isoformat(),
+            "session_outcome": "incomplete",
+            "step_completed": False,
+            "task_completed": False,
+        },
+    )
+    assert r_rev3.status_code == 200
+    async with w05_env["sessions"]() as db:
+        sess = await db.get(Session, w05_env["session_id"])
+        st = await db.get(Step, w05_env["step_id"])
+        tk = await db.get(Task, w05_env["task_id"])
+        assert sess is not None and sess.status == "incomplete"
+        assert st is not None and st.status == "pending" and st.remaining_base_seconds == 2100
+        assert tk is not None and tk.status == "pending"
+
+    run_detail = (await w05_client.get(f"/api/v1/runs/{run_id}")).json()["data"]
+    assert datetime.fromisoformat(run_detail["ended_at"]) == ended_at
+    assert run_detail["work_elapsed_seconds"] == 1500
+    assert run_detail["rest_elapsed_seconds"] == 300
+    assert run_detail["actual_work_seconds"] == 1500
+
+    # Bây giờ chạy Run 2 trên session1b và xác nhận hoàn thành Step/Task từ Run 2
+    # Trước tiên cập nhật lại Run 1 sang completed + step_completed=True
+    await w05_client.put(
+        f"/api/v1/check-ins/{cid}/response",
+        headers={"Idempotency-Key": "cmd-w306-corr-rev-4"},
+        json={
+            "expected_response_revision": 3,
+            "responded_at": (ended_at + timedelta(seconds=40)).isoformat(),
+            "session_outcome": "completed",
+            "step_completed": False,
+            "task_completed": False,
+        },
+    )
+
+    s1b_id = str(w05_env["session1b_id"])
+    s1b_start = cast(datetime, w05_env["session1b_start"])
+    s1b_end = cast(datetime, w05_env["session1b_end"])
+    r_s1b = await w05_client.post(
+        f"/api/v1/sessions/{s1b_id}/start",
+        headers={"Idempotency-Key": "cmd-w306-start-1b"},
+        json={
+            "expected_schedule_revision": 1,
+            "device_id": "android_pixel_8",
+            "requested_start_at": s1b_start.isoformat(),
+        },
+    )
+    assert r_s1b.status_code == 201
+    run_1b_id = r_s1b.json()["data"]["run_id"]
+
+    r_end_1b = await w05_client.post(
+        f"/api/v1/runs/{run_1b_id}/end",
+        headers={"Idempotency-Key": "cmd-w306-end-1b"},
+        json={
+            "device_id": "android_pixel_8",
+            "expected_run_revision": 1,
+            "event_id": "ev-w306-end-1b",
+            "ended_at": s1b_end.isoformat(),
+            "end_reason": "timer_elapsed",
+            "work_elapsed_seconds": 1500,
+            "rest_elapsed_seconds": 300,
+        },
+    )
+    assert r_end_1b.status_code == 200
+    cid_1b = r_end_1b.json()["data"]["check_in"]["checkin_id"]
+
+    r_ans_1b = await w05_client.put(
+        f"/api/v1/check-ins/{cid_1b}/response",
+        headers={"Idempotency-Key": "cmd-w306-ans-1b"},
+        json={
+            "expected_response_revision": 0,
+            "responded_at": (s1b_end + timedelta(seconds=10)).isoformat(),
+            "session_outcome": "completed",
+            "step_completed": True,
+            "task_completed": True,
+        },
+    )
+    assert r_ans_1b.status_code == 200
+
+    # Khi Run 1 sửa lại thành incomplete, không được xóa xác nhận hợp lệ của Run 2 (cid_1b)!
+    r_rev5 = await w05_client.put(
+        f"/api/v1/check-ins/{cid}/response",
+        headers={"Idempotency-Key": "cmd-w306-corr-rev-5"},
+        json={
+            "expected_response_revision": 4,
+            "responded_at": (s1b_end + timedelta(seconds=20)).isoformat(),
+            "session_outcome": "incomplete",
+            "step_completed": False,
+            "task_completed": False,
+        },
+    )
+    assert r_rev5.status_code == 200
+    async with w05_env["sessions"]() as db:
+        st = await db.get(Step, w05_env["step_id"])
+        tk = await db.get(Task, w05_env["task_id"])
+        assert st is not None and st.status == "completed" and st.remaining_base_seconds == 0
+        assert tk is not None and tk.status == "completed"
+
+
+@pytest.mark.asyncio
+async def test_w306_completion_cascade_early_confirm_and_contradictory_flags(
+    w05_client, w05_env, monkeypatch
+):
+    """Kiểm thử W3-06 [P1] (R01):
+    - Kiểm tra từ chối tổ hợp cờ mâu thuẫn (422 VALIDATION_ERROR).
+    - Đường (a): Tự động suy từ session_outcome='completed' khi hoàn thành Session cuối của Step -> Step completed,
+      và khi hoàn thành Step cuối của Task + unexpanded_scope rỗng -> Task completed (nếu còn unexpanded_scope thì không tự suy).
+    - Đường (b): Xác nhận trực tiếp task_completed=True đóng toàn Task kể cả khi còn unexpanded_scope,
+      giữ nguyên các phiên tương lai chưa chạy (không tạo SessionRun/actual giả).
+    """
+    run = await _start_run(w05_client, w05_env)
+    run_id = run["run_id"]
+    start_at = cast(datetime, w05_env["scheduled_start"])
+    ended_at = start_at + timedelta(minutes=30)
+    monkeypatch.setattr(
+        run_service,
+        "_current_utc_now",
+        lambda now=None: (now or ended_at).astimezone(UTC),
+    )
+
+    r_end = await w05_client.post(
+        f"/api/v1/runs/{run_id}/end",
+        headers={"Idempotency-Key": "cmd-w306-r01-end-1a"},
+        json={
+            "device_id": "android_pixel_8",
+            "expected_run_revision": 1,
+            "event_id": "ev-w306-r01-end-1a",
+            "ended_at": ended_at.isoformat(),
+            "end_reason": "timer_elapsed",
+            "work_elapsed_seconds": 1500,
+            "rest_elapsed_seconds": 300,
+        },
+    )
+    assert r_end.status_code == 200
+    cid_1a = r_end.json()["data"]["check_in"]["checkin_id"]
+
+    # 1. Tổ hợp mâu thuẫn: session_outcome != 'completed' nhưng step_completed=True hoặc task_completed=True -> 422
+    for bad_body in (
+        {
+            "expected_response_revision": 0,
+            "responded_at": (ended_at + timedelta(seconds=5)).isoformat(),
+            "session_outcome": "incomplete",
+            "step_completed": True,
+            "task_completed": False,
+        },
+        {
+            "expected_response_revision": 0,
+            "responded_at": (ended_at + timedelta(seconds=5)).isoformat(),
+            "session_outcome": "partial",
+            "step_completed": False,
+            "task_completed": True,
+        },
+        {
+            "expected_response_revision": 0,
+            "responded_at": (ended_at + timedelta(seconds=5)).isoformat(),
+            "session_outcome": "completed",
+            "step_completed": False,
+            "task_completed": True,
+        },
+    ):
+        r_bad = await w05_client.put(
+            f"/api/v1/check-ins/{cid_1a}/response",
+            headers={"Idempotency-Key": f"cmd-w306-bad-{uuid4()}"},
+            json=bad_body,
+        )
+        assert r_bad.status_code == 422
+        assert r_bad.json()["error"]["code"] == "VALIDATION_ERROR"
+
+    # 2. Hoàn thành Session 1A (chưa phải phiên cuối của Step 1) với step_completed=None -> Step 1 vẫn pending
+    r_ok_1a = await w05_client.put(
+        f"/api/v1/check-ins/{cid_1a}/response",
+        headers={"Idempotency-Key": "cmd-w306-r01-ans-1a"},
+        json={
+            "expected_response_revision": 0,
+            "responded_at": (ended_at + timedelta(seconds=10)).isoformat(),
+            "session_outcome": "completed",
+        },
+    )
+    assert r_ok_1a.status_code == 200
+    async with w05_env["sessions"]() as db:
+        st1 = await db.get(Step, w05_env["step_id"])
+        assert st1 is not None and st1.status == "pending"
+
+    # 3. Hoàn thành Session 1B (phiên cuối của Step 1) với step_completed=None -> tự đóng Step 1!
+    s1b_id = str(w05_env["session1b_id"])
+    s1b_start = cast(datetime, w05_env["session1b_start"])
+    s1b_end = cast(datetime, w05_env["session1b_end"])
+    r_s1b = await w05_client.post(
+        f"/api/v1/sessions/{s1b_id}/start",
+        headers={"Idempotency-Key": "cmd-w306-r01-start-1b"},
+        json={
+            "expected_schedule_revision": 1,
+            "device_id": "android_pixel_8",
+            "requested_start_at": s1b_start.isoformat(),
+        },
+    )
+    assert r_s1b.status_code == 201
+    run_1b_id = r_s1b.json()["data"]["run_id"]
+    r_end_1b = await w05_client.post(
+        f"/api/v1/runs/{run_1b_id}/end",
+        headers={"Idempotency-Key": "cmd-w306-r01-end-1b"},
+        json={
+            "device_id": "android_pixel_8",
+            "expected_run_revision": 1,
+            "event_id": "ev-w306-r01-end-1b",
+            "ended_at": s1b_end.isoformat(),
+            "end_reason": "timer_elapsed",
+            "work_elapsed_seconds": 1500,
+            "rest_elapsed_seconds": 300,
+        },
+    )
+    assert r_end_1b.status_code == 200
+    cid_1b = r_end_1b.json()["data"]["check_in"]["checkin_id"]
+
+    r_ok_1b = await w05_client.put(
+        f"/api/v1/check-ins/{cid_1b}/response",
+        headers={"Idempotency-Key": "cmd-w306-r01-ans-1b"},
+        json={
+            "expected_response_revision": 0,
+            "responded_at": (s1b_end + timedelta(seconds=10)).isoformat(),
+            "session_outcome": "completed",
+        },
+    )
+    assert r_ok_1b.status_code == 200
+    async with w05_env["sessions"]() as db:
+        st1 = await db.get(Step, w05_env["step_id"])
+        tk = await db.get(Task, w05_env["task_id"])
+        assert st1 is not None and st1.status == "completed" and st1.remaining_base_seconds == 0
+        assert tk is not None and tk.status == "pending"
+        # Đặt unexpanded_scope trước khi chạy Step 2
+        tk.unexpanded_scope = "Còn phần tổng kết chưa chia lịch"
+        await db.commit()
+
+    # 4. Hoàn thành Session 2 (phiên cuối của Step 2 - Step cuối đã chia lịch) khi còn unexpanded_scope:
+    # Step 2 tự đóng, nhưng Task KHÔNG tự suy completed!
+    s2_id = str(w05_env["session2_id"])
+    s2_start = cast(datetime, w05_env["session2_start"])
+    s2_end = cast(datetime, w05_env["session2_end"])
+    r_s2 = await w05_client.post(
+        f"/api/v1/sessions/{s2_id}/start",
+        headers={"Idempotency-Key": "cmd-w306-r01-start-2"},
+        json={
+            "expected_schedule_revision": 1,
+            "device_id": "android_pixel_8",
+            "requested_start_at": s2_start.isoformat(),
+        },
+    )
+    assert r_s2.status_code == 201
+    run_2_id = r_s2.json()["data"]["run_id"]
+    r_end_2 = await w05_client.post(
+        f"/api/v1/runs/{run_2_id}/end",
+        headers={"Idempotency-Key": "cmd-w306-r01-end-2"},
+        json={
+            "device_id": "android_pixel_8",
+            "expected_run_revision": 1,
+            "event_id": "ev-w306-r01-end-2",
+            "ended_at": s2_end.isoformat(),
+            "end_reason": "timer_elapsed",
+            "work_elapsed_seconds": 1500,
+            "rest_elapsed_seconds": 300,
+        },
+    )
+    assert r_end_2.status_code == 200
+    cid_2 = r_end_2.json()["data"]["check_in"]["checkin_id"]
+
+    r_ok_2 = await w05_client.put(
+        f"/api/v1/check-ins/{cid_2}/response",
+        headers={"Idempotency-Key": "cmd-w306-r01-ans-2"},
+        json={
+            "expected_response_revision": 0,
+            "responded_at": (s2_end + timedelta(seconds=10)).isoformat(),
+            "session_outcome": "completed",
+        },
+    )
+    assert r_ok_2.status_code == 200
+    async with w05_env["sessions"]() as db:
+        st2 = await db.get(Step, w05_env["step2_id"])
+        tk = await db.get(Task, w05_env["task_id"])
+        assert st2 is not None and st2.status == "completed" and st2.remaining_base_seconds == 0
+        assert tk is not None and tk.status != "completed"
+
+    # 5. Người dùng chủ động xác nhận task_completed=True -> đóng luôn Task dù còn unexpanded_scope!
+    r_explicit_task = await w05_client.put(
+        f"/api/v1/check-ins/{cid_2}/response",
+        headers={"Idempotency-Key": "cmd-w306-r01-ans-2-explicit-task"},
+        json={
+            "expected_response_revision": 1,
+            "responded_at": (s2_end + timedelta(seconds=20)).isoformat(),
+            "session_outcome": "completed",
+            "step_completed": True,
+            "task_completed": True,
+        },
+    )
+    assert r_explicit_task.status_code == 200
+    async with w05_env["sessions"]() as db:
+        tk = await db.get(Task, w05_env["task_id"])
+        assert tk is not None and tk.status == "completed"
+
+
+@pytest.mark.asyncio
+async def test_w306_timeout_300s_boundaries_and_long_offline_end(
+    w05_client, w05_env, monkeypatch
+):
+    """Kiểm thử W3-06 [P2]:
+    - Biên timeout chính xác tại ended_at + 299s (open), +300s (no_respond), +301s (no_respond).
+    - Đồng bộ End offline lâu (> 1 giờ) trả ngay response_state='no_respond' nhất quán với GET detail.
+    """
+    # 1. End offline lâu (> 1 giờ: clock hiện tại cách ended_at 5 giờ) -> no_respond ngay khi End
+    run = await _start_run(w05_client, w05_env)
+    run_id = run["run_id"]
+    start_at = cast(datetime, w05_env["scheduled_start"])
+    ended_at = start_at + timedelta(minutes=30)
+    clock = [ended_at + timedelta(hours=5)]
+    monkeypatch.setattr(
+        run_service,
+        "_current_utc_now",
+        lambda now=None: (now or clock[0]).astimezone(UTC),
+    )
+
+    r_offline_end = await w05_client.post(
+        f"/api/v1/runs/{run_id}/end",
+        headers={"Idempotency-Key": "cmd-w306-offline-5h-end"},
+        json={
+            "device_id": "android_pixel_8",
+            "expected_run_revision": 1,
+            "event_id": "ev-w306-offline-5h-end",
+            "ended_at": ended_at.isoformat(),
+            "end_reason": "timer_elapsed",
+            "work_elapsed_seconds": 1500,
+            "rest_elapsed_seconds": 300,
+        },
+    )
+    assert r_offline_end.status_code == 200
+    offline_data = r_offline_end.json()["data"]
+    assert offline_data["check_in"]["response_state"] == "no_respond"
+    detail_data = (await w05_client.get(f"/api/v1/runs/{run_id}")).json()["data"]
+    assert detail_data["check_in"]["response_state"] == "no_respond"
+    assert offline_data["actual_work_seconds"] == detail_data["actual_work_seconds"] == 1500
+
+    # 2. Kiểm biên 299s (open) -> 300s (no_respond) trên session1b
+    s1b_id = str(w05_env["session1b_id"])
+    s1b_start = cast(datetime, w05_env["session1b_start"])
+    s1b_end = cast(datetime, w05_env["session1b_end"])
+    clock[0] = s1b_start
+    r_s1b = await w05_client.post(
+        f"/api/v1/sessions/{s1b_id}/start",
+        headers={"Idempotency-Key": "cmd-w306-bound-start-1b"},
+        json={
+            "expected_schedule_revision": 1,
+            "device_id": "android_pixel_8",
+            "requested_start_at": s1b_start.isoformat(),
+        },
+    )
+    assert r_s1b.status_code == 201
+    run_1b_id = r_s1b.json()["data"]["run_id"]
+
+    # End tại t = s1b_end + 299s -> vẫn 'open'
+    clock[0] = s1b_end + timedelta(seconds=299)
+    r_end_299 = await w05_client.post(
+        f"/api/v1/runs/{run_1b_id}/end",
+        headers={"Idempotency-Key": "cmd-w306-bound-end-1b"},
+        json={
+            "device_id": "android_pixel_8",
+            "expected_run_revision": 1,
+            "event_id": "ev-w306-bound-end-1b",
+            "ended_at": s1b_end.isoformat(),
+            "end_reason": "timer_elapsed",
+            "work_elapsed_seconds": 1500,
+            "rest_elapsed_seconds": 300,
+        },
+    )
+    assert r_end_299.status_code == 200
+    assert r_end_299.json()["data"]["check_in"]["response_state"] == "open"
+
+    # Đọc GET tại 299s -> vẫn 'open'
+    d_299 = (await w05_client.get(f"/api/v1/runs/{run_1b_id}")).json()["data"]
+    assert d_299["check_in"]["response_state"] == "open"
+
+    # Đọc GET tại đúng 300s -> chuyển sang 'no_respond'
+    clock[0] = s1b_end + timedelta(seconds=300)
+    d_300 = (await w05_client.get(f"/api/v1/runs/{run_1b_id}")).json()["data"]
+    assert d_300["check_in"]["response_state"] == "no_respond"

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from typing import Annotated, Any
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Query, status
@@ -95,6 +96,16 @@ async def get_authorization_url(
     return SuccessEnvelope(data=OAuthAuthUrlResponse(auth_url=auth_url), meta=build_response_meta())
 
 
+def _append_query_params(url: str, params: dict[str, str | None]) -> str:
+    """Nối các tham số query vào deep-link/redirect URL mà vẫn giữ nguyên query cũ."""
+    parsed = urlparse(url)
+    query_items = dict(parse_qsl(parsed.query, keep_blank_values=True))
+    for key, val in params.items():
+        if val is not None:
+            query_items[key] = val
+    return urlunparse(parsed._replace(query=urlencode(query_items)))
+
+
 # 46 | GET /api/v1/calendar/oauth/callback
 @router.get(
     "/oauth/callback",
@@ -102,16 +113,28 @@ async def get_authorization_url(
     response_class=RedirectResponse,
 )
 async def oauth_callback(
-    code: Annotated[str, Query(min_length=1, description="Authorization code do Google cấp")],
     state: Annotated[str, Query(min_length=1, description="State token bảo vệ chống CSRF")],
     db: DbSessionDep,
-    current_user: CurrentUserDep | None = None,
+    code: Annotated[str | None, Query(description="Authorization code do Google cấp")] = None,
+    error: Annotated[str | None, Query(description="Mã lỗi OAuth từ Google nếu có")] = None,
+    error_description: Annotated[str | None, Query(description="Mô tả chi tiết lỗi OAuth từ Google")] = None,
 ) -> RedirectResponse:
     service = CalendarService(db)
-    user_id = current_user.user_id if current_user else None
+    if error or not code:
+        try:
+            return_target = await service.handle_oauth_error(state=state)
+        except CalendarAuthError as exc:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=exc.message) from exc
+        base_target = return_target or "proplan://calendar/connected"
+        target_url = _append_query_params(
+            base_target,
+            {"error": error or "missing_code", "error_description": error_description},
+        )
+        return RedirectResponse(url=target_url, status_code=302)
+
     try:
         conn, return_target = await service.handle_oauth_callback(
-            user_id=user_id,
+            user_id=None,
             code=code,
             state=state,
         )
@@ -131,12 +154,19 @@ async def oauth_callback(
     response_class=RedirectResponse,
 )
 async def oauth2_callback_legacy(
-    code: Annotated[str, Query(min_length=1)],
     state: Annotated[str, Query(min_length=1)],
     db: DbSessionDep,
-    current_user: CurrentUserDep | None = None,
+    code: Annotated[str | None, Query()] = None,
+    error: Annotated[str | None, Query()] = None,
+    error_description: Annotated[str | None, Query()] = None,
 ) -> RedirectResponse:
-    return await oauth_callback(code=code, state=state, db=db, current_user=current_user)
+    return await oauth_callback(
+        state=state,
+        db=db,
+        code=code,
+        error=error,
+        error_description=error_description,
+    )
 
 
 # 47 | GET /api/v1/calendar/connections

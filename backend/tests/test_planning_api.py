@@ -923,3 +923,29 @@ async def test_uf1_deadline_without_start_at_and_resolved_ai_clarification_can_c
         {"expected_summary_revision": draft2["summary_revision"]},
     )
     assert confirmed.status_code == 200, confirmed.text
+
+
+async def test_review_feasibility_preserves_deficit_and_infeasible_status(api, monkeypatch):
+    from app.schemas.planning import PlanCandidate as PlanCandidateSchema
+    from app.services import plan_service
+
+    client, _ = api
+    draft_id = await confirmed_draft(client)
+    cand_dict = await candidate(client, draft_id)
+    cand = PlanCandidateSchema.model_validate(cand_dict)
+    infeasible_cand = cand.model_copy(
+        update={
+            "feasibility": cand.feasibility.model_copy(
+                update={
+                    "status": "infeasible",
+                    "fully_scheduled": False,
+                    "deficit_seconds": 1800,
+                }
+            )
+        }
+    )
+    monkeypatch.setattr(plan_service, "_concrete_issues", lambda c, s: [])
+    reviewed = plan_service._review_feasibility(infeasible_cand, None)  # type: ignore[arg-type]
+    assert reviewed.feasibility.deficit_seconds == 1800
+    assert reviewed.feasibility.status == "infeasible"
+    assert reviewed.feasibility.fully_scheduled is False

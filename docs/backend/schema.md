@@ -10,7 +10,7 @@ Cập nhật nguồn gốc: **30/10/2026**; đồng bộ local và quyết đị
 - [Backend Docs](https://docs.google.com/document/d/1X1zIWny1nOWCfkS4zLEdn71uZLhYLu5OkHlUPKcdoxE/edit): 01 nghiệp vụ; 02 object; 03 cách dùng API; 04 trách nhiệm; 05 kiểm chứng.
 - [Sheet API — tab api](https://docs.google.com/spreadsheets/d/1RTI0Hv0DydDX5S0DMq1clSFmGggCuGkAMORynke6J0w/edit#gid=1522506644): request, success/fail JSON và **ghi chú trong ô** của 62 endpoint, dòng 2–63.
 - Tên trường và biến thể JSON trao đổi theo Sheet; nghiệp vụ theo thẻ 01. Chỗ hai nguồn chưa khớp được ghi tại mục 9; không tự coi một ví dụ là toàn bộ schema hoặc enum.
-- O00 User ở mục 8 là thiết kế tài khoản nội bộ bổ sung theo lựa chọn Google Sign-In; chưa phải object/API đăng nhập đã được công bố trong hai nguồn.
+- O00 User và Auth login/me tại mục8/AUTH_GUIDE là contract bổ sung11/11/2026; mức kiểm chứng runtime xem handoff.
 - schema.md đồng bộ các nguồn trên và các quyết định local được người dùng chốt trong Project/kế hoạch tuần 2. Mục 12 ghi rõ phần thay đổi local còn chờ cập nhật Docs/Sheet và triển khai DTO/code; không coi tài liệu online đã được cập nhật. Các tài liệu trong _temp không phải phụ thuộc để dùng file này.
 
 ### Quy ước kiểu dữ liệu
@@ -385,18 +385,23 @@ API liên quan: [dòng 33](https://docs.google.com/spreadsheets/d/1RTI0Hv0DydDX5
 
 | Trường dữ liệu | Kiểu JSON | Tác dụng và ràng buộc |
 | --- | --- | --- |
-| `trigger_reason` | string enum | Nguyên nhân đổi lịch: bận, chưa xong, yêu cầu mới, đổi cài đặt… |
-| `target_task_id` | string | Task chính khởi tạo yêu cầu đổi lịch; khác với các Task được phép dời và các Task thực tế bị ảnh hưởng. |
+| `trigger_reason` | string enum | Nguyên nhân đổi lịch: `checkin_incomplete`, `checkin_busy`, `checkin_skipped`, `missed_start`, `user_reschedule`, `early_completion_pull_forward`, `settings_change`, `expand_next_horizon`. |
+| `target_task_id` | string \| null | Task chính khởi tạo yêu cầu đổi lịch (null khi đổi cài đặt chung); khác với các Task được phép dời và các Task thực tế bị ảnh hưởng. |
 | `affected_task_ids` | array<string> | Các Task thực sự bị tác động; phải là tập con của allowed_task_ids, không dùng làm phạm vi cấp quyền. |
 | `base_schedule_revision` | integer | Bản lịch nền; dùng ngăn áp một phương án đã cũ. |
-| `proposed_changes` | ProposedChanges | Các phần mới được chia, Steps/Sessions mới, phiên thêm/hủy/dời và giờ trước–sau. Mở rộng dùng cùng Task, không ghi đè phần đã thực hiện. |
-| `feasibility` | O10 | Kết quả kiểm cả collision, thời hạn và khoảng cách 15 phút. |
+| `proposed_changes` | ProposedChanges | Các phiên dời/thêm/hủy, Steps mới thêm và `next_horizon_from`/`next_horizon_to`. Mở rộng dùng cùng Task, không ghi đè phần đã thực hiện. |
+| `feasibility` | ProposalFeasibilityData | Kết quả kiểm cả collision, thời hạn và khoảng cách (trạng thái `feasible` \| `deficit` \| `insufficient_data` \| ...). |
 | `explanation` | string | Lý do ngắn gọn, không phán xét để người dùng hiểu phương án; Python dựng lựa chọn đã kiểm chứng theo trạng thái, LLM chỉ chọn câu hợp lệ hoặc dùng fallback khớp trạng thái (không tự bịa mốc giờ/deadline). |
-| `status` | string enum | Đang chờ, được duyệt, bị từ chối hoặc bị bản mới thay thế. |
-| `proposal_revision` | integer | Phiên bản phương án; duyệt phải đúng bản đã xem. |
+| `status` | string enum | Wire enum theo API Sheet (SY03): `pending` \| `approved` \| `rejected` \| `superseded`. |
+| `proposal_revision` | integer | Phiên bản phương án (`>= 1`); duyệt phải đúng bản đã xem. |
 | `allowed_task_ids` | array<string> | Phạm vi người dùng cho phép dời; affected_task_ids là tập thực sự bị tác động và không được vượt phạm vi này. |
-| `source_revisions` | SourceRevisions | Revision giờ rảnh, cấu hình và CalendarContext nguồn bên cạnh base_schedule_revision; nguồn đổi thì phải kiểm và trình lại. |
+| `source_revisions` | ProposalSourceRevisions | Revision 5 nguồn (`task`, `schedule`, `availability`, `settings`, `calendar`) bên cạnh `base_schedule_revision`; nguồn đổi thì phải kiểm và trình lại. |
 | `supersedes_proposal_id` | string \| null | Bản cũ bị thay thế bởi proposal này; chỉ một bản hiện hành còn được phép duyệt cho mỗi user. |
+| `calculated_at` | date-time \| null | Mốc tính toán phương án; dùng kiểm `PREVIEW_STALE` khi mở lại app hoặc quá `start_window`. |
+| `continuation_request` | ContinuationRequest \| null | Tham số xin làm tiếp ngay (SY02 / dòng 33) nếu proposal thuộc luồng Continuation. |
+| `gap_exceptions` | array<GapException> | Ngoại lệ khoảng nghỉ trong Continuation (`immediate_continuation` \| `user_borrowed_break`, `borrowed_seconds <= 120`). |
+| `start_window` | StartWindow \| null | Cửa sổ bắt đầu hợp lệ (`earliest_start`, `latest_start`, `not_before`, `not_after`) cho Continuation (R05). |
+| `approval_envelope` | ApprovalEnvelope \| null | Ràng buộc `actual_start_plus_fixed_work_plus_min_break_le_latest_start` kiểm tại thời điểm bấm Approve (R05). |
 | `pending_notification_state` | string enum | Trạng thái gửi một thông báo cho proposal đang chờ khi user rời app; không suy đã đọc từ việc gửi thành công, không nhắc lặp mặc định. |
 | `pending_notification_sent_at` | date-time \| null | Mốc đã gửi thông báo nếu quan sát được; null khi chưa gửi. Thông báo mở bản hiện hành để kiểm lại thời gian và revision, không tự duyệt. |
 | `proposal_id` | string | Trường bổ sung từ response Sheet; mã tài nguyên hoặc liên kết server. |
@@ -654,7 +659,7 @@ Kiểu dùng chung được định nghĩa ở bảng dưới và mục bổ sun
 | CalendarDateTime | Event có giờ: date_time: date-time; time_zone: string. Event cả ngày: date: string YYYY-MM-DD. Không trộn hai nhánh; end của event cả ngày là ngày kết thúc không bao gồm. |
 | ResourceRef | Các mã tài nguyên cần thiết, ví dụ {task_id: string}. Schema phụ thuộc loại tài nguyên; phải định nghĩa cụ thể cho từng endpoint. |
 | CandidateStep / CandidateSession | client_step_key và client_session_key trước khi lưu; Session tham chiếu client_step_key. Sau confirm nhận key_mapping.steps/sessions. |
-| ProposedChanges | Thiết kế UF6: {steps:array<StepChange>,sessions:array<SessionChange>}; không có planning_parts. add dùng client key; update/move/cancel dùng ID đã lưu và before/after. UF6 chưa triển khai đầy đủ trong đợt C01 này. |
+| `ProposedChanges` | Hợp đồng UF6 triển khai (`app/schemas/reschedule.py`): `{sessions_to_move, sessions_to_add, sessions_to_cancel, steps_to_add, next_horizon_from, next_horizon_to}`. Dùng `temp_session_id`/`before`/`after` cho phiên thêm/dời và giữ nguyên Run đang chạy/đã hoàn tất. |
 | BusyInterval | {start_at:date-time,end_at:date-time,source:{kind:calendar_event\|confirmed_session\|manual,connection_id:string\|null,google_calendar_id:string\|null,google_event_id:string\|null,session_id:string\|null,client_interval_id:string\|null}}. calendar_event cần bộ 3 mã Google; confirmed_session cần session_id; manual cần client_interval_id. Chỉ loại own-event khi trùng mapping cụ thể, không loại mọi event của cùng calendar. |
 
 ### Kiểu dữ liệu bổ sung dùng trong API
@@ -770,9 +775,17 @@ Server tạo client keys và ghi estimate_source=user_confirmed cho nguồn th�
 | `requested_changes` | SettingsChange | Đọc điều kiện và ghi chú của endpoint; không cho client sửa trường dẫn xuất. |
 | `pending_proposal_id` | string \| null | Đọc điều kiện và ghi chú của endpoint; không cho client sửa trường dẫn xuất. |
 | `target_draft_id` | string \| null | Draft được chỉnh giờ. |
-| `target_task_id` | string \| null | Task được yêu cầu chỉnh giờ; hiện chờ UF6. |
+| `target_task_id` | string \| null | Task được yêu cầu chỉnh giờ; thay đổi ảnh hưởng lịch đã chốt tạo pending proposal qua UF6. |
 | `summary_revision` | integer \| null | Revision sau sửa Draft; đọc lại Draft trước confirm. |
 | `planning_input_revision` | integer \| null | Revision đầu vào sau sửa Draft. |
+
+### CancelSettingsChangeResult (Dòng 42)
+
+| Trường | Kiểu JSON | Lưu ý |
+| --- | --- | --- |
+| `change_request_id` | string | Mã yêu cầu thay đổi cài đặt bị hủy. |
+| `application_state` | `"cancelled"` | Trạng thái sau khi hủy pending change request; không đảo cài đặt đã effective. |
+| `effective_revision` | integer | Revision cài đặt đang có hiệu lực giữ nguyên hiện tại. |
 
 ### SuggestionResponse
 
@@ -944,11 +957,11 @@ Bảng này là chỉ mục, không thay request validation. Các trường dư�
 | 30 | POST `/api/v1/runs/{run_id}/check-ins` | path: run_id; body: kind, asked_at, expected_run_revision |
 | 31 | PUT `/api/v1/check-ins/{checkin_id}/response` | path: checkin_id; body: expected_response_revision, responded_at, session_outcome, step_completed, task_completed, skip_scope, remaining_note |
 | 32 | POST `/api/v1/runs/{run_id}/actual-corrections` | path: run_id; body: expected_run_revision, self_report_work_seconds, reason, occurred_at |
-| 33 | POST `/api/v1/proposals` | body: trigger_reason, target_task_id, allowed_task_ids, base_schedule_revision, source_revisions, request_text, expected_current_proposal_id |
-| 34 | GET `/api/v1/proposals/current` | body: null |
+| 33 | POST `/api/v1/proposals` | body: trigger_reason, target_task_id, allowed_task_ids, expected_base_schedule_revision, expected_source_revisions, request_text, continuation_request (SY02) |
+| 34 | GET `/api/v1/proposals/current` | body: null (trả `ProposalData \| null`) |
 | 35 | GET `/api/v1/proposals/{proposal_id}` | path: proposal_id; body: null |
-| 36 | POST `/api/v1/proposals/{proposal_id}/rebuild` | path: proposal_id; body: expected_proposal_revision, request_text |
-| 37 | POST `/api/v1/proposals/{proposal_id}/approve` | path: proposal_id; body: expected_proposal_revision, expected_base_schedule_revision, expected_source_revisions |
+| 36 | POST `/api/v1/proposals/{proposal_id}/rebuild` | path: proposal_id; body: expected_proposal_revision, request_text (`201`) |
+| 37 | POST `/api/v1/proposals/{proposal_id}/approve` | path: proposal_id; body: expected_proposal_revision, expected_base_schedule_revision, expected_source_revisions, start_continuation, device_id, event_id, expected_source_run_revision |
 | 38 | POST `/api/v1/proposals/{proposal_id}/reject` | path: proposal_id; body: expected_proposal_revision, reason |
 | 39 | GET `/api/v1/preferences` | body: null |
 | 40 | GET `/api/v1/availability` | body: null; query: from, to |
@@ -975,6 +988,7 @@ Bảng này là chỉ mục, không thay request validation. Các trường dư�
 | 61 | POST `/api/v1/planning-contexts` | body: source_draft_id, expected_summary_revision, from, to, selected_calendar_sources, manual_busy_intervals, excluded_sources; nguồn cũ dùng availability_ref thay hai trường Draft. |
 | 62 | GET `/api/v1/planning-contexts/{context_id}` | path: context_id; body: null |
 | 63 | GET `/api/v1/commands/{command_id}` | path: command_id; body: null |
+| 64 | GET `/api/v1/runs/{run_id}/upcoming-schedule-context` | path: run_id; query: from, to, cursor, limit; body: null |
 
 ## 6. Quy tắc nghiệp vụ tác động đến schema
 
@@ -1006,22 +1020,26 @@ Bảng này là chỉ mục, không thay request validation. Các trường dư�
 - Bí mật và transcript/audio không ghi log. credential_ref/payload_hash/payload_snapshot nội bộ không trả ra chỉ vì object có chúng.
 - offline_start_supported=false trong capabilities hiện hành; cache/thu âm local không tự đồng nghĩa được start độc lập offline.
 
-## 8. O00 User — tài khoản nội bộ cần nối với Auth
+## 8. O00 User và Authentication — 11/11/2026
 
-**Phạm vi thiết kế bổ sung:** lựa chọn đã thống nhất trong phiên làm việc là Google Sign-In → Backend xác minh Google ID token → cấp app access token. Hai nguồn đang tham chiếu chưa công bố endpoint/DTO Auth app; bảng này không tự thêm endpoint đăng nhập.
+Auth contract triển khai: [AUTH_GUIDE.md](AUTH_GUIDE.md). PR17 bàn giao Backend/Docs; Mobile Google login chờ tích hợp riêng. OpenAPI khai báo AppBearer (HTTP bearer, JWT) cho CurrentUserDep; login và callback Calendar không yêu cầu app Bearer, alias callback vẫn ẩn có chủ ý. Google Sign-In đổi Google ID token tại `POST /api/v1/auth/google`; `GET /api/v1/auth/me` và API nghiệp vụ dùng Bearer JWT app, đọc User DB/active. Google Sign-In tách Calendar consent; callback Calendar dùng state riêng.
 
-| Trường nội bộ đề nghị | Kiểu | Ý nghĩa |
-|---|---|---|
-| user_id (API) / id (DB) | string | Mã user nội bộ; app token sub trỏ về user này |
-| google_sub hoặc AuthIdentity(provider,provider_subject) | string | Subject Google đã xác minh; định danh tài khoản, không dùng email thay sub |
-| email | string/null | Hồ sơ lấy từ token đã xác minh nếu có; không mặc định khóa định danh Google là email |
-| display_name | string/null | Hồ sơ hiển thị nếu có, không suy giới hạn 100 ký tự là đã chốt |
-| is_active | boolean | Kiểm user còn được dùng API |
-| created_at/updated_at | date-time | Metadata lưu trữ theo model triển khai |
+| Field | Contract |
+|---|---|
+| user_id / JWT sub | UUID User nội bộ; API trả string |
+| google_sub | unique Google subject đã xác minh, chỉ nội bộ |
+| email | Google verified email bắt buộc, <=320; DB unique; không tự link theo email |
+| display_name | trimmed Google name, fallback email local part, cắt tối đa100 |
+| is_active | DB false →403 ACCOUNT_DISABLED; User đã xóa →401 |
+| preferences | tạo đúng một UserPreference theo defaults khi tạo User; không reset khi login lại |
 
-Google Sign-In và Calendar OAuth là hai luồng riêng; đăng nhập không tự cấp quyền Calendar. Backend kiểm token Google trước liên kết user; các API nghiệp vụ dùng app access token. TTL/refresh/logout/thu hồi token và DTO Auth phải review riêng trước code Mobile–Backend.
+Login200 dùng SuccessEnvelope[GoogleLoginData]: access_token, token_type=bearer, expires_in=3600, user=CurrentUser. Me200 dùng SuccessEnvelope[CurrentUser]. Request GoogleLoginRequest chỉ id_token, extra=forbid, không blank/padded, dài1–16384. Login không cần Idempotency-Key hoặc app Bearer. Chi tiết JSON/lỗi/next_action ở Auth guide và Sheet `api!A65:J66`; không renumber routes cũ.
 
-Các trường streak trong schema cũ (current_streak_days, streak_frozen, streak_freeze_tokens, last_streak_date) là **phần mở rộng chưa có trong Backend Docs/Sheet hiện hành**. Giữ chúng ngoài schema tối thiểu và không áp mặc định 2 freeze tokens hoặc tự phát sinh luật streak từ file cũ. Bản này cũng không tạo yêu cầu đăng nhập mật khẩu/hashed_password khi cơ chế được chọn là Google Sign-In.
+JWT app HS256 allowlist, JWT_SECRET_KEY riêng khỏi SECRET_KEY Calendar; required sub(UUID), exp/iat(integer), iss/aud chính xác, token_type=access. TTL3600s, skew mặc định0 (0–60). Chưa app refresh token/revoke: re-exchange Google ID token; logout local không vô hiệu JWT trước exp. Startup staging/production cấm dev_user; seed/create_all chỉ development/testing và AUTH_MODE=dev_user. Không thêm schema migration vì unique google_sub/email/preferences đã có.
+
+Auth errors:422 VALIDATION_ERROR/fix_fields;401 INVALID_GOOGLE_ID_TOKEN hoặc UNAUTHENTICATED/authenticate;403 ACCOUNT_DISABLED/contact_support;409 ACCOUNT_LINK_CONFLICT/review_account_link;422 GOOGLE_PROFILE_INCOMPLETE/review_google_profile;503 AUTH_PROVIDER_UNAVAILABLE/retry_login (retryable=true). Các lỗi khác retryable=false. ErrorEnvelope giữ field_errors/current_revisions/meta; mọi Auth401 có WWW-Authenticate: Bearer. Đây là contract delta, không phải tuyên bố Google thật/Tester598cases đã đạt.
+
+Password/streak legacy nằm ngoài phạm vi Auth này. Bằng chứng/lệnh tái lập và phạm vi PostgreSQL/Calendar QA mới ở [PR17_AUTH_VERIFICATION.md](PR17_AUTH_VERIFICATION.md); không cần handoff local để review.
 
 ## 9. Giới hạn và trạng thái triển khai C01 — 03/11/2026
 
@@ -1080,3 +1098,16 @@ Quyết định đã được người dùng chốt, lấy [Project mục 8.2](.
 | Vai trò tuần 2 | Cương: router/DTO/HTTP; Hưng: service nghiệp vụ; Tín: schema/migration/repository; An/Thịnh/Khải: UI/local/native | Kế thừa contract chung trên dev; không tạo bộ JSON riêng theo người |
 
 Bản nền phục vụ bắt đầu phát triển, chưa phải nghiệm thu giai đoạn 1 hay MVP: UF1 mới nhận giờ riêng nhưng UF2 vẫn chặn nguồn mới; Mobile chưa xử lý đầy đủ trường availability riêng, chưa build/analyze trên máy MT vì chưa có SDK. Không tự bỏ guard UF2, thay nguồn giờ hoặc đánh dấu các output này đã đạt.
+
+## 13. Đồng bộ hợp đồng UF5–UF7, Dòng 64 & Continuation (SY01–SY03) — 14/11/2026
+
+- **API Dòng 64 (`GET /api/v1/runs/{run_id}/upcoming-schedule-context`):** Triển khai tại `api/v1/focus.py` và `schemas/reschedule.py` (`UpcomingScheduleContextData`), trả `current_step`, `source_run_revision`, `source_revisions` (`ProposalSourceRevisions`), `calendar_status`/`calendar_fetched_at`, `coverage` (`CoverageWindow`), `max_extension_seconds_without_borrow`, `recommended_extension_seconds`, `limit_assumptions`, và `timeline` (`session` | `google_busy`).
+- **UF6 Proposals & Continuation (`SY02`, `SY03`):**
+  - Wire enum trạng thái trong `ProposalData.status` dùng chuẩn **`pending` \| `approved` \| `rejected` \| `superseded`** (khớp `SY03`).
+  - `CreateProposalRequest` nhận `continuation_request` (`ContinuationRequest`) cho trường hợp làm tiếp ngay, áp dụng `GapException` (`borrow_break_seconds <= 120`, đồng bộ `SY02` `120s`/`780s` cho nhánh continuation và giữ chuẩn `>= 900s` cho mọi phiên bình thường).
+  - `ApproveProposalRequest` hỗ trợ `start_continuation=true` (yêu cầu kèm `device_id`, `event_id`, `expected_source_run_revision`), trả `ApproveProposalData` gồm `schedule_version`, `sessions`, `continuation_session_id`, `continuation_run`, `calendar_sync_job_enqueued`, và tự enqueue đồng bộ Google Calendar sau commit khi đã liên kết.
+- **UF7 Settings & Suggestions (`API41–44`):**
+  - Gỡ nhánh `503 POLICY_NOT_CONFIGURED` trong `api/v1/settings.py`: thay đổi `work_interval_seconds`, `rest_interval_seconds`, `buffer_multiplier`, hoặc giờ Task có lịch đã chốt tạo `SettingChangeRequest` `pending` gắn `pending_proposal_id` qua `reschedule_service.create_settings_change_proposal`; giữ nguyên `settings_snapshot` cho Run đang chạy.
+  - `POST /api/v1/settings/change-requests/{change_request_id}/cancel` (Dòng 42) trả `CancelSettingsChangeResult`, hủy đồng bộ proposal chờ tương ứng mà không làm mất hiệu lực cấu hình hiện hành.
+  - `GET /api/v1/suggestions/current` trả `AdaptationSuggestionData | null`; `POST /api/v1/suggestions/{suggestion_id}/response` trả `SuggestionResponseResult` (không tự áp buffer khi chưa được user `accept`/`edit` và tạo pending change request/proposal nếu ảnh hưởng lịch tương lai).
+- **OpenAPI / Swagger UI:** Bổ sung `summary` và `responses` (`ErrorEnvelope` cho `401`/`404`/`409`/`422`/`503`) trên các route UF5 CheckIn (`checkin.py`), UF6 Proposals (`reschedule.py`), Row 64 (`focus.py`) và UF7 Settings/Suggestions (`settings.py`).

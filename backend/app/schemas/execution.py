@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from datetime import datetime
-from typing import Literal
+from datetime import UTC, datetime, timedelta
+from typing import Any, Literal
 
 from pydantic import AwareDatetime, Field, model_validator
 
@@ -55,7 +55,7 @@ class SessionSnapshot(ApiModel):
     step_id: str = Field(min_length=1)
     scheduled_start: datetime
     scheduled_end: datetime
-    micro_task_text: str = Field(min_length=1)
+    micro_task_text: str | None = Field(default=None)
     micro_task_seconds: int | None = Field(default=None, ge=0)
     work_seconds: int = Field(gt=0)
     rest_seconds: int = Field(ge=0)
@@ -124,6 +124,9 @@ class SessionRunData(ApiModel):
     settings_snapshot: SettingsSnapshot
     check_in: CheckInData | None = None
     dnd_release_at: datetime | None = None
+    total_planned_seconds: int | None = Field(default=None, ge=0)
+    segments: list[SessionSegment] = Field(default_factory=list)
+    continuation_of_run_id: str | None = None
 
 
 SessionRun = SessionRunData
@@ -143,6 +146,11 @@ class RunEventItem(ApiModel):
     def validate_occurred_at(self) -> RunEventItem:
         if self.occurred_at.utcoffset() is None:
             raise ValueError("Thời điểm sự kiện phải có múi giờ.")
+        now_utc = datetime.now(UTC)
+        if self.occurred_at.astimezone(UTC) > now_utc + timedelta(seconds=300):
+            raise ValueError(
+                "Thời điểm sự kiện vượt quá giới hạn sai lệch đồng hồ cho phép (tương lai quá 5 phút)."
+            )
         return self
 
 
@@ -164,6 +172,15 @@ class RunEventBatchResult(ApiModel):
     run_revision: int = Field(ge=1)
     accepted_event_ids: list[str] = Field(default_factory=list)
     duplicate_event_ids: list[str] = Field(default_factory=list)
+    accepted_count: int = Field(default=0, ge=0)
+
+    @model_validator(mode="before")
+    @classmethod
+    def populate_accepted_count(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            if "accepted_count" not in data and "accepted_event_ids" in data:
+                data["accepted_count"] = len(data["accepted_event_ids"])
+        return data
 
 
 class RunEndRequest(ApiModel):

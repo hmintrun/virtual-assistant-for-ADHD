@@ -33,6 +33,16 @@ class Settings(BaseSettings):
         description="Khóa bí mật ký JWT; ẩn khỏi repr/log để bảo mật.",
     )
 
+    # App authentication is separate from Calendar OAuth/credential encryption.
+    AUTH_MODE: Literal["dev_user", "google"] = "dev_user"
+    JWT_SECRET_KEY: str = Field(default="", repr=False)
+    JWT_ISSUER: str = "proplan-va"
+    JWT_AUDIENCE: str = "proplan-va-api"
+    ACCESS_TOKEN_TTL_SECONDS: int = Field(default=3600, ge=60, le=86400)
+    AUTH_CLOCK_SKEW_SECONDS: int = Field(default=0, ge=0, le=60)
+    GOOGLE_SIGN_IN_AUDIENCES: list[str] = []
+    GOOGLE_AUTH_TIMEOUT_SECONDS: float = Field(default=5.0, gt=0, le=30)
+
     # Cơ sở dữ liệu (SQLite cho Dev, PostgreSQL cho Production)
     DATABASE_URL: str = "sqlite+aiosqlite:///./proplan.db"
 
