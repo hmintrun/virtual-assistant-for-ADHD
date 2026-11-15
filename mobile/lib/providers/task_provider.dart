@@ -7,6 +7,7 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import '../core/api_client.dart';
 import '../models/planning_models.dart';
 import '../models/task_model.dart';
+import '../services/calendar_api.dart';
 import '../services/planning_api.dart';
 
 class AvailabilitySlot {
@@ -52,16 +53,20 @@ class TaskProvider extends ChangeNotifier {
   final String _storageKey;
   static const _storage = FlutterSecureStorage();
 
-  TaskProvider({PlanningApi? planningApi, String? ownerId})
+  TaskProvider(
+      {PlanningApi? planningApi, String? ownerId, CalendarApi? calendarApi})
       : _storageKey = ownerId == null
             ? 'proplan.uf1.current_draft.v1'
             : 'proplan.uf1.current_draft.v1.$ownerId',
-        _planningApi = planningApi ?? PlanningApi(ownerId: ownerId);
+        _planningApi = planningApi ?? PlanningApi(ownerId: ownerId),
+        _calendarApi = calendarApi ?? CalendarApi();
 
   final PlanningApi _planningApi;
+  final CalendarApi _calendarApi;
 
   String _title = '';
   String _rawInputText = '';
+  String _entrySource = 'text';
   String _scope = '';
   DateTime? _deadline;
   AvailabilitySlot? _availability;
@@ -74,6 +79,14 @@ class TaskProvider extends ChangeNotifier {
   PlanningDraftModel? _draft;
   PlanCandidateModel? _candidate;
   TaskModel? _confirmedTask;
+  String? _calendarSyncState;
+  int? _confirmedScheduleRevision;
+  bool get canRefreshCalendarSync =>
+      _confirmedScheduleRevision != null &&
+      (_confirmedTask?.sessions.isNotEmpty ?? false) &&
+      (_calendarSyncState == 'pending' ||
+          _calendarSyncState == 'outbox_queued');
+  String? get calendarSyncState => _calendarSyncState;
   bool _isApiBusy = false;
   String? _apiError;
   String? _clientDraftId;
@@ -265,6 +278,42 @@ class TaskProvider extends ChangeNotifier {
     });
   }
 
+  bool get hasUnconfirmedDraft =>
+      !_planLocked && (_draft != null || _title.trim().isNotEmpty);
+
+  Future<void> analyzeThoughtDraft(PlanningDraftModel draft) async {
+    if (draft.stage == 'confirmed') {
+      throw const ApiException('Suy nghĩ này đã được tạo thành công việc.');
+    }
+    if (hasUnconfirmedDraft) {
+      throw const ApiException('Hãy lưu hoặc hoàn tất bản nháp đang mở.');
+    }
+    await _runApi((revision) async {
+      _draft = draft;
+      _rawInputText = draft.rawInput ?? draft.title;
+      _entrySource = 'text';
+      _clientDraftId = draft.clientDraftId;
+      _clientDraftFingerprint = null;
+      _title = draft.title.isEmpty ? _rawInputText : draft.title;
+      _draftSaved = true;
+      _scope = '';
+      _deadline = null;
+      _availability = null;
+      _confirmedTask = null;
+      _calendarSyncState = null;
+      _confirmedScheduleRevision = null;
+      _candidate = null;
+      _confirmed = false;
+      _planLocked = false;
+      _planSavedForLater = false;
+      _applyDraftSummary();
+      await _persist();
+      _draft = await _accept(_planningApi.analyzeDraft(draft), revision);
+      _applyDraftSummary();
+      await _persist();
+    });
+  }
+
   Future<void> submitClarification(String message) async {
     final answer = message.trim();
     if (answer.isEmpty) {
@@ -305,6 +354,7 @@ class TaskProvider extends ChangeNotifier {
         _planningApi.createDraft(
           clientDraftId: _clientDraftId!,
           rawInput: input,
+          inputSource: _entrySource,
           title: title,
           scope: scope,
           deadline: deadline,
@@ -406,7 +456,12 @@ class TaskProvider extends ChangeNotifier {
     });
   }
 
-  Future<void> generateCandidateOnBackend({String? stepProposal}) async {
+  /// [useManualAvailability]: user đã thấy lỗi đọc Google Calendar và chủ động
+  /// chọn xếp theo giờ rảnh nhập tay (W3-15: thu hồi quyền vẫn lập được lịch).
+  Future<void> generateCandidateOnBackend({
+    String? stepProposal,
+    bool useManualAvailability = false,
+  }) async {
     final source = _draft;
     if (source == null ||
         source.summaryConfirmedRevision != source.summaryRevision) {
@@ -422,13 +477,46 @@ class TaskProvider extends ChangeNotifier {
         );
         _draft = current;
       }
+      // Chụp lịch bận Google (nếu user đã chọn lịch đọc) để thuật toán xếp
+      // phiên né giờ bận. Không có lịch nào → null, xếp theo giờ rảnh như cũ.
+      final calendarContextRef = await _createCalendarContext(
+        current,
+        useManualAvailability: useManualAvailability,
+      );
       final generated = await _accept(
-        _planningApi.createCandidate(current),
+        _planningApi.createCandidate(
+          current,
+          calendarContextRef: calendarContextRef,
+        ),
         revision,
       );
       _candidate = generated;
       await _persist();
     });
+  }
+
+  /// Khoảng chụp lịch bận = [start_at, hạn chót] của Draft: luôn phủ trọn
+  /// phạm vi Backend xếp lịch, và giữ cố định giữa các lần xếp lại (Backend
+  /// không cho bản chụp mới hẹp hơn bản cũ).
+  Future<Map<String, dynamic>?> _createCalendarContext(
+    PlanningDraftModel draft, {
+    bool useManualAvailability = false,
+  }) async {
+    final constraint = draft.summary['time_constraint'];
+    if (constraint is! Map) return null;
+    DateTime? read(String key) =>
+        DateTime.tryParse(constraint[key] as String? ?? '');
+    final end = read('deadline_at') ?? read('finish_by_at');
+    if (end == null) return null;
+    final start = read('start_at') ?? DateTime.now();
+    if (!start.isBefore(end)) return null;
+    return _calendarApi.createPlanningContextForDraft(
+      draftId: draft.draftId,
+      summaryRevision: draft.summaryRevision,
+      from: start,
+      to: end,
+      useManualAvailability: useManualAvailability,
+    );
   }
 
   Future<void> refreshCandidateFromBackend() async {
@@ -483,10 +571,37 @@ class TaskProvider extends ChangeNotifier {
       if (saved.taskId.isEmpty)
         throw const ApiException('Máy chủ chưa trả công việc đã lưu.');
       _confirmedTask = saved;
+      _calendarSyncState = receipt['calendar_sync_summary'] as String?;
+      _confirmedScheduleRevision =
+          (receipt['schedule_version'] as Map?)?['version_number'] as int?;
       _planLocked = true;
       _planSavedForLater = false;
       _confirmed = true;
       await _persist();
+    });
+  }
+
+  Future<void> refreshCalendarSync() async {
+    if (!canRefreshCalendarSync) return;
+    final sessions = _confirmedTask!.sessions;
+    final from = sessions
+        .map((item) => item.scheduledStart)
+        .reduce((a, b) => a.isBefore(b) ? a : b);
+    final to = sessions
+        .map((item) => item.scheduledEnd)
+        .reduce((a, b) => a.isAfter(b) ? a : b);
+    await _runApi((revision) async {
+      final state = await _accept(
+          _planningApi.refreshCalendarSync(
+            scheduleRevision: _confirmedScheduleRevision!,
+            from: from,
+            to: to,
+          ),
+          revision);
+      if (state != null) {
+        _calendarSyncState = state;
+        await _persist();
+      }
     });
   }
 
@@ -774,8 +889,17 @@ class TaskProvider extends ChangeNotifier {
     if (_scope.trim().isEmpty && scope != null) setScope(scope[1]!.trim());
   }
 
-  void setTitle(String value) {
-    if (_title == value) return;
+  void setTitle(String value, {bool fromVoice = false}) {
+    if (inputText.trim() == value.trim()) return;
+    if (_draft != null) {
+      _scope = '';
+      _deadline = null;
+      _availability = null;
+    }
+    _entrySource =
+        fromVoice || (_entrySource == 'voice' && value.trim().isNotEmpty)
+            ? 'voice'
+            : 'text';
     if (_title != value) {
       _candidate = null;
       _confirmedTask = null;
@@ -863,10 +987,13 @@ class TaskProvider extends ChangeNotifier {
               start: DateTime.parse(start),
               end: DateTime.parse(end),
             );
+      _entrySource = data['entry_source'] == 'voice' ? 'voice' : 'text';
       _draftSaved = data['draft_saved'] as bool? ?? true;
       _confirmed = data['confirmed'] as bool? ?? false;
       _decompositionChoice = data['decomposition_choice'] as String?;
       _planLocked = data['plan_locked'] as bool? ?? false;
+      _calendarSyncState = data['calendar_sync_state'] as String?;
+      _confirmedScheduleRevision = data['confirmed_schedule_revision'] as int?;
       _planSavedForLater = data['plan_saved_for_later'] as bool? ?? false;
       // A cached Task is not proof of a backend confirmation. It is restored
       // only after GET /tasks/{task_id} succeeds in restoreBackendState().
@@ -920,6 +1047,7 @@ class TaskProvider extends ChangeNotifier {
     _decompositionChoice = null;
     _title = '';
     _rawInputText = '';
+    _entrySource = 'text';
     _scope = '';
     _deadline = null;
     _availability = null;
@@ -928,6 +1056,8 @@ class TaskProvider extends ChangeNotifier {
     _draft = null;
     _candidate = null;
     _confirmedTask = null;
+    _calendarSyncState = null;
+    _confirmedScheduleRevision = null;
     _planLocked = false;
     _planSavedForLater = false;
     unawaited(_deleteDraft());
@@ -950,6 +1080,7 @@ class TaskProvider extends ChangeNotifier {
     final data = <String, Object?>{
       'title': _title,
       'raw_input_text': _rawInputText,
+      'entry_source': _entrySource,
       'scope': _scope,
       'deadline': _deadline?.toIso8601String(),
       'availability_start': _availability?.start.toIso8601String(),
@@ -960,6 +1091,8 @@ class TaskProvider extends ChangeNotifier {
       'plan_locked': _planLocked,
       'plan_saved_for_later': _planSavedForLater,
       'confirmed_task': _confirmedTask?.toJson(),
+      'calendar_sync_state': _calendarSyncState,
+      'confirmed_schedule_revision': _confirmedScheduleRevision,
       'backend_draft_id': _draft?.draftId,
       'client_draft_id': _clientDraftId,
       'client_draft_fingerprint': _clientDraftFingerprint,

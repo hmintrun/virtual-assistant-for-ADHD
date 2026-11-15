@@ -46,6 +46,9 @@ class ApiClient {
             if (session == null ||
                 !session.active ||
                 error.response?.statusCode != 401 ||
+                (request.path.startsWith('/calendar/') &&
+                    error.response?.data is Map &&
+                    (error.response?.data as Map)['detail'] is String) ||
                 request.extra['auth_retried'] == true) {
               handler.next(error);
               return;
@@ -62,6 +65,9 @@ class ApiClient {
             }
             try {
               handler.resolve(await this.dio.fetch<dynamic>(request.copyWith(
+                    data: request.data is FormData
+                        ? (request.data as FormData).clone()
+                        : request.data,
                     extra: {...request.extra, 'auth_retried': true},
                   )));
             } on DioException catch (retryError) {
@@ -115,6 +121,40 @@ class ApiClient {
         queryParameters: queryParameters,
       );
       return _unwrap(response.data);
+    } on DioException catch (error) {
+      throw ApiException.fromDio(error);
+    }
+  }
+
+  String? get ownerId => _session?.active == true ? _session!.ownerId : null;
+
+  Future<Map<String, dynamic>?> getOptionalData(String path) async {
+    try {
+      final response = await dio.get<Map<String, dynamic>>(path);
+      final body = response.data;
+      if (body != null && body.containsKey('data') && body['data'] == null) {
+        return null;
+      }
+      return _unwrap(body);
+    } on DioException catch (error) {
+      throw ApiException.fromDio(error);
+    }
+  }
+
+  Future<List<Map<String, dynamic>>> getListData(
+    String path, {
+    Map<String, dynamic>? queryParameters,
+  }) async {
+    try {
+      final response = await dio.get<Map<String, dynamic>>(
+        path,
+        queryParameters: queryParameters,
+      );
+      final items = response.data?['data'];
+      if (items is! List) {
+        throw const ApiException('Backend trả về danh sách không hợp lệ.');
+      }
+      return items.whereType<Map<String, dynamic>>().toList(growable: false);
     } on DioException catch (error) {
       throw ApiException.fromDio(error);
     }
@@ -213,7 +253,9 @@ class ApiException implements Exception {
     final detail = body is Map<String, dynamic>
         ? body['error'] as Map<String, dynamic>?
         : null;
-    final serverMessage = detail?['message'] as String?;
+    final legacyDetail = body is Map<String, dynamic> ? body['detail'] : null;
+    final serverMessage = detail?['message'] as String? ??
+        (legacyDetail is String ? legacyDetail : null);
     final message = serverMessage ??
         switch (error.type) {
           DioExceptionType.connectionTimeout =>

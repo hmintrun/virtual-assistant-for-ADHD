@@ -7,6 +7,7 @@ import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 
 import '../core/theme.dart';
+import 'task_summary_screen.dart';
 import '../models/focus_session_model.dart';
 import '../models/task_model.dart';
 import '../providers/focus_provider.dart';
@@ -31,6 +32,10 @@ class _FocusScreenState extends State<FocusScreen> with WidgetsBindingObserver {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted)
+        context.read<FocusProvider>().reportAppVisibility(foreground: true);
+    });
   }
 
   @override
@@ -39,7 +44,10 @@ class _FocusScreenState extends State<FocusScreen> with WidgetsBindingObserver {
       final focus = context.read<FocusProvider>();
       focus.refreshDndPermission();
       focus.handleAppResume();
+      focus.reportAppVisibility(foreground: true);
       if (focus.stage == FocusStage.ended) focus.refreshRunCheckIn();
+    } else if (state == AppLifecycleState.paused) {
+      context.read<FocusProvider>().reportAppVisibility(foreground: false);
     }
   }
 
@@ -88,6 +96,13 @@ class _FocusScreenState extends State<FocusScreen> with WidgetsBindingObserver {
               Padding(
                 padding: const EdgeInsets.only(bottom: 12),
                 child: Text(focus.runError!),
+              ),
+            if (focus.startRequiresReplan)
+              TextButton(
+                onPressed: () => Navigator.of(context).pushReplacementNamed(
+                  '/calendar',
+                ),
+                child: const Text('Xem lịch'),
               ),
             _buildStage(context, focus, session),
           ],
@@ -388,23 +403,25 @@ class _FocusScreenState extends State<FocusScreen> with WidgetsBindingObserver {
       const SizedBox(height: 20),
       _SessionCard(session: session),
       const SizedBox(height: 12),
-      _InfoCard(
-        icon:
-            focus.dndPermission ? Icons.do_not_disturb_on : Icons.info_outline,
-        title: focus.dndPermission
-            ? 'Quyền Không làm phiền đã sẵn sàng'
-            : 'Chưa cấp quyền Không làm phiền',
-        subtitle: focus.dndPermission
-            ? 'Khi bắt đầu, Melbel sẽ bật chế độ tập trung.'
-            : 'Bạn vẫn có thể bắt đầu. Có thể cấp quyền trong Cài đặt Android.',
-      ),
+      if (focus.supportsDnd)
+        _InfoCard(
+          icon: focus.dndPermission
+              ? Icons.do_not_disturb_on
+              : Icons.info_outline,
+          title: focus.dndPermission
+              ? 'Quyền Không làm phiền đã sẵn sàng'
+              : 'Chưa cấp quyền Không làm phiền',
+          subtitle: focus.dndPermission
+              ? 'Khi bắt đầu, Melbel sẽ bật chế độ tập trung.'
+              : 'Bạn vẫn có thể bắt đầu. Có thể cấp quyền trong Cài đặt Android.',
+        ),
       const SizedBox(height: 20),
       PrimaryCta(
         label: 'Bắt đầu đếm giờ ${_minutes(session.workSeconds)} phút',
         icon: Icons.play_arrow_rounded,
         onPressed: focus.runCommandBusy ? null : focus.startRun,
       ),
-      if (!focus.dndPermission)
+      if (focus.supportsDnd && !focus.dndPermission)
         TextButton(
           onPressed: focus.openDndSettings,
           child: const Text('Cấp quyền Không làm phiền'),
@@ -767,6 +784,23 @@ class _FocusScreenState extends State<FocusScreen> with WidgetsBindingObserver {
     FocusSessionInfo session,
   ) {
     return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      Row(
+        children: [
+          Expanded(
+            child: Text(
+              'Kết thúc phiên ${_minutes(session.workSeconds)} phút',
+              style: Theme.of(context).textTheme.titleLarge,
+            ),
+          ),
+          if (focus.dndApplied)
+            _StatusPill(
+              label: 'DND bật',
+              icon: Icons.do_not_disturb_on_outlined,
+              color: MelbelColors.kSecondary,
+            ),
+        ],
+      ),
+      const SizedBox(height: 12),
       ReviewHeader(
         focus.missedCheckIn
             ? 'Chưa phản hồi'
@@ -788,7 +822,10 @@ class _FocusScreenState extends State<FocusScreen> with WidgetsBindingObserver {
           label: 'Đồng bộ kết thúc phiên',
           onPressed: focus.runCommandBusy ? null : focus.syncRunEnd,
         ),
-      if (focus.hasPendingCheckInResponse)
+      if (focus.canUndoSkip)
+        SecondaryCta(
+            label: 'Hoàn tác bỏ qua', onPressed: focus.undoSkippedCheckIn)
+      else if (focus.hasPendingCheckInResponse)
         PrimaryCta(
           label: 'Gửi lại kết quả phiên',
           onPressed: focus.runCommandBusy ? null : focus.retryCheckInResponse,
@@ -830,6 +867,14 @@ class _FocusScreenState extends State<FocusScreen> with WidgetsBindingObserver {
           child: const Text('Nghỉ giải lao'),
         ),
       ],
+      if (!focus.canAnswerCheckIn && focus.serverRunId != null)
+        SecondaryCta(
+          label: 'Xem phương án đổi lịch',
+          onPressed: () => Navigator.of(context).push(MaterialPageRoute<void>(
+            builder: (_) => ScheduleChangeReasonScreen(
+                session: session, runId: focus.serverRunId),
+          )),
+        ),
       PrimaryCta(
         label: 'Quay về trang trước',
         onPressed: () => Navigator.of(context).pop(),
@@ -853,26 +898,33 @@ class _FocusScreenState extends State<FocusScreen> with WidgetsBindingObserver {
                   const ReviewHeader('Bạn muốn bỏ qua thế nào?',
                       'Chọn phạm vi cho phiên này.'),
                   ReviewSessionCard(session: session),
-                  for (final (label, value) in const [
-                    ('Hoãn phiên này làm sau', 'postpone_session'),
-                    ('Bỏ qua phiên này', 'skip_session'),
-                    ('Bỏ toàn bộ bước này', 'skip_step'),
-                  ])
-                    ListTile(
-                      title: Text(label),
-                      onTap: () => Navigator.pop(context, value),
-                    ),
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 8,
+                    children: [
+                      for (final (label, value) in const [
+                        ('Hoãn phiên này', 'postpone_session'),
+                        ('Bỏ qua phiên này', 'skip_session'),
+                        ('Bỏ toàn bộ bước', 'skip_step'),
+                      ])
+                        ActionChip(
+                          label: Text(label),
+                          onPressed: () => Navigator.pop(context, value),
+                        ),
+                    ],
+                  ),
                 ],
               )),
     );
-    if (scope != null && mounted) {
-      await focus.answerCheckIn('skipped', skipScope: scope);
-      if (mounted && !focus.canAnswerCheckIn && scope == 'postpone_session') {
-        await Navigator.of(context).push(MaterialPageRoute<void>(
-          builder: (_) => ScheduleChangeReasonScreen(session: session),
-        ));
-      }
-    }
+    if (scope == null || !mounted) return;
+    await focus.queueSkippedCheckIn(scope);
+    if (!mounted || !focus.canUndoSkip) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      content: const Text('Đã chọn bỏ qua.'),
+      duration: const Duration(seconds: 5),
+      action: SnackBarAction(
+          label: 'Hoàn tác', onPressed: focus.undoSkippedCheckIn),
+    ));
   }
 
   Future<void> _reviewOutcome(
@@ -913,7 +965,11 @@ class _FocusScreenState extends State<FocusScreen> with WidgetsBindingObserver {
     await Navigator.of(context).push(MaterialPageRoute<void>(
       builder: (_) => outcome == 'completed'
           ? NextFocusActionScreen(session: session)
-          : ScheduleChangeReasonScreen(session: session),
+          : ScheduleChangeReasonScreen(
+              session: session,
+              runId: focus.serverRunId,
+              initialReason:
+                  outcome == 'busy' ? 'checkin_busy' : 'checkin_incomplete'),
     ));
   }
 
@@ -947,6 +1003,7 @@ class _ThoughtInboxScreenState extends State<ThoughtInboxScreen> {
   final _audioPlayer = AudioPlayer();
   String? _playingThoughtId;
   bool _showDraft = false;
+  bool _isConverting = false;
 
   @override
   void dispose() {
@@ -989,31 +1046,90 @@ class _ThoughtInboxScreenState extends State<ThoughtInboxScreen> {
           const MelbelCard(child: Text('Chưa có suy nghĩ nào được cất.')),
         if (!_showDraft)
           for (final thought in focus.thoughts)
-            _ThoughtTile(
-              thought: thought,
-              isPlaying: _playingThoughtId == thought.id,
-              onPlay: thought.audioPath == null
-                  ? null
-                  : () => _playThought(thought),
-              onDelete: () async {
-                if (_playingThoughtId == thought.id) {
-                  await _audioPlayer.stop();
-                  if (mounted) setState(() => _playingThoughtId = null);
-                }
-                await focus.deleteThought(thought);
-                if (!context.mounted) return;
-                ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-                  content: const Text('Đã xóa ghi chú'),
-                  duration: const Duration(seconds: 5),
-                  action: SnackBarAction(
-                    label: 'Hoàn tác',
-                    onPressed: () => unawaited(focus.undoDeletedThought()),
-                  ),
-                ));
-              },
-            ),
+            Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+              _ThoughtTile(
+                thought: thought,
+                isPlaying: _playingThoughtId == thought.id,
+                onPlay: thought.audioPath == null
+                    ? null
+                    : () => _playThought(thought),
+                onDelete: () async {
+                  if (_playingThoughtId == thought.id) {
+                    await _audioPlayer.stop();
+                    if (mounted) setState(() => _playingThoughtId = null);
+                  }
+                  await focus.deleteThought(thought);
+                  if (!context.mounted) return;
+                  ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                    content: const Text('Đã xóa ghi chú'),
+                    duration: const Duration(seconds: 5),
+                    action: SnackBarAction(
+                      label: 'Hoàn tác',
+                      onPressed: () => unawaited(focus.undoDeletedThought()),
+                    ),
+                  ));
+                },
+              ),
+              if (!focus.isActiveRun &&
+                  !focus.needsEndSync &&
+                  !focus.runCommandBusy &&
+                  !task.hasUnconfirmedDraft &&
+                  thought.serverThoughtId != null)
+                TextButton.icon(
+                  onPressed: _isConverting || task.isApiBusy
+                      ? null
+                      : () => _convertThought(focus, task, thought),
+                  icon: const Icon(Icons.edit_note_outlined),
+                  label: const Text('Tạo việc từ suy nghĩ'),
+                ),
+            ]),
       ],
     );
+  }
+
+  Future<void> _convertThought(
+    FocusProvider focus,
+    TaskProvider task,
+    ThoughtRecord thought,
+  ) async {
+    final text = await Navigator.of(context).push<String>(
+      MaterialPageRoute(
+          builder: (_) => _ThoughtDraftEntry(
+                initialText: thought.text ?? '',
+                transcribe: thought.localAudioPath == null
+                    ? null
+                    : () => focus.transcribeThought(thought),
+              )),
+    );
+    if (!mounted ||
+        text == null ||
+        task.isApiBusy ||
+        task.hasUnconfirmedDraft) {
+      return;
+    }
+    setState(() => _isConverting = true);
+    try {
+      final draft = await focus.convertThoughtToDraft(thought, text);
+      if (!mounted) return;
+      // An existing draft belongs in the summary even when analysis is unavailable.
+      try {
+        await task.analyzeThoughtDraft(draft);
+      } catch (_) {
+        if (!mounted || task.draft?.draftId != draft.draftId) rethrow;
+      }
+      if (!mounted) return;
+      await Navigator.of(context).push<void>(
+        MaterialPageRoute(builder: (_) => const TaskSummaryScreen()),
+      );
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(error.toString())),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _isConverting = false);
+    }
   }
 
   Future<void> _playThought(ThoughtRecord thought) async {
@@ -1039,6 +1155,71 @@ class _ThoughtInboxScreenState extends State<ThoughtInboxScreen> {
       }
     }
   }
+}
+
+class _ThoughtDraftEntry extends StatefulWidget {
+  const _ThoughtDraftEntry({required this.initialText, this.transcribe});
+  final String initialText;
+  final Future<String> Function()? transcribe;
+
+  @override
+  State<_ThoughtDraftEntry> createState() => _ThoughtDraftEntryState();
+}
+
+class _ThoughtDraftEntryState extends State<_ThoughtDraftEntry> {
+  late final _text = TextEditingController(text: widget.initialText);
+  bool _transcribing = false;
+
+  Future<void> _transcribe() async {
+    setState(() => _transcribing = true);
+    try {
+      final text = await widget.transcribe!();
+      if (mounted) _text.text = text;
+    } catch (_) {
+      if (mounted)
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+              content: Text('Chưa chuyển được ghi âm. Bạn có thể nhập chữ.')),
+        );
+    } finally {
+      if (mounted) setState(() => _transcribing = false);
+    }
+  }
+
+  @override
+  void dispose() {
+    _text.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => FocusReviewPage(
+        title: 'Tạo việc từ suy nghĩ',
+        children: [
+          if (widget.transcribe != null)
+            SecondaryCta(
+              label: _transcribing ? 'Đang chuyển…' : 'Chuyển ghi âm thành chữ',
+              onPressed: _transcribing ? null : _transcribe,
+            ),
+          TextField(
+            enabled: !_transcribing,
+            controller: _text,
+            minLines: 3,
+            maxLines: 6,
+            onChanged: (_) => setState(() {}),
+            decoration: const InputDecoration(
+              labelText: 'Nội dung công việc',
+              hintText: 'Nhập nội dung từ ghi âm hoặc suy nghĩ của bạn.',
+            ),
+          ),
+          PrimaryCta(
+            label: 'Tạo bản nháp',
+            onPressed: _transcribing || _text.text.trim().isEmpty
+                ? null
+                : () => Navigator.pop(context, _text.text.trim()),
+          ),
+        ],
+      );
 }
 
 class _SessionCard extends StatelessWidget {

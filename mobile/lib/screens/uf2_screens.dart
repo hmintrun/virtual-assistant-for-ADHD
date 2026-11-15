@@ -6,8 +6,8 @@ import '../services/voice_service.dart';
 import '../models/focus_session_model.dart';
 import '../providers/focus_provider.dart';
 import '../providers/task_provider.dart';
+import '../widgets/calendar_fallback.dart';
 import '../widgets/melbel_ui.dart';
-import 'home_screen.dart';
 import 'candidate_review_screen.dart';
 import 'focus_screen.dart';
 
@@ -75,7 +75,7 @@ class _DecompositionChoiceScreenState extends State<DecompositionChoiceScreen>
     if (_isListening) setState(() => _isListening = false);
   }
 
-  Future<void> _generateCandidate() async {
+  Future<void> _generateCandidate({bool useManualAvailability = false}) async {
     final task = context.read<TaskProvider>();
     if (_isGenerating || task.isApiBusy) return;
     setState(() => _isGenerating = true);
@@ -83,6 +83,7 @@ class _DecompositionChoiceScreenState extends State<DecompositionChoiceScreen>
       final proposal = _intentController.text.trim();
       await task.generateCandidateOnBackend(
         stepProposal: proposal.isEmpty ? null : proposal,
+        useManualAvailability: useManualAvailability,
       );
       if (!mounted) return;
       await Navigator.push(
@@ -90,10 +91,18 @@ class _DecompositionChoiceScreenState extends State<DecompositionChoiceScreen>
         MaterialPageRoute<void>(builder: (_) => const CandidateReviewScreen()),
       );
     } catch (error) {
-      if (mounted)
+      if (!mounted) return;
+      if (isCalendarUnavailable(error)) {
+        showCalendarFallbackSnackBar(
+          context,
+          onUseManualAvailability: () =>
+              _generateCandidate(useManualAvailability: true),
+        );
+      } else {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text('Chưa tạo được phương án: $error')),
         );
+      }
     } finally {
       if (mounted) setState(() => _isGenerating = false);
     }
@@ -467,6 +476,7 @@ class _VoiceAssistantModalState extends State<VoiceAssistantModal> {
   final _speech = OnDeviceSpeechService();
   bool _listening = false;
   bool _starting = false;
+  double _level = 0;
   String? _error;
 
   @override
@@ -498,6 +508,7 @@ class _VoiceAssistantModalState extends State<VoiceAssistantModal> {
       _starting = true;
       _listening = true;
       _error = null;
+      _level = 0;
     });
     void stop([String? error]) {
       if (!mounted) return;
@@ -517,6 +528,13 @@ class _VoiceAssistantModalState extends State<VoiceAssistantModal> {
         onError: (_) =>
             stop('Chưa nhận được giọng nói. Bạn có thể gõ yêu cầu.'),
         onDone: stop,
+        onSoundLevel: (level) {
+          if (!mounted || !_listening) return;
+          final fraction = (level / 10).clamp(0.0, 1.0).toDouble();
+          if ((fraction - _level).abs() > 0.05) {
+            setState(() => _level = fraction);
+          }
+        },
       );
       if (!started) stop('Chưa bật được mic. Bạn có thể gõ yêu cầu.');
     } catch (_) {
@@ -546,7 +564,41 @@ class _VoiceAssistantModalState extends State<VoiceAssistantModal> {
                 onPressed: _starting ? null : _toggleMic,
                 icon: Icon(_listening ? Icons.graphic_eq : Icons.mic_none),
               ),
-              if (_listening) const Text('Đang nghe…'),
+              if (_listening) ...[
+                const Text('Đang nghe…'),
+                ExcludeSemantics(
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 8),
+                    child: SizedBox(
+                      height: 28,
+                      child: Row(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          for (final height in const [
+                            8.0,
+                            16.0,
+                            24.0,
+                            16.0,
+                            8.0
+                          ])
+                            AnimatedContainer(
+                              duration: MediaQuery.disableAnimationsOf(context)
+                                  ? Duration.zero
+                                  : const Duration(milliseconds: 90),
+                              width: 4,
+                              height: 5 + height * _level,
+                              margin: const EdgeInsets.symmetric(horizontal: 3),
+                              decoration: BoxDecoration(
+                                color: Theme.of(context).colorScheme.primary,
+                                borderRadius: BorderRadius.circular(4),
+                              ),
+                            ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+              ],
               if (_error != null) Text(_error!),
               const SizedBox(height: 12),
               TextField(
@@ -1424,9 +1476,14 @@ class PlanLockedScreen extends StatelessWidget {
     final confirmedDeadline = deadlineAt == null
         ? task.formatDeadline(task.deadline)
         : task.formatDeadline(DateTime.tryParse(deadlineAt)?.toLocal());
-    final sessionSummary = confirmedSessions.isEmpty
-        ? 'Backend chưa trả các phiên đã lưu.'
-        : '${confirmedSessions.length} phiên theo lịch backend';
+    final calendarStatus = switch (task.calendarSyncState) {
+      'synced' => 'Đã đồng bộ',
+      'pending' || 'outbox_queued' => 'Đang chờ đồng bộ',
+      'not_integrated' => 'Chưa liên kết lịch để ghi phiên',
+      'conflict' => 'Có thay đổi cần xem lại',
+      'failed' => 'Đồng bộ chưa thành công',
+      _ => 'Chưa có trạng thái đồng bộ',
+    };
 
     return Scaffold(
       appBar: const MelbelAppBar(title: 'Kế hoạch đã sẵn sàng', showBack: true),
@@ -1449,7 +1506,9 @@ class PlanLockedScreen extends StatelessWidget {
             PrimaryCta(
               label: 'Bắt đầu phiên đầu tiên',
               icon: Icons.play_arrow,
-              onPressed: () => _startFirstSession(context),
+              onPressed: confirmedSessions.isEmpty
+                  ? null
+                  : () => _startFirstSession(context),
             ),
             const SizedBox(height: 8),
             SecondaryCta(
@@ -1457,10 +1516,8 @@ class PlanLockedScreen extends StatelessWidget {
               icon: Icons.home_outlined,
               height: 48,
               onPressed: () {
-                Navigator.of(context).pushAndRemoveUntil(
-                  MaterialPageRoute<void>(builder: (_) => const HomeScreen()),
-                  (route) => false,
-                );
+                Navigator.of(context)
+                    .pushNamedAndRemoveUntil('/home', (_) => false);
               },
             ),
           ],
@@ -1484,16 +1541,6 @@ class PlanLockedScreen extends StatelessWidget {
                       fontSize: 24,
                       fontWeight: FontWeight.w600,
                       color: MelbelColors.kOnSurface,
-                    ),
-                  ),
-                  const SizedBox(height: 6),
-                  Text(
-                    'Mọi thứ đã sẵn sàng theo nhịp êm dịu của bạn',
-                    textAlign: TextAlign.center,
-                    style: TextStyle(
-                      fontFamily: 'Be Vietnam Pro',
-                      fontSize: 15,
-                      color: MelbelColors.kOnSurfaceVariant,
                     ),
                   ),
                 ],
@@ -1570,9 +1617,30 @@ class PlanLockedScreen extends StatelessWidget {
                   _lockedRow(
                     icon: Icons.timelapse,
                     iconColor: MelbelColors.kOnSurfaceVariant,
-                    title: 'Nhịp độ phân bổ',
-                    desc: sessionSummary,
+                    title: 'Google Calendar',
+                    desc: calendarStatus,
                   ),
+                  if (task.canRefreshCalendarSync)
+                    TextButton.icon(
+                      icon: const Icon(Icons.sync),
+                      label: Text(task.isApiBusy
+                          ? 'Đang cập nhật…'
+                          : 'Cập nhật đồng bộ'),
+                      onPressed: task.isApiBusy
+                          ? null
+                          : () async {
+                              try {
+                                await task.refreshCalendarSync();
+                              } catch (_) {
+                                if (!context.mounted) return;
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  const SnackBar(
+                                      content: Text(
+                                          'Chưa cập nhật được trạng thái lịch.')),
+                                );
+                              }
+                            },
+                    ),
                   const SizedBox(height: 10),
                   _lockedRow(
                     icon: Icons.calendar_today,
@@ -1602,80 +1670,10 @@ class PlanLockedScreen extends StatelessWidget {
               ),
             ),
             const SizedBox(height: 16),
-
-            // Note: Melbel sẽ nhắc khẽ
-            Container(
-              padding: const EdgeInsets.all(14),
-              decoration: BoxDecoration(
-                color: MelbelColors.kSurfaceContainer,
-                borderRadius: BorderRadius.circular(16),
-                border: Border.all(color: MelbelColors.kOutline),
-              ),
-              child: Row(
-                children: [
-                  Icon(
-                    Icons.notifications_paused,
-                    size: 20,
-                    color: MelbelColors.kOnSurfaceVariant,
-                  ),
-                  SizedBox(width: 10),
-                  Expanded(
-                    child: Text(
-                      'Melbel sẽ nhắc khẽ khi đến giờ, không báo dồn dập.',
-                      style: TextStyle(
-                        fontFamily: 'Be Vietnam Pro',
-                        fontSize: 13,
-                        color: MelbelColors.kOnSurfaceVariant,
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-            const SizedBox(height: 20),
-
-            // Mood check
-            Wrap(
-              spacing: 12,
-              runSpacing: 8,
-              children: [
-                Text(
-                  'Cảm giác của bạn lúc này?',
-                  style: TextStyle(
-                    fontFamily: 'Be Vietnam Pro',
-                    fontSize: 14,
-                    color: MelbelColors.kOnSurfaceVariant,
-                  ),
-                ),
-                Row(
-                  children: [
-                    _moodChip('An tâm', isSelected: true),
-                    const SizedBox(width: 8),
-                    _moodChip('Cần nghỉ chút', isSelected: false),
-                  ],
-                ),
-              ],
-            ),
-            const SizedBox(height: 20),
-
-            // Demo link for D-29 & D-30
-            Center(
-              child: TextButton.icon(
-                onPressed: () => _open(context, const SessionReminderScreen()),
-                icon: Icon(
-                  Icons.notifications_active,
-                  size: 16,
-                  color: MelbelColors.kPrimaryContainer,
-                ),
-                label: Text(
-                  'Xem thử nhắc nhở trước phiên (D-29) & Màn hình khóa (D-30)',
-                  style: TextStyle(
-                    fontFamily: 'Be Vietnam Pro',
-                    fontSize: 12,
-                    color: MelbelColors.kPrimaryContainer,
-                  ),
-                ),
-              ),
+            TextButton.icon(
+              onPressed: () => _open(context, const SessionReminderScreen()),
+              icon: const Icon(Icons.notifications_none),
+              label: const Text('Xem thử nhắc phiên'),
             ),
           ],
         ),
@@ -1733,32 +1731,6 @@ class PlanLockedScreen extends StatelessWidget {
             ),
           ),
         ],
-      ),
-    );
-  }
-
-  Widget _moodChip(String text, {required bool isSelected}) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-      decoration: BoxDecoration(
-        color: MelbelColors.kSurfaceContainer,
-        borderRadius: BorderRadius.circular(999),
-        border: Border.all(
-          color: isSelected
-              ? MelbelColors.kPrimaryContainer
-              : MelbelColors.kOutline,
-        ),
-      ),
-      child: Text(
-        text,
-        style: TextStyle(
-          fontFamily: 'Be Vietnam Pro',
-          fontSize: 12,
-          fontWeight: isSelected ? FontWeight.w500 : FontWeight.w400,
-          color: isSelected
-              ? MelbelColors.kPrimary
-              : MelbelColors.kOnSurfaceVariant,
-        ),
       ),
     );
   }

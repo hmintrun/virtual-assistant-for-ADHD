@@ -9,9 +9,9 @@ from __future__ import annotations
 
 import logging
 from abc import ABC, abstractmethod
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode
 
 import httpx
 
@@ -22,6 +22,15 @@ logger = logging.getLogger(__name__)
 GOOGLE_TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token"
 GOOGLE_AUTH_ENDPOINT = "https://accounts.google.com/o/oauth2/v2/auth"
 GOOGLE_CALENDAR_BASE_URL = "https://www.googleapis.com/calendar/v3"
+
+
+def _calendar_events_url(calendar_id: str, event_id: str | None = None) -> str:
+    """Build Google Calendar events endpoint URL with URL-escaped path segments."""
+    encoded_cal = quote(calendar_id, safe="")
+    base = f"{GOOGLE_CALENDAR_BASE_URL}/calendars/{encoded_cal}/events"
+    if event_id is None:
+        return base
+    return f"{base}/{quote(event_id, safe='')}"
 
 
 class CalendarClientError(Exception):
@@ -182,6 +191,19 @@ class GoogleCalendarClient(CalendarClientInterface):
                     account_ref = info_resp.json().get("email", account_ref)
             except Exception as e:
                 logger.debug("Failed to fetch userinfo email: %s", e)
+            if account_ref == "unknown@google.com":
+                # Scope Calendar không gồm "email" nên userinfo thường bị từ chối.
+                # ID của lịch chính chính là email tài khoản → dùng làm account_ref,
+                # để mỗi tài khoản Google có một CalendarConnection riêng.
+                try:
+                    primary_resp = await client.get(
+                        f"{GOOGLE_CALENDAR_BASE_URL}/users/me/calendarList/primary",
+                        headers={"Authorization": f"Bearer {token_data.get('access_token')}"},
+                    )
+                    if primary_resp.status_code == 200:
+                        account_ref = primary_resp.json().get("id", account_ref)
+                except Exception as e:
+                    logger.debug("Failed to fetch primary calendar id: %s", e)
 
             token_data["account_ref"] = account_ref
             return token_data
@@ -249,7 +271,7 @@ class GoogleCalendarClient(CalendarClientInterface):
         time_max: datetime,
     ) -> list[dict[str, Any]]:
         headers = {"Authorization": f"Bearer {access_token}"}
-        url = f"{GOOGLE_CALENDAR_BASE_URL}/calendars/{calendar_id}/events"
+        url = _calendar_events_url(calendar_id)
         all_events: list[dict[str, Any]] = []
         page_token: str | None = None
         async with httpx.AsyncClient(timeout=25.0) as client:
@@ -282,7 +304,7 @@ class GoogleCalendarClient(CalendarClientInterface):
         event_id: str,
     ) -> dict[str, Any] | None:
         headers = {"Authorization": f"Bearer {access_token}"}
-        url = f"{GOOGLE_CALENDAR_BASE_URL}/calendars/{calendar_id}/events/{event_id}"
+        url = _calendar_events_url(calendar_id, event_id)
         async with httpx.AsyncClient(timeout=15.0) as client:
             resp = await client.get(url, headers=headers)
             if resp.status_code == 404:
@@ -303,7 +325,7 @@ class GoogleCalendarClient(CalendarClientInterface):
             "Authorization": f"Bearer {access_token}",
             "Content-Type": "application/json",
         }
-        url = f"{GOOGLE_CALENDAR_BASE_URL}/calendars/{calendar_id}/events"
+        url = _calendar_events_url(calendar_id)
         async with httpx.AsyncClient(timeout=15.0) as client:
             resp = await client.post(url, headers=headers, json=event_payload)
             if resp.status_code == 401:
@@ -329,7 +351,7 @@ class GoogleCalendarClient(CalendarClientInterface):
         if expected_etag:
             headers["If-Match"] = expected_etag
 
-        url = f"{GOOGLE_CALENDAR_BASE_URL}/calendars/{calendar_id}/events/{event_id}"
+        url = _calendar_events_url(calendar_id, event_id)
         async with httpx.AsyncClient(timeout=15.0) as client:
             resp = await client.put(url, headers=headers, json=event_payload)
             if resp.status_code == 412:
@@ -351,7 +373,7 @@ class GoogleCalendarClient(CalendarClientInterface):
         if expected_etag:
             headers["If-Match"] = expected_etag
 
-        url = f"{GOOGLE_CALENDAR_BASE_URL}/calendars/{calendar_id}/events/{event_id}"
+        url = _calendar_events_url(calendar_id, event_id)
         async with httpx.AsyncClient(timeout=15.0) as client:
             resp = await client.delete(url, headers=headers)
             if resp.status_code == 412:

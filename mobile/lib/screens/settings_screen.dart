@@ -3,6 +3,7 @@ import 'package:provider/provider.dart';
 
 import '../core/api_client.dart';
 import '../providers/theme_provider.dart';
+import '../services/adaptation_api.dart';
 import '../widgets/melbel_ui.dart';
 import 'focus_review_screens.dart';
 
@@ -15,10 +16,15 @@ class SettingsScreen extends StatefulWidget {
 
 class _SettingsScreenState extends State<SettingsScreen> {
   final _api = ApiClient();
+  late final _adaptation = AdaptationApi(_api);
+  Map<String, dynamic>? _suggestion;
+  String? _suggestionError;
   Map<String, dynamic>? _preferences;
   int? _work;
   int? _rest;
+  double? _bufferMultiplier;
   List<int>? _reminders;
+  String? _reminderStyle;
   bool _busy = false;
   String? _error;
 
@@ -40,13 +46,133 @@ class _SettingsScreenState extends State<SettingsScreen> {
         _preferences = data;
         _work = data['work_interval_seconds'] as int?;
         _rest = data['rest_interval_seconds'] as int?;
+        _bufferMultiplier = (data['buffer_multiplier'] as num?)?.toDouble();
         _reminders = (data['reminder_offsets'] as List?)?.cast<int>();
+        _reminderStyle = data['reminder_style'] as String?;
       });
+      await _loadSuggestion();
     } on ApiException catch (error) {
       if (mounted) setState(() => _error = error.message);
     } finally {
       if (mounted) setState(() => _busy = false);
     }
+  }
+
+  Future<void> _loadSuggestion() async {
+    try {
+      final value = await _adaptation.suggestion();
+      if (mounted)
+        setState(() {
+          _suggestion = value;
+          _suggestionError = null;
+        });
+    } on ApiException catch (error) {
+      if (mounted)
+        setState(() {
+          _suggestion = null;
+          _suggestionError = error.message;
+        });
+    }
+  }
+
+  Future<void> _respond(String action, {Object? editedValue}) async {
+    final suggestion = _suggestion;
+    final revision = _preferences?['revision'] as int?;
+    if (_busy || suggestion == null || revision == null) return;
+    setState(() => _busy = true);
+    try {
+      await _adaptation.respond(suggestion, revision, action,
+          editedValue: editedValue);
+      if (mounted) await _load();
+    } on ApiException catch (error) {
+      if (mounted) setState(() => _suggestionError = error.message);
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Future<void> _reviewProposal(String id) async {
+    await Navigator.of(context).push<bool>(MaterialPageRoute(
+      builder: (_) => ScheduleComparisonScreen(
+        reason: 'Thay đổi cài đặt',
+        proposalId: id,
+      ),
+    ));
+    if (mounted) await _load();
+  }
+
+  String _suggestionValue(Object? value) => value is List
+      ? value
+          .whereType<int>()
+          .map((seconds) => '${seconds ~/ 60} phút')
+          .join(', ')
+      : '×$value';
+
+  Future<String?> _showPreferenceEditor(Object value) async {
+    final controller = TextEditingController(
+      text: value is List
+          ? value.whereType<int>().map((s) => s ~/ 60).join(', ')
+          : '$value',
+    );
+    final result = await showModalBottomSheet<String>(
+      context: context,
+      isScrollControlled: true,
+      builder: (sheet) => SafeArea(
+          child: Padding(
+        padding: EdgeInsets.fromLTRB(
+            20, 20, 20, 20 + MediaQuery.viewInsetsOf(sheet).bottom),
+        child: Column(mainAxisSize: MainAxisSize.min, children: [
+          TextField(
+            controller: controller,
+            decoration: InputDecoration(
+                labelText: value is List
+                    ? 'Phút, cách nhau bằng dấu phẩy'
+                    : 'Hệ số đệm'),
+          ),
+          const SizedBox(height: 12),
+          PrimaryCta(
+              label: 'Áp dụng',
+              onPressed: () => Navigator.pop(sheet, controller.text.trim())),
+        ]),
+      )),
+    );
+    WidgetsBinding.instance.addPostFrameCallback((_) => controller.dispose());
+    return result;
+  }
+
+  double? _parseBuffer(String text) {
+    final value = double.tryParse(text.replaceAll(',', '.'));
+    return value != null && value.isFinite && value > 0 ? value : null;
+  }
+
+  Future<void> _editBuffer(double current) async {
+    final result = await _showPreferenceEditor(current);
+    if (!mounted || result == null) return;
+    final value = _parseBuffer(result);
+    setState(() {
+      _error = value == null ? 'Nhập hệ số đệm lớn hơn 0.' : null;
+      if (value != null) _bufferMultiplier = value;
+    });
+  }
+
+  Future<void> _editSuggestion(Object value) async {
+    final result = await _showPreferenceEditor(value);
+    if (!mounted || result == null) return;
+    Object? parsed;
+    if (value is List) {
+      final minutes =
+          result.split(',').map((v) => int.tryParse(v.trim())).toList();
+      if (minutes.every((v) => v != null && v >= 0)) {
+        parsed = minutes.map((v) => v! * 60).toList();
+      }
+    } else {
+      parsed = _parseBuffer(result);
+    }
+    if (parsed == null) {
+      setState(() => _suggestionError = 'Giá trị chưa hợp lệ.');
+      return;
+    }
+    await _respond('edit', editedValue: parsed);
   }
 
   Map<String, dynamic> get _changes {
@@ -57,10 +183,15 @@ class _SettingsScreenState extends State<SettingsScreen> {
         'work_interval_seconds': _work,
       if (_rest != null && _rest != current['rest_interval_seconds'])
         'rest_interval_seconds': _rest,
+      if (_bufferMultiplier != null &&
+          _bufferMultiplier != current['buffer_multiplier'])
+        'buffer_multiplier': _bufferMultiplier,
       if (_reminders != null &&
           _reminders!.join(',') !=
               (current['reminder_offsets'] as List?)?.join(','))
         'reminder_offsets': _reminders,
+      if (_reminderStyle != null && _reminderStyle != current['reminder_style'])
+        'reminder_style': _reminderStyle,
     };
   }
 
@@ -86,6 +217,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
       if (!mounted) return;
       await _load();
       if (!mounted) return;
+      if (result['pending_proposal_id'] case final String proposalId) {
+        await _reviewProposal(proposalId);
+        return;
+      }
       await Navigator.of(context).push(MaterialPageRoute<void>(
         builder: (context) => FocusReviewPage(
           title: 'Đã lưu cài đặt',
@@ -161,7 +296,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   @override
   Widget build(BuildContext context) {
     final theme = context.watch<ThemeProvider>();
-    final pending = _preferences?['pending_proposal_id'] != null;
+    final pending = _preferences?['pending_proposal_id'] as String?;
     return FocusReviewPage(
       title: 'Cài đặt',
       children: [
@@ -172,10 +307,65 @@ class _SettingsScreenState extends State<SettingsScreen> {
         if (_preferences == null && !_busy)
           SecondaryCta(label: 'Tải lại cài đặt', onPressed: _load),
         if (_preferences != null) ...[
-          if (pending)
-            const MelbelCard(
-                child: Text(
-                    'Có thay đổi đang chờ duyệt. Cấu hình hiệu lực vẫn được giữ.')),
+          MelbelCard(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text('Giọng nhắc',
+                    style: Theme.of(context).textTheme.titleMedium),
+                Wrap(
+                  spacing: 8,
+                  children: [
+                    for (final entry in const {
+                      'gentle': 'Nhẹ nhàng',
+                      'upbeat': 'Tươi vui',
+                    }.entries)
+                      ChoiceChip(
+                        label: Text(entry.value),
+                        selected: _reminderStyle == entry.key,
+                        onSelected: _busy
+                            ? null
+                            : (_) => setState(() => _reminderStyle = entry.key),
+                      ),
+                  ],
+                ),
+                if (_bufferMultiplier case final buffer?)
+                  TextButton(
+                    onPressed: _busy ? null : () => _editBuffer(buffer),
+                    child: Text('Hệ số đệm: ×$buffer'),
+                  ),
+              ],
+            ),
+          ),
+          if (pending != null)
+            SecondaryCta(
+                label: 'Xem thay đổi chờ duyệt',
+                onPressed: _busy ? null : () => _reviewProposal(pending)),
+          if (_suggestionError != null) Text(_suggestionError!),
+          if (_suggestion case final suggestion?)
+            MelbelCard(
+                child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text('Gợi ý cho phiên sau',
+                    style: Theme.of(context).textTheme.titleMedium),
+                Text(
+                    '${_suggestionValue(suggestion['current_value'])} → ${_suggestionValue(suggestion['suggested_value'])}'),
+                if (suggestion['reason'] case final String reason) Text(reason),
+                Wrap(spacing: 8, children: [
+                  TextButton(
+                      onPressed: _busy ? null : () => _respond('accept'),
+                      child: const Text('Áp dụng')),
+                  if (suggestion['suggested_value'] case final Object value)
+                    TextButton(
+                        onPressed: _busy ? null : () => _editSuggestion(value),
+                        child: const Text('Tùy chỉnh')),
+                  TextButton(
+                      onPressed: _busy ? null : () => _respond('reject'),
+                      child: const Text('Bỏ qua')),
+                ]),
+              ],
+            )),
           MelbelCard(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,

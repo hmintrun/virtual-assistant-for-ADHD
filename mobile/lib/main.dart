@@ -17,6 +17,8 @@ import 'screens/onboarding_screens.dart';
 import 'screens/support_screens.dart';
 import 'screens/home_screen.dart';
 import 'screens/calendar_screen.dart';
+import 'screens/google_calendar_screen.dart';
+import 'screens/calendar_connect_screen.dart';
 import 'screens/focus_screen.dart';
 import 'screens/settings_screen.dart';
 import 'screens/focus_review_screens.dart';
@@ -91,15 +93,38 @@ class _OwnerApp extends StatelessWidget {
       );
 }
 
-class ProPlanApp extends StatelessWidget {
+class ProPlanApp extends StatefulWidget {
   const ProPlanApp({super.key, required this.signedIn});
 
   final bool signedIn;
 
   @override
+  State<ProPlanApp> createState() => _ProPlanAppState();
+}
+
+class _ProPlanAppState extends State<ProPlanApp> {
+  final _navigatorKey = GlobalKey<NavigatorState>();
+  bool _reauthAccountOpen = false;
+
+  Future<void> _openAccount() async {
+    final navigator = _navigatorKey.currentState;
+    if (navigator == null || _reauthAccountOpen) return;
+    _reauthAccountOpen = true;
+    try {
+      await navigator.pushNamed('/account');
+    } finally {
+      _reauthAccountOpen = false;
+    }
+  }
+
+  @override
   Widget build(BuildContext context) {
     context.watch<ThemeProvider>();
+    final signedIn = widget.signedIn;
+    final needsSignIn =
+        signedIn && (context.watch<AuthService?>()?.needsSignIn ?? false);
     return MaterialApp(
+      navigatorKey: _navigatorKey,
       title: 'ProPlan VA',
       locale: const Locale('vi'),
       supportedLocales: const [Locale('vi')],
@@ -112,9 +137,16 @@ class ProPlanApp extends StatelessWidget {
               '/login': (_) => const HomeScreen(),
               '/home': (_) => const HomeScreen(),
               '/calendar': (_) => const CalendarScreen(),
+              '/google-calendar': (_) =>
+                  !kIsWeb && defaultTargetPlatform == TargetPlatform.android
+                      ? const CalendarConnectScreen()
+                      : const GoogleCalendarScreen(),
               '/settings': (_) => const SettingsScreen(),
               '/thoughts': (_) => const ThoughtInboxScreen(),
-              '/schedule-change': (_) => const ScheduleChangeReasonScreen(),
+              '/schedule-change': (_) => const ScheduleComparisonScreen(
+                    reason: 'Đề xuất chờ duyệt',
+                    trigger: 'resume',
+                  ),
               '/help': (_) => const HelpScreen(),
               '/account': (_) => const AccountScreen(),
             }
@@ -139,7 +171,26 @@ class ProPlanApp extends StatelessWidget {
           child: Center(
             child: ConstrainedBox(
               constraints: const BoxConstraints(maxWidth: 430),
-              child: child ?? const SizedBox.shrink(),
+              child: Column(
+                children: [
+                  Expanded(child: child ?? const SizedBox.shrink()),
+                  if (needsSignIn)
+                    Material(
+                      color: MelbelColors.kSurface,
+                      child: SafeArea(
+                        top: false,
+                        child: ListTile(
+                          leading: const Icon(Icons.info_outline),
+                          title: const Text('Phiên đăng nhập đã hết hạn'),
+                          trailing: TextButton(
+                            onPressed: _openAccount,
+                            child: const Text('Đăng nhập lại'),
+                          ),
+                        ),
+                      ),
+                    ),
+                ],
+              ),
             ),
           ),
         ),

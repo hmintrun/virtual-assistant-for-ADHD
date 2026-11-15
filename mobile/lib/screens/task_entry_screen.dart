@@ -1,8 +1,12 @@
+import 'dart:async';
+
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
 import '../core/theme.dart';
 import '../providers/task_provider.dart';
+import '../services/audio_recorder_service.dart';
 import '../services/voice_service.dart';
 import '../widgets/melbel_ui.dart';
 import 'drafts_screen.dart';
@@ -19,13 +23,16 @@ class _TaskEntryScreenState extends State<TaskEntryScreen> {
   late final TextEditingController _titleController;
   bool _isNavigating = false;
   bool _isListening = false;
-  static const _voiceFailureLimit = 3;
-  int _voiceFailures = 0;
-  bool _showTextEntry = false;
   bool _startingSpeech = false;
   String _recognizedWords = '';
   final OnDeviceSpeechService _speechService = OnDeviceSpeechService();
   String _textBeforeListening = '';
+  final _recorder = !kIsWeb && defaultTargetPlatform == TargetPlatform.android
+      ? AudioRecorderService.taskEntry()
+      : null;
+  late final _transcription = VoiceTranscriptionService();
+  bool _useOnDevice = false;
+  Future<void>? _recordingStart;
 
   @override
   void initState() {
@@ -33,14 +40,33 @@ class _TaskEntryScreenState extends State<TaskEntryScreen> {
     _titleController = TextEditingController(
       text: context.read<TaskProvider>().inputText,
     );
+    final recorder = _recorder;
+    if (recorder != null) {
+      recorder.onAutoStopped = (recording) => unawaited(_transcribe(recording));
+      recorder.onAutoStopFailed = (_) => _offerOnDevice();
+    }
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted) _speechService.requestAndroidPermission();
+      if (mounted && recorder == null)
+        _speechService.requestAndroidPermission();
+      if (mounted && recorder != null) {
+        _recordingStart = recorder
+            .hasPermission()
+            .then<void>((_) {}, onError: (Object _, StackTrace __) {});
+      }
     });
   }
 
   @override
   void dispose() {
     _speechService.dispose();
+    final recorder = _recorder;
+    if (recorder != null) {
+      recorder.onAutoStopped =
+          (recording) => unawaited(recorder.deleteRecording(recording.path));
+      recorder.onAutoStopFailed = null;
+      unawaited((_recordingStart ?? Future<void>.value())
+          .whenComplete(recorder.dispose));
+    }
     _titleController.dispose();
     super.dispose();
   }
@@ -135,7 +161,6 @@ class _TaskEntryScreenState extends State<TaskEntryScreen> {
     setState(() {
       _isListening = false;
       if (success) {
-        _voiceFailures = 0;
         final combined = [_textBeforeListening, words]
             .where((part) => part.isNotEmpty)
             .join(' ');
@@ -143,23 +168,81 @@ class _TaskEntryScreenState extends State<TaskEntryScreen> {
           text: combined,
           selection: TextSelection.collapsed(offset: combined.length),
         );
-        context.read<TaskProvider>().setTitle(combined);
-      } else {
-        _voiceFailures++;
-        if (_voiceFailures >= _voiceFailureLimit) _showTextEntry = true;
+        context.read<TaskProvider>().setTitle(combined, fromVoice: true);
       }
     });
     if (success) return;
     ScaffoldMessenger.of(context)
       ..hideCurrentSnackBar()
       ..showSnackBar(SnackBar(
-        content: Text(_showTextEntry
-            ? 'Bạn có thể nhập văn bản.'
-            : 'Chưa nhận được giọng nói ($_voiceFailures/3).'),
+        content:
+            const Text('Chưa nhận được giọng nói. Bạn có thể gõ nội dung.'),
       ));
   }
 
+  void _offerOnDevice() {
+    if (!mounted) return;
+    setState(() {
+      _useOnDevice = true;
+      _startingSpeech = false;
+      _isListening = false;
+    });
+    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+      content: Text(
+          'Chưa chuyển được giọng nói. Chạm mic để thử nhận diện trên máy, hoặc gõ chữ.'),
+    ));
+  }
+
+  Future<void> _transcribe(ThoughtRecording recording) async {
+    final recorder = _recorder!;
+    try {
+      if (!mounted) return;
+      setState(() => _startingSpeech = true);
+      _recognizedWords = await _transcription.transcribeM4a(
+        recording.path,
+        recordingId: recording.path,
+      );
+      _finishSpeechAttempt();
+    } catch (_) {
+      _offerOnDevice();
+    } finally {
+      await recorder.deleteRecording(recording.path);
+      if (mounted) setState(() => _startingSpeech = false);
+    }
+  }
+
   Future<void> _toggleListening() async {
+    if (_startingSpeech) return;
+    final recorder = _recorder;
+    if (recorder == null || _useOnDevice) return _toggleOnDevice();
+    if (_isListening) {
+      setState(() => _startingSpeech = true);
+      try {
+        await _transcribe(await recorder.stopAndFinalize());
+      } catch (_) {
+        _offerOnDevice();
+      }
+      return;
+    }
+    _textBeforeListening = _titleController.text.trim();
+    _recognizedWords = '';
+    setState(() => _startingSpeech = true);
+    try {
+      await _recordingStart;
+      if (!mounted) return;
+      final start = recorder.start(maxDuration: const Duration(seconds: 45));
+      _recordingStart =
+          start.then<void>((_) {}, onError: (Object _, StackTrace __) {});
+      await start;
+      if (mounted) setState(() => _isListening = true);
+    } catch (_) {
+      _offerOnDevice();
+    } finally {
+      if (mounted) setState(() => _startingSpeech = false);
+    }
+  }
+
+  Future<void> _toggleOnDevice() async {
     if (_startingSpeech) return;
     if (_isListening) {
       _startingSpeech = true;
@@ -203,7 +286,6 @@ class _TaskEntryScreenState extends State<TaskEntryScreen> {
   Widget build(BuildContext context) {
     final task = context.watch<TaskProvider>();
     final busy = task.isApiBusy || _isNavigating;
-    if (!_showTextEntry) return _buildVoicePage(task, busy);
     final now = DateTime.now();
     final today18 = DateTime(now.year, now.month, now.day, 18);
     final tomorrow18 = today18.add(const Duration(days: 1));
@@ -217,7 +299,7 @@ class _TaskEntryScreenState extends State<TaskEntryScreen> {
         child: ListView(
           padding: const EdgeInsets.fromLTRB(20, 16, 20, 24),
           children: [
-            const PlanningStageHeader(step: 1, label: 'Nhập bằng chữ'),
+            const PlanningStageHeader(step: 1, label: 'Nhập công việc'),
             const SizedBox(height: 16),
             const MelbelCard(
               child: Row(
@@ -242,7 +324,16 @@ class _TaskEntryScreenState extends State<TaskEntryScreen> {
                 alignLabelWithHint: true,
                 border: OutlineInputBorder(),
               ),
+              enabled: !busy && !_isListening && !_startingSpeech,
               onChanged: task.setTitle,
+            ),
+            const SizedBox(height: 12),
+            Center(
+              child: _VoiceRecordButton(
+                listening: _isListening && !_startingSpeech,
+                starting: _isListening && _startingSpeech,
+                onPressed: busy || _startingSpeech ? null : _toggleListening,
+              ),
             ),
             if (task.draftPersisted)
               const Padding(
@@ -286,67 +377,17 @@ class _TaskEntryScreenState extends State<TaskEntryScreen> {
             PrimaryCta(
               label: 'Phân tích công việc',
               icon: Icons.arrow_forward,
-              onPressed: busy || _isListening ? null : _continue,
+              onPressed:
+                  (busy || _isListening || _startingSpeech) ? null : _continue,
             ),
             const SizedBox(height: 8),
             SecondaryCta(
               label: 'Lưu vào Hộp nháp',
               icon: Icons.drafts_outlined,
-              onPressed: busy || _isListening ? null : _saveDraft,
+              onPressed:
+                  (busy || _isListening || _startingSpeech) ? null : _saveDraft,
             ),
           ],
-        ),
-      ),
-    );
-  }
-
-  Widget _buildVoicePage(TaskProvider task, bool busy) {
-    final transcript = _titleController.text.trim();
-    return Scaffold(
-      appBar:
-          const MelbelAppBar(title: 'Thêm việc bằng giọng nói', showBack: true),
-      body: SafeArea(
-        child: Center(
-          child: SingleChildScrollView(
-            padding: const EdgeInsets.all(20),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                _VoiceRecordButton(
-                  listening: _isListening && !_startingSpeech,
-                  starting: _isListening && _startingSpeech,
-                  onPressed: busy || _startingSpeech ? null : _toggleListening,
-                ),
-                if (!_isListening)
-                  TextButton(
-                    onPressed: busy || _startingSpeech
-                        ? null
-                        : () => setState(() => _showTextEntry = true),
-                    child: const Text('Nhập bằng chữ'),
-                  ),
-                if (!_isListening && transcript.isNotEmpty) ...[
-                  const SizedBox(height: 16),
-                  MelbelCard(child: Text(transcript)),
-                  const SizedBox(height: 12),
-                  TextButton(
-                    onPressed: busy ? null : _pickDeadline,
-                    child: Text(task.deadline == null
-                        ? 'Chọn hạn chót'
-                        : task.formatDeadline(task.deadline)),
-                  ),
-                  PrimaryCta(
-                    label: 'Phân tích công việc',
-                    onPressed: busy ? null : _continue,
-                  ),
-                  const SizedBox(height: 8),
-                  SecondaryCta(
-                    label: 'Lưu nháp',
-                    onPressed: busy ? null : _saveDraft,
-                  ),
-                ],
-              ],
-            ),
-          ),
         ),
       ),
     );
@@ -576,7 +617,7 @@ class _AiLoadingScreenState extends State<AiLoadingScreen> {
               ),
               const SizedBox(height: 16),
               SecondaryCta(
-                label: 'Quay lại sửa',
+                label: 'Hủy và quay lại',
                 onPressed: () => Navigator.maybePop(context),
               ),
             ],

@@ -24,6 +24,7 @@ class _CalendarScreenState extends State<CalendarScreen> {
   late final ApiClient _api;
   List<Map<String, dynamic>> _sessions = [];
   bool _loading = true;
+  bool _cached = false;
   String? _error;
   int _request = 0;
 
@@ -44,12 +45,16 @@ class _CalendarScreenState extends State<CalendarScreen> {
       _sessions = [];
     });
     try {
-      final sessions = await ScheduleService(_api).loadSessions(
+      final service = ScheduleService(_api);
+      final sessions = await service.loadCalendarMonth(
         month,
         DateTime(month.year, month.month + 1),
-        includeTitles: true,
       );
-      if (mounted && request == _request) setState(() => _sessions = sessions);
+      if (mounted && request == _request)
+        setState(() {
+          _sessions = sessions;
+          _cached = service.usedCache;
+        });
     } catch (error) {
       if (mounted && request == _request)
         setState(() => _error = error.toString());
@@ -95,7 +100,8 @@ class _CalendarScreenState extends State<CalendarScreen> {
                               padding: const EdgeInsets.only(bottom: 10),
                               child: MelbelCard(
                                   child: ListTile(
-                                      onTap: session['status'] == 'scheduled'
+                                      onTap: !_cached &&
+                                              session['status'] == 'scheduled'
                                           ? () => Navigator.pop(
                                               context,
                                               FocusSessionInfo.fromJson(
@@ -194,6 +200,21 @@ class _CalendarScreenState extends State<CalendarScreen> {
         child: ListView(
           padding: const EdgeInsets.fromLTRB(16, 16, 16, 88),
           children: [
+            TextButton.icon(
+              icon: const Icon(Icons.event_available_outlined),
+              label: const Text('Google Calendar'),
+              onPressed: () =>
+                  Navigator.of(context).pushNamed('/google-calendar'),
+            ),
+            TextButton.icon(
+              icon: const Icon(Icons.swap_horiz),
+              label: const Text('Đề xuất đổi lịch'),
+              onPressed: () async {
+                final changed =
+                    await Navigator.of(context).pushNamed('/schedule-change');
+                if (mounted && changed == true) await _load();
+              },
+            ),
             MelbelCard(
               padding: const EdgeInsets.all(12),
               child: Column(
@@ -354,6 +375,11 @@ class _CalendarScreenState extends State<CalendarScreen> {
             ),
             const SizedBox(height: 12),
             if (_loading) const LinearProgressIndicator(),
+            if (_cached && !_loading && _error == null)
+              TextButton(
+                onPressed: _load,
+                child: const Text('Lịch đã lưu · Tải lại'),
+              ),
             if (_error != null)
               MelbelCard(
                 child: Column(

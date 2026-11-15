@@ -1,3 +1,4 @@
+import '../services/google_calendar_api.dart';
 import '../services/auth_service.dart';
 import '../providers/focus_provider.dart';
 import '../providers/task_provider.dart';
@@ -109,6 +110,33 @@ class AccountScreen extends StatefulWidget {
 
 class _AccountScreenState extends State<AccountScreen> {
   final _connection = ApiClient().getData('/capabilities');
+  Future<List<Map<String, dynamic>>> _calendarConnections =
+      GoogleCalendarApi(ApiClient()).connections();
+
+  Future<void> _openGoogleCalendar() async {
+    await Navigator.pushNamed(context, '/google-calendar');
+    if (!mounted) return;
+    setState(() =>
+        _calendarConnections = GoogleCalendarApi(ApiClient()).connections());
+  }
+
+  String _calendarStatus(AsyncSnapshot<List<Map<String, dynamic>>> snapshot) {
+    if (snapshot.connectionState != ConnectionState.done)
+      return 'Đang kiểm tra…';
+    if (snapshot.hasError) return 'Chưa kiểm tra được kết nối';
+    final connections = snapshot.data ?? const [];
+    for (final connection in connections) {
+      if (connection['connection_state'] == 'connected') {
+        final account = connection['account_ref'];
+        return account is String && account.isNotEmpty
+            ? 'Đã liên kết · $account'
+            : 'Đã liên kết';
+      }
+    }
+    return connections.any((item) => item['connection_state'] != 'disconnected')
+        ? 'Cần kết nối lại'
+        : 'Chưa liên kết';
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -177,10 +205,15 @@ class _AccountScreenState extends State<AccountScreen> {
           const SizedBox(height: 20),
           Text('Tài khoản và lịch Google',
               style: Theme.of(context).textTheme.titleMedium),
-          const _HelpRow(
-            icon: Icons.cloud_sync_outlined,
-            title: 'Đồng bộ Google',
-            subtitle: 'Chưa liên kết tài khoản',
+          FutureBuilder<List<Map<String, dynamic>>>(
+            future: _calendarConnections,
+            builder: (context, snapshot) => ListTile(
+              leading: const Icon(Icons.cloud_sync_outlined),
+              title: const Text('Google Calendar'),
+              subtitle: Text(_calendarStatus(snapshot)),
+              trailing: const Icon(Icons.chevron_right),
+              onTap: _openGoogleCalendar,
+            ),
           ),
           FutureBuilder<Map<String, dynamic>>(
             future: _connection,

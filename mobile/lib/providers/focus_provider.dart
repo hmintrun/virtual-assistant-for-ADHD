@@ -1,19 +1,26 @@
 import 'dart:async';
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 
 import '../core/api_client.dart';
 import '../models/focus_session_model.dart';
+import '../models/outbox_record.dart';
 import '../models/task_model.dart';
+import '../models/planning_models.dart';
+import '../repositories/local_outbox_repository.dart';
 import '../repositories/local_run_repository.dart';
 import '../services/audio_recorder_service.dart';
 import '../services/alarm_service.dart';
+import '../services/clock_sync_service.dart';
 import '../services/dnd_service.dart';
 import '../services/focus_native_controller.dart';
+import '../services/outbox_replay_worker.dart';
 import '../services/timer_service.dart';
+import '../services/voice_service.dart';
 
 enum FocusStage {
   reminder,
@@ -36,6 +43,7 @@ class ThoughtRecord {
     required this.createdAt,
     required this.undoDeadlineAt,
     this.sourceRunId,
+    this.serverRunId,
     this.inputType = 'text',
     this.textContent,
     this.localAudioPath,
@@ -54,6 +62,7 @@ class ThoughtRecord {
   final DateTime createdAt;
   final DateTime undoDeadlineAt;
   final String? sourceRunId;
+  final String? serverRunId;
   final String inputType;
   final String? textContent;
   final String? localAudioPath;
@@ -67,6 +76,7 @@ class ThoughtRecord {
         'created_at': createdAt.toIso8601String(),
         'undo_deadline_at': undoDeadlineAt.toIso8601String(),
         if (sourceRunId != null) 'source_run_id': sourceRunId,
+        if (serverRunId != null) 'server_run_id': serverRunId,
         'input_type': inputType,
         if (textContent != null) 'text_content': textContent,
         if (localAudioPath != null) 'local_audio_path': localAudioPath,
@@ -96,6 +106,7 @@ class ThoughtRecord {
       createdAt: created,
       undoDeadlineAt: deadline,
       sourceRunId: json['source_run_id'] as String?,
+      serverRunId: json['server_run_id'] as String?,
       inputType: normalizedType,
       textContent: (json['text_content'] ?? json['text']) as String?,
       localAudioPath:
@@ -120,6 +131,7 @@ class ThoughtRecord {
         createdAt: createdAt,
         undoDeadlineAt: undoDeadlineAt,
         sourceRunId: sourceRunId,
+        serverRunId: serverRunId,
         inputType: inputType,
         textContent: textContent ?? this.textContent,
         localAudioPath: localAudioPath ?? this.localAudioPath,
@@ -140,6 +152,9 @@ class FocusProvider extends ChangeNotifier {
     LocalRunRepository? repository,
     Clock? clock,
     FlutterSecureStorage? storage,
+    LocalOutboxRepository? outboxRepository,
+    OutboxReplayWorker? outboxWorker,
+    ClockSyncService? clockSync,
   })  : _clock = clock ?? const SystemClock(),
         timer = timer ?? FocusTimerService(clock: clock),
         microTaskTimer = microTaskTimer ?? FocusTimerService(clock: clock),
@@ -149,7 +164,10 @@ class FocusProvider extends ChangeNotifier {
         _repository = repository ??
             (storage != null
                 ? SecureStorageRunRepository(storage: storage)
-                : SecureStorageRunRepository()) {
+                : SecureStorageRunRepository()),
+        _outboxRepository = outboxRepository,
+        _outboxWorker = outboxWorker,
+        _clockSync = clockSync {
     this.timer.onElapsed = _onSegmentElapsed;
     this.timer.addListener(_onTimerChanged);
     this.microTaskTimer.onElapsed = _onMicroTaskElapsed;
@@ -179,20 +197,95 @@ class FocusProvider extends ChangeNotifier {
   final DndService dnd;
   final ApiClient _api;
   final LocalRunRepository _repository;
+  final LocalOutboxRepository? _outboxRepository;
+  final OutboxReplayWorker? _outboxWorker;
+  final ClockSyncService? _clockSync;
   final List<ThoughtRecord> _thoughts = [];
+
+  LocalOutboxRepository? get outboxRepository => _outboxRepository;
+  OutboxReplayWorker? get outboxWorker => _outboxWorker;
+  ClockSyncService? get clockSync => _clockSync;
 
   FocusSessionInfo? _session;
   DateTime? _runEndsAt;
   Map<String, dynamic>? _serverRun;
   Map<String, dynamic>? _pendingEnd;
   Map<String, dynamic>? _pendingResponse;
+  DateTime? _skipUndoUntil;
+  Timer? _skipSendTimer;
+
+  bool get canUndoSkip =>
+      _skipUndoUntil?.isAfter(_clock.now()) == true &&
+      _pendingResponse != null &&
+      !_runCommandBusy;
+
+  Future<void> queueSkippedCheckIn(String scope) async {
+    final checkIn = _checkIn;
+    if (checkIn == null ||
+        !canAnswerCheckIn ||
+        _pendingResponse != null ||
+        _runCommandBusy) return;
+    _skipUndoUntil = _clock.now().add(const Duration(seconds: 5));
+    _runCommandBusy = true;
+    _pendingResponse = {
+      'expected_response_revision': checkIn['response_revision'],
+      'responded_at': _clock.now().toUtc().toIso8601String(),
+      'session_outcome': 'skipped',
+      'skip_scope': scope,
+    };
+    try {
+      await _persistRun();
+      _scheduleSkippedCheckIn();
+    } catch (_) {
+      _skipUndoUntil = null;
+      _pendingResponse = null;
+      _runError = 'Chưa lưu được lựa chọn. Hãy thử lại.';
+    } finally {
+      _runCommandBusy = false;
+      _notify();
+    }
+  }
+
+  Future<void> undoSkippedCheckIn() async {
+    if (!canUndoSkip) return;
+    final pending = _pendingResponse;
+    final deadline = _skipUndoUntil;
+    _skipSendTimer?.cancel();
+    _runCommandBusy = true;
+    _pendingResponse = null;
+    _skipUndoUntil = null;
+    try {
+      await _persistRun();
+    } catch (_) {
+      _pendingResponse = pending;
+      _skipUndoUntil = deadline;
+      _scheduleSkippedCheckIn();
+    } finally {
+      _runCommandBusy = false;
+      _notify();
+    }
+  }
+
+  void _scheduleSkippedCheckIn() {
+    final deadline = _skipUndoUntil;
+    if (_disposed || deadline == null || _pendingResponse == null) return;
+    _skipSendTimer?.cancel();
+    _skipSendTimer = Timer(deadline.difference(_clock.now()), () async {
+      await retryCheckInResponse();
+    });
+  }
+
   Map<String, dynamic>? _startRequest;
   bool _runCommandBusy = false;
   String? _runError;
 
   bool get runCommandBusy => _runCommandBusy;
   String? get runError => _runError;
+  bool get startRequiresReplan => _runError != null && _startRequiresReplan;
+  bool _startRequiresReplan = false;
+  bool get supportsDnd => _usesNativeFocus;
   bool get needsEndSync => _pendingEnd != null;
+  String? get serverRunId => _serverRun?['run_id'] as String?;
   Map<String, dynamic>? get _checkIn =>
       _serverRun?['check_in'] as Map<String, dynamic>?;
   String? get _focusOwnerId =>
@@ -225,6 +318,87 @@ class FocusProvider extends ChangeNotifier {
   final Set<String> _undoneThoughtIds = {};
   ThoughtRecord? _pendingDeletedThought;
   bool _disposed = false;
+  static const _deviceStateChannel = MethodChannel('proplan/device_state');
+  Future<void> _deviceReports = Future<void>.value();
+  Future<String>? _deviceId;
+
+  Future<String> _getDeviceId() => _deviceId ??= _loadDeviceId();
+
+  Future<String> _loadDeviceId() async {
+    final prefs = await SharedPreferences.getInstance();
+    final stored = prefs.getString('focus_device_id');
+    if (stored != null) return stored;
+    final device = ApiClient.newIdempotencyKey('device');
+    await prefs.setString('focus_device_id', device);
+    return device;
+  }
+
+  bool _appInForeground = true;
+  String _dndApplyState = 'not_applied';
+  String _dndRestoreState = 'not_needed';
+
+  void reportAppVisibility({required bool foreground}) {
+    _appInForeground = foreground;
+    _reportDeviceState();
+  }
+
+  void _reportDeviceState() {
+    if (!_usesNativeFocus || _disposed) return;
+    final run = _serverRun;
+    final runId = run?['run_id'] as String?;
+    final scheduleRevision = _session?.scheduleRevision;
+    final apply = _dndApplyState;
+    final restore = _dndRestoreState;
+    final activeRunId = isActiveRun ? runId : null;
+    final ownerRunId = _dndApplied ? runId : null;
+    final visibility = _appInForeground ? 'foreground' : 'background';
+    _deviceReports = _deviceReports.then((_) async {
+      if (_disposed) return;
+      try {
+        final permissions = await _deviceStateChannel
+            .invokeMapMethod<String, String>('readPermissions');
+        if (permissions == null || _disposed) return;
+        final prefs = await SharedPreferences.getInstance();
+        final device = run?['device_id'] as String? ?? await _getDeviceId();
+        if (_disposed) return;
+        final revisionKey = 'focus_device_report_revision_$device';
+        final revision = (prefs.getInt(revisionKey) ?? 0) + 1;
+        await prefs.setInt(revisionKey, revision);
+        await _api.putData(
+          '/devices/${Uri.encodeComponent(device)}/state',
+          data: {
+            'device_report_revision': revision,
+            ...permissions,
+            'active_run_id': activeRunId,
+            'last_schedule_revision': scheduleRevision,
+            'dnd_owner_run_id': ownerRunId,
+            'dnd_apply_state': apply,
+            'dnd_restore_state': restore,
+            'reported_at': _clock.now().toUtc().toIso8601String(),
+            'app_visibility': visibility,
+          },
+        );
+      } on ApiException catch (error) {
+        // A later report can recover from a revision conflict without blocking Focus.
+        final revision = error.currentRevisions['device_report_revision'];
+        if (revision != null && !_disposed) {
+          try {
+            final prefs = await SharedPreferences.getInstance();
+            final device = run?['device_id'] as String? ??
+                prefs.getString('focus_device_id');
+            if (device != null) {
+              final key = 'focus_device_report_revision_$device';
+              if (revision > (prefs.getInt(key) ?? 0)) {
+                await prefs.setInt(key, revision);
+              }
+            }
+          } catch (_) {}
+        }
+      } catch (_) {
+        // Unavailable Android services must not interrupt a focus session.
+      }
+    });
+  }
 
   FocusSessionInfo? get session => _session;
   FocusStage get stage => _stage;
@@ -272,14 +446,16 @@ class FocusProvider extends ChangeNotifier {
 
   Future<void> restore() async {
     await _loadThoughts();
+    if (_outboxWorker != null) {
+      unawaited(_outboxWorker.triggerReplay());
+    }
     final nativeRecovery = _usesNativeFocus
         ? await FocusNativeController.instance.recoverOnAppStart()
         : null;
     final json = await _repository.loadActiveRun();
     if (json == null) {
-      if (!_usesNativeFocus) {
-        final staleOwner = await dnd.pendingOwnerRunId();
-        if (staleOwner != null) await dnd.restore(runId: staleOwner);
+      if (_thoughts.any((thought) => thought.isPendingSync)) {
+        _ensureOfflineProbe();
       }
       return;
     }
@@ -290,9 +466,18 @@ class FocusProvider extends ChangeNotifier {
       _serverRun = json['server_run'] as Map<String, dynamic>?;
       _pendingEnd = json['pending_end'] as Map<String, dynamic>?;
       _pendingResponse = json['pending_response'] as Map<String, dynamic>?;
+      _skipUndoUntil =
+          DateTime.tryParse(json['skip_undo_until'] as String? ?? '');
+      _scheduleSkippedCheckIn();
+      if (_skipUndoUntil == null &&
+          _pendingResponse?['session_outcome'] == 'skipped') {
+        _skipSendTimer = Timer(Duration.zero, retryCheckInResponse);
+      }
+      _actualWorkSeconds = json['actual_work_seconds'] as int? ?? 0;
       if (json['stage'] == FocusStage.ended.name) {
         _stage = FocusStage.ended;
         _watchCheckInDeadline();
+        if (needsEndSync || hasPendingCheckInResponse) _startOfflineProbe();
         _notify();
         return;
       }
@@ -303,15 +488,13 @@ class FocusProvider extends ChangeNotifier {
       _segmentIndex = json['segment_index'] as int? ?? 0;
       _runEndsAt = DateTime.tryParse(json['run_ends_at'] as String? ?? '');
       _runEndsAt = nativeRecovery?.endsAt ?? _runEndsAt;
-      _actualWorkSeconds = json['actual_work_seconds'] as int? ?? 0;
       _resumeStage = FocusStage.values.firstWhere(
         (stage) => stage.name == json['stage'],
         orElse: () => FocusStage.active,
       );
-      _dndApplied = nativeRecovery == null
-          ? await dnd.pendingOwnerRunId() == _focusOwnerId
-          : nativeRecovery.state == FocusRecoveryState.running ||
-              nativeRecovery.state == FocusRecoveryState.awaitingCheckIn;
+      _dndApplied = supportsDnd && await dnd.isAppliedFor(_focusOwnerId);
+      _dndApplyState = _dndApplied ? 'applied' : 'not_applied';
+      _dndRestoreState = _dndApplied ? 'pending' : 'not_needed';
       _stage = _resumeStage;
       final deadline =
           DateTime.tryParse(json['timer_deadline'] as String? ?? '');
@@ -388,6 +571,8 @@ class FocusProvider extends ChangeNotifier {
     recorder.resetFailures();
     _lastError = null;
     _alarmScheduled = null;
+    _dndApplyState = 'not_applied';
+    _dndRestoreState = 'not_needed';
     await _refreshDndPermission();
     _notify();
   }
@@ -436,12 +621,10 @@ class FocusProvider extends ChangeNotifier {
     if (session == null || _runCommandBusy || isActiveRun) return;
     _runCommandBusy = true;
     _runError = null;
+    _startRequiresReplan = false;
     _notify();
     try {
-      final prefs = await SharedPreferences.getInstance();
-      final device = prefs.getString('focus_device_id') ??
-          ApiClient.newIdempotencyKey('device');
-      await prefs.setString('focus_device_id', device);
+      final device = await _getDeviceId();
       final request = _startRequest ??= {
         'device_id': device,
         'expected_schedule_revision': session.scheduleRevision,
@@ -465,6 +648,7 @@ class FocusProvider extends ChangeNotifier {
       }
       await _beginLocalRun();
     } on ApiException catch (error) {
+      _startRequiresReplan = error.code == 'START_REQUIRES_REPLAN';
       _runError = error.message;
     } finally {
       _runCommandBusy = false;
@@ -493,9 +677,12 @@ class FocusProvider extends ChangeNotifier {
         );
         _runEndsAt = result.endsAt;
         _dndApplied = result.dndApplied;
+        _dndApplyState = _dndApplied ? 'applied' : 'not_applied';
+        _dndRestoreState = _dndApplied ? 'pending' : 'not_needed';
         _alarmScheduled = result.alarmScheduled;
       } catch (_) {
         _dndApplied = false;
+        _dndApplyState = 'failed';
         _alarmScheduled = false;
       }
     } else {
@@ -503,11 +690,7 @@ class FocusProvider extends ChangeNotifier {
           .skip(_firstWorkIndex)
           .fold<int>(0, (total, segment) => total + segment.durationSeconds);
       _runEndsAt = _clock.now().add(Duration(seconds: totalSeconds));
-      try {
-        _dndApplied = await dnd.enable(runId: _focusOwnerId!);
-      } catch (_) {
-        _dndApplied = false;
-      }
+      _dndApplied = false;
       try {
         await WakelockPlus.enable();
       } catch (_) {
@@ -517,6 +700,7 @@ class FocusProvider extends ChangeNotifier {
     _segmentIndex = _firstWorkIndex;
     await _startCurrentSegment();
     _startOfflineProbe();
+    _reportDeviceState();
     await _persistRun();
     _notify();
   }
@@ -582,8 +766,8 @@ class FocusProvider extends ChangeNotifier {
         _lastError = error.toString();
       }
     }
-    await _restoreFocusMode(preserveCheckIn: awaitCheckIn);
     _stage = FocusStage.ended;
+    await _restoreFocusMode(preserveCheckIn: awaitCheckIn);
     final endedAt = awaitCheckIn ? _runEndsAt ?? _clock.now() : _clock.now();
     _runEndsAt = null;
     // Káº¿t thÃºc Ä‘áº¿m giá» cá»¥c bá»™ KHÃ”NG tá»± Ä‘á»™ng Ä‘Ã¡nh dáº¥u hoÃ n thÃ nh Session/Step/Task (UF5).
@@ -603,6 +787,10 @@ class FocusProvider extends ChangeNotifier {
     } else if (!(awaitCheckIn && _usesNativeFocus)) {
       await _repository.clearActiveRun();
     }
+    if (_thoughts.any((thought) => thought.isPendingSync)) {
+      _ensureOfflineProbe();
+    }
+    _reportDeviceState();
     _notify();
   }
 
@@ -623,10 +811,12 @@ class FocusProvider extends ChangeNotifier {
       _watchCheckInDeadline();
     } on ApiException catch (error) {
       _runError = error.message;
+      if (error.statusCode == null) _ensureOfflineProbe();
     } finally {
       _runCommandBusy = false;
       _notify();
     }
+    if (!needsEndSync) await refreshRunCheckIn();
   }
 
   Future<void> restAfterCheckIn() async {
@@ -647,27 +837,40 @@ class FocusProvider extends ChangeNotifier {
   }
 
   Future<void> refreshRunCheckIn() async {
-    if (!hasOpenCheckIn || needsEndSync || _runCommandBusy) return;
+    final run = _serverRun;
+    final id = run?['run_id'] as String?;
+    if (id == null ||
+        _stage != FocusStage.ended ||
+        needsEndSync ||
+        _runCommandBusy) return;
     try {
-      final id = _serverRun!['run_id'];
-      final run = await _api.getData('/runs/$id');
-      if (_serverRun?['run_id'] != id || _runCommandBusy) return;
-      _serverRun = run;
-      await _persistRun();
-      if (!canAnswerCheckIn) {
+      final result = await _api.getData(
+        '/runs/${Uri.encodeComponent(id)}/check-ins',
+        queryParameters: const {'kind': 'final'},
+      );
+      if (_disposed || !identical(_serverRun, run) || _runCommandBusy) return;
+      final checkIn = (result['items'] as List?)
+          ?.whereType<Map<String, dynamic>>()
+          .lastOrNull;
+      if (checkIn == null) return;
+      _serverRun = {...run!, 'check_in': checkIn};
+      if (!hasOpenCheckIn) _checkInDeadline?.cancel();
+      if (canAnswerCheckIn) {
+        await _persistRun();
+      } else {
         _pendingResponse = null;
         await _restoreFocusMode();
         await _repository.clearActiveRun();
       }
       _notify();
     } on ApiException {
-      // Keep the last known check-in available during a connection loss.
+      // Keep the check-in received when ending the run if refresh fails.
     }
   }
 
   Future<void> retryCheckInResponse() async {
     final pending = _pendingResponse;
-    if (pending == null) return;
+    if (pending == null || canUndoSkip) return;
     await answerCheckIn(
       pending['session_outcome'] as String,
       skipScope: pending['skip_scope'] as String?,
@@ -683,14 +886,18 @@ class FocusProvider extends ChangeNotifier {
     bool? stepCompleted,
   }) async {
     final checkIn = _checkIn;
-    if (checkIn == null || !canAnswerCheckIn || _runCommandBusy) return;
+    if (checkIn == null || !canAnswerCheckIn || _runCommandBusy || canUndoSkip)
+      return;
+    _skipUndoUntil = null;
     _runCommandBusy = true;
     _runError = null;
     _notify();
     try {
+      final respondedAt = _clockSync?.nowAdjustedIso() ??
+          _clock.now().toUtc().toIso8601String();
       final pending = _pendingResponse ??= {
         'expected_response_revision': checkIn['response_revision'],
-        'responded_at': _clock.now().toUtc().toIso8601String(),
+        'responded_at': respondedAt,
         'session_outcome': outcome,
         if (skipScope != null) 'skip_scope': skipScope,
         if (stepCompleted != null) 'step_completed': stepCompleted,
@@ -698,23 +905,54 @@ class FocusProvider extends ChangeNotifier {
           'remaining_note': remainingNote!.trim(),
       };
       await _persistRun();
-      final response = await _api.putData(
-        '/check-ins/${checkIn['checkin_id']}/response',
-        data: pending,
-        idempotencyKey: ApiClient.stableIdempotencyKey(
-            'checkin_${checkIn['checkin_id']}', pending.toString()),
-      );
-      _serverRun = {..._serverRun!, 'check_in': response};
-      _checkInDeadline?.cancel();
-      _pendingResponse = null;
       await _restoreFocusMode();
-      await _repository.clearActiveRun();
+      if (_outboxRepository != null) {
+        final clientEventId = ApiClient.stableIdempotencyKey(
+            'checkin_${checkIn['checkin_id']}', pending.toString());
+        await _outboxRepository.enqueueOutboxRecord(
+          OutboxRecord(
+            clientEventId: clientEventId,
+            eventType: OutboxEventType.checkinResponse,
+            targetResourceId: checkIn['checkin_id'] as String?,
+            endpoint: '/check-ins/${checkIn['checkin_id']}/response',
+            httpMethod: 'PUT',
+            payload: pending,
+            occurredAt: _clock.now(),
+            holdUntil: _clock.now().add(const Duration(seconds: 5)),
+          ),
+          holdDuration: const Duration(seconds: 5),
+        );
+        Timer(const Duration(milliseconds: 5200), () {
+          _outboxWorker?.triggerReplay();
+        });
+        _checkInDeadline?.cancel();
+        _pendingResponse = null;
+        await _repository.clearActiveRun();
+      } else {
+        final response = await _api.putData(
+          '/check-ins/${checkIn['checkin_id']}/response',
+          data: pending,
+          idempotencyKey: ApiClient.stableIdempotencyKey(
+              'checkin_${checkIn['checkin_id']}', pending.toString()),
+        );
+        _serverRun = {..._serverRun!, 'check_in': response};
+        _checkInDeadline?.cancel();
+        _pendingResponse = null;
+        await _repository.clearActiveRun();
+      }
     } on ApiException catch (error) {
-      if (error.statusCode != null) {
+      final status = error.statusCode;
+      if (status != null &&
+          status >= 400 &&
+          status < 500 &&
+          status != 401 &&
+          status != 408 &&
+          status != 429) {
         _pendingResponse = null;
         await _persistRun();
       }
       _runError = error.message;
+      if (_pendingResponse != null) _ensureOfflineProbe();
     } finally {
       _runCommandBusy = false;
       _notify();
@@ -756,7 +994,7 @@ class FocusProvider extends ChangeNotifier {
   }
 
   Future<void> openDndSettings() async {
-    dnd.openPermissionSettings();
+    if (supportsDnd) dnd.openPermissionSettings();
   }
 
   Future<void> refreshDndPermission() async {
@@ -765,6 +1003,10 @@ class FocusProvider extends ChangeNotifier {
   }
 
   Future<void> _refreshDndPermission() async {
+    if (!supportsDnd) {
+      _dndPermission = false;
+      return;
+    }
     try {
       _dndPermission = await dnd.hasPermission;
     } catch (_) {
@@ -812,6 +1054,7 @@ class FocusProvider extends ChangeNotifier {
       clientThoughtId: now.microsecondsSinceEpoch.toString(),
       createdAt: now,
       undoDeadlineAt: now.add(const Duration(seconds: 5)),
+      serverRunId: _serverRun?['run_id'] as String?,
       inputType: 'audio',
       localAudioPath: recording.path,
       attemptCount: attemptCount,
@@ -819,6 +1062,7 @@ class FocusProvider extends ChangeNotifier {
       isPendingSync: true,
     );
     await _saveThought(thought);
+    unawaited(_confirmAudioSaved());
     _recordingAttempts = 0;
     recorder.resetFailures();
     if (_stage != FocusStage.thoughtSaved) _resumeStage = _stage;
@@ -871,6 +1115,7 @@ class FocusProvider extends ChangeNotifier {
       clientThoughtId: now.microsecondsSinceEpoch.toString(),
       createdAt: now,
       undoDeadlineAt: now.add(const Duration(seconds: 5)),
+      serverRunId: _serverRun?['run_id'] as String?,
       inputType: 'text',
       textContent: normalized,
       attemptCount: 1,
@@ -906,6 +1151,9 @@ class FocusProvider extends ChangeNotifier {
       } catch (_) {}
     }
     await _repository.deleteThought(thought.clientThoughtId);
+    if (_outboxRepository != null) {
+      await _outboxRepository.cancelOutboxRecord(thought.clientThoughtId);
+    }
     if (_stage == FocusStage.thoughtSaved) _stage = _resumeStage;
     _scheduleOutboxFlush();
     await _persistRun();
@@ -915,6 +1163,26 @@ class FocusProvider extends ChangeNotifier {
   Future<void> _saveThought(ThoughtRecord thought) async {
     await _repository.queueThought(thought);
     _thoughts.insert(0, thought);
+    if (_outboxRepository != null) {
+      await _outboxRepository.enqueueOutboxRecord(
+        OutboxRecord(
+          clientEventId: thought.clientThoughtId,
+          eventType: OutboxEventType.thoughtCapture,
+          endpoint: '/thoughts',
+          httpMethod: 'POST',
+          payload: {
+            'client_thought_id': thought.clientThoughtId,
+            'input_type': thought.inputType,
+            if (thought.textContent != null)
+              'text_content': thought.textContent,
+            'attempt_count': thought.attemptCount,
+            'capture_state': thought.captureState,
+          },
+          occurredAt: thought.createdAt,
+          holdUntil: thought.undoDeadlineAt,
+        ),
+      );
+    }
   }
 
   Future<void> deleteThought(ThoughtRecord thought) async {
@@ -956,6 +1224,9 @@ class FocusProvider extends ChangeNotifier {
     _deleteUndoExpiry = null;
     if (thought == null) return;
     await _repository.deleteThought(thought.clientThoughtId);
+    if (_outboxRepository != null) {
+      await _outboxRepository.cancelOutboxRecord(thought.clientThoughtId);
+    }
     if (thought.localAudioPath != null) {
       try {
         await recorder.deleteRecording(thought.localAudioPath!);
@@ -1021,9 +1292,11 @@ class FocusProvider extends ChangeNotifier {
       for (final thought in readyToSync) {
         if (_undoneThoughtIds.contains(thought.clientThoughtId)) continue;
         try {
-          // Local runs have no backend run_id. Older entries stored a session ID.
+          // Older entries stored a Session ID; only serverRunId is safe to send.
           final payload = {
             'client_thought_id': thought.clientThoughtId,
+            if (thought.serverRunId != null)
+              'source_run_id': thought.serverRunId,
             'input_type': thought.inputType,
             if (thought.textContent != null)
               'text_content': thought.textContent,
@@ -1058,6 +1331,56 @@ class FocusProvider extends ChangeNotifier {
     }
   }
 
+  Future<String> transcribeThought(ThoughtRecord thought) async {
+    if (isActiveRun || isRecording || runCommandBusy || needsEndSync) {
+      throw const ApiException('Hãy kết thúc phiên trước khi chuyển ghi âm.');
+    }
+    final path = thought.localAudioPath;
+    final id = thought.serverThoughtId;
+    if (kIsWeb || path == null || id == null) {
+      throw const ApiException(
+          'Chưa có ghi âm đã đồng bộ để chuyển thành chữ.');
+    }
+    return VoiceTranscriptionService(api: _api).transcribeM4a(
+      path,
+      recordingId: thought.clientThoughtId,
+      thoughtId: id,
+    );
+  }
+
+  Future<PlanningDraftModel> convertThoughtToDraft(
+    ThoughtRecord thought,
+    String text,
+  ) async {
+    if (isActiveRun || isRecording || runCommandBusy || needsEndSync) {
+      throw const ApiException('Hãy kết thúc phiên trước khi tạo việc.');
+    }
+    final id = thought.serverThoughtId;
+    if (id == null) {
+      throw const ApiException('Ghi chú chưa đồng bộ. Hãy thử lại sau.');
+    }
+    final path = '/thoughts/${Uri.encodeComponent(id)}';
+    final current = await _api.getData(path);
+    final linked = current['linked_draft_id'] as String?;
+    if (linked != null) {
+      return PlanningDraftModel.fromJson(
+        await _api.getData('/drafts/${Uri.encodeComponent(linked)}'),
+      );
+    }
+    final payload = {
+      'expected_thought_revision': current['thought_revision'],
+      'text_content': text.trim(),
+    };
+    final response = await _api.postData(
+      '$path/draft',
+      data: payload,
+      idempotencyKey: ApiClient.stableIdempotencyKey(
+          'thought_draft_$id', payload.toString()),
+    );
+    return PlanningDraftModel.fromJson(
+        response['draft'] as Map<String, dynamic>);
+  }
+
   Future<void> _persistRun() async {
     final session = _session;
     if (session == null ||
@@ -1067,6 +1390,8 @@ class FocusProvider extends ChangeNotifier {
       if (_serverRun != null) 'server_run': _serverRun,
       if (_pendingEnd != null) 'pending_end': _pendingEnd,
       if (_pendingResponse != null) 'pending_response': _pendingResponse,
+      if (_skipUndoUntil != null)
+        'skip_undo_until': _skipUndoUntil!.toUtc().toIso8601String(),
       if (_runEndsAt != null) 'run_ends_at': _runEndsAt!.toIso8601String(),
       'segments': _segments.map((segment) => segment.toJson()).toList(),
       'segment_index': _segmentIndex,
@@ -1082,6 +1407,14 @@ class FocusProvider extends ChangeNotifier {
     unawaited(_probeBackend(_offlineProbeGeneration));
   }
 
+  void _ensureOfflineProbe() {
+    if (_disposed || _offlineProbe != null) return;
+    final generation = _offlineProbeGeneration;
+    _offlineProbe = Timer(const Duration(seconds: 15), () {
+      unawaited(_probeBackend(generation));
+    });
+  }
+
   Future<void> _probeBackend(int generation) async {
     bool offline;
     try {
@@ -1095,9 +1428,24 @@ class FocusProvider extends ChangeNotifier {
       _isOffline = offline;
       _notify();
     }
-    if (!offline && _thoughts.any((thought) => thought.isPendingSync)) {
-      unawaited(flushOutbox());
+    if (!offline) {
+      if (_thoughts.any((thought) => thought.isPendingSync)) {
+        unawaited(flushOutbox());
+      }
+      if (_stage == FocusStage.ended) {
+        if (needsEndSync) await syncRunEnd();
+        if (hasPendingCheckInResponse) await retryCheckInResponse();
+      }
     }
+    if (_disposed || generation != _offlineProbeGeneration) return;
+    if (_stage == FocusStage.ended &&
+        !needsEndSync &&
+        !hasPendingCheckInResponse &&
+        !_thoughts.any((thought) => thought.isPendingSync)) {
+      _stopOfflineProbe();
+      return;
+    }
+    _offlineProbe?.cancel();
     _offlineProbe = Timer(Duration(seconds: offline ? 30 : 60), () {
       unawaited(_probeBackend(generation));
     });
@@ -1117,22 +1465,36 @@ class FocusProvider extends ChangeNotifier {
         final result = await FocusNativeController.instance.stop(
           runId: _focusOwnerId!,
         );
+        if (result.dndRestoreState != 'not_needed' ||
+            _dndRestoreState == 'pending') {
+          _dndRestoreState = result.dndRestoreState;
+        }
         final saved = result.savedRecording;
         if (saved != null) {
           _isRecording = false;
           await _saveFinalizedRecording(saved);
         }
-      } catch (_) {}
+      } catch (_) {
+        if (_dndApplied) _dndRestoreState = 'failed';
+      }
     } else {
-      try {
-        final runId = _focusOwnerId;
-        if (runId != null) await dnd.restore(runId: runId);
-      } catch (_) {}
       try {
         await WakelockPlus.disable();
       } catch (_) {}
     }
     _dndApplied = false;
+    _reportDeviceState();
+  }
+
+  Future<void> _confirmAudioSaved() async {
+    if (!_usesNativeFocus) return;
+    try {
+      await HapticFeedback.lightImpact();
+    } on PlatformException {
+      // Audio is already saved even if the device cannot provide feedback.
+    } on MissingPluginException {
+      // Some Android test hosts do not expose haptics.
+    }
   }
 
   Future<void> _saveFinalizedRecording(ThoughtRecording recording) async {
@@ -1141,12 +1503,14 @@ class FocusProvider extends ChangeNotifier {
       clientThoughtId: now.microsecondsSinceEpoch.toString(),
       createdAt: now,
       undoDeadlineAt: now.add(const Duration(seconds: 5)),
+      serverRunId: _serverRun?['run_id'] as String?,
       inputType: 'audio',
       localAudioPath: recording.path,
       attemptCount: (_recordingAttempts + 1).clamp(1, 3),
       captureState: 'saved',
       isPendingSync: true,
     ));
+    unawaited(_confirmAudioSaved());
     _scheduleOutboxFlush();
   }
 
@@ -1166,6 +1530,7 @@ class FocusProvider extends ChangeNotifier {
   @override
   void dispose() {
     _disposed = true;
+    _skipSendTimer?.cancel();
     _checkInDeadline?.cancel();
     _stopOfflineProbe();
     _undoExpiry?.cancel();

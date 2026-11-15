@@ -1,5 +1,6 @@
-"""Dịch vụ tích hợp LLM đa tầng có Hedged Warm Backup:
-Gemini 3.8 Flash (Primary) -> Gemini 3.5 Flash-Lite (Warm Backup) -> Groq Qwen 3.8 / GPT-OSS (Tier 2) -> Rule-based (Tier 3).
+"""Dịch vụ LLM đa tầng theo profile của từng luồng.
+
+UF1 gọi Flash-Lite trước. Các luồng còn lại dùng Gemini Flash và Warm Backup.
 """
 
 from __future__ import annotations
@@ -61,7 +62,7 @@ class ExecutionTimingProfile(NamedTuple):
     hard_timeout: float
     primary_priority_until: float
     warm_backup_at: float
-    groq_hedge_at: float
+    groq_hedge_at: float | None
 
 
 # ==============================================================================
@@ -227,8 +228,13 @@ class AIService:
             )
         return self._groq_client
 
+    def _extraction_profile(self) -> ExecutionTimingProfile:
+        """UF1 dùng cùng một deadline cho Flash-Lite và nhánh Qwen dự phòng."""
+        hard = self._settings.AI_UF1_TIMEOUT_SECONDS
+        return ExecutionTimingProfile(hard, hard, hard, groq_hedge_at=None)
+
     def _interactive_profile(self) -> ExecutionTimingProfile:
-        """Khung thời gian A cho các luồng hội thoại trực tiếp (UF1 & UF6)."""
+        """Khung thời gian A cho chỉnh kế hoạch bằng ngôn ngữ tự nhiên và UF6."""
         hard = self._settings.AI_TIMEOUT_SECONDS
         return ExecutionTimingProfile(
             hard_timeout=hard,
@@ -285,10 +291,11 @@ class AIService:
         system_prompt: str,
         user_prompt: str,
         schema_cls: type[SchemaT],
+        allow_secondary: bool = True,
     ) -> SchemaT:
         """
         Tầng 2: Dự phòng qua Groq Cloud (`qwen/qwen3.8-27b`).
-        Nếu model chính trên Groq chạm trần TPM (HTTP 429), tự động chuyển sang model phụ (`openai/gpt-oss-20b`).
+        Các luồng cho phép model phụ có thể thử GPT-OSS khi Qwen thất bại.
         """
         client = self._get_groq_client()
         if client is None:
@@ -303,7 +310,7 @@ class AIService:
 
         candidate_models = [self._settings.GROQ_FALLBACK_MODEL.strip()]
         secondary = self._settings.GROQ_SECONDARY_FALLBACK_MODEL.strip()
-        if secondary and secondary not in candidate_models:
+        if allow_secondary and secondary and secondary not in candidate_models:
             candidate_models.append(secondary)
 
         last_exc: Exception | None = None
@@ -344,7 +351,8 @@ class AIService:
         profile: ExecutionTimingProfile,
     ) -> tuple[SchemaT, GenerationTier]:
         """
-        Điều phối thực thi đa tầng ưu tiên chất lượng (Quality-First Hedged Execution):
+        UF1 chỉ gọi Flash-Lite và cho phép Qwen khi thiếu Gemini hoặc Gemini lỗi sớm.
+        Các luồng còn lại dùng điều phối ưu tiên chất lượng:
         1. `0.0s`: Chạy `GEMINI_FLASH_MODEL` (`gemini-3.8-flash`). Nếu xong trước `primary_priority_until` -> nhận ngay.
         2. `warm_backup_at`: Khởi chạy ngầm `GEMINI_BACKUP_MODEL` (`gemini-3.5-flash-lite`) lưu sẵn vào RAM.
            Vẫn kiên nhẫn đợi `3.8-flash` tới mốc `primary_priority_until`, quá mốc này mới bung bản nháp RAM ra trả.
@@ -355,6 +363,8 @@ class AIService:
         t0 = loop.time()
         deadline = t0 + profile.hard_timeout
         priority_deadline = min(deadline, t0 + profile.primary_priority_until)
+        is_uf1 = flow_name == "UF1"
+        groq_hedge_at = profile.groq_hedge_at
 
         has_gemini = self._get_gemini_client() is not None
         has_groq = self._get_groq_client() is not None
@@ -368,6 +378,7 @@ class AIService:
                     system_prompt=system_prompt,
                     user_prompt=user_prompt,
                     schema_cls=schema_cls,
+                    allow_secondary=not is_uf1,
                 )
             )
             try:
@@ -378,8 +389,10 @@ class AIService:
             finally:
                 self._cancel_provider_task(groq_only)
 
-        primary_model = self._settings.GEMINI_FLASH_MODEL.strip()
-        backup_model = self._settings.GEMINI_BACKUP_MODEL.strip()
+        primary_model = (
+            self._settings.GEMINI_UF1_MODEL if is_uf1 else self._settings.GEMINI_FLASH_MODEL
+        ).strip()
+        backup_model = "" if is_uf1 else self._settings.GEMINI_BACKUP_MODEL.strip()
         can_use_backup = bool(backup_model and backup_model != primary_model)
 
         primary_task: asyncio.Task[SchemaT] = asyncio.create_task(
@@ -388,7 +401,7 @@ class AIService:
                 user_prompt=user_prompt,
                 schema_cls=schema_cls,
                 model_name=primary_model,
-                thinking_level=types.ThinkingLevel.LOW,
+                thinking_level=types.ThinkingLevel.MINIMAL if is_uf1 else types.ThinkingLevel.LOW,
             )
         )
         backup_task: asyncio.Task[SchemaT] | None = None
@@ -414,12 +427,15 @@ class AIService:
 
         def _start_groq() -> None:
             nonlocal groq_task
+            if is_uf1 and loop.time() > t0 + self._settings.AI_UF1_GROQ_FAST_FAIL_SECONDS:
+                return
             if groq_task is None and has_groq:
                 groq_task = asyncio.create_task(
                     self._call_groq_structured(
                         system_prompt=system_prompt,
                         user_prompt=user_prompt,
                         schema_cls=schema_cls,
+                        allow_secondary=not is_uf1,
                     )
                 )
 
@@ -441,7 +457,7 @@ class AIService:
                         return primary_task.result(), "tier_1_gemini"
                     primary_failed = True
                     logger.warning(
-                        "%s Primary (%s) lỗi nhanh (%s), kích hoạt nhánh dự phòng tức thì.",
+                        "%s Primary (%s) thất bại (%s).",
                         flow_name,
                         primary_model,
                         type(exc).__name__,
@@ -505,7 +521,8 @@ class AIService:
                     groq_task is None
                     and has_groq
                     and warm_result is None
-                    and now >= t0 + profile.groq_hedge_at
+                    and groq_hedge_at is not None
+                    and now >= t0 + groq_hedge_at
                 ):
                     _start_groq()
 
@@ -513,7 +530,7 @@ class AIService:
                 backup_exhausted = not can_use_backup or (
                     backup_task is not None and backup_harvested
                 )
-                groq_exhausted = not has_groq or (groq_task is not None and groq_harvested)
+                groq_exhausted = not has_groq or groq_harvested or (is_uf1 and groq_task is None)
                 if primary_failed and backup_exhausted and groq_exhausted and warm_result is None:
                     raise RuntimeError(f"{flow_name}: Toàn bộ các tầng AI đều thất bại.")
 
@@ -523,8 +540,8 @@ class AIService:
                     next_wake = min(next_wake, priority_deadline)
                 if backup_task is None and can_use_backup:
                     next_wake = min(next_wake, t0 + profile.warm_backup_at)
-                if groq_task is None and has_groq and warm_result is None:
-                    next_wake = min(next_wake, t0 + profile.groq_hedge_at)
+                if groq_task is None and has_groq and warm_result is None and groq_hedge_at is not None:
+                    next_wake = min(next_wake, t0 + groq_hedge_at)
 
                 active_tasks = [
                     t
@@ -617,7 +634,7 @@ class AIService:
                 system_prompt=UF1_EXTRACTION_SYSTEM_PROMPT,
                 user_prompt=user_prompt,
                 schema_cls=LLMTaskExtractionPayload,
-                profile=self._interactive_profile(),
+                profile=self._extraction_profile(),
             )
             result = TaskExtractionResult(
                 **llm_payload.model_dump(),

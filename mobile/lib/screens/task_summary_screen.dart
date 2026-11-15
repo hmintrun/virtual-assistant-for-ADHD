@@ -5,6 +5,7 @@ import '../core/api_client.dart';
 import '../core/theme.dart';
 import '../models/planning_models.dart';
 import '../providers/task_provider.dart';
+import '../widgets/calendar_fallback.dart';
 import '../widgets/melbel_ui.dart';
 import 'drafts_screen.dart';
 import 'candidate_review_screen.dart';
@@ -131,7 +132,8 @@ class _TaskSummaryScreenState extends State<TaskSummaryScreen> {
     final useAnswerAsScope = onlyScopeIsMissing && answer.isNotEmpty;
     final scope = useAnswerAsScope ? answer : _scopeController.text.trim();
     final hasFormChanges = draft != null &&
-        (scope != draft.scope ||
+        (task.title.trim() != draft.title.trim() ||
+            scope != draft.scope ||
             task.availability != null ||
             task.deadline != _initialDeadline);
     task.setScope(scope);
@@ -144,7 +146,7 @@ class _TaskSummaryScreenState extends State<TaskSummaryScreen> {
           (useAnswerAsAvailability ||
               useAnswerAsScope ||
               optionalRequirement.isNotEmpty ||
-              answer.isEmpty && hasFormChanges)) {
+              hasFormChanges)) {
         await task.updateDraftOnBackend(extraRequirement: optionalRequirement);
         if (mounted &&
             (optionalRequirement.isNotEmpty ||
@@ -152,6 +154,13 @@ class _TaskSummaryScreenState extends State<TaskSummaryScreen> {
           _clarificationController.clear();
         }
         _initialDeadline = task.deadline;
+        if (!task.canPlan &&
+            answer.isNotEmpty &&
+            !useAnswerAsScope &&
+            !useAnswerAsAvailability) {
+          await task.submitClarification(answer);
+          if (mounted && task.canPlan) _clarificationController.clear();
+        }
         if (mounted && useAnswerAsScope && task.scope.trim() == answer) {
           _scopeFocusNode.unfocus();
           _scopeController.text = task.scope;
@@ -181,17 +190,36 @@ class _TaskSummaryScreenState extends State<TaskSummaryScreen> {
             builder: (_) => const CandidateReviewScreen(),
           ));
     } on ApiException catch (error) {
-      if (mounted) {
+      if (!mounted) return;
+      if (isCalendarUnavailable(error)) {
+        showCalendarFallbackSnackBar(context,
+            onUseManualAvailability: _generateWithManualAvailability);
+      } else {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(error.message)),
-        );
+            SnackBar(content: Text('Chưa cập nhật được bản nháp: $error')));
       }
-    } catch (_) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-          content: Text('Chưa cập nhật được công việc. Thử lại nhé.'),
-        ));
-      }
+    } finally {
+      if (mounted) setState(() => _isSubmitting = false);
+    }
+  }
+
+  /// User đã thấy lỗi đọc Google Calendar và chọn xếp theo giờ rảnh nhập tay.
+  Future<void> _generateWithManualAvailability() async {
+    final task = context.read<TaskProvider>();
+    if (_isSubmitting || task.isApiBusy) return;
+    setState(() => _isSubmitting = true);
+    try {
+      await task.generateCandidateOnBackend(useManualAvailability: true);
+      if (!mounted) return;
+      await Navigator.push(
+          context,
+          MaterialPageRoute<void>(
+            builder: (_) => const CandidateReviewScreen(),
+          ));
+    } catch (error) {
+      if (mounted)
+        ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Chưa tạo được phương án: $error')));
     } finally {
       if (mounted) setState(() => _isSubmitting = false);
     }
@@ -382,12 +410,17 @@ class _TaskSummaryScreenState extends State<TaskSummaryScreen> {
                 label: 'Điều chỉnh thời gian',
                 onPressed: _isSubmitting || task.isApiBusy
                     ? null
-                    : () => Navigator.push(
+                    : () async {
+                        final editAvailability = await Navigator.push<bool>(
                           context,
-                          MaterialPageRoute<void>(
+                          MaterialPageRoute<bool>(
                             builder: (_) => const TimeConflictScreen(),
                           ),
-                        ),
+                        );
+                        if (mounted && editAvailability == true) {
+                          await _pickAvailability(task);
+                        }
+                      },
               ),
               const SizedBox(height: 12),
             ],
@@ -520,6 +553,13 @@ List<String> _requiredQuestions(List<JsonMap> issues) {
     'AI_AVAILABILITY_INCOMPLETE',
     'AI_AVAILABILITY_REVIEW_REQUIRED',
   };
+  String fieldGroup(JsonMap issue) {
+    final path = (issue['field_path'] as String?) ?? '';
+    final field = path.startsWith('summary.') ? path.substring(8) : path;
+    final root = field.split('.').first;
+    return root == 'availability_ref' ? 'availability' : root;
+  }
+
   final blockers = issues.where((issue) => issue['blocking'] == true).toList();
   final specificFields = {
     for (final issue in blockers)
@@ -530,12 +570,12 @@ List<String> _requiredQuestions(List<JsonMap> issues) {
                   .trim()
                   .isNotEmpty ??
               false))
-        issue['field_path'],
+        fieldGroup(issue),
   };
   final questions = <String>{};
   for (final issue in blockers) {
     if (genericCodes.contains(issue['code']) &&
-        specificFields.contains(issue['field_path'])) {
+        specificFields.contains(fieldGroup(issue))) {
       continue;
     }
     final question = (issue['question'] ?? issue['message'])?.toString().trim();
@@ -562,7 +602,7 @@ class _TimeConflictScreenState extends State<TimeConflictScreen> {
       final day = await showDatePicker(
         context: context,
         initialDate: task.deadline?.isAfter(now) == true
-            ? task.deadline!
+            ? task.deadline!.toLocal()
             : now.add(const Duration(days: 1)),
         firstDate: DateTime(now.year, now.month, now.day),
         lastDate: DateTime(9999, 12, 31),
@@ -573,7 +613,7 @@ class _TimeConflictScreenState extends State<TimeConflictScreen> {
         context: context,
         initialTime: task.deadline == null
             ? const TimeOfDay(hour: 18, minute: 0)
-            : TimeOfDay.fromDateTime(task.deadline!),
+            : TimeOfDay.fromDateTime(task.deadline!.toLocal()),
       );
       if (time == null || !mounted) return;
       final newDeadline =
@@ -589,7 +629,7 @@ class _TimeConflictScreenState extends State<TimeConflictScreen> {
       return;
     }
     if (_selectedOption == 1) {
-      Navigator.pop(context);
+      Navigator.pop(context, true);
       return;
     }
     if (_selectedOption == 2) {
@@ -737,6 +777,16 @@ class _TimeConflictScreenState extends State<TimeConflictScreen> {
             ),
             const SizedBox(height: 20),
 
+            MelbelCard(
+              child: ListTile(
+                contentPadding: EdgeInsets.zero,
+                leading: const Icon(Icons.event_available_outlined),
+                title: const Text('Giờ rảnh đã khai báo'),
+                subtitle: Text(task.availabilitySummary),
+              ),
+            ),
+            const SizedBox(height: 16),
+
             // 3. ONE Clear Question & Quick Direct Resolution
             Text(
               'Chọn cách điều chỉnh',
@@ -770,39 +820,13 @@ class _TimeConflictScreenState extends State<TimeConflictScreen> {
             ),
             const SizedBox(height: 10),
 
-            OutlinedButton.icon(
-              onPressed: () {
-                ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-                  content: Text(
-                      'Ghi âm chưa khả dụng. Bạn vẫn có thể sửa giờ rảnh.'),
-                ));
-              },
-              icon: const Icon(Icons.mic_none),
-              label: const Text('Nói để điều chỉnh'),
-            ),
-
-            const SizedBox(height: 24),
+            const SizedBox(height: 16),
 
             // Confirm Resolution Button
             PrimaryCta(
               label: 'Xác nhận',
               icon: Icons.check,
               onPressed: _selectedOption < 0 ? null : () => _resolve(task),
-            ),
-            const SizedBox(height: 10),
-            SecondaryCta(
-              label: 'Lưu nháp',
-              icon: Icons.archive_outlined,
-              height: 48,
-              onPressed: () async {
-                task.saveDraft();
-                await Navigator.push(
-                  context,
-                  MaterialPageRoute<void>(
-                    builder: (_) => const DraftSavedScreen(),
-                  ),
-                );
-              },
             ),
           ],
         ),

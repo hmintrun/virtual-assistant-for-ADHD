@@ -6,7 +6,7 @@ import hashlib
 import json
 import logging
 import secrets
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 from typing import Any
 from uuid import UUID, uuid4, uuid5, NAMESPACE_DNS
 
@@ -50,7 +50,8 @@ def _resolve_uuid(value: str | UUID) -> UUID:
     try:
         return UUID(str(value))
     except ValueError:
-        return uuid5(NAMESPACE_DNS, f"proplan.identifier:{value}")
+        # Match the Draft service owner namespace in dev_user mode.
+        return uuid5(NAMESPACE_DNS, f"proplan.user:{value}")
 
 
 async def _ensure_user_exists(db: AsyncSession, user_id: UUID) -> None:
@@ -144,18 +145,15 @@ class CalendarService:
         _, auth_url = await self.create_authorization(user_id, redirect_uri=redirect_uri)
         return auth_url
 
-    async def handle_oauth_callback(
+    async def _consume_valid_authorization(
         self,
-        user_id: str | UUID | None,
-        code: str,
         state: str,
-        redirect_uri: str | None = None,
-    ) -> tuple[CalendarConnection, str | None]:
-        """Xác thực mã callback từ Google và tạo hoặc cập nhật CalendarConnection với Fernet encryption."""
+        user_id: str | UUID | None = None,
+    ) -> tuple[CalendarAuthorization, UUID, str | None]:
+        """Xác thực state token chưa hết hạn/tiêu thụ, đánh dấu đã tiêu thụ và trả về metadata."""
         state_hash = _hash_state(state)
-        now_utc = datetime.now(timezone.utc)
+        now_utc = datetime.now(UTC)
 
-        # Tìm authorization record theo state_hash
         query = select(CalendarAuthorization).where(
             CalendarAuthorization.state_hash == state_hash,
             CalendarAuthorization.consumed_at.is_(None),
@@ -177,6 +175,31 @@ class CalendarService:
         return_target = auth_intent.return_target
         auth_intent.consumed_at = now_utc
         await self.db.commit()
+        return auth_intent, uid, return_target
+
+    async def handle_oauth_error(
+        self,
+        state: str,
+        user_id: str | UUID | None = None,
+    ) -> str | None:
+        """Xác thực và tiêu thụ authorization intent khi Google OAuth callback trả lỗi/từ chối."""
+        _, _, return_target = await self._consume_valid_authorization(state=state, user_id=user_id)
+        return return_target
+
+    async def handle_oauth_callback(
+        self,
+        user_id: str | UUID | None,
+        code: str,
+        state: str,
+        redirect_uri: str | None = None,
+    ) -> tuple[CalendarConnection, str | None]:
+        """Xác thực mã callback từ Google và tạo hoặc cập nhật CalendarConnection với Fernet encryption."""
+        now_utc = datetime.now(UTC)
+        auth_intent, uid, return_target = await self._consume_valid_authorization(
+            state=state, user_id=user_id
+        )
+        if not code:
+            raise CalendarAuthError("Thiếu mã xác thực OAuth từ Google.")
 
         # Đổi authorization code lấy token
         target_redirect_uri = redirect_uri or auth_intent.redirect_uri or None
@@ -288,6 +311,11 @@ class CalendarService:
 
     async def get_valid_access_token(self, connection: CalendarConnection) -> str:
         """Lấy access_token hợp lệ từ Fernet credential_ref, tự động refresh nếu hết hạn."""
+        if connection.connection_state == "disconnected":
+            raise CalendarAuthError(
+                "Kết nối Google Calendar đã bị ngắt. Vui lòng kết nối lại."
+            )
+
         creds = _deserialize_credentials_safe(
             connection.credential_ref,
             user_id=connection.user_id,
@@ -471,8 +499,13 @@ class CalendarService:
             raise CalendarClientError("Bản xem trước cấu hình đã hết hạn. Vui lòng tạo bản xem trước mới.", status_code=409)
 
         conn = await self.db.get(CalendarConnection, preview.connection_id)
-        if not conn:
+        if not conn or conn.user_id != uid:
             raise CalendarClientError("Không tìm thấy kết nối liên quan.", status_code=404)
+        if conn.connection_state != "connected":
+            raise CalendarClientError(
+                "Kết nối lịch không ở trạng thái đang kết nối. Vui lòng kết nối lại.",
+                status_code=409,
+            )
 
         payload = preview.payload or {}
         read_ids = payload.get("read_calendar_ids", [])

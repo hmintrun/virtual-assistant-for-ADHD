@@ -53,6 +53,11 @@ class CandidateReviewScreen extends StatelessWidget {
     final canConfirm =
         candidate.isFeasible && !hasPastSession && !task.isApiBusy;
     final title = task.title.isEmpty ? 'Công việc' : task.title;
+    final horizon = candidate.raw['planning_horizon'] as Map?;
+    final windowStart =
+        DateTime.tryParse(horizon?['start_at'] as String? ?? '');
+    final windowEnd = DateTime.tryParse(horizon?['end_at'] as String? ?? '');
+    final dates = MaterialLocalizations.of(context);
 
     return Scaffold(
       appBar: const MelbelAppBar(title: 'Kế hoạch đề xuất', showBack: true),
@@ -70,6 +75,12 @@ class CandidateReviewScreen extends StatelessWidget {
             const SizedBox(height: 6),
             Text('Hạn chót: ${task.formatDeadline(task.deadline)}',
                 style: TextStyle(color: MelbelColors.kOnSurfaceVariant)),
+            if (windowStart != null && windowEnd != null)
+              Text(
+                'Khoảng lập lịch: ${dates.formatShortDate(windowStart.toLocal())}'
+                ' – ${dates.formatShortDate(windowEnd.toLocal())}',
+                style: TextStyle(color: MelbelColors.kOnSurfaceVariant),
+              ),
             const SizedBox(height: 14),
             MelbelCard(
                 child: Column(
@@ -241,7 +252,7 @@ class CandidateReviewScreen extends StatelessWidget {
   }
 
   static String _feasibilityLabel(String status) => switch (status) {
-        'feasible' => 'Backend đánh giá phương án khả thi',
+        'feasible' => 'Đủ thời gian trước hạn chót',
         'infeasible' => 'Chưa đủ thời gian trước hạn chót',
         'search_inconclusive' => 'Chưa thể kết luận khả năng xếp lịch',
         _ => 'Trạng thái khả thi: $status',
