@@ -97,15 +97,22 @@ class Settings(BaseSettings):
     ENABLE_CALENDAR_SYNC_WORKER: bool = True
     TESTING: bool = False
 
-    # Voice STT (V01 & A21) — chọn sau khảo sát STT tiếng Việt 01/11/2026: Gemini Transcribe smart.
+    # Voice STT (V01 & A21) — hỗ trợ Gemini Transcribe và Groq Whisper (whisper-large-v3-turbo).
     # Dự phòng khi Backend lỗi/mất mạng nằm ở Mobile (speech_to_text on-device).
-    VOICE_STT_PROVIDER: Literal["gemini", "fake"] = "gemini"
+    VOICE_STT_PROVIDER: Literal["gemini", "groq", "auto", "fake"] = "gemini"
     GEMINI_STT_MODEL: str = "gemini-3.5-transcribe"
     GEMINI_STT_MODE: Literal["smart", "verbatim"] = "smart"
     VOICE_STT_LANGUAGE: str = "vi-VN"
     # Đo thực tế ~8-9s/clip ngắn (gồm ~2,5s upload) nên timeout rộng hơn luồng LLM.
     VOICE_STT_TIMEOUT_SECONDS: float = Field(default=20.0, gt=0.0, le=120.0)
     VOICE_MAX_AUDIO_BYTES: int = Field(default=10 * 1024 * 1024, gt=0)
+
+    # Voice TTS (W3-09) — ưu tiên Edge-TTS trên Backend, fallback sang flutter_tts on-device.
+    VOICE_TTS_PROVIDER: Literal["edge_tts", "fake"] = "edge_tts"
+    VOICE_TTS_DEFAULT_VOICE: str = "vi-VN-HoaiMyNeural"
+    VOICE_TTS_TIMEOUT_SECONDS: float = Field(default=10.0, gt=0.0, le=60.0)
+    VOICE_TTS_MAX_CHARS: int = Field(default=600, gt=0, le=2000)
+    VOICE_TTS_CACHE_SIZE: int = Field(default=64, ge=0, le=512)
 
     # UF1: Flash-Lite MINIMAL từ đầu; chuyển Qwen khi lỗi trong ngưỡng còn đủ thời gian dưới trần.
     AI_UF1_TIMEOUT_SECONDS: float = Field(default=4.5, gt=0.0, le=15.0)
