@@ -432,7 +432,13 @@ class TaskExtractionResult(LLMTaskExtractionPayload):
                 f"Khung giờ {joined_phrases} bạn có thể làm từ mấy giờ đến mấy giờ cụ thể để mình xếp lịch chuẩn xác?"
             )
 
-        if self.deadline is None and self.time_constraint is None:
+        has_tc_end = self.time_constraint is not None and (
+            self.time_constraint.deadline_at is not None
+            or self.time_constraint.finish_by_at is not None
+        )
+        if self.deadline is None and has_tc_end and self.time_constraint is not None:
+            self.deadline = self.time_constraint.deadline_at or self.time_constraint.finish_by_at
+        if self.deadline is None and not has_tc_end:
             missing_questions.append("Khi nào bạn cần hoàn thành xong công việc này (hạn chót)?")
 
         if missing_questions or self.has_conflict:
@@ -444,6 +450,8 @@ class TaskExtractionResult(LLMTaskExtractionPayload):
                     ]
                 else:
                     self.clarification_questions = missing_questions
+        elif self.is_complete:
+            self.clarification_questions = []
 
         return self
 

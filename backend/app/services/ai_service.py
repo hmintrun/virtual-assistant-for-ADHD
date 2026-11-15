@@ -31,6 +31,7 @@ from app.schemas.schedule import (
 from app.schemas.task import (
     CandidateAdjustmentResult,
     CandidateStepAdjustment,
+    ExtractedTimeConstraint,
     GenerationTier,
     LLMCandidateAdjustmentPayload,
     LLMPlanAdjustmentPayload,
@@ -89,8 +90,8 @@ QUY TẮC BẤT BIẾN (STRICT GUARDRAILS — TUYỆT ĐỐI TUÂN THỦ):
   + Nếu người dùng nêu buổi mơ hồ mà thiếu mốc giờ cụ thể (ví dụ chỉ nói "tối thứ 6", "chiều mai" mà không rõ từ mấy giờ đến mấy giờ và chưa chủ động xác nhận dùng một khung giờ cụ thể đã có), TUYỆT ĐỐI KHÔNG tự gán "19:00-21:00"; phải đặt `start_local = null`, `end_local = null`, `is_ambiguous = true`, `is_complete = false` và hỏi rõ mốc giờ trong `clarification_questions`.
 - PHÁT HIỆN MÂU THUẪN: Đối chiếu với `current_datetime` và `busy_intervals_from_calendar`. Đặt `has_conflict = true` nếu hạn chót nằm trong quá khứ (`<= current_datetime`), khung giờ rảnh rơi sau `deadline`, hoặc toàn bộ khung giờ rảnh bị trùng với lịch bận.
 - GỘP CÂU HỎI LÀM RÕ TRONG 1 VÒNG DUY NHẤT (SINGLE-ROUND CLARIFICATION): Nếu thiếu bất kỳ thông tin nào, còn khung giờ mơ hồ (`is_ambiguous = true`) hoặc có mâu thuẫn (`has_conflict = true`), đặt `is_complete = false` và gom TẤT CẢ câu hỏi vào `clarification_questions` một cách ngắn gọn, ấm áp trong 1 màn hình duy nhất.
-- CHỈ ĐẶT `is_complete = true` KHI VÀ CHỈ KHI đủ cả 4 trường rõ ràng, mọi `structured_free_windows` đều có `is_ambiguous = false`, và `has_conflict = false` (khi đó `clarification_questions` phải là `[]`).
-- time_constraint dùng kind=deadline/window, start_at và đúng một mốc cuối deadline_at/finish_by_at; thiếu thì để null, không đoán. Kế thừa thông tin đã rõ từ previous_draft. Trích goal chỉ khi user nêu.
+- CHỈ ĐẶT `is_complete = true` KHI VÀ CHỈ KHI đủ cả 4 trường rõ ràng, mọi `structured_free_windows` đều có `is_ambiguous = false`, và `has_conflict = false` (khi đó `clarification_questions` bắt buộc là `[]`; KHÔNG tự đặt thêm câu hỏi phụ ngoài 4 trường bắt buộc).
+- time_constraint dùng kind=deadline/window, start_at, input_timezone và đúng một mốc cuối deadline_at/finish_by_at. Nếu user chỉ nêu hạn chót mà không nêu mốc bắt đầu riêng, đặt `start_at = current_datetime`; chỉ để `null` khi thiếu hẳn hạn chót hoàn thành, không tự đoán hạn chót. Kế thừa thông tin đã rõ từ previous_draft. Trích goal chỉ khi user nêu.
 - Trả clarification_issues có code, field_path, message, question, blocking. Câu hỏi phải gắn đúng trường con nếu biết.
 - field_review_notes chứa giải thích bất lợi có căn cứ theo từng trường khi đề xuất khác previous_draft. Nếu user muốn giữ giá trị cũ, giải thích bất lợi có căn cứ rồi hỏi xác nhận; không ép đổi, không bịa số phút thiếu hoặc kết luận khả thi khi chưa có phép tính.
 - resolved_issue_keys chỉ chứa khóa code|field_path|question của AI_CLARIFICATION trong previous_draft mà câu trả lời mới thực sự giải quyết; không tự xóa field-review đã bảo vệ giá trị user.
@@ -399,13 +400,18 @@ class AIService:
         backup_model = "" if is_uf1 else self._settings.GEMINI_BACKUP_MODEL.strip()
         can_use_backup = bool(backup_model and backup_model != primary_model)
 
+        primary_thinking_level = (
+            types.ThinkingLevel.MINIMAL
+            if is_uf1 or "flash-lite" in primary_model.lower()
+            else types.ThinkingLevel.LOW
+        )
         primary_task: asyncio.Task[SchemaT] = asyncio.create_task(
             self._call_gemini_structured(
                 system_prompt=system_prompt,
                 user_prompt=user_prompt,
                 schema_cls=schema_cls,
                 model_name=primary_model,
-                thinking_level=types.ThinkingLevel.MINIMAL if is_uf1 else types.ThinkingLevel.LOW,
+                thinking_level=primary_thinking_level,
             )
         )
         backup_task: asyncio.Task[SchemaT] | None = None
@@ -431,7 +437,7 @@ class AIService:
 
         def _start_groq() -> None:
             nonlocal groq_task
-            if is_uf1 and loop.time() > t0 + self._settings.AI_UF1_GROQ_FAST_FAIL_SECONDS:
+            if is_uf1 and loop.time() > min(deadline, t0 + self._settings.AI_UF1_GROQ_FAST_FAIL_SECONDS):
                 return
             if groq_task is None and has_groq:
                 groq_task = asyncio.create_task(
@@ -644,7 +650,14 @@ class AIService:
                 **llm_payload.model_dump(),
                 generation_tier=winner_tier,
             )
-            return self._enforce_uf1_temporal_guardrails(result, current_dt=current_dt)
+            return self._enforce_uf1_temporal_guardrails(
+                result,
+                current_dt=current_dt,
+                timezone=timezone,
+                previous_time_constraint=(
+                    parsed_draft.time_constraint if parsed_draft is not None else None
+                ),
+            )
         except Exception as exc:
             logger.warning(
                 "UF1 chuyển sang Tier 3 Rule-based do lỗi: %s",
@@ -658,17 +671,18 @@ class AIService:
         result: TaskExtractionResult,
         *,
         current_dt: datetime,
+        timezone: str = "Asia/Ho_Chi_Minh",
+        previous_time_constraint: ExtractedTimeConstraint | None = None,
     ) -> TaskExtractionResult:
         """
         Kiểm chứng thời gian bằng Python thuần túy (Hybrid Architecture Guardrail):
         CẤM tin mù quáng phép so sánh ngày giờ của LLM — nếu deadline rơi vào quá khứ,
         bắt buộc bật cờ has_conflict=True và is_complete=False.
         """
-        end = (
-            (result.time_constraint.deadline_at or result.time_constraint.finish_by_at)
-            if result.time_constraint
-            else result.deadline
-        )
+        tc = result.time_constraint
+        tc_deadline = tc.deadline_at if tc is not None else None
+        tc_finish_by = tc.finish_by_at if tc is not None else None
+        end = tc_deadline or tc_finish_by or result.deadline
         if end is not None:
             normalized_deadline = cls._normalize_dt_for_compare(end, current_dt)
             if normalized_deadline <= current_dt:
@@ -686,6 +700,65 @@ class AIService:
                         "clarification_questions": questions,
                     }
                 )
+
+            candidate_tz = (
+                tc.input_timezone.strip()
+                if tc is not None and tc.input_timezone and tc.input_timezone.strip()
+                else (
+                    previous_time_constraint.input_timezone.strip()
+                    if previous_time_constraint is not None
+                    and previous_time_constraint.input_timezone
+                    and previous_time_constraint.input_timezone.strip()
+                    else timezone
+                )
+            )
+            try:
+                ZoneInfo(candidate_tz)
+                resolved_tz = candidate_tz
+            except ZoneInfoNotFoundError:
+                resolved_tz = timezone
+            tz_ref_dt = cls._resolve_current_dt(resolved_tz, current_dt)
+            norm_end = cls._normalize_dt_for_compare(end, tz_ref_dt)
+            if tc is not None and tc.kind in {"deadline", "window"}:
+                if tc.kind == "window" and tc_finish_by is None and tc_deadline is not None:
+                    kind: Literal["deadline", "window"] = "deadline"
+                elif tc.kind == "deadline" and tc_deadline is None and tc_finish_by is not None:
+                    kind = "window"
+                else:
+                    kind = tc.kind
+            elif tc_finish_by is not None and tc_deadline is None:
+                kind = "window"
+            else:
+                kind = "deadline"
+
+            if tc is not None and tc.start_at is not None:
+                norm_start = cls._normalize_dt_for_compare(tc.start_at, tz_ref_dt)
+            elif (
+                previous_time_constraint is not None
+                and previous_time_constraint.start_at is not None
+                and cls._normalize_dt_for_compare(
+                    previous_time_constraint.start_at, tz_ref_dt
+                )
+                < norm_end
+            ):
+                norm_start = cls._normalize_dt_for_compare(
+                    previous_time_constraint.start_at, tz_ref_dt
+                )
+            else:
+                norm_start = tz_ref_dt
+            updated_tc = ExtractedTimeConstraint(
+                kind=kind,
+                start_at=norm_start,
+                deadline_at=norm_end if kind == "deadline" else None,
+                finish_by_at=norm_end if kind == "window" else None,
+                input_timezone=resolved_tz,
+            )
+            return result.model_copy(
+                update={
+                    "deadline": norm_end,
+                    "time_constraint": updated_tc,
+                }
+            )
         return result
 
     def _fallback_extract_task(

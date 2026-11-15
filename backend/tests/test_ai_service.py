@@ -5,13 +5,14 @@ from __future__ import annotations
 import asyncio
 import json
 import unittest
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import patch
 
 from google.genai import types
 
 from app.core.config import Settings
+from app.schemas.common import TimeConstraint
 from app.schemas.schedule import (
     FeasibilityReportSchema,
     LLMRescheduleEmpathyPayload,
@@ -23,6 +24,7 @@ from app.schemas.schedule import (
 )
 from app.schemas.task import (
     ExtractedFreeWindowSchema,
+    ExtractedTimeConstraint,
     LLMPlanAdjustmentPayload,
     LLMTaskDecompositionPayload,
     LLMTaskExtractionPayload,
@@ -285,6 +287,7 @@ class TestAIService(unittest.TestCase):
         """
         cfg = Settings(
             GEMINI_API_KEY="AIzaSyTestKey",
+            GEMINI_FLASH_MODEL="gemini-3.8-flash",
             GROQ_API_KEY="",
             GOOGLE_CREDENTIALS_PATH="",
             AI_WARM_BACKUP_DELAY_SECONDS=0.02,
@@ -328,6 +331,7 @@ class TestAIService(unittest.TestCase):
         """
         cfg = Settings(
             GEMINI_API_KEY="AIzaSyTestKey",
+            GEMINI_FLASH_MODEL="gemini-3.8-flash",
             GROQ_API_KEY="",
             GOOGLE_CREDENTIALS_PATH="",
             AI_UF2_WARM_BACKUP_DELAY_SECONDS=0.02,
@@ -919,6 +923,138 @@ class TestAIService(unittest.TestCase):
         )
         self.assertFalse(initial_prompt.asks_step_completion)
         self.assertIn("nghỉ ngay", initial_prompt.prompt_text)
+
+    def test_uf1_late_failure_within_expanded_threshold_cascades_to_groq(self) -> None:
+        """UF1 lỗi Gemini sau 1.0s nhưng còn thời gian trong trần 4.5s vẫn nhảy sang Groq."""
+        cfg = Settings(
+            _env_file=None,
+            GEMINI_API_KEY="AIzaSyTestKey",
+            GROQ_API_KEY="gsk_TestKey",
+            GOOGLE_CREDENTIALS_PATH="",
+        )
+        self.assertGreaterEqual(cfg.AI_UF1_GROQ_FAST_FAIL_SECONDS, 3.0)
+        service = AIService(app_settings=cfg)
+
+        async def _late_gemini_failure(**_: Any) -> LLMTaskExtractionPayload:
+            await asyncio.sleep(1.05)
+            raise RuntimeError("Transient Gemini ServerError after 1.05s")
+
+        async def _working_groq(**_: Any) -> LLMTaskExtractionPayload:
+            return LLMTaskExtractionPayload(
+                title="Báo cáo đồ án",
+                content="Viết báo cáo đồ án",
+                scope="5 trang",
+                free_time_slots=["Tối thứ 3 19:00-21:00"],
+                deadline=datetime.now(UTC) + timedelta(days=3),
+                is_complete=True,
+                summary="Groq cứu hộ thành công sau lỗi muộn của Gemini.",
+            )
+
+        with (
+            patch.object(service, "_get_gemini_client", return_value=object()),
+            patch.object(service, "_get_groq_client", return_value=object()),
+            patch.object(service, "_call_gemini_structured", side_effect=_late_gemini_failure),
+            patch.object(service, "_call_groq_structured", side_effect=_working_groq) as groq,
+        ):
+            res = asyncio.run(service.extract_task_intent("Viết báo cáo đồ án 5 trang"))
+
+        self.assertEqual(res.generation_tier, "tier_2_groq")
+        self.assertEqual(res.scope, "5 trang")
+        groq.assert_awaited_once()
+
+    def test_default_non_uf1_flash_lite_uses_minimal_thinking_without_duplicate_backup(self) -> None:
+        """Cấu hình mặc định chạy 3.5-flash-lite MINIMAL cho UF2/UF6 và không bắn trùng backup."""
+        cfg = Settings(
+            _env_file=None,
+            GEMINI_API_KEY="AIzaSyTestKey",
+            GROQ_API_KEY="",
+            GOOGLE_CREDENTIALS_PATH="",
+        )
+        self.assertEqual(cfg.GEMINI_FLASH_MODEL, "gemini-3.5-flash-lite")
+        service = AIService(app_settings=cfg)
+        allowed_notes, allowed_tip = service._reschedule_copy("busy", proposal_available=True)
+        calls: list[tuple[str | None, types.ThinkingLevel]] = []
+
+        async def _fake_gemini(
+            *,
+            model_name: str | None = None,
+            thinking_level: types.ThinkingLevel = types.ThinkingLevel.LOW,
+            **_: Any,
+        ) -> LLMRescheduleEmpathyPayload:
+            calls.append((model_name, thinking_level))
+            return LLMRescheduleEmpathyPayload(
+                empathetic_note=allowed_notes[0],
+                encouragement_tip=allowed_tip,
+            )
+
+        with (
+            patch.object(service, "_get_gemini_client", return_value=object()),
+            patch.object(service, "_call_gemini_structured", side_effect=_fake_gemini),
+        ):
+            res = asyncio.run(service.generate_reschedule_empathy("busy", proposal_available=True))
+
+        self.assertEqual(res.generation_tier, "tier_1_gemini")
+        self.assertEqual(calls, [("gemini-3.5-flash-lite", types.ThinkingLevel.MINIMAL)])
+
+    def test_uf1_deadline_without_start_at_populates_start_at_and_timezone(self) -> None:
+        """Khi LLM chỉ trả deadline_at (start_at=None), UF1 tự điền start_at hợp lệ theo timezone."""
+        cfg = Settings(
+            _env_file=None,
+            GEMINI_API_KEY="AIzaSyTestKey",
+            GROQ_API_KEY="",
+            GOOGLE_CREDENTIALS_PATH="",
+        )
+        service = AIService(app_settings=cfg)
+        ref_now = datetime(2026, 11, 14, 17, 0, tzinfo=UTC)
+        future_deadline = datetime(2026, 11, 20, 18, 0, tzinfo=UTC)
+
+        async def _fake_gemini(**_: Any) -> LLMTaskExtractionPayload:
+            return LLMTaskExtractionPayload(
+                title="Viết báo cáo",
+                content="Viết báo cáo cuối kỳ",
+                scope="10 trang PDF",
+                free_time_slots=["Thứ 3 19:00-21:00"],
+                structured_free_windows=[
+                    ExtractedFreeWindowSchema(
+                        kind="weekly_rule",
+                        weekday=2,
+                        start_local="19:00",
+                        end_local="21:00",
+                        raw_phrase="Thứ 3 19:00-21:00",
+                    )
+                ],
+                time_constraint=ExtractedTimeConstraint(
+                    kind="deadline",
+                    start_at=None,
+                    deadline_at=future_deadline,
+                    input_timezone=None,
+                ),
+                deadline=None,
+                is_complete=True,
+                summary="Báo cáo 10 trang nộp ngày 20/11.",
+                clarification_questions=["Câu hỏi phụ dư thừa"],
+            )
+
+        with (
+            patch.object(service, "_get_gemini_client", return_value=object()),
+            patch.object(service, "_call_gemini_structured", side_effect=_fake_gemini),
+        ):
+            res = asyncio.run(
+                service.extract_task_intent(
+                    "Viết báo cáo cuối kỳ 10 trang, tối thứ 3 19h-21h, nộp 20/11",
+                    timezone="Asia/Ho_Chi_Minh",
+                    reference_now=ref_now,
+                )
+            )
+
+        self.assertTrue(res.is_complete)
+        self.assertEqual(res.clarification_questions, [])
+        self.assertIsNotNone(res.time_constraint)
+        assert res.time_constraint is not None
+        self.assertIsNotNone(res.time_constraint.start_at)
+        self.assertEqual(res.time_constraint.input_timezone, "Asia/Ho_Chi_Minh")
+        validated = TimeConstraint.model_validate(res.time_constraint.model_dump())
+        self.assertEqual(validated.deadline_at, future_deadline)
 
 
 if __name__ == "__main__":

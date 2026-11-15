@@ -1,0 +1,3335 @@
+{
+  "started_at": "2026-11-11T17:11:14.153941+07:00",
+  "reference_now": "2026-11-11T09:00:00+07:00",
+  "cases": {
+    "small": "Sắp xếp 20 tài liệu PDF vào 3 thư mục môn học và đổi tên theo môn-ngày. Bắt đầu ngày 12/11/2026 lúc 19:00, rảnh 19:00-20:00 ngày đó. Hạn chót 12/11/2026 lúc 21:00, giờ Việt Nam.",
+    "medium": "Viết báo cáo 8 trang về khảo sát thói quen học tập của 30 sinh viên, gồm mục tiêu, phương pháp, kết quả, 3 biểu đồ và kết luận; nộp một file PDF. Dữ liệu đã có trong bảng tính, không cần khảo sát thêm. Bắt đầu 12/11/2026 lúc 19:00. Rảnh ngày 12, 13 và 14/11/2026, mỗi ngày từ 19:00 đến 21:00. Hạn chót 15/11/2026 lúc 17:00 giờ Việt Nam. Chỉ dùng dữ liệu có sẵn, không đưa thông tin cá nhân vào báo cáo.",
+    "large": "Hoàn thành nguyên mẫu ứng dụng quản lý thư viện cho đồ án nhóm 4 người. Phạm vi gồm đăng nhập, phân quyền thủ thư và độc giả, quản lý 500 đầu sách, tìm kiếm theo tên/tác giả, mượn trả, theo dõi quá hạn và báo cáo thống kê tháng. Đầu ra là mã nguồn backend FastAPI, frontend web, database PostgreSQL, tài liệu API, 30 ca kiểm thử chức năng, báo cáo PDF 25 trang, 15 slide và video demo 5 phút. Không triển khai thanh toán, không gửi email thật và không triển khai lên cloud. Thiết kế giao diện đã có; cần rà soát tính nhất quán giữa API và màn hình, dữ liệu demo không chứa thông tin người thật. Tôi phụ trách tích hợp và báo cáo; các thành viên khác đã cung cấp module đăng nhập và danh mục sách. Bắt đầu 12/11/2026 lúc 18:00, hạn chót 30/11/2026 lúc 17:00 giờ Việt Nam. Tôi rảnh thứ Hai, thứ Tư và thứ Sáu từ 18:00 đến 21:00, thứ Bảy từ 09:00 đến 12:00 và từ 14:00 đến 17:00 trong khoảng ngày 12 đến 29/11/2026. Giữ nguyên các lịch học đã có, không tự đổi lịch công việc khác. Ưu tiên demo chạy ổn định, sau đó kiểm thử, cuối cùng hoàn thiện tài liệu; chỉ ghi nhận yêu cầu ở bước này, chưa chia bước hoặc chốt lịch.",
+    "missing_fields": "Mình muốn viết báo cáo 2 trang gồm kết quả và kết luận."
+  },
+  "config": {
+    "GEMINI_FLASH_MODEL": "gemini-3.8-flash",
+    "GEMINI_BACKUP_MODEL": "gemini-3.5-flash-lite",
+    "GROQ_FALLBACK_MODEL": "qwen/qwen3.8-27b",
+    "GROQ_SECONDARY_FALLBACK_MODEL": "openai/gpt-oss-20b",
+    "AI_TIMEOUT_SECONDS": 4.5,
+    "AI_PRIMARY_PRIORITY_SECONDS": 4.0,
+    "AI_WARM_BACKUP_DELAY_SECONDS": 2.6,
+    "AI_GROQ_HEDGE_DELAY_SECONDS": 3.5
+  },
+  "runs": [
+    {
+      "mode": "primary",
+      "case": "small",
+      "repetition": 1,
+      "elapsed_s": 4.5119,
+      "status": "timeout",
+      "winner": null,
+      "generation_tier": "tier_3_rule_based",
+      "coordinator_error": {
+        "error_type": "TimeoutError",
+        "http_status": null,
+        "error_message": "UF1 vượt trần thời gian xử lý (4.5s)."
+      },
+      "attempts": [
+        {
+          "model": "gemini-3.8-flash",
+          "start_s": 0.0052,
+          "status": "cancelled",
+          "elapsed_s": 4.5077
+        }
+      ],
+      "checks": {
+        "content_present": true,
+        "scope_present": false,
+        "is_complete": false,
+        "has_conflict": false
+      },
+      "result": {
+        "title": "Sắp xếp 20 tài liệu PDF vào 3 thư mục môn học và đổi tên theo môn-ngày. Bắt đầu ",
+        "goal": null,
+        "time_constraint": null,
+        "clarification_issues": [],
+        "resolved_issue_keys": [],
+        "field_review_notes": {},
+        "content": "Sắp xếp 20 tài liệu PDF vào 3 thư mục môn học và đổi tên theo môn-ngày. Bắt đầu ngày 12/11/2026 lúc 19:00, rảnh 19:00-20:00 ngày đó. Hạn chót 12/11/2026 lúc 21:00, giờ Việt Nam.",
+        "scope": null,
+        "free_time_slots": [],
+        "availability_update_mode": "merge",
+        "structured_free_windows": [],
+        "deadline": null,
+        "extra_requirements": [],
+        "is_complete": false,
+        "has_conflict": false,
+        "summary": "Đã ghi nhận công việc: 'Sắp xếp 20 tài liệu PDF vào 3 thư mục môn học và đổi tên theo môn-ngày. Bắt đầu ngày 12/11/2026 lúc 19:00, rảnh 19:00-20:00 ngày đó. Hạn chót 12/11/2026 lúc 21:00, giờ Việt Nam.'. Mình cần bạn bổ sung/xác nhận thêm thông tin bên dưới để lên lịch chuẩn xác nhé.",
+        "clarification_questions": [
+          "Phạm vi hoặc kết quả đầu ra mong muốn của việc này là gì (ví dụ: số trang, số phần cần hoàn thiện)?",
+          "Bạn có những khung giờ rảnh cụ thể nào (từ mấy giờ đến mấy giờ) để mình sắp xếp các phiên tập trung?",
+          "Hạn chót (ngày và giờ) bạn cần hoàn thành xong công việc này là khi nào?"
+        ],
+        "generation_tier": "tier_3_rule_based"
+      }
+    },
+    {
+      "mode": "backup",
+      "case": "small",
+      "repetition": 1,
+      "elapsed_s": 2.0296,
+      "status": "success",
+      "winner": "gemini-3.5-flash-lite",
+      "generation_tier": "tier_1_gemini",
+      "coordinator_error": null,
+      "attempts": [
+        {
+          "model": "gemini-3.5-flash-lite",
+          "start_s": 0.0002,
+          "status": "schema_valid",
+          "elapsed_s": 2.0293
+        }
+      ],
+      "checks": {
+        "content_present": true,
+        "scope_present": true,
+        "is_complete": true,
+        "has_conflict": false,
+        "start_at_preserved": true,
+        "time_constraint_end_preserved": true
+      },
+      "result": {
+        "title": "Sắp xếp tài liệu PDF",
+        "goal": null,
+        "time_constraint": {
+          "kind": "deadline",
+          "start_at": "2026-11-12T19:00:00+07:00",
+          "deadline_at": "2026-11-12T21:00:00+07:00",
+          "finish_by_at": null,
+          "input_timezone": "Asia/Ho_Chi_Minh"
+        },
+        "clarification_issues": [],
+        "resolved_issue_keys": [],
+        "field_review_notes": {},
+        "content": "Sắp xếp 20 tài liệu PDF vào 3 thư mục môn học và đổi tên theo môn-ngày",
+        "scope": "20 tài liệu PDF vào 3 thư mục",
+        "free_time_slots": [
+          "12/11/2026 19:00-20:00"
+        ],
+        "availability_update_mode": "merge",
+        "structured_free_windows": [
+          {
+            "kind": "specific_date",
+            "weekday": null,
+            "date": "2026-11-12",
+            "start_local": "19:00",
+            "end_local": "20:00",
+            "raw_phrase": "19:00-20:00 ngày 12/11/2026",
+            "is_ambiguous": false
+          }
+        ],
+        "deadline": "2026-11-12T21:00:00+07:00",
+        "extra_requirements": [],
+        "is_complete": true,
+        "has_conflict": false,
+        "summary": "Sắp xếp 20 tài liệu PDF vào 3 thư mục và đổi tên trong khung giờ 19:00 - 20:00 ngày 12/11/2026, hạn chót 21:00 cùng ngày.",
+        "clarification_questions": [],
+        "generation_tier": "tier_1_gemini"
+      }
+    },
+    {
+      "mode": "groq",
+      "case": "small",
+      "repetition": 1,
+      "elapsed_s": 0.77,
+      "status": "error",
+      "winner": null,
+      "generation_tier": "tier_3_rule_based",
+      "coordinator_error": {
+        "error_type": "RateLimitError",
+        "http_status": 429,
+        "error_message": "Error code: 429 - {'error': {'message': \"Request too large for model `qwen/qwen3.8-27b` in organization `[REDACTED_ORG]` service tier `on_demand` on output tokens per minute (OTPM): Limit 1000, Requested 1586. The request's expected output tokens exceed the enforced limit; reduce max_tokens (or the request's expected output) and try again. Need more tokens? Upgrade to Dev Tier today at https://console.groq.com/settings/billing\", 'type': 'tokens', 'code': 'rate_limit_exceeded'}}"
+      },
+      "attempts": [
+        {
+          "model": "qwen/qwen3.8-27b",
+          "start_s": 0.0033,
+          "status": "error",
+          "error_type": "RateLimitError",
+          "http_status": 429,
+          "error_message": "Error code: 429 - {'error': {'message': \"Request too large for model `qwen/qwen3.8-27b` in organization `[REDACTED_ORG]` service tier `on_demand` on output tokens per minute (OTPM): Limit 1000, Requested 1586. The request's expected output tokens exceed the enforced limit; reduce max_tokens (or the request's expected output) and try again. Need more tokens? Upgrade to Dev Tier today at https://console.groq.com/settings/billing\", 'type': 'tokens', 'code': 'rate_limit_exceeded'}}",
+          "elapsed_s": 0.7666
+        }
+      ],
+      "checks": {
+        "content_present": true,
+        "scope_present": false,
+        "is_complete": false,
+        "has_conflict": false
+      },
+      "result": {
+        "title": "Sắp xếp 20 tài liệu PDF vào 3 thư mục môn học và đổi tên theo môn-ngày. Bắt đầu ",
+        "goal": null,
+        "time_constraint": null,
+        "clarification_issues": [],
+        "resolved_issue_keys": [],
+        "field_review_notes": {},
+        "content": "Sắp xếp 20 tài liệu PDF vào 3 thư mục môn học và đổi tên theo môn-ngày. Bắt đầu ngày 12/11/2026 lúc 19:00, rảnh 19:00-20:00 ngày đó. Hạn chót 12/11/2026 lúc 21:00, giờ Việt Nam.",
+        "scope": null,
+        "free_time_slots": [],
+        "availability_update_mode": "merge",
+        "structured_free_windows": [],
+        "deadline": null,
+        "extra_requirements": [],
+        "is_complete": false,
+        "has_conflict": false,
+        "summary": "Đã ghi nhận công việc: 'Sắp xếp 20 tài liệu PDF vào 3 thư mục môn học và đổi tên theo môn-ngày. Bắt đầu ngày 12/11/2026 lúc 19:00, rảnh 19:00-20:00 ngày đó. Hạn chót 12/11/2026 lúc 21:00, giờ Việt Nam.'. Mình cần bạn bổ sung/xác nhận thêm thông tin bên dưới để lên lịch chuẩn xác nhé.",
+        "clarification_questions": [
+          "Phạm vi hoặc kết quả đầu ra mong muốn của việc này là gì (ví dụ: số trang, số phần cần hoàn thiện)?",
+          "Bạn có những khung giờ rảnh cụ thể nào (từ mấy giờ đến mấy giờ) để mình sắp xếp các phiên tập trung?",
+          "Hạn chót (ngày và giờ) bạn cần hoàn thành xong công việc này là khi nào?"
+        ],
+        "generation_tier": "tier_3_rule_based"
+      }
+    },
+    {
+      "mode": "groq_secondary",
+      "case": "small",
+      "repetition": 1,
+      "elapsed_s": 1.9218,
+      "status": "success",
+      "winner": "openai/gpt-oss-20b",
+      "generation_tier": "tier_2_groq",
+      "coordinator_error": null,
+      "attempts": [
+        {
+          "model": "openai/gpt-oss-20b",
+          "start_s": 0.0024,
+          "status": "schema_valid",
+          "elapsed_s": 1.9192
+        }
+      ],
+      "checks": {
+        "content_present": true,
+        "scope_present": true,
+        "is_complete": true,
+        "has_conflict": false,
+        "start_at_preserved": false,
+        "time_constraint_end_preserved": false
+      },
+      "result": {
+        "title": null,
+        "goal": null,
+        "time_constraint": null,
+        "clarification_issues": [],
+        "resolved_issue_keys": [],
+        "field_review_notes": {},
+        "content": "Sắp xếp 20 tài liệu PDF vào 3 thư mục môn học và đổi tên theo môn-ngày.",
+        "scope": "đổi tên theo môn-ngày",
+        "free_time_slots": [
+          "19:00-20:00 ngày 12/11/2026"
+        ],
+        "availability_update_mode": "merge",
+        "structured_free_windows": [
+          {
+            "kind": "specific_date",
+            "weekday": null,
+            "date": "2026-11-12",
+            "start_local": "19:00",
+            "end_local": "20:00",
+            "raw_phrase": "19:00-20:00 ngày 12/11/2026",
+            "is_ambiguous": false
+          }
+        ],
+        "deadline": "2026-11-12T21:00:00+07:00",
+        "extra_requirements": [],
+        "is_complete": true,
+        "has_conflict": false,
+        "summary": "Sắp xếp 20 tài liệu PDF vào 3 thư mục môn học, đổi tên theo môn-ngày, bắt đầu 12/11/2026 19:00, rảnh 19:00-20:00, hạn chót 12/11/2026 21:00.",
+        "clarification_questions": [],
+        "generation_tier": "tier_2_groq"
+      }
+    },
+    {
+      "mode": "production",
+      "case": "small",
+      "repetition": 1,
+      "elapsed_s": 4.4957,
+      "status": "timeout",
+      "winner": null,
+      "generation_tier": "tier_3_rule_based",
+      "coordinator_error": {
+        "error_type": "TimeoutError",
+        "http_status": null,
+        "error_message": "UF1 vượt trần thời gian xử lý (4.5s)."
+      },
+      "attempts": [
+        {
+          "model": "gemini-3.8-flash",
+          "start_s": 0.0002,
+          "status": "cancelled",
+          "elapsed_s": 4.4963
+        },
+        {
+          "model": "gemini-3.5-flash-lite",
+          "start_s": 2.6101,
+          "status": "cancelled",
+          "elapsed_s": 1.8867
+        },
+        {
+          "model": "qwen/qwen3.8-27b",
+          "start_s": 3.5026,
+          "status": "cancelled",
+          "elapsed_s": 0.9946
+        }
+      ],
+      "checks": {
+        "content_present": true,
+        "scope_present": false,
+        "is_complete": false,
+        "has_conflict": false
+      },
+      "result": {
+        "title": "Sắp xếp 20 tài liệu PDF vào 3 thư mục môn học và đổi tên theo môn-ngày. Bắt đầu ",
+        "goal": null,
+        "time_constraint": null,
+        "clarification_issues": [],
+        "resolved_issue_keys": [],
+        "field_review_notes": {},
+        "content": "Sắp xếp 20 tài liệu PDF vào 3 thư mục môn học và đổi tên theo môn-ngày. Bắt đầu ngày 12/11/2026 lúc 19:00, rảnh 19:00-20:00 ngày đó. Hạn chót 12/11/2026 lúc 21:00, giờ Việt Nam.",
+        "scope": null,
+        "free_time_slots": [],
+        "availability_update_mode": "merge",
+        "structured_free_windows": [],
+        "deadline": null,
+        "extra_requirements": [],
+        "is_complete": false,
+        "has_conflict": false,
+        "summary": "Đã ghi nhận công việc: 'Sắp xếp 20 tài liệu PDF vào 3 thư mục môn học và đổi tên theo môn-ngày. Bắt đầu ngày 12/11/2026 lúc 19:00, rảnh 19:00-20:00 ngày đó. Hạn chót 12/11/2026 lúc 21:00, giờ Việt Nam.'. Mình cần bạn bổ sung/xác nhận thêm thông tin bên dưới để lên lịch chuẩn xác nhé.",
+        "clarification_questions": [
+          "Phạm vi hoặc kết quả đầu ra mong muốn của việc này là gì (ví dụ: số trang, số phần cần hoàn thiện)?",
+          "Bạn có những khung giờ rảnh cụ thể nào (từ mấy giờ đến mấy giờ) để mình sắp xếp các phiên tập trung?",
+          "Hạn chót (ngày và giờ) bạn cần hoàn thành xong công việc này là khi nào?"
+        ],
+        "generation_tier": "tier_3_rule_based"
+      }
+    },
+    {
+      "mode": "primary",
+      "case": "medium",
+      "repetition": 1,
+      "elapsed_s": 4.5104,
+      "status": "timeout",
+      "winner": null,
+      "generation_tier": "tier_3_rule_based",
+      "coordinator_error": {
+        "error_type": "TimeoutError",
+        "http_status": null,
+        "error_message": "UF1 vượt trần thời gian xử lý (4.5s)."
+      },
+      "attempts": [
+        {
+          "model": "gemini-3.8-flash",
+          "start_s": 0.0003,
+          "status": "cancelled",
+          "elapsed_s": 4.5105
+        }
+      ],
+      "checks": {
+        "content_present": true,
+        "scope_present": false,
+        "is_complete": false,
+        "has_conflict": false
+      },
+      "result": {
+        "title": "Viết báo cáo 8 trang về khảo sát thói quen học tập của 30 sinh viên, gồm mục tiê",
+        "goal": null,
+        "time_constraint": null,
+        "clarification_issues": [],
+        "resolved_issue_keys": [],
+        "field_review_notes": {},
+        "content": "Viết báo cáo 8 trang về khảo sát thói quen học tập của 30 sinh viên, gồm mục tiêu, phương pháp, kết quả, 3 biểu đồ và kết luận; nộp một file PDF. Dữ liệu đã có trong bảng tính, không cần khảo sát thêm. Bắt đầu 12/11/2026 lúc 19:00. Rảnh ngày 12, 13 và 14/11/2026, mỗi ngày từ 19:00 đến 21:00. Hạn chót 15/11/2026 lúc 17:00 giờ Việt Nam. Chỉ dùng dữ liệu có sẵn, không đưa thông tin cá nhân vào báo cáo.",
+        "scope": null,
+        "free_time_slots": [],
+        "availability_update_mode": "merge",
+        "structured_free_windows": [],
+        "deadline": null,
+        "extra_requirements": [],
+        "is_complete": false,
+        "has_conflict": false,
+        "summary": "Đã ghi nhận công việc: 'Viết báo cáo 8 trang về khảo sát thói quen học tập của 30 sinh viên, gồm mục tiêu, phương pháp, kết quả, 3 biểu đồ và kết luận; nộp một file PDF. Dữ liệu đã có trong bảng tính, không cần khảo sát thêm. Bắt đầu 12/11/2026 lúc 19:00. Rảnh ngày 12, 13 và 14/11/2026, mỗi ngày từ 19:00 đến 21:00. Hạn chót 15/11/2026 lúc 17:00 giờ Việt Nam. Chỉ dùng dữ liệu có sẵn, không đưa thông tin cá nhân vào báo cáo.'. Mình cần bạn bổ sung/xác nhận thêm thông tin bên dưới để lên lịch chuẩn xác nhé.",
+        "clarification_questions": [
+          "Phạm vi hoặc kết quả đầu ra mong muốn của việc này là gì (ví dụ: số trang, số phần cần hoàn thiện)?",
+          "Bạn có những khung giờ rảnh cụ thể nào (từ mấy giờ đến mấy giờ) để mình sắp xếp các phiên tập trung?",
+          "Hạn chót (ngày và giờ) bạn cần hoàn thành xong công việc này là khi nào?"
+        ],
+        "generation_tier": "tier_3_rule_based"
+      }
+    },
+    {
+      "mode": "backup",
+      "case": "medium",
+      "repetition": 1,
+      "elapsed_s": 2.8705,
+      "status": "success",
+      "winner": "gemini-3.5-flash-lite",
+      "generation_tier": "tier_1_gemini",
+      "coordinator_error": null,
+      "attempts": [
+        {
+          "model": "gemini-3.5-flash-lite",
+          "start_s": 0.0001,
+          "status": "schema_valid",
+          "elapsed_s": 2.8702
+        }
+      ],
+      "checks": {
+        "content_present": true,
+        "scope_present": true,
+        "is_complete": true,
+        "has_conflict": false,
+        "start_at_preserved": true,
+        "time_constraint_end_preserved": true
+      },
+      "result": {
+        "title": "Viết báo cáo khảo sát thói quen học tập",
+        "goal": "Viết báo cáo 8 trang về khảo sát thói quen học tập của 30 sinh viên",
+        "time_constraint": {
+          "kind": "deadline",
+          "start_at": "2026-11-12T19:00:00+07:00",
+          "deadline_at": "2026-11-15T17:00:00+07:00",
+          "finish_by_at": null,
+          "input_timezone": "Asia/Ho_Chi_Minh"
+        },
+        "clarification_issues": [],
+        "resolved_issue_keys": [],
+        "field_review_notes": {},
+        "content": "Viết báo cáo 8 trang về khảo sát thói quen học tập của 30 sinh viên, gồm mục tiêu, phương pháp, kết quả, 3 biểu đồ và kết luận; nộp một file PDF.",
+        "scope": "8 trang, gồm mục tiêu, phương pháp, kết quả, 3 biểu đồ và kết luận, nộp file PDF",
+        "free_time_slots": [
+          "Ngày 12/11/2026 từ 19:00 đến 21:00",
+          "Ngày 13/11/2026 từ 19:00 đến 21:00",
+          "Ngày 14/11/2026 từ 19:00 đến 21:00"
+        ],
+        "availability_update_mode": "merge",
+        "structured_free_windows": [
+          {
+            "kind": "specific_date",
+            "weekday": null,
+            "date": "2026-11-12",
+            "start_local": "19:00",
+            "end_local": "21:00",
+            "raw_phrase": "Ngày 12/11/2026 từ 19:00 đến 21:00",
+            "is_ambiguous": false
+          },
+          {
+            "kind": "specific_date",
+            "weekday": null,
+            "date": "2026-11-13",
+            "start_local": "19:00",
+            "end_local": "21:00",
+            "raw_phrase": "Ngày 13/11/2026 từ 19:00 đến 21:00",
+            "is_ambiguous": false
+          },
+          {
+            "kind": "specific_date",
+            "weekday": null,
+            "date": "2026-11-14",
+            "start_local": "19:00",
+            "end_local": "21:00",
+            "raw_phrase": "Ngày 14/11/2026 từ 19:00 đến 21:00",
+            "is_ambiguous": false
+          }
+        ],
+        "deadline": "2026-11-15T17:00:00+07:00",
+        "extra_requirements": [
+          "Dữ liệu đã có trong bảng tính, không cần khảo sát thêm",
+          "Chỉ dùng dữ liệu có sẵn, không đưa thông tin cá nhân vào báo cáo"
+        ],
+        "is_complete": true,
+        "has_conflict": false,
+        "summary": "Bạn muốn viết báo cáo 8 trang dạng PDF về khảo sát thói quen học tập trong các khung giờ rảnh từ 19:00 đến 21:00 các ngày 12, 13, 14/11/2026, hạn chót vào 17:00 ngày 15/11/2026.",
+        "clarification_questions": [],
+        "generation_tier": "tier_1_gemini"
+      }
+    },
+    {
+      "mode": "groq",
+      "case": "medium",
+      "repetition": 1,
+      "elapsed_s": 2.3122,
+      "status": "success",
+      "winner": "qwen/qwen3.8-27b",
+      "generation_tier": "tier_2_groq",
+      "coordinator_error": null,
+      "attempts": [
+        {
+          "model": "qwen/qwen3.8-27b",
+          "start_s": 0.0039,
+          "status": "schema_valid",
+          "elapsed_s": 2.3081
+        }
+      ],
+      "checks": {
+        "content_present": true,
+        "scope_present": true,
+        "is_complete": true,
+        "has_conflict": false,
+        "start_at_preserved": true,
+        "time_constraint_end_preserved": true
+      },
+      "result": {
+        "title": "Báo cáo khảo sát thói quen học tập",
+        "goal": null,
+        "time_constraint": {
+          "kind": "deadline",
+          "start_at": "2026-11-12T19:00:00+07:00",
+          "deadline_at": "2026-11-15T17:00:00+07:00",
+          "finish_by_at": null,
+          "input_timezone": "Asia/Ho_Chi_Minh"
+        },
+        "clarification_issues": [],
+        "resolved_issue_keys": [],
+        "field_review_notes": {},
+        "content": "Viết báo cáo về khảo sát thói quen học tập của 30 sinh viên",
+        "scope": "8 trang, gồm mục tiêu, phương pháp, kết quả, 3 biểu đồ và kết luận; đầu ra là 1 file PDF",
+        "free_time_slots": [
+          "12/11/2026 từ 19:00 đến 21:00",
+          "13/11/2026 từ 19:00 đến 21:00",
+          "14/11/2026 từ 19:00 đến 21:00"
+        ],
+        "availability_update_mode": "merge",
+        "structured_free_windows": [
+          {
+            "kind": "specific_date",
+            "weekday": null,
+            "date": "2026-11-12",
+            "start_local": "19:00",
+            "end_local": "21:00",
+            "raw_phrase": "Rảnh ngày 12... từ 19:00 đến 21:00",
+            "is_ambiguous": false
+          },
+          {
+            "kind": "specific_date",
+            "weekday": null,
+            "date": "2026-11-13",
+            "start_local": "19:00",
+            "end_local": "21:00",
+            "raw_phrase": "Rảnh ngày 13... từ 19:00 đến 21:00",
+            "is_ambiguous": false
+          },
+          {
+            "kind": "specific_date",
+            "weekday": null,
+            "date": "2026-11-14",
+            "start_local": "19:00",
+            "end_local": "21:00",
+            "raw_phrase": "Rảnh ngày 14... từ 19:00 đến 21:00",
+            "is_ambiguous": false
+          }
+        ],
+        "deadline": "2026-11-15T17:00:00+07:00",
+        "extra_requirements": [
+          "Chỉ dùng dữ liệu có sẵn trong bảng tính",
+          "Không đưa thông tin cá nhân vào báo cáo"
+        ],
+        "is_complete": true,
+        "has_conflict": false,
+        "summary": "Bạn cần viết báo cáo 8 trang (PDF) về khảo sát thói quen học tập của 30 sinh viên. Bạn có 3 khung giờ rảnh (19:00-21:00) trong các ngày 12, 13 và 14/11. Hạn chót là 15/11 lúc 17:00. Dữ liệu đã có sẵn, không cần khảo sát thêm.",
+        "clarification_questions": [],
+        "generation_tier": "tier_2_groq"
+      }
+    },
+    {
+      "mode": "groq_secondary",
+      "case": "medium",
+      "repetition": 1,
+      "elapsed_s": 2.5079,
+      "status": "success",
+      "winner": "openai/gpt-oss-20b",
+      "generation_tier": "tier_2_groq",
+      "coordinator_error": null,
+      "attempts": [
+        {
+          "model": "openai/gpt-oss-20b",
+          "start_s": 0.0044,
+          "status": "schema_valid",
+          "elapsed_s": 2.5033
+        }
+      ],
+      "checks": {
+        "content_present": true,
+        "scope_present": true,
+        "is_complete": true,
+        "has_conflict": false,
+        "start_at_preserved": false,
+        "time_constraint_end_preserved": true
+      },
+      "result": {
+        "title": "Báo cáo khảo sát học tập",
+        "goal": "Viết báo cáo 8 trang",
+        "time_constraint": {
+          "kind": "deadline",
+          "start_at": null,
+          "deadline_at": "2026-11-15T17:00:00+07:00",
+          "finish_by_at": null,
+          "input_timezone": "Asia/Ho_Chi_Minh"
+        },
+        "clarification_issues": [],
+        "resolved_issue_keys": [],
+        "field_review_notes": {},
+        "content": "Viết báo cáo 8 trang về khảo sát thói quen học tập của 30 sinh viên, gồm mục tiêu, phương pháp, kết quả, 3 biểu đồ và kết luận; nộp một file PDF. Dữ liệu đã có trong bảng tính, không cần khảo sát thêm. Chỉ dùng dữ liệu có sẵn, không đưa thông tin cá nhân vào báo cáo.",
+        "scope": "8 trang báo cáo, 3 biểu đồ, file PDF",
+        "free_time_slots": [
+          "12/11/2026 19:00-21:00",
+          "13/11/2026 19:00-21:00",
+          "14/11/2026 19:00-21:00"
+        ],
+        "availability_update_mode": "merge",
+        "structured_free_windows": [
+          {
+            "kind": "specific_date",
+            "weekday": null,
+            "date": "2026-11-12",
+            "start_local": "19:00",
+            "end_local": "21:00",
+            "raw_phrase": "Rảnh ngày 12/11/2026 từ 19:00 đến 21:00",
+            "is_ambiguous": false
+          },
+          {
+            "kind": "specific_date",
+            "weekday": null,
+            "date": "2026-11-13",
+            "start_local": "19:00",
+            "end_local": "21:00",
+            "raw_phrase": "Rảnh ngày 13/11/2026 từ 19:00 đến 21:00",
+            "is_ambiguous": false
+          },
+          {
+            "kind": "specific_date",
+            "weekday": null,
+            "date": "2026-11-14",
+            "start_local": "19:00",
+            "end_local": "21:00",
+            "raw_phrase": "Rảnh ngày 14/11/2026 từ 19:00 đến 21:00",
+            "is_ambiguous": false
+          }
+        ],
+        "deadline": "2026-11-15T17:00:00+07:00",
+        "extra_requirements": [],
+        "is_complete": true,
+        "has_conflict": false,
+        "summary": "Viết báo cáo 8 trang về khảo sát thói quen học tập của 30 sinh viên, bao gồm mục tiêu, phương pháp, kết quả, 3 biểu đồ, và kết luận; nộp PDF. Dữ liệu đã có, không cần khảo sát thêm. Bắt đầu 12/11/2026 lúc 19:00, rảnh 12-14/11/2026 19:00-21:00, hạn chót 15/11/2026 lúc 17:00.",
+        "clarification_questions": [],
+        "generation_tier": "tier_2_groq"
+      }
+    },
+    {
+      "mode": "production",
+      "case": "medium",
+      "repetition": 1,
+      "elapsed_s": 4.5102,
+      "status": "timeout",
+      "winner": null,
+      "generation_tier": "tier_3_rule_based",
+      "coordinator_error": {
+        "error_type": "TimeoutError",
+        "http_status": null,
+        "error_message": "UF1 vượt trần thời gian xử lý (4.5s)."
+      },
+      "attempts": [
+        {
+          "model": "gemini-3.8-flash",
+          "start_s": 0.0002,
+          "status": "cancelled",
+          "elapsed_s": 4.5106
+        },
+        {
+          "model": "gemini-3.5-flash-lite",
+          "start_s": 2.62,
+          "status": "cancelled",
+          "elapsed_s": 1.8911
+        },
+        {
+          "model": "qwen/qwen3.8-27b",
+          "start_s": 3.512,
+          "status": "error",
+          "error_type": "RateLimitError",
+          "http_status": 429,
+          "error_message": "Error code: 429 - {'error': {'message': 'Rate limit reached for model `qwen/qwen3.8-27b` in organization `[REDACTED_ORG]` service tier `on_demand` on input tokens per minute (ITPM): Limit 7000, Used 4517, Requested 3411. Please try again in 7.954285714s. Need more tokens? Upgrade to Dev Tier today at https://console.groq.com/settings/billing', 'type': 'tokens', 'code': 'rate_limit_exceeded'}}",
+          "elapsed_s": 0.2749
+        },
+        {
+          "model": "openai/gpt-oss-20b",
+          "start_s": 3.787,
+          "status": "error",
+          "error_type": "RateLimitError",
+          "http_status": 429,
+          "error_message": "Error code: 429 - {'error': {'message': 'Rate limit reached for model `openai/gpt-oss-20b` in organization `[REDACTED_ORG]` service tier `on_demand` on tokens per minute (TPM): Limit 8000, Used 6295, Requested 3806. Please try again in 15.7575s. Need more tokens? Upgrade to Dev Tier today at https://console.groq.com/settings/billing', 'type': 'tokens', 'code': 'rate_limit_exceeded'}}",
+          "elapsed_s": 0.1563
+        }
+      ],
+      "checks": {
+        "content_present": true,
+        "scope_present": false,
+        "is_complete": false,
+        "has_conflict": false
+      },
+      "result": {
+        "title": "Viết báo cáo 8 trang về khảo sát thói quen học tập của 30 sinh viên, gồm mục tiê",
+        "goal": null,
+        "time_constraint": null,
+        "clarification_issues": [],
+        "resolved_issue_keys": [],
+        "field_review_notes": {},
+        "content": "Viết báo cáo 8 trang về khảo sát thói quen học tập của 30 sinh viên, gồm mục tiêu, phương pháp, kết quả, 3 biểu đồ và kết luận; nộp một file PDF. Dữ liệu đã có trong bảng tính, không cần khảo sát thêm. Bắt đầu 12/11/2026 lúc 19:00. Rảnh ngày 12, 13 và 14/11/2026, mỗi ngày từ 19:00 đến 21:00. Hạn chót 15/11/2026 lúc 17:00 giờ Việt Nam. Chỉ dùng dữ liệu có sẵn, không đưa thông tin cá nhân vào báo cáo.",
+        "scope": null,
+        "free_time_slots": [],
+        "availability_update_mode": "merge",
+        "structured_free_windows": [],
+        "deadline": null,
+        "extra_requirements": [],
+        "is_complete": false,
+        "has_conflict": false,
+        "summary": "Đã ghi nhận công việc: 'Viết báo cáo 8 trang về khảo sát thói quen học tập của 30 sinh viên, gồm mục tiêu, phương pháp, kết quả, 3 biểu đồ và kết luận; nộp một file PDF. Dữ liệu đã có trong bảng tính, không cần khảo sát thêm. Bắt đầu 12/11/2026 lúc 19:00. Rảnh ngày 12, 13 và 14/11/2026, mỗi ngày từ 19:00 đến 21:00. Hạn chót 15/11/2026 lúc 17:00 giờ Việt Nam. Chỉ dùng dữ liệu có sẵn, không đưa thông tin cá nhân vào báo cáo.'. Mình cần bạn bổ sung/xác nhận thêm thông tin bên dưới để lên lịch chuẩn xác nhé.",
+        "clarification_questions": [
+          "Phạm vi hoặc kết quả đầu ra mong muốn của việc này là gì (ví dụ: số trang, số phần cần hoàn thiện)?",
+          "Bạn có những khung giờ rảnh cụ thể nào (từ mấy giờ đến mấy giờ) để mình sắp xếp các phiên tập trung?",
+          "Hạn chót (ngày và giờ) bạn cần hoàn thành xong công việc này là khi nào?"
+        ],
+        "generation_tier": "tier_3_rule_based"
+      }
+    },
+    {
+      "mode": "primary",
+      "case": "large",
+      "repetition": 1,
+      "elapsed_s": 4.5102,
+      "status": "timeout",
+      "winner": null,
+      "generation_tier": "tier_3_rule_based",
+      "coordinator_error": {
+        "error_type": "TimeoutError",
+        "http_status": null,
+        "error_message": "UF1 vượt trần thời gian xử lý (4.5s)."
+      },
+      "attempts": [
+        {
+          "model": "gemini-3.8-flash",
+          "start_s": 0.0002,
+          "status": "cancelled",
+          "elapsed_s": 4.5104
+        }
+      ],
+      "checks": {
+        "content_present": true,
+        "scope_present": false,
+        "is_complete": false,
+        "has_conflict": false
+      },
+      "result": {
+        "title": "Hoàn thành nguyên mẫu ứng dụng quản lý thư viện cho đồ án nhóm 4 người. Phạm vi ",
+        "goal": null,
+        "time_constraint": null,
+        "clarification_issues": [],
+        "resolved_issue_keys": [],
+        "field_review_notes": {},
+        "content": "Hoàn thành nguyên mẫu ứng dụng quản lý thư viện cho đồ án nhóm 4 người. Phạm vi gồm đăng nhập, phân quyền thủ thư và độc giả, quản lý 500 đầu sách, tìm kiếm theo tên/tác giả, mượn trả, theo dõi quá hạn và báo cáo thống kê tháng. Đầu ra là mã nguồn backend FastAPI, frontend web, database PostgreSQL, tài liệu API, 30 ca kiểm thử chức năng, báo cáo PDF 25 trang, 15 slide và video demo 5 phút. Không triển khai thanh toán, không gửi email thật và không triển khai lên cloud. Thiết kế giao diện đã có; cần rà soát tính nhất quán giữa API và màn hình, dữ liệu demo không chứa thông tin người thật. Tôi phụ trách tích hợp và báo cáo; các thành viên khác đã cung cấp module đăng nhập và danh mục sách. Bắt đầu 12/11/2026 lúc 18:00, hạn chót 30/11/2026 lúc 17:00 giờ Việt Nam. Tôi rảnh thứ Hai, thứ Tư và thứ Sáu từ 18:00 đến 21:00, thứ Bảy từ 09:00 đến 12:00 và từ 14:00 đến 17:00 trong khoảng ngày 12 đến 29/11/2026. Giữ nguyên các lịch học đã có, không tự đổi lịch công việc khác. Ưu tiên demo chạy ổn định, sau đó kiểm thử, cuối cùng hoàn thiện tài liệu; chỉ ghi nhận yêu cầu ở bước này, chưa chia bước hoặc chốt lịch.",
+        "scope": null,
+        "free_time_slots": [],
+        "availability_update_mode": "merge",
+        "structured_free_windows": [],
+        "deadline": null,
+        "extra_requirements": [],
+        "is_complete": false,
+        "has_conflict": false,
+        "summary": "Đã ghi nhận công việc: 'Hoàn thành nguyên mẫu ứng dụng quản lý thư viện cho đồ án nhóm 4 người. Phạm vi gồm đăng nhập, phân quyền thủ thư và độc giả, quản lý 500 đầu sách, tìm kiếm theo tên/tác giả, mượn trả, theo dõi quá hạn và báo cáo thống kê tháng. Đầu ra là mã nguồn backend FastAPI, frontend web, database PostgreSQL, tài liệu API, 30 ca kiểm thử chức năng, báo cáo PDF 25 trang, 15 slide và video demo 5 phút. Không triển khai thanh toán, không gửi email thật và không triển khai lên cloud. Thiết kế giao diện đã có; cần rà soát tính nhất quán giữa API và màn hình, dữ liệu demo không chứa thông tin người thật. Tôi phụ trách tích hợp và báo cáo; các thành viên khác đã cung cấp module đăng nhập và danh mục sách. Bắt đầu 12/11/2026 lúc 18:00, hạn chót 30/11/2026 lúc 17:00 giờ Việt Nam. Tôi rảnh thứ Hai, thứ Tư và thứ Sáu từ 18:00 đến 21:00, thứ Bảy từ 09:00 đến 12:00 và từ 14:00 đến 17:00 trong khoảng ngày 12 đến 29/11/2026. Giữ nguyên các lịch học đã có, không tự đổi lịch công việc khác. Ưu tiên demo chạy ổn định, sau đó kiểm thử, cuối cùng hoàn thiện tài liệu; chỉ ghi nhận yêu cầu ở bước này, chưa chia bước hoặc chốt lịch.'. Mình cần bạn bổ sung/xác nhận thêm thông tin bên dưới để lên lịch chuẩn xác nhé.",
+        "clarification_questions": [
+          "Phạm vi hoặc kết quả đầu ra mong muốn của việc này là gì (ví dụ: số trang, số phần cần hoàn thiện)?",
+          "Bạn có những khung giờ rảnh cụ thể nào (từ mấy giờ đến mấy giờ) để mình sắp xếp các phiên tập trung?",
+          "Hạn chót (ngày và giờ) bạn cần hoàn thành xong công việc này là khi nào?"
+        ],
+        "generation_tier": "tier_3_rule_based"
+      }
+    },
+    {
+      "mode": "backup",
+      "case": "large",
+      "repetition": 1,
+      "elapsed_s": 3.5651,
+      "status": "success",
+      "winner": "gemini-3.5-flash-lite",
+      "generation_tier": "tier_1_gemini",
+      "coordinator_error": null,
+      "attempts": [
+        {
+          "model": "gemini-3.5-flash-lite",
+          "start_s": 0.0002,
+          "status": "schema_valid",
+          "elapsed_s": 3.5647
+        }
+      ],
+      "checks": {
+        "content_present": true,
+        "scope_present": true,
+        "is_complete": true,
+        "has_conflict": false,
+        "start_at_preserved": true,
+        "time_constraint_end_preserved": true
+      },
+      "result": {
+        "title": "Hoàn thành nguyên mẫu ứng dụng quản lý thư viện",
+        "goal": "Hoàn thành nguyên mẫu ứng dụng quản lý thư viện cho đồ án nhóm 4 người với các hạng mục tích hợp, kiểm thử và báo cáo",
+        "time_constraint": {
+          "kind": "deadline",
+          "start_at": "2026-11-12T18:00:00+07:00",
+          "deadline_at": "2026-11-30T17:00:00+07:00",
+          "finish_by_at": null,
+          "input_timezone": "Asia/Ho_Chi_Minh"
+        },
+        "clarification_issues": [],
+        "resolved_issue_keys": [],
+        "field_review_notes": {},
+        "content": "Tích hợp backend FastAPI, frontend web, database PostgreSQL, tài liệu API, 30 ca kiểm thử chức năng, báo cáo PDF 25 trang, 15 slide và video demo 5 phút",
+        "scope": "Mã nguồn backend FastAPI, frontend web, database PostgreSQL, tài liệu API, 30 ca kiểm thử chức năng, báo cáo PDF 25 trang, 15 slide và video demo 5 phút. Không triển khai thanh toán, không gửi email thật, không lên cloud.",
+        "free_time_slots": [
+          "Thứ Hai, Thứ Tư, Thứ Sáu từ 18:00 đến 21:00",
+          "Thứ Bảy từ 09:00 đến 12:00 và từ 14:00 đến 17:00 (12/11/2026 - 29/11/2026)"
+        ],
+        "availability_update_mode": "merge",
+        "structured_free_windows": [
+          {
+            "kind": "weekly_rule",
+            "weekday": 1,
+            "date": null,
+            "start_local": "18:00",
+            "end_local": "21:00",
+            "raw_phrase": "thứ Hai từ 18:00 đến 21:00",
+            "is_ambiguous": false
+          },
+          {
+            "kind": "weekly_rule",
+            "weekday": 3,
+            "date": null,
+            "start_local": "18:00",
+            "end_local": "21:00",
+            "raw_phrase": "thứ Tư từ 18:00 đến 21:00",
+            "is_ambiguous": false
+          },
+          {
+            "kind": "weekly_rule",
+            "weekday": 5,
+            "date": null,
+            "start_local": "18:00",
+            "end_local": "21:00",
+            "raw_phrase": "thứ Sáu từ 18:00 đến 21:00",
+            "is_ambiguous": false
+          },
+          {
+            "kind": "weekly_rule",
+            "weekday": 6,
+            "date": null,
+            "start_local": "09:00",
+            "end_local": "12:00",
+            "raw_phrase": "thứ Bảy từ 09:00 đến 12:00",
+            "is_ambiguous": false
+          },
+          {
+            "kind": "weekly_rule",
+            "weekday": 6,
+            "date": null,
+            "start_local": "14:00",
+            "end_local": "17:00",
+            "raw_phrase": "thứ Bảy từ 14:00 đến 17:00",
+            "is_ambiguous": false
+          }
+        ],
+        "deadline": "2026-11-30T17:00:00+07:00",
+        "extra_requirements": [
+          "Không triển khai thanh toán, không gửi email thật, không triển khai lên cloud",
+          "Rà soát tính nhất quán giữa API và màn hình",
+          "Dữ liệu demo không chứa thông tin người thật",
+          "Ưu tiên demo chạy ổn định, sau đó kiểm thử, cuối cùng hoàn thiện tài liệu"
+        ],
+        "is_complete": true,
+        "has_conflict": false,
+        "summary": "Đã ghi nhận công việc hoàn thành nguyên mẫu ứng dụng quản lý thư viện đồ án nhóm. Thời gian bắt đầu từ 12/11/2026 lúc 18:00 đến hạn chót 30/11/2026 lúc 17:00, với các khung giờ rảnh vào thứ Hai, Tư, Sáu (18:00-21:00) và thứ Bảy (09:00-12:00, 14:00-17:00).",
+        "clarification_questions": [],
+        "generation_tier": "tier_1_gemini"
+      }
+    },
+    {
+      "mode": "groq",
+      "case": "large",
+      "repetition": 1,
+      "elapsed_s": 0.322,
+      "status": "error",
+      "winner": null,
+      "generation_tier": "tier_3_rule_based",
+      "coordinator_error": {
+        "error_type": "RateLimitError",
+        "http_status": 429,
+        "error_message": "Error code: 429 - {'error': {'message': 'Rate limit reached for model `qwen/qwen3.8-27b` in organization `[REDACTED_ORG]` service tier `on_demand` on output tokens per minute (OTPM): Limit 1000, Used 505, Requested 612. Please try again in 7.02s. Need more tokens? Upgrade to Dev Tier today at https://console.groq.com/settings/billing', 'type': 'tokens', 'code': 'rate_limit_exceeded'}}"
+      },
+      "attempts": [
+        {
+          "model": "qwen/qwen3.8-27b",
+          "start_s": 0.0028,
+          "status": "error",
+          "error_type": "RateLimitError",
+          "http_status": 429,
+          "error_message": "Error code: 429 - {'error': {'message': 'Rate limit reached for model `qwen/qwen3.8-27b` in organization `[REDACTED_ORG]` service tier `on_demand` on output tokens per minute (OTPM): Limit 1000, Used 505, Requested 612. Please try again in 7.02s. Need more tokens? Upgrade to Dev Tier today at https://console.groq.com/settings/billing', 'type': 'tokens', 'code': 'rate_limit_exceeded'}}",
+          "elapsed_s": 0.3191
+        }
+      ],
+      "checks": {
+        "content_present": true,
+        "scope_present": false,
+        "is_complete": false,
+        "has_conflict": false
+      },
+      "result": {
+        "title": "Hoàn thành nguyên mẫu ứng dụng quản lý thư viện cho đồ án nhóm 4 người. Phạm vi ",
+        "goal": null,
+        "time_constraint": null,
+        "clarification_issues": [],
+        "resolved_issue_keys": [],
+        "field_review_notes": {},
+        "content": "Hoàn thành nguyên mẫu ứng dụng quản lý thư viện cho đồ án nhóm 4 người. Phạm vi gồm đăng nhập, phân quyền thủ thư và độc giả, quản lý 500 đầu sách, tìm kiếm theo tên/tác giả, mượn trả, theo dõi quá hạn và báo cáo thống kê tháng. Đầu ra là mã nguồn backend FastAPI, frontend web, database PostgreSQL, tài liệu API, 30 ca kiểm thử chức năng, báo cáo PDF 25 trang, 15 slide và video demo 5 phút. Không triển khai thanh toán, không gửi email thật và không triển khai lên cloud. Thiết kế giao diện đã có; cần rà soát tính nhất quán giữa API và màn hình, dữ liệu demo không chứa thông tin người thật. Tôi phụ trách tích hợp và báo cáo; các thành viên khác đã cung cấp module đăng nhập và danh mục sách. Bắt đầu 12/11/2026 lúc 18:00, hạn chót 30/11/2026 lúc 17:00 giờ Việt Nam. Tôi rảnh thứ Hai, thứ Tư và thứ Sáu từ 18:00 đến 21:00, thứ Bảy từ 09:00 đến 12:00 và từ 14:00 đến 17:00 trong khoảng ngày 12 đến 29/11/2026. Giữ nguyên các lịch học đã có, không tự đổi lịch công việc khác. Ưu tiên demo chạy ổn định, sau đó kiểm thử, cuối cùng hoàn thiện tài liệu; chỉ ghi nhận yêu cầu ở bước này, chưa chia bước hoặc chốt lịch.",
+        "scope": null,
+        "free_time_slots": [],
+        "availability_update_mode": "merge",
+        "structured_free_windows": [],
+        "deadline": null,
+        "extra_requirements": [],
+        "is_complete": false,
+        "has_conflict": false,
+        "summary": "Đã ghi nhận công việc: 'Hoàn thành nguyên mẫu ứng dụng quản lý thư viện cho đồ án nhóm 4 người. Phạm vi gồm đăng nhập, phân quyền thủ thư và độc giả, quản lý 500 đầu sách, tìm kiếm theo tên/tác giả, mượn trả, theo dõi quá hạn và báo cáo thống kê tháng. Đầu ra là mã nguồn backend FastAPI, frontend web, database PostgreSQL, tài liệu API, 30 ca kiểm thử chức năng, báo cáo PDF 25 trang, 15 slide và video demo 5 phút. Không triển khai thanh toán, không gửi email thật và không triển khai lên cloud. Thiết kế giao diện đã có; cần rà soát tính nhất quán giữa API và màn hình, dữ liệu demo không chứa thông tin người thật. Tôi phụ trách tích hợp và báo cáo; các thành viên khác đã cung cấp module đăng nhập và danh mục sách. Bắt đầu 12/11/2026 lúc 18:00, hạn chót 30/11/2026 lúc 17:00 giờ Việt Nam. Tôi rảnh thứ Hai, thứ Tư và thứ Sáu từ 18:00 đến 21:00, thứ Bảy từ 09:00 đến 12:00 và từ 14:00 đến 17:00 trong khoảng ngày 12 đến 29/11/2026. Giữ nguyên các lịch học đã có, không tự đổi lịch công việc khác. Ưu tiên demo chạy ổn định, sau đó kiểm thử, cuối cùng hoàn thiện tài liệu; chỉ ghi nhận yêu cầu ở bước này, chưa chia bước hoặc chốt lịch.'. Mình cần bạn bổ sung/xác nhận thêm thông tin bên dưới để lên lịch chuẩn xác nhé.",
+        "clarification_questions": [
+          "Phạm vi hoặc kết quả đầu ra mong muốn của việc này là gì (ví dụ: số trang, số phần cần hoàn thiện)?",
+          "Bạn có những khung giờ rảnh cụ thể nào (từ mấy giờ đến mấy giờ) để mình sắp xếp các phiên tập trung?",
+          "Hạn chót (ngày và giờ) bạn cần hoàn thành xong công việc này là khi nào?"
+        ],
+        "generation_tier": "tier_3_rule_based"
+      }
+    },
+    {
+      "mode": "groq_secondary",
+      "case": "large",
+      "repetition": 1,
+      "elapsed_s": 0.2738,
+      "status": "error",
+      "winner": null,
+      "generation_tier": "tier_3_rule_based",
+      "coordinator_error": {
+        "error_type": "RateLimitError",
+        "http_status": 429,
+        "error_message": "Error code: 429 - {'error': {'message': 'Rate limit reached for model `openai/gpt-oss-20b` in organization `[REDACTED_ORG]` service tier `on_demand` on tokens per minute (TPM): Limit 8000, Used 4797, Requested 4002. Please try again in 5.9925s. Need more tokens? Upgrade to Dev Tier today at https://console.groq.com/settings/billing', 'type': 'tokens', 'code': 'rate_limit_exceeded'}}"
+      },
+      "attempts": [
+        {
+          "model": "openai/gpt-oss-20b",
+          "start_s": 0.0025,
+          "status": "error",
+          "error_type": "RateLimitError",
+          "http_status": 429,
+          "error_message": "Error code: 429 - {'error': {'message': 'Rate limit reached for model `openai/gpt-oss-20b` in organization `[REDACTED_ORG]` service tier `on_demand` on tokens per minute (TPM): Limit 8000, Used 4797, Requested 4002. Please try again in 5.9925s. Need more tokens? Upgrade to Dev Tier today at https://console.groq.com/settings/billing', 'type': 'tokens', 'code': 'rate_limit_exceeded'}}",
+          "elapsed_s": 0.2711
+        }
+      ],
+      "checks": {
+        "content_present": true,
+        "scope_present": false,
+        "is_complete": false,
+        "has_conflict": false
+      },
+      "result": {
+        "title": "Hoàn thành nguyên mẫu ứng dụng quản lý thư viện cho đồ án nhóm 4 người. Phạm vi ",
+        "goal": null,
+        "time_constraint": null,
+        "clarification_issues": [],
+        "resolved_issue_keys": [],
+        "field_review_notes": {},
+        "content": "Hoàn thành nguyên mẫu ứng dụng quản lý thư viện cho đồ án nhóm 4 người. Phạm vi gồm đăng nhập, phân quyền thủ thư và độc giả, quản lý 500 đầu sách, tìm kiếm theo tên/tác giả, mượn trả, theo dõi quá hạn và báo cáo thống kê tháng. Đầu ra là mã nguồn backend FastAPI, frontend web, database PostgreSQL, tài liệu API, 30 ca kiểm thử chức năng, báo cáo PDF 25 trang, 15 slide và video demo 5 phút. Không triển khai thanh toán, không gửi email thật và không triển khai lên cloud. Thiết kế giao diện đã có; cần rà soát tính nhất quán giữa API và màn hình, dữ liệu demo không chứa thông tin người thật. Tôi phụ trách tích hợp và báo cáo; các thành viên khác đã cung cấp module đăng nhập và danh mục sách. Bắt đầu 12/11/2026 lúc 18:00, hạn chót 30/11/2026 lúc 17:00 giờ Việt Nam. Tôi rảnh thứ Hai, thứ Tư và thứ Sáu từ 18:00 đến 21:00, thứ Bảy từ 09:00 đến 12:00 và từ 14:00 đến 17:00 trong khoảng ngày 12 đến 29/11/2026. Giữ nguyên các lịch học đã có, không tự đổi lịch công việc khác. Ưu tiên demo chạy ổn định, sau đó kiểm thử, cuối cùng hoàn thiện tài liệu; chỉ ghi nhận yêu cầu ở bước này, chưa chia bước hoặc chốt lịch.",
+        "scope": null,
+        "free_time_slots": [],
+        "availability_update_mode": "merge",
+        "structured_free_windows": [],
+        "deadline": null,
+        "extra_requirements": [],
+        "is_complete": false,
+        "has_conflict": false,
+        "summary": "Đã ghi nhận công việc: 'Hoàn thành nguyên mẫu ứng dụng quản lý thư viện cho đồ án nhóm 4 người. Phạm vi gồm đăng nhập, phân quyền thủ thư và độc giả, quản lý 500 đầu sách, tìm kiếm theo tên/tác giả, mượn trả, theo dõi quá hạn và báo cáo thống kê tháng. Đầu ra là mã nguồn backend FastAPI, frontend web, database PostgreSQL, tài liệu API, 30 ca kiểm thử chức năng, báo cáo PDF 25 trang, 15 slide và video demo 5 phút. Không triển khai thanh toán, không gửi email thật và không triển khai lên cloud. Thiết kế giao diện đã có; cần rà soát tính nhất quán giữa API và màn hình, dữ liệu demo không chứa thông tin người thật. Tôi phụ trách tích hợp và báo cáo; các thành viên khác đã cung cấp module đăng nhập và danh mục sách. Bắt đầu 12/11/2026 lúc 18:00, hạn chót 30/11/2026 lúc 17:00 giờ Việt Nam. Tôi rảnh thứ Hai, thứ Tư và thứ Sáu từ 18:00 đến 21:00, thứ Bảy từ 09:00 đến 12:00 và từ 14:00 đến 17:00 trong khoảng ngày 12 đến 29/11/2026. Giữ nguyên các lịch học đã có, không tự đổi lịch công việc khác. Ưu tiên demo chạy ổn định, sau đó kiểm thử, cuối cùng hoàn thiện tài liệu; chỉ ghi nhận yêu cầu ở bước này, chưa chia bước hoặc chốt lịch.'. Mình cần bạn bổ sung/xác nhận thêm thông tin bên dưới để lên lịch chuẩn xác nhé.",
+        "clarification_questions": [
+          "Phạm vi hoặc kết quả đầu ra mong muốn của việc này là gì (ví dụ: số trang, số phần cần hoàn thiện)?",
+          "Bạn có những khung giờ rảnh cụ thể nào (từ mấy giờ đến mấy giờ) để mình sắp xếp các phiên tập trung?",
+          "Hạn chót (ngày và giờ) bạn cần hoàn thành xong công việc này là khi nào?"
+        ],
+        "generation_tier": "tier_3_rule_based"
+      }
+    },
+    {
+      "mode": "production",
+      "case": "large",
+      "repetition": 1,
+      "elapsed_s": 4.5003,
+      "status": "timeout",
+      "winner": null,
+      "generation_tier": "tier_3_rule_based",
+      "coordinator_error": {
+        "error_type": "TimeoutError",
+        "http_status": null,
+        "error_message": "UF1 vượt trần thời gian xử lý (4.5s)."
+      },
+      "attempts": [
+        {
+          "model": "gemini-3.8-flash",
+          "start_s": 0.0002,
+          "status": "cancelled",
+          "elapsed_s": 4.5007
+        },
+        {
+          "model": "gemini-3.5-flash-lite",
+          "start_s": 2.6001,
+          "status": "cancelled",
+          "elapsed_s": 1.901
+        },
+        {
+          "model": "qwen/qwen3.8-27b",
+          "start_s": 3.493,
+          "status": "error",
+          "error_type": "RateLimitError",
+          "http_status": 429,
+          "error_message": "Error code: 429 - {'error': {'message': 'Rate limit reached for model `qwen/qwen3.8-27b` in organization `[REDACTED_ORG]` service tier `on_demand` on output tokens per minute (OTPM): Limit 1000, Used 420, Requested 612. Please try again in 1.92s. Need more tokens? Upgrade to Dev Tier today at https://console.groq.com/settings/billing', 'type': 'tokens', 'code': 'rate_limit_exceeded'}}",
+          "elapsed_s": 0.3195
+        },
+        {
+          "model": "openai/gpt-oss-20b",
+          "start_s": 3.8125,
+          "status": "error",
+          "error_type": "RateLimitError",
+          "http_status": 429,
+          "error_message": "Error code: 429 - {'error': {'message': 'Rate limit reached for model `openai/gpt-oss-20b` in organization `[REDACTED_ORG]` service tier `on_demand` on tokens per minute (TPM): Limit 8000, Used 4179, Requested 4080. Please try again in 1.9425s. Need more tokens? Upgrade to Dev Tier today at https://console.groq.com/settings/billing', 'type': 'tokens', 'code': 'rate_limit_exceeded'}}",
+          "elapsed_s": 0.1975
+        }
+      ],
+      "checks": {
+        "content_present": true,
+        "scope_present": false,
+        "is_complete": false,
+        "has_conflict": false
+      },
+      "result": {
+        "title": "Hoàn thành nguyên mẫu ứng dụng quản lý thư viện cho đồ án nhóm 4 người. Phạm vi ",
+        "goal": null,
+        "time_constraint": null,
+        "clarification_issues": [],
+        "resolved_issue_keys": [],
+        "field_review_notes": {},
+        "content": "Hoàn thành nguyên mẫu ứng dụng quản lý thư viện cho đồ án nhóm 4 người. Phạm vi gồm đăng nhập, phân quyền thủ thư và độc giả, quản lý 500 đầu sách, tìm kiếm theo tên/tác giả, mượn trả, theo dõi quá hạn và báo cáo thống kê tháng. Đầu ra là mã nguồn backend FastAPI, frontend web, database PostgreSQL, tài liệu API, 30 ca kiểm thử chức năng, báo cáo PDF 25 trang, 15 slide và video demo 5 phút. Không triển khai thanh toán, không gửi email thật và không triển khai lên cloud. Thiết kế giao diện đã có; cần rà soát tính nhất quán giữa API và màn hình, dữ liệu demo không chứa thông tin người thật. Tôi phụ trách tích hợp và báo cáo; các thành viên khác đã cung cấp module đăng nhập và danh mục sách. Bắt đầu 12/11/2026 lúc 18:00, hạn chót 30/11/2026 lúc 17:00 giờ Việt Nam. Tôi rảnh thứ Hai, thứ Tư và thứ Sáu từ 18:00 đến 21:00, thứ Bảy từ 09:00 đến 12:00 và từ 14:00 đến 17:00 trong khoảng ngày 12 đến 29/11/2026. Giữ nguyên các lịch học đã có, không tự đổi lịch công việc khác. Ưu tiên demo chạy ổn định, sau đó kiểm thử, cuối cùng hoàn thiện tài liệu; chỉ ghi nhận yêu cầu ở bước này, chưa chia bước hoặc chốt lịch.",
+        "scope": null,
+        "free_time_slots": [],
+        "availability_update_mode": "merge",
+        "structured_free_windows": [],
+        "deadline": null,
+        "extra_requirements": [],
+        "is_complete": false,
+        "has_conflict": false,
+        "summary": "Đã ghi nhận công việc: 'Hoàn thành nguyên mẫu ứng dụng quản lý thư viện cho đồ án nhóm 4 người. Phạm vi gồm đăng nhập, phân quyền thủ thư và độc giả, quản lý 500 đầu sách, tìm kiếm theo tên/tác giả, mượn trả, theo dõi quá hạn và báo cáo thống kê tháng. Đầu ra là mã nguồn backend FastAPI, frontend web, database PostgreSQL, tài liệu API, 30 ca kiểm thử chức năng, báo cáo PDF 25 trang, 15 slide và video demo 5 phút. Không triển khai thanh toán, không gửi email thật và không triển khai lên cloud. Thiết kế giao diện đã có; cần rà soát tính nhất quán giữa API và màn hình, dữ liệu demo không chứa thông tin người thật. Tôi phụ trách tích hợp và báo cáo; các thành viên khác đã cung cấp module đăng nhập và danh mục sách. Bắt đầu 12/11/2026 lúc 18:00, hạn chót 30/11/2026 lúc 17:00 giờ Việt Nam. Tôi rảnh thứ Hai, thứ Tư và thứ Sáu từ 18:00 đến 21:00, thứ Bảy từ 09:00 đến 12:00 và từ 14:00 đến 17:00 trong khoảng ngày 12 đến 29/11/2026. Giữ nguyên các lịch học đã có, không tự đổi lịch công việc khác. Ưu tiên demo chạy ổn định, sau đó kiểm thử, cuối cùng hoàn thiện tài liệu; chỉ ghi nhận yêu cầu ở bước này, chưa chia bước hoặc chốt lịch.'. Mình cần bạn bổ sung/xác nhận thêm thông tin bên dưới để lên lịch chuẩn xác nhé.",
+        "clarification_questions": [
+          "Phạm vi hoặc kết quả đầu ra mong muốn của việc này là gì (ví dụ: số trang, số phần cần hoàn thiện)?",
+          "Bạn có những khung giờ rảnh cụ thể nào (từ mấy giờ đến mấy giờ) để mình sắp xếp các phiên tập trung?",
+          "Hạn chót (ngày và giờ) bạn cần hoàn thành xong công việc này là khi nào?"
+        ],
+        "generation_tier": "tier_3_rule_based"
+      }
+    },
+    {
+      "mode": "primary",
+      "case": "missing_fields",
+      "repetition": 1,
+      "elapsed_s": 4.5097,
+      "status": "timeout",
+      "winner": null,
+      "generation_tier": "tier_3_rule_based",
+      "coordinator_error": {
+        "error_type": "TimeoutError",
+        "http_status": null,
+        "error_message": "UF1 vượt trần thời gian xử lý (4.5s)."
+      },
+      "attempts": [
+        {
+          "model": "gemini-3.8-flash",
+          "start_s": 0.0002,
+          "status": "cancelled",
+          "elapsed_s": 4.5105
+        }
+      ],
+      "checks": {
+        "content_present": true,
+        "scope_present": false,
+        "is_complete": false,
+        "has_conflict": false,
+        "missing_fields_not_invented": true
+      },
+      "result": {
+        "title": "Mình muốn viết báo cáo 2 trang gồm kết quả và kết luận.",
+        "goal": null,
+        "time_constraint": null,
+        "clarification_issues": [],
+        "resolved_issue_keys": [],
+        "field_review_notes": {},
+        "content": "Mình muốn viết báo cáo 2 trang gồm kết quả và kết luận.",
+        "scope": null,
+        "free_time_slots": [],
+        "availability_update_mode": "merge",
+        "structured_free_windows": [],
+        "deadline": null,
+        "extra_requirements": [],
+        "is_complete": false,
+        "has_conflict": false,
+        "summary": "Đã ghi nhận công việc: 'Mình muốn viết báo cáo 2 trang gồm kết quả và kết luận.'. Mình cần bạn bổ sung/xác nhận thêm thông tin bên dưới để lên lịch chuẩn xác nhé.",
+        "clarification_questions": [
+          "Phạm vi hoặc kết quả đầu ra mong muốn của việc này là gì (ví dụ: số trang, số phần cần hoàn thiện)?",
+          "Bạn có những khung giờ rảnh cụ thể nào (từ mấy giờ đến mấy giờ) để mình sắp xếp các phiên tập trung?",
+          "Hạn chót (ngày và giờ) bạn cần hoàn thành xong công việc này là khi nào?"
+        ],
+        "generation_tier": "tier_3_rule_based"
+      }
+    },
+    {
+      "mode": "backup",
+      "case": "missing_fields",
+      "repetition": 1,
+      "elapsed_s": 1.7104,
+      "status": "success",
+      "winner": "gemini-3.5-flash-lite",
+      "generation_tier": "tier_1_gemini",
+      "coordinator_error": null,
+      "attempts": [
+        {
+          "model": "gemini-3.5-flash-lite",
+          "start_s": 0.0001,
+          "status": "schema_valid",
+          "elapsed_s": 1.7102
+        }
+      ],
+      "checks": {
+        "content_present": true,
+        "scope_present": true,
+        "is_complete": false,
+        "has_conflict": false,
+        "missing_fields_not_invented": true
+      },
+      "result": {
+        "title": "Viết báo cáo",
+        "goal": null,
+        "time_constraint": null,
+        "clarification_issues": [
+          {
+            "code": "MISSING_AVAILABILITY",
+            "field_path": "availability",
+            "message": "Thiếu thông tin khung giờ rảnh",
+            "question": "Bạn muốn dành khung giờ nào để làm báo cáo này?",
+            "blocking": true
+          },
+          {
+            "code": "MISSING_DEADLINE",
+            "field_path": "deadline",
+            "message": "Thiếu thời hạn hoàn thành",
+            "question": "Bạn cần hoàn thành báo cáo này trước mốc thời gian nào?",
+            "blocking": true
+          }
+        ],
+        "resolved_issue_keys": [],
+        "field_review_notes": {},
+        "content": "Viết báo cáo",
+        "scope": "2 trang gồm kết quả và kết luận",
+        "free_time_slots": [],
+        "availability_update_mode": "merge",
+        "structured_free_windows": [],
+        "deadline": null,
+        "extra_requirements": [],
+        "is_complete": false,
+        "has_conflict": false,
+        "summary": "Bạn muốn viết báo cáo dài 2 trang chỉ gồm kết quả và kết luận. Hiện tại chúng ta cần xác định thêm thời gian rảnh và hạn chót để lên lịch nhé.",
+        "clarification_questions": [
+          "Bạn muốn dành khung giờ nào để làm báo cáo này?",
+          "Bạn cần hoàn thành báo cáo này trước mốc thời gian nào?"
+        ],
+        "generation_tier": "tier_1_gemini"
+      }
+    },
+    {
+      "mode": "groq",
+      "case": "missing_fields",
+      "repetition": 1,
+      "elapsed_s": 1.6755,
+      "status": "success",
+      "winner": "qwen/qwen3.8-27b",
+      "generation_tier": "tier_2_groq",
+      "coordinator_error": null,
+      "attempts": [
+        {
+          "model": "qwen/qwen3.8-27b",
+          "start_s": 0.0033,
+          "status": "schema_valid",
+          "elapsed_s": 1.672
+        }
+      ],
+      "checks": {
+        "content_present": true,
+        "scope_present": true,
+        "is_complete": false,
+        "has_conflict": false,
+        "missing_fields_not_invented": true
+      },
+      "result": {
+        "title": "Viết báo cáo 2 trang",
+        "goal": null,
+        "time_constraint": null,
+        "clarification_issues": [
+          {
+            "code": "MISSING_FREE_WINDOWS",
+            "field_path": "availability",
+            "message": "Chưa có thông tin về khung giờ rảnh để lên kế hoạch thực hiện công việc.",
+            "question": "Bạn dự kiến sẽ làm báo cáo này vào những khung giờ nào? (Ví dụ: Tối nay từ 19:00 đến 21:00, hoặc sáng mai từ 08:00 đến 10:00)",
+            "blocking": true
+          },
+          {
+            "code": "MISSING_DEADLINE",
+            "field_path": "deadline",
+            "message": "Chưa có thông tin về hạn chót hoàn thành báo cáo.",
+            "question": "Bạn cần hoàn thành báo cáo này trước thời điểm nào? (Ví dụ: 17:00 ngày mai, hoặc 23:59 cuối tuần này)",
+            "blocking": true
+          }
+        ],
+        "resolved_issue_keys": [],
+        "field_review_notes": {},
+        "content": "Viết báo cáo",
+        "scope": "2 trang, bao gồm phần kết quả và kết luận",
+        "free_time_slots": [],
+        "availability_update_mode": "merge",
+        "structured_free_windows": [],
+        "deadline": null,
+        "extra_requirements": [],
+        "is_complete": false,
+        "has_conflict": false,
+        "summary": "Mình đã ghi nhận bạn muốn viết báo cáo 2 trang gồm kết quả và kết luận. Để lên kế hoạch chi tiết, mình cần biết thêm khung giờ rảnh bạn dự kiến làm việc và hạn chót cần hoàn thành.",
+        "clarification_questions": [
+          "Bạn dự kiến sẽ làm báo cáo này vào những khung giờ nào? (Ví dụ: Tối nay từ 19:00 đến 21:00, hoặc sáng mai từ 08:00 đến 10:00)",
+          "Bạn cần hoàn thành báo cáo này trước thời điểm nào? (Ví dụ: 17:00 ngày mai, hoặc 23:59 cuối tuần này)"
+        ],
+        "generation_tier": "tier_2_groq"
+      }
+    },
+    {
+      "mode": "groq_secondary",
+      "case": "missing_fields",
+      "repetition": 1,
+      "elapsed_s": 2.3785,
+      "status": "success",
+      "winner": "openai/gpt-oss-20b",
+      "generation_tier": "tier_2_groq",
+      "coordinator_error": null,
+      "attempts": [
+        {
+          "model": "openai/gpt-oss-20b",
+          "start_s": 0.0031,
+          "status": "schema_valid",
+          "elapsed_s": 2.3752
+        }
+      ],
+      "checks": {
+        "content_present": true,
+        "scope_present": true,
+        "is_complete": false,
+        "has_conflict": false,
+        "missing_fields_not_invented": true
+      },
+      "result": {
+        "title": null,
+        "goal": null,
+        "time_constraint": null,
+        "clarification_issues": [
+          {
+            "code": "AVAILABILITY_REQUIRED",
+            "field_path": "availability",
+            "message": "Không có thông tin khung giờ rảnh.",
+            "question": "Bạn có thể cho biết thời gian rảnh để làm việc và hạn chót hoàn thành báo cáo không?",
+            "blocking": true
+          },
+          {
+            "code": "DEADLINE_REQUIRED",
+            "field_path": "deadline",
+            "message": "Không có hạn chót hoàn thành.",
+            "question": "Bạn có thể cho biết thời gian rảnh để làm việc và hạn chót hoàn thành báo cáo không?",
+            "blocking": true
+          }
+        ],
+        "resolved_issue_keys": [],
+        "field_review_notes": {},
+        "content": "Viết báo cáo 2 trang gồm kết quả và kết luận.",
+        "scope": "2 trang",
+        "free_time_slots": [],
+        "availability_update_mode": "merge",
+        "structured_free_windows": [],
+        "deadline": null,
+        "extra_requirements": [],
+        "is_complete": false,
+        "has_conflict": false,
+        "summary": "Viết báo cáo 2 trang gồm kết quả và kết luận.",
+        "clarification_questions": [
+          "Bạn có thể cho biết thời gian rảnh để làm việc và hạn chót hoàn thành báo cáo không?"
+        ],
+        "generation_tier": "tier_2_groq"
+      }
+    },
+    {
+      "mode": "production",
+      "case": "missing_fields",
+      "repetition": 1,
+      "elapsed_s": 4.4187,
+      "status": "success",
+      "winner": "gemini-3.5-flash-lite",
+      "generation_tier": "tier_1_gemini",
+      "coordinator_error": null,
+      "attempts": [
+        {
+          "model": "gemini-3.8-flash",
+          "start_s": 0.0002,
+          "status": "cancelled",
+          "elapsed_s": 4.4187
+        },
+        {
+          "model": "gemini-3.5-flash-lite",
+          "start_s": 2.6056,
+          "status": "schema_valid",
+          "elapsed_s": 1.813
+        },
+        {
+          "model": "qwen/qwen3.8-27b",
+          "start_s": 3.5033,
+          "status": "error",
+          "error_type": "RateLimitError",
+          "http_status": 429,
+          "error_message": "Error code: 429 - {'error': {'message': 'Rate limit reached for model `qwen/qwen3.8-27b` in organization `[REDACTED_ORG]` service tier `on_demand` on output tokens per minute (OTPM): Limit 1000, Used 648, Requested 834. Please try again in 28.92s. Need more tokens? Upgrade to Dev Tier today at https://console.groq.com/settings/billing', 'type': 'tokens', 'code': 'rate_limit_exceeded'}}",
+          "elapsed_s": 0.2733
+        },
+        {
+          "model": "openai/gpt-oss-20b",
+          "start_s": 3.7767,
+          "status": "error",
+          "error_type": "RateLimitError",
+          "http_status": 429,
+          "error_message": "Error code: 429 - {'error': {'message': 'Rate limit reached for model `openai/gpt-oss-20b` in organization `[REDACTED_ORG]` service tier `on_demand` on tokens per minute (TPM): Limit 8000, Used 6930, Requested 5017. Please try again in 29.6025s. Need more tokens? Upgrade to Dev Tier today at https://console.groq.com/settings/billing', 'type': 'tokens', 'code': 'rate_limit_exceeded'}}",
+          "elapsed_s": 0.158
+        }
+      ],
+      "checks": {
+        "content_present": true,
+        "scope_present": true,
+        "is_complete": false,
+        "has_conflict": false,
+        "missing_fields_not_invented": true
+      },
+      "result": {
+        "title": "Viết báo cáo",
+        "goal": null,
+        "time_constraint": null,
+        "clarification_issues": [
+          {
+            "code": "MISSING_AVAILABILITY",
+            "field_path": "availability",
+            "message": "Chưa có thông tin về khung giờ rảnh",
+            "question": "Bạn dự định dành khung giờ nào để làm báo cáo này?",
+            "blocking": true
+          },
+          {
+            "code": "MISSING_DEADLINE",
+            "field_path": "deadline",
+            "message": "Chưa có thời hạn hoàn thành (deadline)",
+            "question": "Bạn muốn hoàn thành báo cáo này trước thời gian nào?",
+            "blocking": true
+          }
+        ],
+        "resolved_issue_keys": [],
+        "field_review_notes": {},
+        "content": "Viết báo cáo",
+        "scope": "2 trang gồm kết quả và kết luận",
+        "free_time_slots": [],
+        "availability_update_mode": "merge",
+        "structured_free_windows": [],
+        "deadline": null,
+        "extra_requirements": [],
+        "is_complete": false,
+        "has_conflict": false,
+        "summary": "Bạn muốn viết báo cáo 2 trang gồm kết quả và kết luận, nhưng hiện chưa có thời gian rảnh và hạn chót.",
+        "clarification_questions": [
+          "Bạn dự định dành khung giờ nào để làm báo cáo này?",
+          "Bạn muốn hoàn thành báo cáo này trước thời gian nào?"
+        ],
+        "generation_tier": "tier_1_gemini"
+      }
+    },
+    {
+      "mode": "backup",
+      "case": "small",
+      "repetition": 2,
+      "elapsed_s": 1.7984,
+      "status": "success",
+      "winner": "gemini-3.5-flash-lite",
+      "generation_tier": "tier_1_gemini",
+      "coordinator_error": null,
+      "attempts": [
+        {
+          "model": "gemini-3.5-flash-lite",
+          "start_s": 0.0003,
+          "status": "schema_valid",
+          "elapsed_s": 1.798
+        }
+      ],
+      "checks": {
+        "content_present": true,
+        "scope_present": true,
+        "is_complete": true,
+        "has_conflict": false,
+        "start_at_preserved": false,
+        "time_constraint_end_preserved": true
+      },
+      "result": {
+        "title": "Sắp xếp tài liệu PDF",
+        "goal": null,
+        "time_constraint": {
+          "kind": "deadline",
+          "start_at": null,
+          "deadline_at": "2026-11-12T21:00:00+07:00",
+          "finish_by_at": null,
+          "input_timezone": "Asia/Ho_Chi_Minh"
+        },
+        "clarification_issues": [],
+        "resolved_issue_keys": [],
+        "field_review_notes": {},
+        "content": "Sắp xếp 20 tài liệu PDF vào 3 thư mục môn học và đổi tên theo môn-ngày",
+        "scope": "20 tài liệu PDF vào 3 thư mục môn học và đổi tên theo môn-ngày",
+        "free_time_slots": [
+          "Ngày 12/11/2026 từ 19:00 đến 20:00"
+        ],
+        "availability_update_mode": "merge",
+        "structured_free_windows": [
+          {
+            "kind": "specific_date",
+            "weekday": null,
+            "date": "2026-11-12",
+            "start_local": "19:00",
+            "end_local": "20:00",
+            "raw_phrase": "19:00-20:00 ngày 12/11/2026",
+            "is_ambiguous": false
+          }
+        ],
+        "deadline": "2026-11-12T21:00:00+07:00",
+        "extra_requirements": [],
+        "is_complete": true,
+        "has_conflict": false,
+        "summary": "Sắp xếp 20 tài liệu PDF vào 3 thư mục môn học và đổi tên theo môn-ngày. Thời gian rảnh: ngày 12/11/2026 từ 19:00 đến 20:00. Hạn chót: 12/11/2026 lúc 21:00.",
+        "clarification_questions": [],
+        "generation_tier": "tier_1_gemini"
+      }
+    },
+    {
+      "mode": "groq",
+      "case": "small",
+      "repetition": 2,
+      "elapsed_s": 0.3073,
+      "status": "error",
+      "winner": null,
+      "generation_tier": "tier_3_rule_based",
+      "coordinator_error": {
+        "error_type": "RateLimitError",
+        "http_status": 429,
+        "error_message": "Error code: 429 - {'error': {'message': 'Rate limit reached for model `qwen/qwen3.8-27b` in organization `[REDACTED_ORG]` service tier `on_demand` on output tokens per minute (OTPM): Limit 1000, Used 585, Requested 518. Please try again in 6.18s. Need more tokens? Upgrade to Dev Tier today at https://console.groq.com/settings/billing', 'type': 'tokens', 'code': 'rate_limit_exceeded'}}"
+      },
+      "attempts": [
+        {
+          "model": "qwen/qwen3.8-27b",
+          "start_s": 0.0031,
+          "status": "error",
+          "error_type": "RateLimitError",
+          "http_status": 429,
+          "error_message": "Error code: 429 - {'error': {'message': 'Rate limit reached for model `qwen/qwen3.8-27b` in organization `[REDACTED_ORG]` service tier `on_demand` on output tokens per minute (OTPM): Limit 1000, Used 585, Requested 518. Please try again in 6.18s. Need more tokens? Upgrade to Dev Tier today at https://console.groq.com/settings/billing', 'type': 'tokens', 'code': 'rate_limit_exceeded'}}",
+          "elapsed_s": 0.3042
+        }
+      ],
+      "checks": {
+        "content_present": true,
+        "scope_present": false,
+        "is_complete": false,
+        "has_conflict": false
+      },
+      "result": {
+        "title": "Sắp xếp 20 tài liệu PDF vào 3 thư mục môn học và đổi tên theo môn-ngày. Bắt đầu ",
+        "goal": null,
+        "time_constraint": null,
+        "clarification_issues": [],
+        "resolved_issue_keys": [],
+        "field_review_notes": {},
+        "content": "Sắp xếp 20 tài liệu PDF vào 3 thư mục môn học và đổi tên theo môn-ngày. Bắt đầu ngày 12/11/2026 lúc 19:00, rảnh 19:00-20:00 ngày đó. Hạn chót 12/11/2026 lúc 21:00, giờ Việt Nam.",
+        "scope": null,
+        "free_time_slots": [],
+        "availability_update_mode": "merge",
+        "structured_free_windows": [],
+        "deadline": null,
+        "extra_requirements": [],
+        "is_complete": false,
+        "has_conflict": false,
+        "summary": "Đã ghi nhận công việc: 'Sắp xếp 20 tài liệu PDF vào 3 thư mục môn học và đổi tên theo môn-ngày. Bắt đầu ngày 12/11/2026 lúc 19:00, rảnh 19:00-20:00 ngày đó. Hạn chót 12/11/2026 lúc 21:00, giờ Việt Nam.'. Mình cần bạn bổ sung/xác nhận thêm thông tin bên dưới để lên lịch chuẩn xác nhé.",
+        "clarification_questions": [
+          "Phạm vi hoặc kết quả đầu ra mong muốn của việc này là gì (ví dụ: số trang, số phần cần hoàn thiện)?",
+          "Bạn có những khung giờ rảnh cụ thể nào (từ mấy giờ đến mấy giờ) để mình sắp xếp các phiên tập trung?",
+          "Hạn chót (ngày và giờ) bạn cần hoàn thành xong công việc này là khi nào?"
+        ],
+        "generation_tier": "tier_3_rule_based"
+      }
+    },
+    {
+      "mode": "groq_secondary",
+      "case": "small",
+      "repetition": 2,
+      "elapsed_s": 0.2723,
+      "status": "error",
+      "winner": null,
+      "generation_tier": "tier_3_rule_based",
+      "coordinator_error": {
+        "error_type": "RateLimitError",
+        "http_status": 429,
+        "error_message": "Error code: 429 - {'error': {'message': 'Rate limit reached for model `openai/gpt-oss-20b` in organization `[REDACTED_ORG]` service tier `on_demand` on tokens per minute (TPM): Limit 8000, Used 6343, Requested 5076. Please try again in 25.6425s. Need more tokens? Upgrade to Dev Tier today at https://console.groq.com/settings/billing', 'type': 'tokens', 'code': 'rate_limit_exceeded'}}"
+      },
+      "attempts": [
+        {
+          "model": "openai/gpt-oss-20b",
+          "start_s": 0.0025,
+          "status": "error",
+          "error_type": "RateLimitError",
+          "http_status": 429,
+          "error_message": "Error code: 429 - {'error': {'message': 'Rate limit reached for model `openai/gpt-oss-20b` in organization `[REDACTED_ORG]` service tier `on_demand` on tokens per minute (TPM): Limit 8000, Used 6343, Requested 5076. Please try again in 25.6425s. Need more tokens? Upgrade to Dev Tier today at https://console.groq.com/settings/billing', 'type': 'tokens', 'code': 'rate_limit_exceeded'}}",
+          "elapsed_s": 0.2697
+        }
+      ],
+      "checks": {
+        "content_present": true,
+        "scope_present": false,
+        "is_complete": false,
+        "has_conflict": false
+      },
+      "result": {
+        "title": "Sắp xếp 20 tài liệu PDF vào 3 thư mục môn học và đổi tên theo môn-ngày. Bắt đầu ",
+        "goal": null,
+        "time_constraint": null,
+        "clarification_issues": [],
+        "resolved_issue_keys": [],
+        "field_review_notes": {},
+        "content": "Sắp xếp 20 tài liệu PDF vào 3 thư mục môn học và đổi tên theo môn-ngày. Bắt đầu ngày 12/11/2026 lúc 19:00, rảnh 19:00-20:00 ngày đó. Hạn chót 12/11/2026 lúc 21:00, giờ Việt Nam.",
+        "scope": null,
+        "free_time_slots": [],
+        "availability_update_mode": "merge",
+        "structured_free_windows": [],
+        "deadline": null,
+        "extra_requirements": [],
+        "is_complete": false,
+        "has_conflict": false,
+        "summary": "Đã ghi nhận công việc: 'Sắp xếp 20 tài liệu PDF vào 3 thư mục môn học và đổi tên theo môn-ngày. Bắt đầu ngày 12/11/2026 lúc 19:00, rảnh 19:00-20:00 ngày đó. Hạn chót 12/11/2026 lúc 21:00, giờ Việt Nam.'. Mình cần bạn bổ sung/xác nhận thêm thông tin bên dưới để lên lịch chuẩn xác nhé.",
+        "clarification_questions": [
+          "Phạm vi hoặc kết quả đầu ra mong muốn của việc này là gì (ví dụ: số trang, số phần cần hoàn thiện)?",
+          "Bạn có những khung giờ rảnh cụ thể nào (từ mấy giờ đến mấy giờ) để mình sắp xếp các phiên tập trung?",
+          "Hạn chót (ngày và giờ) bạn cần hoàn thành xong công việc này là khi nào?"
+        ],
+        "generation_tier": "tier_3_rule_based"
+      }
+    },
+    {
+      "mode": "production",
+      "case": "small",
+      "repetition": 2,
+      "elapsed_s": 4.5028,
+      "status": "timeout",
+      "winner": null,
+      "generation_tier": "tier_3_rule_based",
+      "coordinator_error": {
+        "error_type": "TimeoutError",
+        "http_status": null,
+        "error_message": "UF1 vượt trần thời gian xử lý (4.5s)."
+      },
+      "attempts": [
+        {
+          "model": "gemini-3.8-flash",
+          "start_s": 0.0001,
+          "status": "cancelled",
+          "elapsed_s": 4.5031
+        },
+        {
+          "model": "gemini-3.5-flash-lite",
+          "start_s": 2.6097,
+          "status": "cancelled",
+          "elapsed_s": 1.8936
+        },
+        {
+          "model": "qwen/qwen3.8-27b",
+          "start_s": 3.5239,
+          "status": "error",
+          "error_type": "RateLimitError",
+          "http_status": 429,
+          "error_message": "Error code: 429 - {'error': {'message': 'Rate limit reached for model `qwen/qwen3.8-27b` in organization `[REDACTED_ORG]` service tier `on_demand` on output tokens per minute (OTPM): Limit 1000, Used 500, Requested 834. Please try again in 20.04s. Need more tokens? Upgrade to Dev Tier today at https://console.groq.com/settings/billing', 'type': 'tokens', 'code': 'rate_limit_exceeded'}}",
+          "elapsed_s": 0.2717
+        },
+        {
+          "model": "openai/gpt-oss-20b",
+          "start_s": 3.7956,
+          "status": "error",
+          "error_type": "RateLimitError",
+          "http_status": 429,
+          "error_message": "Error code: 429 - {'error': {'message': 'Rate limit reached for model `openai/gpt-oss-20b` in organization `[REDACTED_ORG]` service tier `on_demand` on tokens per minute (TPM): Limit 8000, Used 5749, Requested 3750. Please try again in 11.2425s. Need more tokens? Upgrade to Dev Tier today at https://console.groq.com/settings/billing', 'type': 'tokens', 'code': 'rate_limit_exceeded'}}",
+          "elapsed_s": 0.1538
+        }
+      ],
+      "checks": {
+        "content_present": true,
+        "scope_present": false,
+        "is_complete": false,
+        "has_conflict": false
+      },
+      "result": {
+        "title": "Sắp xếp 20 tài liệu PDF vào 3 thư mục môn học và đổi tên theo môn-ngày. Bắt đầu ",
+        "goal": null,
+        "time_constraint": null,
+        "clarification_issues": [],
+        "resolved_issue_keys": [],
+        "field_review_notes": {},
+        "content": "Sắp xếp 20 tài liệu PDF vào 3 thư mục môn học và đổi tên theo môn-ngày. Bắt đầu ngày 12/11/2026 lúc 19:00, rảnh 19:00-20:00 ngày đó. Hạn chót 12/11/2026 lúc 21:00, giờ Việt Nam.",
+        "scope": null,
+        "free_time_slots": [],
+        "availability_update_mode": "merge",
+        "structured_free_windows": [],
+        "deadline": null,
+        "extra_requirements": [],
+        "is_complete": false,
+        "has_conflict": false,
+        "summary": "Đã ghi nhận công việc: 'Sắp xếp 20 tài liệu PDF vào 3 thư mục môn học và đổi tên theo môn-ngày. Bắt đầu ngày 12/11/2026 lúc 19:00, rảnh 19:00-20:00 ngày đó. Hạn chót 12/11/2026 lúc 21:00, giờ Việt Nam.'. Mình cần bạn bổ sung/xác nhận thêm thông tin bên dưới để lên lịch chuẩn xác nhé.",
+        "clarification_questions": [
+          "Phạm vi hoặc kết quả đầu ra mong muốn của việc này là gì (ví dụ: số trang, số phần cần hoàn thiện)?",
+          "Bạn có những khung giờ rảnh cụ thể nào (từ mấy giờ đến mấy giờ) để mình sắp xếp các phiên tập trung?",
+          "Hạn chót (ngày và giờ) bạn cần hoàn thành xong công việc này là khi nào?"
+        ],
+        "generation_tier": "tier_3_rule_based"
+      }
+    },
+    {
+      "mode": "primary",
+      "case": "small",
+      "repetition": 2,
+      "elapsed_s": 4.5244,
+      "status": "timeout",
+      "winner": null,
+      "generation_tier": "tier_3_rule_based",
+      "coordinator_error": {
+        "error_type": "TimeoutError",
+        "http_status": null,
+        "error_message": "UF1 vượt trần thời gian xử lý (4.5s)."
+      },
+      "attempts": [
+        {
+          "model": "gemini-3.8-flash",
+          "start_s": 0.0002,
+          "status": "cancelled",
+          "elapsed_s": 4.5246
+        }
+      ],
+      "checks": {
+        "content_present": true,
+        "scope_present": false,
+        "is_complete": false,
+        "has_conflict": false
+      },
+      "result": {
+        "title": "Sắp xếp 20 tài liệu PDF vào 3 thư mục môn học và đổi tên theo môn-ngày. Bắt đầu ",
+        "goal": null,
+        "time_constraint": null,
+        "clarification_issues": [],
+        "resolved_issue_keys": [],
+        "field_review_notes": {},
+        "content": "Sắp xếp 20 tài liệu PDF vào 3 thư mục môn học và đổi tên theo môn-ngày. Bắt đầu ngày 12/11/2026 lúc 19:00, rảnh 19:00-20:00 ngày đó. Hạn chót 12/11/2026 lúc 21:00, giờ Việt Nam.",
+        "scope": null,
+        "free_time_slots": [],
+        "availability_update_mode": "merge",
+        "structured_free_windows": [],
+        "deadline": null,
+        "extra_requirements": [],
+        "is_complete": false,
+        "has_conflict": false,
+        "summary": "Đã ghi nhận công việc: 'Sắp xếp 20 tài liệu PDF vào 3 thư mục môn học và đổi tên theo môn-ngày. Bắt đầu ngày 12/11/2026 lúc 19:00, rảnh 19:00-20:00 ngày đó. Hạn chót 12/11/2026 lúc 21:00, giờ Việt Nam.'. Mình cần bạn bổ sung/xác nhận thêm thông tin bên dưới để lên lịch chuẩn xác nhé.",
+        "clarification_questions": [
+          "Phạm vi hoặc kết quả đầu ra mong muốn của việc này là gì (ví dụ: số trang, số phần cần hoàn thiện)?",
+          "Bạn có những khung giờ rảnh cụ thể nào (từ mấy giờ đến mấy giờ) để mình sắp xếp các phiên tập trung?",
+          "Hạn chót (ngày và giờ) bạn cần hoàn thành xong công việc này là khi nào?"
+        ],
+        "generation_tier": "tier_3_rule_based"
+      }
+    },
+    {
+      "mode": "backup",
+      "case": "medium",
+      "repetition": 2,
+      "elapsed_s": 2.6102,
+      "status": "success",
+      "winner": "gemini-3.5-flash-lite",
+      "generation_tier": "tier_1_gemini",
+      "coordinator_error": null,
+      "attempts": [
+        {
+          "model": "gemini-3.5-flash-lite",
+          "start_s": 0.0002,
+          "status": "schema_valid",
+          "elapsed_s": 2.6094
+        }
+      ],
+      "checks": {
+        "content_present": true,
+        "scope_present": true,
+        "is_complete": true,
+        "has_conflict": false,
+        "start_at_preserved": true,
+        "time_constraint_end_preserved": true
+      },
+      "result": {
+        "title": "Viết báo cáo khảo sát thói quen học tập",
+        "goal": "Hoàn thành báo cáo 8 trang về khảo sát thói quen học tập của 30 sinh viên nộp định dạng PDF.",
+        "time_constraint": {
+          "kind": "deadline",
+          "start_at": "2026-11-12T19:00:00+07:00",
+          "deadline_at": "2026-11-15T17:00:00+07:00",
+          "finish_by_at": null,
+          "input_timezone": "Asia/Ho_Chi_Minh"
+        },
+        "clarification_issues": [],
+        "resolved_issue_keys": [],
+        "field_review_notes": {},
+        "content": "Viết báo cáo 8 trang về khảo sát thói quen học tập của 30 sinh viên, gồm mục tiêu, phương pháp, kết quả, 3 biểu đồ và kết luận; nộp một file PDF.",
+        "scope": "Báo cáo 8 trang, gồm mục tiêu, phương pháp, kết quả, 3 biểu đồ, kết luận, xuất file PDF.",
+        "free_time_slots": [
+          "Ngày 12/11/2026 từ 19:00 đến 21:00",
+          "Ngày 13/11/2026 từ 19:00 đến 21:00",
+          "Ngày 14/11/2026 từ 19:00 đến 21:00"
+        ],
+        "availability_update_mode": "merge",
+        "structured_free_windows": [
+          {
+            "kind": "specific_date",
+            "weekday": null,
+            "date": "2026-11-12",
+            "start_local": "19:00",
+            "end_local": "21:00",
+            "raw_phrase": "Ngày 12/11/2026 từ 19:00 đến 21:00",
+            "is_ambiguous": false
+          },
+          {
+            "kind": "specific_date",
+            "weekday": null,
+            "date": "2026-11-13",
+            "start_local": "19:00",
+            "end_local": "21:00",
+            "raw_phrase": "Ngày 13/11/2026 từ 19:00 đến 21:00",
+            "is_ambiguous": false
+          },
+          {
+            "kind": "specific_date",
+            "weekday": null,
+            "date": "2026-11-14",
+            "start_local": "19:00",
+            "end_local": "21:00",
+            "raw_phrase": "Ngày 14/11/2026 từ 19:00 đến 21:00",
+            "is_ambiguous": false
+          }
+        ],
+        "deadline": "2026-11-15T17:00:00+07:00",
+        "extra_requirements": [
+          "Dữ liệu đã có trong bảng tính, không cần khảo sát thêm",
+          "Chỉ dùng dữ liệu có sẵn, không đưa thông tin cá nhân vào báo cáo"
+        ],
+        "is_complete": true,
+        "has_conflict": false,
+        "summary": "Bạn muốn viết báo cáo 8 trang về thói quen học tập (PDF) từ 12/11 đến 14/11 (19:00-21:00 mỗi ngày), hạn nộp 15/11/2026 lúc 17:00.",
+        "clarification_questions": [],
+        "generation_tier": "tier_1_gemini"
+      }
+    },
+    {
+      "mode": "groq",
+      "case": "medium",
+      "repetition": 2,
+      "elapsed_s": 2.6219,
+      "status": "success",
+      "winner": "qwen/qwen3.8-27b",
+      "generation_tier": "tier_2_groq",
+      "coordinator_error": null,
+      "attempts": [
+        {
+          "model": "qwen/qwen3.8-27b",
+          "start_s": 0.0039,
+          "status": "schema_valid",
+          "elapsed_s": 2.6178
+        }
+      ],
+      "checks": {
+        "content_present": true,
+        "scope_present": true,
+        "is_complete": true,
+        "has_conflict": false,
+        "start_at_preserved": true,
+        "time_constraint_end_preserved": true
+      },
+      "result": {
+        "title": "Viết báo cáo khảo sát thói quen học tập",
+        "goal": null,
+        "time_constraint": {
+          "kind": "deadline",
+          "start_at": "2026-11-12T19:00:00+07:00",
+          "deadline_at": "2026-11-15T17:00:00+07:00",
+          "finish_by_at": null,
+          "input_timezone": "Asia/Ho_Chi_Minh"
+        },
+        "clarification_issues": [],
+        "resolved_issue_keys": [],
+        "field_review_notes": {},
+        "content": "Viết báo cáo về khảo sát thói quen học tập của 30 sinh viên, bao gồm các phần: mục tiêu, phương pháp, kết quả, 3 biểu đồ và kết luận.",
+        "scope": "Báo cáo 8 trang, định dạng file PDF, sử dụng dữ liệu có sẵn trong bảng tính (không khảo sát thêm).",
+        "free_time_slots": [
+          "12/11/2026 từ 19:00 đến 21:00",
+          "13/11/2026 từ 19:00 đến 21:00",
+          "14/11/2026 từ 19:00 đến 21:00"
+        ],
+        "availability_update_mode": "merge",
+        "structured_free_windows": [
+          {
+            "kind": "specific_date",
+            "weekday": null,
+            "date": "2026-11-12",
+            "start_local": "19:00",
+            "end_local": "21:00",
+            "raw_phrase": "Rảnh ngày 12/11/2026 từ 19:00 đến 21:00",
+            "is_ambiguous": false
+          },
+          {
+            "kind": "specific_date",
+            "weekday": null,
+            "date": "2026-11-13",
+            "start_local": "19:00",
+            "end_local": "21:00",
+            "raw_phrase": "Rảnh ngày 13/11/2026 từ 19:00 đến 21:00",
+            "is_ambiguous": false
+          },
+          {
+            "kind": "specific_date",
+            "weekday": null,
+            "date": "2026-11-14",
+            "start_local": "19:00",
+            "end_local": "21:00",
+            "raw_phrase": "Rảnh ngày 14/11/2026 từ 19:00 đến 21:00",
+            "is_ambiguous": false
+          }
+        ],
+        "deadline": "2026-11-15T17:00:00+07:00",
+        "extra_requirements": [
+          "Chỉ dùng dữ liệu có sẵn trong bảng tính, không cần khảo sát thêm.",
+          "Không đưa thông tin cá nhân vào báo cáo."
+        ],
+        "is_complete": true,
+        "has_conflict": false,
+        "summary": "Bạn cần viết báo cáo 8 trang (PDF) về khảo sát thói quen học tập của 30 sinh viên, sử dụng dữ liệu có sẵn. Bạn có 3 khung giờ rảnh (19:00-21:00) trong các ngày 12, 13 và 14/11/2026. Hạn chót nộp bài là 17:00 ngày 15/11/2026. Thông tin đã đầy đủ để lập kế hoạch.",
+        "clarification_questions": [],
+        "generation_tier": "tier_2_groq"
+      }
+    },
+    {
+      "mode": "groq_secondary",
+      "case": "medium",
+      "repetition": 2,
+      "elapsed_s": 0.2612,
+      "status": "error",
+      "winner": null,
+      "generation_tier": "tier_3_rule_based",
+      "coordinator_error": {
+        "error_type": "RateLimitError",
+        "http_status": 429,
+        "error_message": "Error code: 429 - {'error': {'message': 'Rate limit reached for model `openai/gpt-oss-20b` in organization `[REDACTED_ORG]` service tier `on_demand` on tokens per minute (TPM): Limit 8000, Used 4070, Requested 5147. Please try again in 9.1275s. Need more tokens? Upgrade to Dev Tier today at https://console.groq.com/settings/billing', 'type': 'tokens', 'code': 'rate_limit_exceeded'}}"
+      },
+      "attempts": [
+        {
+          "model": "openai/gpt-oss-20b",
+          "start_s": 0.0023,
+          "status": "error",
+          "error_type": "RateLimitError",
+          "http_status": 429,
+          "error_message": "Error code: 429 - {'error': {'message': 'Rate limit reached for model `openai/gpt-oss-20b` in organization `[REDACTED_ORG]` service tier `on_demand` on tokens per minute (TPM): Limit 8000, Used 4070, Requested 5147. Please try again in 9.1275s. Need more tokens? Upgrade to Dev Tier today at https://console.groq.com/settings/billing', 'type': 'tokens', 'code': 'rate_limit_exceeded'}}",
+          "elapsed_s": 0.2588
+        }
+      ],
+      "checks": {
+        "content_present": true,
+        "scope_present": false,
+        "is_complete": false,
+        "has_conflict": false
+      },
+      "result": {
+        "title": "Viết báo cáo 8 trang về khảo sát thói quen học tập của 30 sinh viên, gồm mục tiê",
+        "goal": null,
+        "time_constraint": null,
+        "clarification_issues": [],
+        "resolved_issue_keys": [],
+        "field_review_notes": {},
+        "content": "Viết báo cáo 8 trang về khảo sát thói quen học tập của 30 sinh viên, gồm mục tiêu, phương pháp, kết quả, 3 biểu đồ và kết luận; nộp một file PDF. Dữ liệu đã có trong bảng tính, không cần khảo sát thêm. Bắt đầu 12/11/2026 lúc 19:00. Rảnh ngày 12, 13 và 14/11/2026, mỗi ngày từ 19:00 đến 21:00. Hạn chót 15/11/2026 lúc 17:00 giờ Việt Nam. Chỉ dùng dữ liệu có sẵn, không đưa thông tin cá nhân vào báo cáo.",
+        "scope": null,
+        "free_time_slots": [],
+        "availability_update_mode": "merge",
+        "structured_free_windows": [],
+        "deadline": null,
+        "extra_requirements": [],
+        "is_complete": false,
+        "has_conflict": false,
+        "summary": "Đã ghi nhận công việc: 'Viết báo cáo 8 trang về khảo sát thói quen học tập của 30 sinh viên, gồm mục tiêu, phương pháp, kết quả, 3 biểu đồ và kết luận; nộp một file PDF. Dữ liệu đã có trong bảng tính, không cần khảo sát thêm. Bắt đầu 12/11/2026 lúc 19:00. Rảnh ngày 12, 13 và 14/11/2026, mỗi ngày từ 19:00 đến 21:00. Hạn chót 15/11/2026 lúc 17:00 giờ Việt Nam. Chỉ dùng dữ liệu có sẵn, không đưa thông tin cá nhân vào báo cáo.'. Mình cần bạn bổ sung/xác nhận thêm thông tin bên dưới để lên lịch chuẩn xác nhé.",
+        "clarification_questions": [
+          "Phạm vi hoặc kết quả đầu ra mong muốn của việc này là gì (ví dụ: số trang, số phần cần hoàn thiện)?",
+          "Bạn có những khung giờ rảnh cụ thể nào (từ mấy giờ đến mấy giờ) để mình sắp xếp các phiên tập trung?",
+          "Hạn chót (ngày và giờ) bạn cần hoàn thành xong công việc này là khi nào?"
+        ],
+        "generation_tier": "tier_3_rule_based"
+      }
+    },
+    {
+      "mode": "production",
+      "case": "medium",
+      "repetition": 2,
+      "elapsed_s": 4.5067,
+      "status": "timeout",
+      "winner": null,
+      "generation_tier": "tier_3_rule_based",
+      "coordinator_error": {
+        "error_type": "TimeoutError",
+        "http_status": null,
+        "error_message": "UF1 vượt trần thời gian xử lý (4.5s)."
+      },
+      "attempts": [
+        {
+          "model": "gemini-3.8-flash",
+          "start_s": 0.0001,
+          "status": "cancelled",
+          "elapsed_s": 4.5074
+        },
+        {
+          "model": "gemini-3.5-flash-lite",
+          "start_s": 2.6084,
+          "status": "cancelled",
+          "elapsed_s": 1.8994
+        },
+        {
+          "model": "qwen/qwen3.8-27b",
+          "start_s": 3.5079,
+          "status": "error",
+          "error_type": "RateLimitError",
+          "http_status": 429,
+          "error_message": "Error code: 429 - {'error': {'message': 'Rate limit reached for model `qwen/qwen3.8-27b` in organization `[REDACTED_ORG]` service tier `on_demand` on output tokens per minute (OTPM): Limit 1000, Used 917, Requested 834. Please try again in 45.06s. Need more tokens? Upgrade to Dev Tier today at https://console.groq.com/settings/billing', 'type': 'tokens', 'code': 'rate_limit_exceeded'}}",
+          "elapsed_s": 0.2926
+        },
+        {
+          "model": "openai/gpt-oss-20b",
+          "start_s": 3.8005,
+          "status": "cancelled",
+          "elapsed_s": 0.7079
+        }
+      ],
+      "checks": {
+        "content_present": true,
+        "scope_present": false,
+        "is_complete": false,
+        "has_conflict": false
+      },
+      "result": {
+        "title": "Viết báo cáo 8 trang về khảo sát thói quen học tập của 30 sinh viên, gồm mục tiê",
+        "goal": null,
+        "time_constraint": null,
+        "clarification_issues": [],
+        "resolved_issue_keys": [],
+        "field_review_notes": {},
+        "content": "Viết báo cáo 8 trang về khảo sát thói quen học tập của 30 sinh viên, gồm mục tiêu, phương pháp, kết quả, 3 biểu đồ và kết luận; nộp một file PDF. Dữ liệu đã có trong bảng tính, không cần khảo sát thêm. Bắt đầu 12/11/2026 lúc 19:00. Rảnh ngày 12, 13 và 14/11/2026, mỗi ngày từ 19:00 đến 21:00. Hạn chót 15/11/2026 lúc 17:00 giờ Việt Nam. Chỉ dùng dữ liệu có sẵn, không đưa thông tin cá nhân vào báo cáo.",
+        "scope": null,
+        "free_time_slots": [],
+        "availability_update_mode": "merge",
+        "structured_free_windows": [],
+        "deadline": null,
+        "extra_requirements": [],
+        "is_complete": false,
+        "has_conflict": false,
+        "summary": "Đã ghi nhận công việc: 'Viết báo cáo 8 trang về khảo sát thói quen học tập của 30 sinh viên, gồm mục tiêu, phương pháp, kết quả, 3 biểu đồ và kết luận; nộp một file PDF. Dữ liệu đã có trong bảng tính, không cần khảo sát thêm. Bắt đầu 12/11/2026 lúc 19:00. Rảnh ngày 12, 13 và 14/11/2026, mỗi ngày từ 19:00 đến 21:00. Hạn chót 15/11/2026 lúc 17:00 giờ Việt Nam. Chỉ dùng dữ liệu có sẵn, không đưa thông tin cá nhân vào báo cáo.'. Mình cần bạn bổ sung/xác nhận thêm thông tin bên dưới để lên lịch chuẩn xác nhé.",
+        "clarification_questions": [
+          "Phạm vi hoặc kết quả đầu ra mong muốn của việc này là gì (ví dụ: số trang, số phần cần hoàn thiện)?",
+          "Bạn có những khung giờ rảnh cụ thể nào (từ mấy giờ đến mấy giờ) để mình sắp xếp các phiên tập trung?",
+          "Hạn chót (ngày và giờ) bạn cần hoàn thành xong công việc này là khi nào?"
+        ],
+        "generation_tier": "tier_3_rule_based"
+      }
+    },
+    {
+      "mode": "primary",
+      "case": "medium",
+      "repetition": 2,
+      "elapsed_s": 4.5059,
+      "status": "timeout",
+      "winner": null,
+      "generation_tier": "tier_3_rule_based",
+      "coordinator_error": {
+        "error_type": "TimeoutError",
+        "http_status": null,
+        "error_message": "UF1 vượt trần thời gian xử lý (4.5s)."
+      },
+      "attempts": [
+        {
+          "model": "gemini-3.8-flash",
+          "start_s": 0.0002,
+          "status": "cancelled",
+          "elapsed_s": 4.5061
+        }
+      ],
+      "checks": {
+        "content_present": true,
+        "scope_present": false,
+        "is_complete": false,
+        "has_conflict": false
+      },
+      "result": {
+        "title": "Viết báo cáo 8 trang về khảo sát thói quen học tập của 30 sinh viên, gồm mục tiê",
+        "goal": null,
+        "time_constraint": null,
+        "clarification_issues": [],
+        "resolved_issue_keys": [],
+        "field_review_notes": {},
+        "content": "Viết báo cáo 8 trang về khảo sát thói quen học tập của 30 sinh viên, gồm mục tiêu, phương pháp, kết quả, 3 biểu đồ và kết luận; nộp một file PDF. Dữ liệu đã có trong bảng tính, không cần khảo sát thêm. Bắt đầu 12/11/2026 lúc 19:00. Rảnh ngày 12, 13 và 14/11/2026, mỗi ngày từ 19:00 đến 21:00. Hạn chót 15/11/2026 lúc 17:00 giờ Việt Nam. Chỉ dùng dữ liệu có sẵn, không đưa thông tin cá nhân vào báo cáo.",
+        "scope": null,
+        "free_time_slots": [],
+        "availability_update_mode": "merge",
+        "structured_free_windows": [],
+        "deadline": null,
+        "extra_requirements": [],
+        "is_complete": false,
+        "has_conflict": false,
+        "summary": "Đã ghi nhận công việc: 'Viết báo cáo 8 trang về khảo sát thói quen học tập của 30 sinh viên, gồm mục tiêu, phương pháp, kết quả, 3 biểu đồ và kết luận; nộp một file PDF. Dữ liệu đã có trong bảng tính, không cần khảo sát thêm. Bắt đầu 12/11/2026 lúc 19:00. Rảnh ngày 12, 13 và 14/11/2026, mỗi ngày từ 19:00 đến 21:00. Hạn chót 15/11/2026 lúc 17:00 giờ Việt Nam. Chỉ dùng dữ liệu có sẵn, không đưa thông tin cá nhân vào báo cáo.'. Mình cần bạn bổ sung/xác nhận thêm thông tin bên dưới để lên lịch chuẩn xác nhé.",
+        "clarification_questions": [
+          "Phạm vi hoặc kết quả đầu ra mong muốn của việc này là gì (ví dụ: số trang, số phần cần hoàn thiện)?",
+          "Bạn có những khung giờ rảnh cụ thể nào (từ mấy giờ đến mấy giờ) để mình sắp xếp các phiên tập trung?",
+          "Hạn chót (ngày và giờ) bạn cần hoàn thành xong công việc này là khi nào?"
+        ],
+        "generation_tier": "tier_3_rule_based"
+      }
+    },
+    {
+      "mode": "backup",
+      "case": "large",
+      "repetition": 2,
+      "elapsed_s": 4.498,
+      "status": "timeout",
+      "winner": null,
+      "generation_tier": "tier_3_rule_based",
+      "coordinator_error": {
+        "error_type": "TimeoutError",
+        "http_status": null,
+        "error_message": "UF1 vượt trần thời gian xử lý (4.5s)."
+      },
+      "attempts": [
+        {
+          "model": "gemini-3.5-flash-lite",
+          "start_s": 0.0002,
+          "status": "cancelled",
+          "elapsed_s": 4.4982
+        }
+      ],
+      "checks": {
+        "content_present": true,
+        "scope_present": false,
+        "is_complete": false,
+        "has_conflict": false
+      },
+      "result": {
+        "title": "Hoàn thành nguyên mẫu ứng dụng quản lý thư viện cho đồ án nhóm 4 người. Phạm vi ",
+        "goal": null,
+        "time_constraint": null,
+        "clarification_issues": [],
+        "resolved_issue_keys": [],
+        "field_review_notes": {},
+        "content": "Hoàn thành nguyên mẫu ứng dụng quản lý thư viện cho đồ án nhóm 4 người. Phạm vi gồm đăng nhập, phân quyền thủ thư và độc giả, quản lý 500 đầu sách, tìm kiếm theo tên/tác giả, mượn trả, theo dõi quá hạn và báo cáo thống kê tháng. Đầu ra là mã nguồn backend FastAPI, frontend web, database PostgreSQL, tài liệu API, 30 ca kiểm thử chức năng, báo cáo PDF 25 trang, 15 slide và video demo 5 phút. Không triển khai thanh toán, không gửi email thật và không triển khai lên cloud. Thiết kế giao diện đã có; cần rà soát tính nhất quán giữa API và màn hình, dữ liệu demo không chứa thông tin người thật. Tôi phụ trách tích hợp và báo cáo; các thành viên khác đã cung cấp module đăng nhập và danh mục sách. Bắt đầu 12/11/2026 lúc 18:00, hạn chót 30/11/2026 lúc 17:00 giờ Việt Nam. Tôi rảnh thứ Hai, thứ Tư và thứ Sáu từ 18:00 đến 21:00, thứ Bảy từ 09:00 đến 12:00 và từ 14:00 đến 17:00 trong khoảng ngày 12 đến 29/11/2026. Giữ nguyên các lịch học đã có, không tự đổi lịch công việc khác. Ưu tiên demo chạy ổn định, sau đó kiểm thử, cuối cùng hoàn thiện tài liệu; chỉ ghi nhận yêu cầu ở bước này, chưa chia bước hoặc chốt lịch.",
+        "scope": null,
+        "free_time_slots": [],
+        "availability_update_mode": "merge",
+        "structured_free_windows": [],
+        "deadline": null,
+        "extra_requirements": [],
+        "is_complete": false,
+        "has_conflict": false,
+        "summary": "Đã ghi nhận công việc: 'Hoàn thành nguyên mẫu ứng dụng quản lý thư viện cho đồ án nhóm 4 người. Phạm vi gồm đăng nhập, phân quyền thủ thư và độc giả, quản lý 500 đầu sách, tìm kiếm theo tên/tác giả, mượn trả, theo dõi quá hạn và báo cáo thống kê tháng. Đầu ra là mã nguồn backend FastAPI, frontend web, database PostgreSQL, tài liệu API, 30 ca kiểm thử chức năng, báo cáo PDF 25 trang, 15 slide và video demo 5 phút. Không triển khai thanh toán, không gửi email thật và không triển khai lên cloud. Thiết kế giao diện đã có; cần rà soát tính nhất quán giữa API và màn hình, dữ liệu demo không chứa thông tin người thật. Tôi phụ trách tích hợp và báo cáo; các thành viên khác đã cung cấp module đăng nhập và danh mục sách. Bắt đầu 12/11/2026 lúc 18:00, hạn chót 30/11/2026 lúc 17:00 giờ Việt Nam. Tôi rảnh thứ Hai, thứ Tư và thứ Sáu từ 18:00 đến 21:00, thứ Bảy từ 09:00 đến 12:00 và từ 14:00 đến 17:00 trong khoảng ngày 12 đến 29/11/2026. Giữ nguyên các lịch học đã có, không tự đổi lịch công việc khác. Ưu tiên demo chạy ổn định, sau đó kiểm thử, cuối cùng hoàn thiện tài liệu; chỉ ghi nhận yêu cầu ở bước này, chưa chia bước hoặc chốt lịch.'. Mình cần bạn bổ sung/xác nhận thêm thông tin bên dưới để lên lịch chuẩn xác nhé.",
+        "clarification_questions": [
+          "Phạm vi hoặc kết quả đầu ra mong muốn của việc này là gì (ví dụ: số trang, số phần cần hoàn thiện)?",
+          "Bạn có những khung giờ rảnh cụ thể nào (từ mấy giờ đến mấy giờ) để mình sắp xếp các phiên tập trung?",
+          "Hạn chót (ngày và giờ) bạn cần hoàn thành xong công việc này là khi nào?"
+        ],
+        "generation_tier": "tier_3_rule_based"
+      }
+    },
+    {
+      "mode": "groq",
+      "case": "large",
+      "repetition": 2,
+      "elapsed_s": 0.3003,
+      "status": "error",
+      "winner": null,
+      "generation_tier": "tier_3_rule_based",
+      "coordinator_error": {
+        "error_type": "RateLimitError",
+        "http_status": 429,
+        "error_message": "Error code: 429 - {'error': {'message': 'Rate limit reached for model `qwen/qwen3.8-27b` in organization `[REDACTED_ORG]` service tier `on_demand` on output tokens per minute (OTPM): Limit 1000, Used 725, Requested 834. Please try again in 33.54s. Need more tokens? Upgrade to Dev Tier today at https://console.groq.com/settings/billing', 'type': 'tokens', 'code': 'rate_limit_exceeded'}}"
+      },
+      "attempts": [
+        {
+          "model": "qwen/qwen3.8-27b",
+          "start_s": 0.0036,
+          "status": "error",
+          "error_type": "RateLimitError",
+          "http_status": 429,
+          "error_message": "Error code: 429 - {'error': {'message': 'Rate limit reached for model `qwen/qwen3.8-27b` in organization `[REDACTED_ORG]` service tier `on_demand` on output tokens per minute (OTPM): Limit 1000, Used 725, Requested 834. Please try again in 33.54s. Need more tokens? Upgrade to Dev Tier today at https://console.groq.com/settings/billing', 'type': 'tokens', 'code': 'rate_limit_exceeded'}}",
+          "elapsed_s": 0.2966
+        }
+      ],
+      "checks": {
+        "content_present": true,
+        "scope_present": false,
+        "is_complete": false,
+        "has_conflict": false
+      },
+      "result": {
+        "title": "Hoàn thành nguyên mẫu ứng dụng quản lý thư viện cho đồ án nhóm 4 người. Phạm vi ",
+        "goal": null,
+        "time_constraint": null,
+        "clarification_issues": [],
+        "resolved_issue_keys": [],
+        "field_review_notes": {},
+        "content": "Hoàn thành nguyên mẫu ứng dụng quản lý thư viện cho đồ án nhóm 4 người. Phạm vi gồm đăng nhập, phân quyền thủ thư và độc giả, quản lý 500 đầu sách, tìm kiếm theo tên/tác giả, mượn trả, theo dõi quá hạn và báo cáo thống kê tháng. Đầu ra là mã nguồn backend FastAPI, frontend web, database PostgreSQL, tài liệu API, 30 ca kiểm thử chức năng, báo cáo PDF 25 trang, 15 slide và video demo 5 phút. Không triển khai thanh toán, không gửi email thật và không triển khai lên cloud. Thiết kế giao diện đã có; cần rà soát tính nhất quán giữa API và màn hình, dữ liệu demo không chứa thông tin người thật. Tôi phụ trách tích hợp và báo cáo; các thành viên khác đã cung cấp module đăng nhập và danh mục sách. Bắt đầu 12/11/2026 lúc 18:00, hạn chót 30/11/2026 lúc 17:00 giờ Việt Nam. Tôi rảnh thứ Hai, thứ Tư và thứ Sáu từ 18:00 đến 21:00, thứ Bảy từ 09:00 đến 12:00 và từ 14:00 đến 17:00 trong khoảng ngày 12 đến 29/11/2026. Giữ nguyên các lịch học đã có, không tự đổi lịch công việc khác. Ưu tiên demo chạy ổn định, sau đó kiểm thử, cuối cùng hoàn thiện tài liệu; chỉ ghi nhận yêu cầu ở bước này, chưa chia bước hoặc chốt lịch.",
+        "scope": null,
+        "free_time_slots": [],
+        "availability_update_mode": "merge",
+        "structured_free_windows": [],
+        "deadline": null,
+        "extra_requirements": [],
+        "is_complete": false,
+        "has_conflict": false,
+        "summary": "Đã ghi nhận công việc: 'Hoàn thành nguyên mẫu ứng dụng quản lý thư viện cho đồ án nhóm 4 người. Phạm vi gồm đăng nhập, phân quyền thủ thư và độc giả, quản lý 500 đầu sách, tìm kiếm theo tên/tác giả, mượn trả, theo dõi quá hạn và báo cáo thống kê tháng. Đầu ra là mã nguồn backend FastAPI, frontend web, database PostgreSQL, tài liệu API, 30 ca kiểm thử chức năng, báo cáo PDF 25 trang, 15 slide và video demo 5 phút. Không triển khai thanh toán, không gửi email thật và không triển khai lên cloud. Thiết kế giao diện đã có; cần rà soát tính nhất quán giữa API và màn hình, dữ liệu demo không chứa thông tin người thật. Tôi phụ trách tích hợp và báo cáo; các thành viên khác đã cung cấp module đăng nhập và danh mục sách. Bắt đầu 12/11/2026 lúc 18:00, hạn chót 30/11/2026 lúc 17:00 giờ Việt Nam. Tôi rảnh thứ Hai, thứ Tư và thứ Sáu từ 18:00 đến 21:00, thứ Bảy từ 09:00 đến 12:00 và từ 14:00 đến 17:00 trong khoảng ngày 12 đến 29/11/2026. Giữ nguyên các lịch học đã có, không tự đổi lịch công việc khác. Ưu tiên demo chạy ổn định, sau đó kiểm thử, cuối cùng hoàn thiện tài liệu; chỉ ghi nhận yêu cầu ở bước này, chưa chia bước hoặc chốt lịch.'. Mình cần bạn bổ sung/xác nhận thêm thông tin bên dưới để lên lịch chuẩn xác nhé.",
+        "clarification_questions": [
+          "Phạm vi hoặc kết quả đầu ra mong muốn của việc này là gì (ví dụ: số trang, số phần cần hoàn thiện)?",
+          "Bạn có những khung giờ rảnh cụ thể nào (từ mấy giờ đến mấy giờ) để mình sắp xếp các phiên tập trung?",
+          "Hạn chót (ngày và giờ) bạn cần hoàn thành xong công việc này là khi nào?"
+        ],
+        "generation_tier": "tier_3_rule_based"
+      }
+    },
+    {
+      "mode": "groq_secondary",
+      "case": "large",
+      "repetition": 2,
+      "elapsed_s": 0.2944,
+      "status": "error",
+      "winner": null,
+      "generation_tier": "tier_3_rule_based",
+      "coordinator_error": {
+        "error_type": "RateLimitError",
+        "http_status": 429,
+        "error_message": "Error code: 429 - {'error': {'message': 'Rate limit reached for model `openai/gpt-oss-20b` in organization `[REDACTED_ORG]` service tier `on_demand` on tokens per minute (TPM): Limit 8000, Used 5663, Requested 4004. Please try again in 12.5025s. Need more tokens? Upgrade to Dev Tier today at https://console.groq.com/settings/billing', 'type': 'tokens', 'code': 'rate_limit_exceeded'}}"
+      },
+      "attempts": [
+        {
+          "model": "openai/gpt-oss-20b",
+          "start_s": 0.0039,
+          "status": "error",
+          "error_type": "RateLimitError",
+          "http_status": 429,
+          "error_message": "Error code: 429 - {'error': {'message': 'Rate limit reached for model `openai/gpt-oss-20b` in organization `[REDACTED_ORG]` service tier `on_demand` on tokens per minute (TPM): Limit 8000, Used 5663, Requested 4004. Please try again in 12.5025s. Need more tokens? Upgrade to Dev Tier today at https://console.groq.com/settings/billing', 'type': 'tokens', 'code': 'rate_limit_exceeded'}}",
+          "elapsed_s": 0.2904
+        }
+      ],
+      "checks": {
+        "content_present": true,
+        "scope_present": false,
+        "is_complete": false,
+        "has_conflict": false
+      },
+      "result": {
+        "title": "Hoàn thành nguyên mẫu ứng dụng quản lý thư viện cho đồ án nhóm 4 người. Phạm vi ",
+        "goal": null,
+        "time_constraint": null,
+        "clarification_issues": [],
+        "resolved_issue_keys": [],
+        "field_review_notes": {},
+        "content": "Hoàn thành nguyên mẫu ứng dụng quản lý thư viện cho đồ án nhóm 4 người. Phạm vi gồm đăng nhập, phân quyền thủ thư và độc giả, quản lý 500 đầu sách, tìm kiếm theo tên/tác giả, mượn trả, theo dõi quá hạn và báo cáo thống kê tháng. Đầu ra là mã nguồn backend FastAPI, frontend web, database PostgreSQL, tài liệu API, 30 ca kiểm thử chức năng, báo cáo PDF 25 trang, 15 slide và video demo 5 phút. Không triển khai thanh toán, không gửi email thật và không triển khai lên cloud. Thiết kế giao diện đã có; cần rà soát tính nhất quán giữa API và màn hình, dữ liệu demo không chứa thông tin người thật. Tôi phụ trách tích hợp và báo cáo; các thành viên khác đã cung cấp module đăng nhập và danh mục sách. Bắt đầu 12/11/2026 lúc 18:00, hạn chót 30/11/2026 lúc 17:00 giờ Việt Nam. Tôi rảnh thứ Hai, thứ Tư và thứ Sáu từ 18:00 đến 21:00, thứ Bảy từ 09:00 đến 12:00 và từ 14:00 đến 17:00 trong khoảng ngày 12 đến 29/11/2026. Giữ nguyên các lịch học đã có, không tự đổi lịch công việc khác. Ưu tiên demo chạy ổn định, sau đó kiểm thử, cuối cùng hoàn thiện tài liệu; chỉ ghi nhận yêu cầu ở bước này, chưa chia bước hoặc chốt lịch.",
+        "scope": null,
+        "free_time_slots": [],
+        "availability_update_mode": "merge",
+        "structured_free_windows": [],
+        "deadline": null,
+        "extra_requirements": [],
+        "is_complete": false,
+        "has_conflict": false,
+        "summary": "Đã ghi nhận công việc: 'Hoàn thành nguyên mẫu ứng dụng quản lý thư viện cho đồ án nhóm 4 người. Phạm vi gồm đăng nhập, phân quyền thủ thư và độc giả, quản lý 500 đầu sách, tìm kiếm theo tên/tác giả, mượn trả, theo dõi quá hạn và báo cáo thống kê tháng. Đầu ra là mã nguồn backend FastAPI, frontend web, database PostgreSQL, tài liệu API, 30 ca kiểm thử chức năng, báo cáo PDF 25 trang, 15 slide và video demo 5 phút. Không triển khai thanh toán, không gửi email thật và không triển khai lên cloud. Thiết kế giao diện đã có; cần rà soát tính nhất quán giữa API và màn hình, dữ liệu demo không chứa thông tin người thật. Tôi phụ trách tích hợp và báo cáo; các thành viên khác đã cung cấp module đăng nhập và danh mục sách. Bắt đầu 12/11/2026 lúc 18:00, hạn chót 30/11/2026 lúc 17:00 giờ Việt Nam. Tôi rảnh thứ Hai, thứ Tư và thứ Sáu từ 18:00 đến 21:00, thứ Bảy từ 09:00 đến 12:00 và từ 14:00 đến 17:00 trong khoảng ngày 12 đến 29/11/2026. Giữ nguyên các lịch học đã có, không tự đổi lịch công việc khác. Ưu tiên demo chạy ổn định, sau đó kiểm thử, cuối cùng hoàn thiện tài liệu; chỉ ghi nhận yêu cầu ở bước này, chưa chia bước hoặc chốt lịch.'. Mình cần bạn bổ sung/xác nhận thêm thông tin bên dưới để lên lịch chuẩn xác nhé.",
+        "clarification_questions": [
+          "Phạm vi hoặc kết quả đầu ra mong muốn của việc này là gì (ví dụ: số trang, số phần cần hoàn thiện)?",
+          "Bạn có những khung giờ rảnh cụ thể nào (từ mấy giờ đến mấy giờ) để mình sắp xếp các phiên tập trung?",
+          "Hạn chót (ngày và giờ) bạn cần hoàn thành xong công việc này là khi nào?"
+        ],
+        "generation_tier": "tier_3_rule_based"
+      }
+    },
+    {
+      "mode": "production",
+      "case": "large",
+      "repetition": 2,
+      "elapsed_s": 4.5003,
+      "status": "timeout",
+      "winner": null,
+      "generation_tier": "tier_3_rule_based",
+      "coordinator_error": {
+        "error_type": "TimeoutError",
+        "http_status": null,
+        "error_message": "UF1 vượt trần thời gian xử lý (4.5s)."
+      },
+      "attempts": [
+        {
+          "model": "gemini-3.8-flash",
+          "start_s": 0.0003,
+          "status": "cancelled",
+          "elapsed_s": 4.5005
+        },
+        {
+          "model": "gemini-3.5-flash-lite",
+          "start_s": 2.6032,
+          "status": "cancelled",
+          "elapsed_s": 1.8977
+        },
+        {
+          "model": "qwen/qwen3.8-27b",
+          "start_s": 3.5071,
+          "status": "error",
+          "error_type": "RateLimitError",
+          "http_status": 429,
+          "error_message": "Error code: 429 - {'error': {'message': 'Rate limit reached for model `qwen/qwen3.8-27b` in organization `[REDACTED_ORG]` service tier `on_demand` on output tokens per minute (OTPM): Limit 1000, Used 640, Requested 518. Please try again in 9.48s. Need more tokens? Upgrade to Dev Tier today at https://console.groq.com/settings/billing', 'type': 'tokens', 'code': 'rate_limit_exceeded'}}",
+          "elapsed_s": 0.2939
+        },
+        {
+          "model": "openai/gpt-oss-20b",
+          "start_s": 3.8011,
+          "status": "error",
+          "error_type": "RateLimitError",
+          "http_status": 429,
+          "error_message": "Error code: 429 - {'error': {'message': 'Rate limit reached for model `openai/gpt-oss-20b` in organization `[REDACTED_ORG]` service tier `on_demand` on tokens per minute (TPM): Limit 8000, Used 5067, Requested 4002. Please try again in 8.0175s. Need more tokens? Upgrade to Dev Tier today at https://console.groq.com/settings/billing', 'type': 'tokens', 'code': 'rate_limit_exceeded'}}",
+          "elapsed_s": 0.1551
+        }
+      ],
+      "checks": {
+        "content_present": true,
+        "scope_present": false,
+        "is_complete": false,
+        "has_conflict": false
+      },
+      "result": {
+        "title": "Hoàn thành nguyên mẫu ứng dụng quản lý thư viện cho đồ án nhóm 4 người. Phạm vi ",
+        "goal": null,
+        "time_constraint": null,
+        "clarification_issues": [],
+        "resolved_issue_keys": [],
+        "field_review_notes": {},
+        "content": "Hoàn thành nguyên mẫu ứng dụng quản lý thư viện cho đồ án nhóm 4 người. Phạm vi gồm đăng nhập, phân quyền thủ thư và độc giả, quản lý 500 đầu sách, tìm kiếm theo tên/tác giả, mượn trả, theo dõi quá hạn và báo cáo thống kê tháng. Đầu ra là mã nguồn backend FastAPI, frontend web, database PostgreSQL, tài liệu API, 30 ca kiểm thử chức năng, báo cáo PDF 25 trang, 15 slide và video demo 5 phút. Không triển khai thanh toán, không gửi email thật và không triển khai lên cloud. Thiết kế giao diện đã có; cần rà soát tính nhất quán giữa API và màn hình, dữ liệu demo không chứa thông tin người thật. Tôi phụ trách tích hợp và báo cáo; các thành viên khác đã cung cấp module đăng nhập và danh mục sách. Bắt đầu 12/11/2026 lúc 18:00, hạn chót 30/11/2026 lúc 17:00 giờ Việt Nam. Tôi rảnh thứ Hai, thứ Tư và thứ Sáu từ 18:00 đến 21:00, thứ Bảy từ 09:00 đến 12:00 và từ 14:00 đến 17:00 trong khoảng ngày 12 đến 29/11/2026. Giữ nguyên các lịch học đã có, không tự đổi lịch công việc khác. Ưu tiên demo chạy ổn định, sau đó kiểm thử, cuối cùng hoàn thiện tài liệu; chỉ ghi nhận yêu cầu ở bước này, chưa chia bước hoặc chốt lịch.",
+        "scope": null,
+        "free_time_slots": [],
+        "availability_update_mode": "merge",
+        "structured_free_windows": [],
+        "deadline": null,
+        "extra_requirements": [],
+        "is_complete": false,
+        "has_conflict": false,
+        "summary": "Đã ghi nhận công việc: 'Hoàn thành nguyên mẫu ứng dụng quản lý thư viện cho đồ án nhóm 4 người. Phạm vi gồm đăng nhập, phân quyền thủ thư và độc giả, quản lý 500 đầu sách, tìm kiếm theo tên/tác giả, mượn trả, theo dõi quá hạn và báo cáo thống kê tháng. Đầu ra là mã nguồn backend FastAPI, frontend web, database PostgreSQL, tài liệu API, 30 ca kiểm thử chức năng, báo cáo PDF 25 trang, 15 slide và video demo 5 phút. Không triển khai thanh toán, không gửi email thật và không triển khai lên cloud. Thiết kế giao diện đã có; cần rà soát tính nhất quán giữa API và màn hình, dữ liệu demo không chứa thông tin người thật. Tôi phụ trách tích hợp và báo cáo; các thành viên khác đã cung cấp module đăng nhập và danh mục sách. Bắt đầu 12/11/2026 lúc 18:00, hạn chót 30/11/2026 lúc 17:00 giờ Việt Nam. Tôi rảnh thứ Hai, thứ Tư và thứ Sáu từ 18:00 đến 21:00, thứ Bảy từ 09:00 đến 12:00 và từ 14:00 đến 17:00 trong khoảng ngày 12 đến 29/11/2026. Giữ nguyên các lịch học đã có, không tự đổi lịch công việc khác. Ưu tiên demo chạy ổn định, sau đó kiểm thử, cuối cùng hoàn thiện tài liệu; chỉ ghi nhận yêu cầu ở bước này, chưa chia bước hoặc chốt lịch.'. Mình cần bạn bổ sung/xác nhận thêm thông tin bên dưới để lên lịch chuẩn xác nhé.",
+        "clarification_questions": [
+          "Phạm vi hoặc kết quả đầu ra mong muốn của việc này là gì (ví dụ: số trang, số phần cần hoàn thiện)?",
+          "Bạn có những khung giờ rảnh cụ thể nào (từ mấy giờ đến mấy giờ) để mình sắp xếp các phiên tập trung?",
+          "Hạn chót (ngày và giờ) bạn cần hoàn thành xong công việc này là khi nào?"
+        ],
+        "generation_tier": "tier_3_rule_based"
+      }
+    },
+    {
+      "mode": "primary",
+      "case": "large",
+      "repetition": 2,
+      "elapsed_s": 4.5059,
+      "status": "timeout",
+      "winner": null,
+      "generation_tier": "tier_3_rule_based",
+      "coordinator_error": {
+        "error_type": "TimeoutError",
+        "http_status": null,
+        "error_message": "UF1 vượt trần thời gian xử lý (4.5s)."
+      },
+      "attempts": [
+        {
+          "model": "gemini-3.8-flash",
+          "start_s": 0.0003,
+          "status": "cancelled",
+          "elapsed_s": 4.506
+        }
+      ],
+      "checks": {
+        "content_present": true,
+        "scope_present": false,
+        "is_complete": false,
+        "has_conflict": false
+      },
+      "result": {
+        "title": "Hoàn thành nguyên mẫu ứng dụng quản lý thư viện cho đồ án nhóm 4 người. Phạm vi ",
+        "goal": null,
+        "time_constraint": null,
+        "clarification_issues": [],
+        "resolved_issue_keys": [],
+        "field_review_notes": {},
+        "content": "Hoàn thành nguyên mẫu ứng dụng quản lý thư viện cho đồ án nhóm 4 người. Phạm vi gồm đăng nhập, phân quyền thủ thư và độc giả, quản lý 500 đầu sách, tìm kiếm theo tên/tác giả, mượn trả, theo dõi quá hạn và báo cáo thống kê tháng. Đầu ra là mã nguồn backend FastAPI, frontend web, database PostgreSQL, tài liệu API, 30 ca kiểm thử chức năng, báo cáo PDF 25 trang, 15 slide và video demo 5 phút. Không triển khai thanh toán, không gửi email thật và không triển khai lên cloud. Thiết kế giao diện đã có; cần rà soát tính nhất quán giữa API và màn hình, dữ liệu demo không chứa thông tin người thật. Tôi phụ trách tích hợp và báo cáo; các thành viên khác đã cung cấp module đăng nhập và danh mục sách. Bắt đầu 12/11/2026 lúc 18:00, hạn chót 30/11/2026 lúc 17:00 giờ Việt Nam. Tôi rảnh thứ Hai, thứ Tư và thứ Sáu từ 18:00 đến 21:00, thứ Bảy từ 09:00 đến 12:00 và từ 14:00 đến 17:00 trong khoảng ngày 12 đến 29/11/2026. Giữ nguyên các lịch học đã có, không tự đổi lịch công việc khác. Ưu tiên demo chạy ổn định, sau đó kiểm thử, cuối cùng hoàn thiện tài liệu; chỉ ghi nhận yêu cầu ở bước này, chưa chia bước hoặc chốt lịch.",
+        "scope": null,
+        "free_time_slots": [],
+        "availability_update_mode": "merge",
+        "structured_free_windows": [],
+        "deadline": null,
+        "extra_requirements": [],
+        "is_complete": false,
+        "has_conflict": false,
+        "summary": "Đã ghi nhận công việc: 'Hoàn thành nguyên mẫu ứng dụng quản lý thư viện cho đồ án nhóm 4 người. Phạm vi gồm đăng nhập, phân quyền thủ thư và độc giả, quản lý 500 đầu sách, tìm kiếm theo tên/tác giả, mượn trả, theo dõi quá hạn và báo cáo thống kê tháng. Đầu ra là mã nguồn backend FastAPI, frontend web, database PostgreSQL, tài liệu API, 30 ca kiểm thử chức năng, báo cáo PDF 25 trang, 15 slide và video demo 5 phút. Không triển khai thanh toán, không gửi email thật và không triển khai lên cloud. Thiết kế giao diện đã có; cần rà soát tính nhất quán giữa API và màn hình, dữ liệu demo không chứa thông tin người thật. Tôi phụ trách tích hợp và báo cáo; các thành viên khác đã cung cấp module đăng nhập và danh mục sách. Bắt đầu 12/11/2026 lúc 18:00, hạn chót 30/11/2026 lúc 17:00 giờ Việt Nam. Tôi rảnh thứ Hai, thứ Tư và thứ Sáu từ 18:00 đến 21:00, thứ Bảy từ 09:00 đến 12:00 và từ 14:00 đến 17:00 trong khoảng ngày 12 đến 29/11/2026. Giữ nguyên các lịch học đã có, không tự đổi lịch công việc khác. Ưu tiên demo chạy ổn định, sau đó kiểm thử, cuối cùng hoàn thiện tài liệu; chỉ ghi nhận yêu cầu ở bước này, chưa chia bước hoặc chốt lịch.'. Mình cần bạn bổ sung/xác nhận thêm thông tin bên dưới để lên lịch chuẩn xác nhé.",
+        "clarification_questions": [
+          "Phạm vi hoặc kết quả đầu ra mong muốn của việc này là gì (ví dụ: số trang, số phần cần hoàn thiện)?",
+          "Bạn có những khung giờ rảnh cụ thể nào (từ mấy giờ đến mấy giờ) để mình sắp xếp các phiên tập trung?",
+          "Hạn chót (ngày và giờ) bạn cần hoàn thành xong công việc này là khi nào?"
+        ],
+        "generation_tier": "tier_3_rule_based"
+      }
+    },
+    {
+      "mode": "groq",
+      "case": "small",
+      "repetition": 3,
+      "elapsed_s": 0.2869,
+      "status": "error",
+      "winner": null,
+      "generation_tier": "tier_3_rule_based",
+      "coordinator_error": {
+        "error_type": "RateLimitError",
+        "http_status": 429,
+        "error_message": "Error code: 429 - {'error': {'message': 'Rate limit reached for model `qwen/qwen3.8-27b` in organization `[REDACTED_ORG]` service tier `on_demand` on output tokens per minute (OTPM): Limit 1000, Used 531, Requested 834. Please try again in 21.9s. Need more tokens? Upgrade to Dev Tier today at https://console.groq.com/settings/billing', 'type': 'tokens', 'code': 'rate_limit_exceeded'}}"
+      },
+      "attempts": [
+        {
+          "model": "qwen/qwen3.8-27b",
+          "start_s": 0.0057,
+          "status": "error",
+          "error_type": "RateLimitError",
+          "http_status": 429,
+          "error_message": "Error code: 429 - {'error': {'message': 'Rate limit reached for model `qwen/qwen3.8-27b` in organization `[REDACTED_ORG]` service tier `on_demand` on output tokens per minute (OTPM): Limit 1000, Used 531, Requested 834. Please try again in 21.9s. Need more tokens? Upgrade to Dev Tier today at https://console.groq.com/settings/billing', 'type': 'tokens', 'code': 'rate_limit_exceeded'}}",
+          "elapsed_s": 0.2811
+        }
+      ],
+      "checks": {
+        "content_present": true,
+        "scope_present": false,
+        "is_complete": false,
+        "has_conflict": false
+      },
+      "result": {
+        "title": "Sắp xếp 20 tài liệu PDF vào 3 thư mục môn học và đổi tên theo môn-ngày. Bắt đầu ",
+        "goal": null,
+        "time_constraint": null,
+        "clarification_issues": [],
+        "resolved_issue_keys": [],
+        "field_review_notes": {},
+        "content": "Sắp xếp 20 tài liệu PDF vào 3 thư mục môn học và đổi tên theo môn-ngày. Bắt đầu ngày 12/11/2026 lúc 19:00, rảnh 19:00-20:00 ngày đó. Hạn chót 12/11/2026 lúc 21:00, giờ Việt Nam.",
+        "scope": null,
+        "free_time_slots": [],
+        "availability_update_mode": "merge",
+        "structured_free_windows": [],
+        "deadline": null,
+        "extra_requirements": [],
+        "is_complete": false,
+        "has_conflict": false,
+        "summary": "Đã ghi nhận công việc: 'Sắp xếp 20 tài liệu PDF vào 3 thư mục môn học và đổi tên theo môn-ngày. Bắt đầu ngày 12/11/2026 lúc 19:00, rảnh 19:00-20:00 ngày đó. Hạn chót 12/11/2026 lúc 21:00, giờ Việt Nam.'. Mình cần bạn bổ sung/xác nhận thêm thông tin bên dưới để lên lịch chuẩn xác nhé.",
+        "clarification_questions": [
+          "Phạm vi hoặc kết quả đầu ra mong muốn của việc này là gì (ví dụ: số trang, số phần cần hoàn thiện)?",
+          "Bạn có những khung giờ rảnh cụ thể nào (từ mấy giờ đến mấy giờ) để mình sắp xếp các phiên tập trung?",
+          "Hạn chót (ngày và giờ) bạn cần hoàn thành xong công việc này là khi nào?"
+        ],
+        "generation_tier": "tier_3_rule_based"
+      }
+    },
+    {
+      "mode": "groq_secondary",
+      "case": "small",
+      "repetition": 3,
+      "elapsed_s": 0.3369,
+      "status": "error",
+      "winner": null,
+      "generation_tier": "tier_3_rule_based",
+      "coordinator_error": {
+        "error_type": "RateLimitError",
+        "http_status": 429,
+        "error_message": "Error code: 429 - {'error': {'message': 'Rate limit reached for model `openai/gpt-oss-20b` in organization `[REDACTED_ORG]` service tier `on_demand` on tokens per minute (TPM): Limit 8000, Used 4095, Requested 5094. Please try again in 8.9175s. Need more tokens? Upgrade to Dev Tier today at https://console.groq.com/settings/billing', 'type': 'tokens', 'code': 'rate_limit_exceeded'}}"
+      },
+      "attempts": [
+        {
+          "model": "openai/gpt-oss-20b",
+          "start_s": 0.0023,
+          "status": "error",
+          "error_type": "RateLimitError",
+          "http_status": 429,
+          "error_message": "Error code: 429 - {'error': {'message': 'Rate limit reached for model `openai/gpt-oss-20b` in organization `[REDACTED_ORG]` service tier `on_demand` on tokens per minute (TPM): Limit 8000, Used 4095, Requested 5094. Please try again in 8.9175s. Need more tokens? Upgrade to Dev Tier today at https://console.groq.com/settings/billing', 'type': 'tokens', 'code': 'rate_limit_exceeded'}}",
+          "elapsed_s": 0.3345
+        }
+      ],
+      "checks": {
+        "content_present": true,
+        "scope_present": false,
+        "is_complete": false,
+        "has_conflict": false
+      },
+      "result": {
+        "title": "Sắp xếp 20 tài liệu PDF vào 3 thư mục môn học và đổi tên theo môn-ngày. Bắt đầu ",
+        "goal": null,
+        "time_constraint": null,
+        "clarification_issues": [],
+        "resolved_issue_keys": [],
+        "field_review_notes": {},
+        "content": "Sắp xếp 20 tài liệu PDF vào 3 thư mục môn học và đổi tên theo môn-ngày. Bắt đầu ngày 12/11/2026 lúc 19:00, rảnh 19:00-20:00 ngày đó. Hạn chót 12/11/2026 lúc 21:00, giờ Việt Nam.",
+        "scope": null,
+        "free_time_slots": [],
+        "availability_update_mode": "merge",
+        "structured_free_windows": [],
+        "deadline": null,
+        "extra_requirements": [],
+        "is_complete": false,
+        "has_conflict": false,
+        "summary": "Đã ghi nhận công việc: 'Sắp xếp 20 tài liệu PDF vào 3 thư mục môn học và đổi tên theo môn-ngày. Bắt đầu ngày 12/11/2026 lúc 19:00, rảnh 19:00-20:00 ngày đó. Hạn chót 12/11/2026 lúc 21:00, giờ Việt Nam.'. Mình cần bạn bổ sung/xác nhận thêm thông tin bên dưới để lên lịch chuẩn xác nhé.",
+        "clarification_questions": [
+          "Phạm vi hoặc kết quả đầu ra mong muốn của việc này là gì (ví dụ: số trang, số phần cần hoàn thiện)?",
+          "Bạn có những khung giờ rảnh cụ thể nào (từ mấy giờ đến mấy giờ) để mình sắp xếp các phiên tập trung?",
+          "Hạn chót (ngày và giờ) bạn cần hoàn thành xong công việc này là khi nào?"
+        ],
+        "generation_tier": "tier_3_rule_based"
+      }
+    },
+    {
+      "mode": "production",
+      "case": "small",
+      "repetition": 3,
+      "elapsed_s": 4.5009,
+      "status": "timeout",
+      "winner": null,
+      "generation_tier": "tier_3_rule_based",
+      "coordinator_error": {
+        "error_type": "TimeoutError",
+        "http_status": null,
+        "error_message": "UF1 vượt trần thời gian xử lý (4.5s)."
+      },
+      "attempts": [
+        {
+          "model": "gemini-3.8-flash",
+          "start_s": 0.0002,
+          "status": "cancelled",
+          "elapsed_s": 4.5017
+        },
+        {
+          "model": "gemini-3.5-flash-lite",
+          "start_s": 2.611,
+          "status": "cancelled",
+          "elapsed_s": 1.8917
+        },
+        {
+          "model": "qwen/qwen3.8-27b",
+          "start_s": 3.5028,
+          "status": "cancelled",
+          "elapsed_s": 1.0006
+        }
+      ],
+      "checks": {
+        "content_present": true,
+        "scope_present": false,
+        "is_complete": false,
+        "has_conflict": false
+      },
+      "result": {
+        "title": "Sắp xếp 20 tài liệu PDF vào 3 thư mục môn học và đổi tên theo môn-ngày. Bắt đầu ",
+        "goal": null,
+        "time_constraint": null,
+        "clarification_issues": [],
+        "resolved_issue_keys": [],
+        "field_review_notes": {},
+        "content": "Sắp xếp 20 tài liệu PDF vào 3 thư mục môn học và đổi tên theo môn-ngày. Bắt đầu ngày 12/11/2026 lúc 19:00, rảnh 19:00-20:00 ngày đó. Hạn chót 12/11/2026 lúc 21:00, giờ Việt Nam.",
+        "scope": null,
+        "free_time_slots": [],
+        "availability_update_mode": "merge",
+        "structured_free_windows": [],
+        "deadline": null,
+        "extra_requirements": [],
+        "is_complete": false,
+        "has_conflict": false,
+        "summary": "Đã ghi nhận công việc: 'Sắp xếp 20 tài liệu PDF vào 3 thư mục môn học và đổi tên theo môn-ngày. Bắt đầu ngày 12/11/2026 lúc 19:00, rảnh 19:00-20:00 ngày đó. Hạn chót 12/11/2026 lúc 21:00, giờ Việt Nam.'. Mình cần bạn bổ sung/xác nhận thêm thông tin bên dưới để lên lịch chuẩn xác nhé.",
+        "clarification_questions": [
+          "Phạm vi hoặc kết quả đầu ra mong muốn của việc này là gì (ví dụ: số trang, số phần cần hoàn thiện)?",
+          "Bạn có những khung giờ rảnh cụ thể nào (từ mấy giờ đến mấy giờ) để mình sắp xếp các phiên tập trung?",
+          "Hạn chót (ngày và giờ) bạn cần hoàn thành xong công việc này là khi nào?"
+        ],
+        "generation_tier": "tier_3_rule_based"
+      }
+    },
+    {
+      "mode": "primary",
+      "case": "small",
+      "repetition": 3,
+      "elapsed_s": 4.5102,
+      "status": "timeout",
+      "winner": null,
+      "generation_tier": "tier_3_rule_based",
+      "coordinator_error": {
+        "error_type": "TimeoutError",
+        "http_status": null,
+        "error_message": "UF1 vượt trần thời gian xử lý (4.5s)."
+      },
+      "attempts": [
+        {
+          "model": "gemini-3.8-flash",
+          "start_s": 0.0002,
+          "status": "cancelled",
+          "elapsed_s": 4.5105
+        }
+      ],
+      "checks": {
+        "content_present": true,
+        "scope_present": false,
+        "is_complete": false,
+        "has_conflict": false
+      },
+      "result": {
+        "title": "Sắp xếp 20 tài liệu PDF vào 3 thư mục môn học và đổi tên theo môn-ngày. Bắt đầu ",
+        "goal": null,
+        "time_constraint": null,
+        "clarification_issues": [],
+        "resolved_issue_keys": [],
+        "field_review_notes": {},
+        "content": "Sắp xếp 20 tài liệu PDF vào 3 thư mục môn học và đổi tên theo môn-ngày. Bắt đầu ngày 12/11/2026 lúc 19:00, rảnh 19:00-20:00 ngày đó. Hạn chót 12/11/2026 lúc 21:00, giờ Việt Nam.",
+        "scope": null,
+        "free_time_slots": [],
+        "availability_update_mode": "merge",
+        "structured_free_windows": [],
+        "deadline": null,
+        "extra_requirements": [],
+        "is_complete": false,
+        "has_conflict": false,
+        "summary": "Đã ghi nhận công việc: 'Sắp xếp 20 tài liệu PDF vào 3 thư mục môn học và đổi tên theo môn-ngày. Bắt đầu ngày 12/11/2026 lúc 19:00, rảnh 19:00-20:00 ngày đó. Hạn chót 12/11/2026 lúc 21:00, giờ Việt Nam.'. Mình cần bạn bổ sung/xác nhận thêm thông tin bên dưới để lên lịch chuẩn xác nhé.",
+        "clarification_questions": [
+          "Phạm vi hoặc kết quả đầu ra mong muốn của việc này là gì (ví dụ: số trang, số phần cần hoàn thiện)?",
+          "Bạn có những khung giờ rảnh cụ thể nào (từ mấy giờ đến mấy giờ) để mình sắp xếp các phiên tập trung?",
+          "Hạn chót (ngày và giờ) bạn cần hoàn thành xong công việc này là khi nào?"
+        ],
+        "generation_tier": "tier_3_rule_based"
+      }
+    },
+    {
+      "mode": "backup",
+      "case": "small",
+      "repetition": 3,
+      "elapsed_s": 1.9619,
+      "status": "success",
+      "winner": "gemini-3.5-flash-lite",
+      "generation_tier": "tier_1_gemini",
+      "coordinator_error": null,
+      "attempts": [
+        {
+          "model": "gemini-3.5-flash-lite",
+          "start_s": 0.0002,
+          "status": "schema_valid",
+          "elapsed_s": 1.9615
+        }
+      ],
+      "checks": {
+        "content_present": true,
+        "scope_present": true,
+        "is_complete": true,
+        "has_conflict": false,
+        "start_at_preserved": true,
+        "time_constraint_end_preserved": true
+      },
+      "result": {
+        "title": "Sắp xếp tài liệu PDF",
+        "goal": null,
+        "time_constraint": {
+          "kind": "deadline",
+          "start_at": "2026-11-12T19:00:00+07:00",
+          "deadline_at": "2026-11-12T21:00:00+07:00",
+          "finish_by_at": null,
+          "input_timezone": "Asia/Ho_Chi_Minh"
+        },
+        "clarification_issues": [],
+        "resolved_issue_keys": [],
+        "field_review_notes": {},
+        "content": "Sắp xếp 20 tài liệu PDF vào 3 thư mục môn học và đổi tên theo môn-ngày",
+        "scope": "20 tài liệu PDF vào 3 thư mục môn học và đổi tên theo môn-ngày",
+        "free_time_slots": [
+          "Ngày 12/11/2026 từ 19:00 đến 20:00"
+        ],
+        "availability_update_mode": "merge",
+        "structured_free_windows": [
+          {
+            "kind": "specific_date",
+            "weekday": null,
+            "date": "2026-11-12",
+            "start_local": "19:00",
+            "end_local": "20:00",
+            "raw_phrase": "19:00-20:00 ngày 12/11/2026",
+            "is_ambiguous": false
+          }
+        ],
+        "deadline": "2026-11-12T21:00:00+07:00",
+        "extra_requirements": [],
+        "is_complete": true,
+        "has_conflict": false,
+        "summary": "Bạn muốn sắp xếp 20 tài liệu PDF vào 3 thư mục môn học và đổi tên theo môn-ngày vào ngày 12/11/2026 từ 19:00 đến 20:00, với hạn chót là 12/11/2026 lúc 21:00.",
+        "clarification_questions": [],
+        "generation_tier": "tier_1_gemini"
+      }
+    },
+    {
+      "mode": "groq",
+      "case": "medium",
+      "repetition": 3,
+      "elapsed_s": 2.5327,
+      "status": "success",
+      "winner": "qwen/qwen3.8-27b",
+      "generation_tier": "tier_2_groq",
+      "coordinator_error": null,
+      "attempts": [
+        {
+          "model": "qwen/qwen3.8-27b",
+          "start_s": 0.0031,
+          "status": "schema_valid",
+          "elapsed_s": 2.5292
+        }
+      ],
+      "checks": {
+        "content_present": true,
+        "scope_present": true,
+        "is_complete": true,
+        "has_conflict": false,
+        "start_at_preserved": true,
+        "time_constraint_end_preserved": true
+      },
+      "result": {
+        "title": "Báo cáo khảo sát thói quen học tập",
+        "goal": null,
+        "time_constraint": {
+          "kind": "deadline",
+          "start_at": "2026-11-12T19:00:00+07:00",
+          "deadline_at": "2026-11-15T17:00:00+07:00",
+          "finish_by_at": null,
+          "input_timezone": "Asia/Ho_Chi_Minh"
+        },
+        "clarification_issues": [],
+        "resolved_issue_keys": [],
+        "field_review_notes": {},
+        "content": "Viết báo cáo về khảo sát thói quen học tập của 30 sinh viên, bao gồm các phần: mục tiêu, phương pháp, kết quả, 3 biểu đồ và kết luận. Dữ liệu đã có sẵn trong bảng tính, không cần khảo sát thêm.",
+        "scope": "8 trang, định dạng file PDF, bao gồm mục tiêu, phương pháp, kết quả, 3 biểu đồ và kết luận.",
+        "free_time_slots": [
+          "12/11/2026 từ 19:00 đến 21:00",
+          "13/11/2026 từ 19:00 đến 21:00",
+          "14/11/2026 từ 19:00 đến 21:00"
+        ],
+        "availability_update_mode": "merge",
+        "structured_free_windows": [
+          {
+            "kind": "specific_date",
+            "weekday": null,
+            "date": "2026-11-12",
+            "start_local": "19:00",
+            "end_local": "21:00",
+            "raw_phrase": "Rảnh ngày 12, 13 và 14/11/2026, mỗi ngày từ 19:00 đến 21:00",
+            "is_ambiguous": false
+          },
+          {
+            "kind": "specific_date",
+            "weekday": null,
+            "date": "2026-11-13",
+            "start_local": "19:00",
+            "end_local": "21:00",
+            "raw_phrase": "Rảnh ngày 12, 13 và 14/11/2026, mỗi ngày từ 19:00 đến 21:00",
+            "is_ambiguous": false
+          },
+          {
+            "kind": "specific_date",
+            "weekday": null,
+            "date": "2026-11-14",
+            "start_local": "19:00",
+            "end_local": "21:00",
+            "raw_phrase": "Rảnh ngày 12, 13 và 14/11/2026, mỗi ngày từ 19:00 đến 21:00",
+            "is_ambiguous": false
+          }
+        ],
+        "deadline": "2026-11-15T17:00:00+07:00",
+        "extra_requirements": [
+          "Chỉ dùng dữ liệu có sẵn trong bảng tính",
+          "Không đưa thông tin cá nhân vào báo cáo"
+        ],
+        "is_complete": true,
+        "has_conflict": false,
+        "summary": "Bạn cần viết báo cáo 8 trang (PDF) về khảo sát thói quen học tập của 30 sinh viên, gồm mục tiêu, phương pháp, kết quả, 3 biểu đồ và kết luận. Bạn có 3 khung giờ rảnh (12, 13, 14/11 từ 19:00-21:00) và hạn chót là 15/11 lúc 17:00. Dữ liệu đã có sẵn, không cần khảo sát thêm và không đưa thông tin cá nhân vào báo cáo.",
+        "clarification_questions": [],
+        "generation_tier": "tier_2_groq"
+      }
+    },
+    {
+      "mode": "groq_secondary",
+      "case": "medium",
+      "repetition": 3,
+      "elapsed_s": 3.161,
+      "status": "error",
+      "winner": null,
+      "generation_tier": "tier_3_rule_based",
+      "coordinator_error": {
+        "error_type": "ValidationError",
+        "http_status": null,
+        "error_message": "1 validation error for LLMTaskExtractionPayload\nsummary\n  Field required [type=missing, input_value={'title': None, 'goal': N...field_review_notes': {}}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/2.14/v/missing"
+      },
+      "attempts": [
+        {
+          "model": "openai/gpt-oss-20b",
+          "start_s": 0.0039,
+          "status": "schema_error",
+          "elapsed_s": 3.1552,
+          "error_type": "ValidationError",
+          "http_status": null,
+          "error_message": "1 validation error for LLMTaskExtractionPayload\nsummary\n  Field required [type=missing, input_value={'title': None, 'goal': N...field_review_notes': {}}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/2.14/v/missing"
+        }
+      ],
+      "checks": {
+        "content_present": true,
+        "scope_present": false,
+        "is_complete": false,
+        "has_conflict": false
+      },
+      "result": {
+        "title": "Viết báo cáo 8 trang về khảo sát thói quen học tập của 30 sinh viên, gồm mục tiê",
+        "goal": null,
+        "time_constraint": null,
+        "clarification_issues": [],
+        "resolved_issue_keys": [],
+        "field_review_notes": {},
+        "content": "Viết báo cáo 8 trang về khảo sát thói quen học tập của 30 sinh viên, gồm mục tiêu, phương pháp, kết quả, 3 biểu đồ và kết luận; nộp một file PDF. Dữ liệu đã có trong bảng tính, không cần khảo sát thêm. Bắt đầu 12/11/2026 lúc 19:00. Rảnh ngày 12, 13 và 14/11/2026, mỗi ngày từ 19:00 đến 21:00. Hạn chót 15/11/2026 lúc 17:00 giờ Việt Nam. Chỉ dùng dữ liệu có sẵn, không đưa thông tin cá nhân vào báo cáo.",
+        "scope": null,
+        "free_time_slots": [],
+        "availability_update_mode": "merge",
+        "structured_free_windows": [],
+        "deadline": null,
+        "extra_requirements": [],
+        "is_complete": false,
+        "has_conflict": false,
+        "summary": "Đã ghi nhận công việc: 'Viết báo cáo 8 trang về khảo sát thói quen học tập của 30 sinh viên, gồm mục tiêu, phương pháp, kết quả, 3 biểu đồ và kết luận; nộp một file PDF. Dữ liệu đã có trong bảng tính, không cần khảo sát thêm. Bắt đầu 12/11/2026 lúc 19:00. Rảnh ngày 12, 13 và 14/11/2026, mỗi ngày từ 19:00 đến 21:00. Hạn chót 15/11/2026 lúc 17:00 giờ Việt Nam. Chỉ dùng dữ liệu có sẵn, không đưa thông tin cá nhân vào báo cáo.'. Mình cần bạn bổ sung/xác nhận thêm thông tin bên dưới để lên lịch chuẩn xác nhé.",
+        "clarification_questions": [
+          "Phạm vi hoặc kết quả đầu ra mong muốn của việc này là gì (ví dụ: số trang, số phần cần hoàn thiện)?",
+          "Bạn có những khung giờ rảnh cụ thể nào (từ mấy giờ đến mấy giờ) để mình sắp xếp các phiên tập trung?",
+          "Hạn chót (ngày và giờ) bạn cần hoàn thành xong công việc này là khi nào?"
+        ],
+        "generation_tier": "tier_3_rule_based"
+      }
+    },
+    {
+      "mode": "production",
+      "case": "medium",
+      "repetition": 3,
+      "elapsed_s": 4.523,
+      "status": "timeout",
+      "winner": null,
+      "generation_tier": "tier_3_rule_based",
+      "coordinator_error": {
+        "error_type": "TimeoutError",
+        "http_status": null,
+        "error_message": "UF1 vượt trần thời gian xử lý (4.5s)."
+      },
+      "attempts": [
+        {
+          "model": "gemini-3.8-flash",
+          "start_s": 0.0003,
+          "status": "cancelled",
+          "elapsed_s": 4.5231
+        },
+        {
+          "model": "gemini-3.5-flash-lite",
+          "start_s": 2.6035,
+          "status": "cancelled",
+          "elapsed_s": 1.92
+        },
+        {
+          "model": "qwen/qwen3.8-27b",
+          "start_s": 3.5099,
+          "status": "error",
+          "error_type": "RateLimitError",
+          "http_status": 429,
+          "error_message": "Error code: 429 - {'error': {'message': 'Rate limit reached for model `qwen/qwen3.8-27b` in organization `[REDACTED_ORG]` service tier `on_demand` on input tokens per minute (ITPM): Limit 7000, Used 5531, Requested 3411. Please try again in 16.645714285s. Need more tokens? Upgrade to Dev Tier today at https://console.groq.com/settings/billing', 'type': 'tokens', 'code': 'rate_limit_exceeded'}}",
+          "elapsed_s": 0.3011
+        },
+        {
+          "model": "openai/gpt-oss-20b",
+          "start_s": 3.811,
+          "status": "error",
+          "error_type": "RateLimitError",
+          "http_status": 429,
+          "error_message": "Error code: 429 - {'error': {'message': 'Rate limit reached for model `openai/gpt-oss-20b` in organization `[REDACTED_ORG]` service tier `on_demand` on tokens per minute (TPM): Limit 8000, Used 6622, Requested 5147. Please try again in 28.2675s. Need more tokens? Upgrade to Dev Tier today at https://console.groq.com/settings/billing', 'type': 'tokens', 'code': 'rate_limit_exceeded'}}",
+          "elapsed_s": 0.1648
+        }
+      ],
+      "checks": {
+        "content_present": true,
+        "scope_present": false,
+        "is_complete": false,
+        "has_conflict": false
+      },
+      "result": {
+        "title": "Viết báo cáo 8 trang về khảo sát thói quen học tập của 30 sinh viên, gồm mục tiê",
+        "goal": null,
+        "time_constraint": null,
+        "clarification_issues": [],
+        "resolved_issue_keys": [],
+        "field_review_notes": {},
+        "content": "Viết báo cáo 8 trang về khảo sát thói quen học tập của 30 sinh viên, gồm mục tiêu, phương pháp, kết quả, 3 biểu đồ và kết luận; nộp một file PDF. Dữ liệu đã có trong bảng tính, không cần khảo sát thêm. Bắt đầu 12/11/2026 lúc 19:00. Rảnh ngày 12, 13 và 14/11/2026, mỗi ngày từ 19:00 đến 21:00. Hạn chót 15/11/2026 lúc 17:00 giờ Việt Nam. Chỉ dùng dữ liệu có sẵn, không đưa thông tin cá nhân vào báo cáo.",
+        "scope": null,
+        "free_time_slots": [],
+        "availability_update_mode": "merge",
+        "structured_free_windows": [],
+        "deadline": null,
+        "extra_requirements": [],
+        "is_complete": false,
+        "has_conflict": false,
+        "summary": "Đã ghi nhận công việc: 'Viết báo cáo 8 trang về khảo sát thói quen học tập của 30 sinh viên, gồm mục tiêu, phương pháp, kết quả, 3 biểu đồ và kết luận; nộp một file PDF. Dữ liệu đã có trong bảng tính, không cần khảo sát thêm. Bắt đầu 12/11/2026 lúc 19:00. Rảnh ngày 12, 13 và 14/11/2026, mỗi ngày từ 19:00 đến 21:00. Hạn chót 15/11/2026 lúc 17:00 giờ Việt Nam. Chỉ dùng dữ liệu có sẵn, không đưa thông tin cá nhân vào báo cáo.'. Mình cần bạn bổ sung/xác nhận thêm thông tin bên dưới để lên lịch chuẩn xác nhé.",
+        "clarification_questions": [
+          "Phạm vi hoặc kết quả đầu ra mong muốn của việc này là gì (ví dụ: số trang, số phần cần hoàn thiện)?",
+          "Bạn có những khung giờ rảnh cụ thể nào (từ mấy giờ đến mấy giờ) để mình sắp xếp các phiên tập trung?",
+          "Hạn chót (ngày và giờ) bạn cần hoàn thành xong công việc này là khi nào?"
+        ],
+        "generation_tier": "tier_3_rule_based"
+      }
+    },
+    {
+      "mode": "primary",
+      "case": "medium",
+      "repetition": 3,
+      "elapsed_s": 4.5103,
+      "status": "timeout",
+      "winner": null,
+      "generation_tier": "tier_3_rule_based",
+      "coordinator_error": {
+        "error_type": "TimeoutError",
+        "http_status": null,
+        "error_message": "UF1 vượt trần thời gian xử lý (4.5s)."
+      },
+      "attempts": [
+        {
+          "model": "gemini-3.8-flash",
+          "start_s": 0.0002,
+          "status": "cancelled",
+          "elapsed_s": 4.5105
+        }
+      ],
+      "checks": {
+        "content_present": true,
+        "scope_present": false,
+        "is_complete": false,
+        "has_conflict": false
+      },
+      "result": {
+        "title": "Viết báo cáo 8 trang về khảo sát thói quen học tập của 30 sinh viên, gồm mục tiê",
+        "goal": null,
+        "time_constraint": null,
+        "clarification_issues": [],
+        "resolved_issue_keys": [],
+        "field_review_notes": {},
+        "content": "Viết báo cáo 8 trang về khảo sát thói quen học tập của 30 sinh viên, gồm mục tiêu, phương pháp, kết quả, 3 biểu đồ và kết luận; nộp một file PDF. Dữ liệu đã có trong bảng tính, không cần khảo sát thêm. Bắt đầu 12/11/2026 lúc 19:00. Rảnh ngày 12, 13 và 14/11/2026, mỗi ngày từ 19:00 đến 21:00. Hạn chót 15/11/2026 lúc 17:00 giờ Việt Nam. Chỉ dùng dữ liệu có sẵn, không đưa thông tin cá nhân vào báo cáo.",
+        "scope": null,
+        "free_time_slots": [],
+        "availability_update_mode": "merge",
+        "structured_free_windows": [],
+        "deadline": null,
+        "extra_requirements": [],
+        "is_complete": false,
+        "has_conflict": false,
+        "summary": "Đã ghi nhận công việc: 'Viết báo cáo 8 trang về khảo sát thói quen học tập của 30 sinh viên, gồm mục tiêu, phương pháp, kết quả, 3 biểu đồ và kết luận; nộp một file PDF. Dữ liệu đã có trong bảng tính, không cần khảo sát thêm. Bắt đầu 12/11/2026 lúc 19:00. Rảnh ngày 12, 13 và 14/11/2026, mỗi ngày từ 19:00 đến 21:00. Hạn chót 15/11/2026 lúc 17:00 giờ Việt Nam. Chỉ dùng dữ liệu có sẵn, không đưa thông tin cá nhân vào báo cáo.'. Mình cần bạn bổ sung/xác nhận thêm thông tin bên dưới để lên lịch chuẩn xác nhé.",
+        "clarification_questions": [
+          "Phạm vi hoặc kết quả đầu ra mong muốn của việc này là gì (ví dụ: số trang, số phần cần hoàn thiện)?",
+          "Bạn có những khung giờ rảnh cụ thể nào (từ mấy giờ đến mấy giờ) để mình sắp xếp các phiên tập trung?",
+          "Hạn chót (ngày và giờ) bạn cần hoàn thành xong công việc này là khi nào?"
+        ],
+        "generation_tier": "tier_3_rule_based"
+      }
+    },
+    {
+      "mode": "backup",
+      "case": "medium",
+      "repetition": 3,
+      "elapsed_s": 2.5518,
+      "status": "success",
+      "winner": "gemini-3.5-flash-lite",
+      "generation_tier": "tier_1_gemini",
+      "coordinator_error": null,
+      "attempts": [
+        {
+          "model": "gemini-3.5-flash-lite",
+          "start_s": 0.0001,
+          "status": "schema_valid",
+          "elapsed_s": 2.5515
+        }
+      ],
+      "checks": {
+        "content_present": true,
+        "scope_present": true,
+        "is_complete": true,
+        "has_conflict": false,
+        "start_at_preserved": true,
+        "time_constraint_end_preserved": true
+      },
+      "result": {
+        "title": "Viết báo cáo khảo sát thói quen học tập",
+        "goal": "Viết báo cáo 8 trang về khảo sát thói quen học tập của 30 sinh viên",
+        "time_constraint": {
+          "kind": "deadline",
+          "start_at": "2026-11-12T19:00:00+07:00",
+          "deadline_at": "2026-11-15T17:00:00+07:00",
+          "finish_by_at": null,
+          "input_timezone": "Asia/Ho_Chi_Minh"
+        },
+        "clarification_issues": [],
+        "resolved_issue_keys": [],
+        "field_review_notes": {},
+        "content": "Viết báo cáo khảo sát thói quen học tập của 30 sinh viên dựa trên dữ liệu có sẵn trong bảng tính",
+        "scope": "8 trang, gồm mục tiêu, phương pháp, kết quả, 3 biểu đồ và kết luận; nộp một file PDF",
+        "free_time_slots": [
+          "Ngày 12/11/2026 từ 19:00 đến 21:00",
+          "Ngày 13/11/2026 từ 19:00 đến 21:00",
+          "Ngày 14/11/2026 từ 19:00 đến 21:00"
+        ],
+        "availability_update_mode": "merge",
+        "structured_free_windows": [
+          {
+            "kind": "specific_date",
+            "weekday": null,
+            "date": "2026-11-12",
+            "start_local": "19:00",
+            "end_local": "21:00",
+            "raw_phrase": "ngày 12/11/2026 từ 19:00 đến 21:00",
+            "is_ambiguous": false
+          },
+          {
+            "kind": "specific_date",
+            "weekday": null,
+            "date": "2026-11-13",
+            "start_local": "19:00",
+            "end_local": "21:00",
+            "raw_phrase": "ngày 13/11/2026 từ 19:00 đến 21:00",
+            "is_ambiguous": false
+          },
+          {
+            "kind": "specific_date",
+            "weekday": null,
+            "date": "2026-11-14",
+            "start_local": "19:00",
+            "end_local": "21:00",
+            "raw_phrase": "ngày 14/11/2026 từ 19:00 đến 21:00",
+            "is_ambiguous": false
+          }
+        ],
+        "deadline": "2026-11-15T17:00:00+07:00",
+        "extra_requirements": [
+          "Chỉ dùng dữ liệu có sẵn, không đưa thông tin cá nhân vào báo cáo"
+        ],
+        "is_complete": true,
+        "has_conflict": false,
+        "summary": "Bạn muốn viết báo cáo 8 trang (gồm mục tiêu, phương pháp, kết quả, 3 biểu đồ, kết luận) dạng PDF từ dữ liệu có sẵn. Thời gian làm việc từ 12-14/11/2026 (19:00-21:00 mỗi ngày) và hạn chót là 15/11/2026 lúc 17:00.",
+        "clarification_questions": [],
+        "generation_tier": "tier_1_gemini"
+      }
+    },
+    {
+      "mode": "groq",
+      "case": "large",
+      "repetition": 3,
+      "elapsed_s": 0.291,
+      "status": "error",
+      "winner": null,
+      "generation_tier": "tier_3_rule_based",
+      "coordinator_error": {
+        "error_type": "RateLimitError",
+        "http_status": 429,
+        "error_message": "Error code: 429 - {'error': {'message': 'Rate limit reached for model `qwen/qwen3.8-27b` in organization `[REDACTED_ORG]` service tier `on_demand` on output tokens per minute (OTPM): Limit 1000, Used 707, Requested 834. Please try again in 32.46s. Need more tokens? Upgrade to Dev Tier today at https://console.groq.com/settings/billing', 'type': 'tokens', 'code': 'rate_limit_exceeded'}}"
+      },
+      "attempts": [
+        {
+          "model": "qwen/qwen3.8-27b",
+          "start_s": 0.0041,
+          "status": "error",
+          "error_type": "RateLimitError",
+          "http_status": 429,
+          "error_message": "Error code: 429 - {'error': {'message': 'Rate limit reached for model `qwen/qwen3.8-27b` in organization `[REDACTED_ORG]` service tier `on_demand` on output tokens per minute (OTPM): Limit 1000, Used 707, Requested 834. Please try again in 32.46s. Need more tokens? Upgrade to Dev Tier today at https://console.groq.com/settings/billing', 'type': 'tokens', 'code': 'rate_limit_exceeded'}}",
+          "elapsed_s": 0.2867
+        }
+      ],
+      "checks": {
+        "content_present": true,
+        "scope_present": false,
+        "is_complete": false,
+        "has_conflict": false
+      },
+      "result": {
+        "title": "Hoàn thành nguyên mẫu ứng dụng quản lý thư viện cho đồ án nhóm 4 người. Phạm vi ",
+        "goal": null,
+        "time_constraint": null,
+        "clarification_issues": [],
+        "resolved_issue_keys": [],
+        "field_review_notes": {},
+        "content": "Hoàn thành nguyên mẫu ứng dụng quản lý thư viện cho đồ án nhóm 4 người. Phạm vi gồm đăng nhập, phân quyền thủ thư và độc giả, quản lý 500 đầu sách, tìm kiếm theo tên/tác giả, mượn trả, theo dõi quá hạn và báo cáo thống kê tháng. Đầu ra là mã nguồn backend FastAPI, frontend web, database PostgreSQL, tài liệu API, 30 ca kiểm thử chức năng, báo cáo PDF 25 trang, 15 slide và video demo 5 phút. Không triển khai thanh toán, không gửi email thật và không triển khai lên cloud. Thiết kế giao diện đã có; cần rà soát tính nhất quán giữa API và màn hình, dữ liệu demo không chứa thông tin người thật. Tôi phụ trách tích hợp và báo cáo; các thành viên khác đã cung cấp module đăng nhập và danh mục sách. Bắt đầu 12/11/2026 lúc 18:00, hạn chót 30/11/2026 lúc 17:00 giờ Việt Nam. Tôi rảnh thứ Hai, thứ Tư và thứ Sáu từ 18:00 đến 21:00, thứ Bảy từ 09:00 đến 12:00 và từ 14:00 đến 17:00 trong khoảng ngày 12 đến 29/11/2026. Giữ nguyên các lịch học đã có, không tự đổi lịch công việc khác. Ưu tiên demo chạy ổn định, sau đó kiểm thử, cuối cùng hoàn thiện tài liệu; chỉ ghi nhận yêu cầu ở bước này, chưa chia bước hoặc chốt lịch.",
+        "scope": null,
+        "free_time_slots": [],
+        "availability_update_mode": "merge",
+        "structured_free_windows": [],
+        "deadline": null,
+        "extra_requirements": [],
+        "is_complete": false,
+        "has_conflict": false,
+        "summary": "Đã ghi nhận công việc: 'Hoàn thành nguyên mẫu ứng dụng quản lý thư viện cho đồ án nhóm 4 người. Phạm vi gồm đăng nhập, phân quyền thủ thư và độc giả, quản lý 500 đầu sách, tìm kiếm theo tên/tác giả, mượn trả, theo dõi quá hạn và báo cáo thống kê tháng. Đầu ra là mã nguồn backend FastAPI, frontend web, database PostgreSQL, tài liệu API, 30 ca kiểm thử chức năng, báo cáo PDF 25 trang, 15 slide và video demo 5 phút. Không triển khai thanh toán, không gửi email thật và không triển khai lên cloud. Thiết kế giao diện đã có; cần rà soát tính nhất quán giữa API và màn hình, dữ liệu demo không chứa thông tin người thật. Tôi phụ trách tích hợp và báo cáo; các thành viên khác đã cung cấp module đăng nhập và danh mục sách. Bắt đầu 12/11/2026 lúc 18:00, hạn chót 30/11/2026 lúc 17:00 giờ Việt Nam. Tôi rảnh thứ Hai, thứ Tư và thứ Sáu từ 18:00 đến 21:00, thứ Bảy từ 09:00 đến 12:00 và từ 14:00 đến 17:00 trong khoảng ngày 12 đến 29/11/2026. Giữ nguyên các lịch học đã có, không tự đổi lịch công việc khác. Ưu tiên demo chạy ổn định, sau đó kiểm thử, cuối cùng hoàn thiện tài liệu; chỉ ghi nhận yêu cầu ở bước này, chưa chia bước hoặc chốt lịch.'. Mình cần bạn bổ sung/xác nhận thêm thông tin bên dưới để lên lịch chuẩn xác nhé.",
+        "clarification_questions": [
+          "Phạm vi hoặc kết quả đầu ra mong muốn của việc này là gì (ví dụ: số trang, số phần cần hoàn thiện)?",
+          "Bạn có những khung giờ rảnh cụ thể nào (từ mấy giờ đến mấy giờ) để mình sắp xếp các phiên tập trung?",
+          "Hạn chót (ngày và giờ) bạn cần hoàn thành xong công việc này là khi nào?"
+        ],
+        "generation_tier": "tier_3_rule_based"
+      }
+    },
+    {
+      "mode": "groq_secondary",
+      "case": "large",
+      "repetition": 3,
+      "elapsed_s": 0.2577,
+      "status": "error",
+      "winner": null,
+      "generation_tier": "tier_3_rule_based",
+      "coordinator_error": {
+        "error_type": "RateLimitError",
+        "http_status": 429,
+        "error_message": "Error code: 429 - {'error': {'message': 'Rate limit reached for model `openai/gpt-oss-20b` in organization `[REDACTED_ORG]` service tier `on_demand` on tokens per minute (TPM): Limit 8000, Used 5263, Requested 5861. Please try again in 23.43s. Need more tokens? Upgrade to Dev Tier today at https://console.groq.com/settings/billing', 'type': 'tokens', 'code': 'rate_limit_exceeded'}}"
+      },
+      "attempts": [
+        {
+          "model": "openai/gpt-oss-20b",
+          "start_s": 0.0037,
+          "status": "error",
+          "error_type": "RateLimitError",
+          "http_status": 429,
+          "error_message": "Error code: 429 - {'error': {'message': 'Rate limit reached for model `openai/gpt-oss-20b` in organization `[REDACTED_ORG]` service tier `on_demand` on tokens per minute (TPM): Limit 8000, Used 5263, Requested 5861. Please try again in 23.43s. Need more tokens? Upgrade to Dev Tier today at https://console.groq.com/settings/billing', 'type': 'tokens', 'code': 'rate_limit_exceeded'}}",
+          "elapsed_s": 0.2539
+        }
+      ],
+      "checks": {
+        "content_present": true,
+        "scope_present": false,
+        "is_complete": false,
+        "has_conflict": false
+      },
+      "result": {
+        "title": "Hoàn thành nguyên mẫu ứng dụng quản lý thư viện cho đồ án nhóm 4 người. Phạm vi ",
+        "goal": null,
+        "time_constraint": null,
+        "clarification_issues": [],
+        "resolved_issue_keys": [],
+        "field_review_notes": {},
+        "content": "Hoàn thành nguyên mẫu ứng dụng quản lý thư viện cho đồ án nhóm 4 người. Phạm vi gồm đăng nhập, phân quyền thủ thư và độc giả, quản lý 500 đầu sách, tìm kiếm theo tên/tác giả, mượn trả, theo dõi quá hạn và báo cáo thống kê tháng. Đầu ra là mã nguồn backend FastAPI, frontend web, database PostgreSQL, tài liệu API, 30 ca kiểm thử chức năng, báo cáo PDF 25 trang, 15 slide và video demo 5 phút. Không triển khai thanh toán, không gửi email thật và không triển khai lên cloud. Thiết kế giao diện đã có; cần rà soát tính nhất quán giữa API và màn hình, dữ liệu demo không chứa thông tin người thật. Tôi phụ trách tích hợp và báo cáo; các thành viên khác đã cung cấp module đăng nhập và danh mục sách. Bắt đầu 12/11/2026 lúc 18:00, hạn chót 30/11/2026 lúc 17:00 giờ Việt Nam. Tôi rảnh thứ Hai, thứ Tư và thứ Sáu từ 18:00 đến 21:00, thứ Bảy từ 09:00 đến 12:00 và từ 14:00 đến 17:00 trong khoảng ngày 12 đến 29/11/2026. Giữ nguyên các lịch học đã có, không tự đổi lịch công việc khác. Ưu tiên demo chạy ổn định, sau đó kiểm thử, cuối cùng hoàn thiện tài liệu; chỉ ghi nhận yêu cầu ở bước này, chưa chia bước hoặc chốt lịch.",
+        "scope": null,
+        "free_time_slots": [],
+        "availability_update_mode": "merge",
+        "structured_free_windows": [],
+        "deadline": null,
+        "extra_requirements": [],
+        "is_complete": false,
+        "has_conflict": false,
+        "summary": "Đã ghi nhận công việc: 'Hoàn thành nguyên mẫu ứng dụng quản lý thư viện cho đồ án nhóm 4 người. Phạm vi gồm đăng nhập, phân quyền thủ thư và độc giả, quản lý 500 đầu sách, tìm kiếm theo tên/tác giả, mượn trả, theo dõi quá hạn và báo cáo thống kê tháng. Đầu ra là mã nguồn backend FastAPI, frontend web, database PostgreSQL, tài liệu API, 30 ca kiểm thử chức năng, báo cáo PDF 25 trang, 15 slide và video demo 5 phút. Không triển khai thanh toán, không gửi email thật và không triển khai lên cloud. Thiết kế giao diện đã có; cần rà soát tính nhất quán giữa API và màn hình, dữ liệu demo không chứa thông tin người thật. Tôi phụ trách tích hợp và báo cáo; các thành viên khác đã cung cấp module đăng nhập và danh mục sách. Bắt đầu 12/11/2026 lúc 18:00, hạn chót 30/11/2026 lúc 17:00 giờ Việt Nam. Tôi rảnh thứ Hai, thứ Tư và thứ Sáu từ 18:00 đến 21:00, thứ Bảy từ 09:00 đến 12:00 và từ 14:00 đến 17:00 trong khoảng ngày 12 đến 29/11/2026. Giữ nguyên các lịch học đã có, không tự đổi lịch công việc khác. Ưu tiên demo chạy ổn định, sau đó kiểm thử, cuối cùng hoàn thiện tài liệu; chỉ ghi nhận yêu cầu ở bước này, chưa chia bước hoặc chốt lịch.'. Mình cần bạn bổ sung/xác nhận thêm thông tin bên dưới để lên lịch chuẩn xác nhé.",
+        "clarification_questions": [
+          "Phạm vi hoặc kết quả đầu ra mong muốn của việc này là gì (ví dụ: số trang, số phần cần hoàn thiện)?",
+          "Bạn có những khung giờ rảnh cụ thể nào (từ mấy giờ đến mấy giờ) để mình sắp xếp các phiên tập trung?",
+          "Hạn chót (ngày và giờ) bạn cần hoàn thành xong công việc này là khi nào?"
+        ],
+        "generation_tier": "tier_3_rule_based"
+      }
+    },
+    {
+      "mode": "production",
+      "case": "large",
+      "repetition": 3,
+      "elapsed_s": 4.5212,
+      "status": "timeout",
+      "winner": null,
+      "generation_tier": "tier_3_rule_based",
+      "coordinator_error": {
+        "error_type": "TimeoutError",
+        "http_status": null,
+        "error_message": "UF1 vượt trần thời gian xử lý (4.5s)."
+      },
+      "attempts": [
+        {
+          "model": "gemini-3.8-flash",
+          "start_s": 0.0002,
+          "status": "cancelled",
+          "elapsed_s": 4.5219
+        },
+        {
+          "model": "gemini-3.5-flash-lite",
+          "start_s": 2.6143,
+          "status": "cancelled",
+          "elapsed_s": 1.9082
+        },
+        {
+          "model": "qwen/qwen3.8-27b",
+          "start_s": 3.5168,
+          "status": "error",
+          "error_type": "RateLimitError",
+          "http_status": 429,
+          "error_message": "Error code: 429 - {'error': {'message': 'Rate limit reached for model `qwen/qwen3.8-27b` in organization `[REDACTED_ORG]` service tier `on_demand` on output tokens per minute (OTPM): Limit 1000, Used 623, Requested 950. Please try again in 34.379999999s. Need more tokens? Upgrade to Dev Tier today at https://console.groq.com/settings/billing', 'type': 'tokens', 'code': 'rate_limit_exceeded'}}",
+          "elapsed_s": 0.2813
+        },
+        {
+          "model": "openai/gpt-oss-20b",
+          "start_s": 3.7981,
+          "status": "error",
+          "error_type": "RateLimitError",
+          "http_status": 429,
+          "error_message": "Error code: 429 - {'error': {'message': 'Rate limit reached for model `openai/gpt-oss-20b` in organization `[REDACTED_ORG]` service tier `on_demand` on tokens per minute (TPM): Limit 8000, Used 4668, Requested 5861. Please try again in 18.9675s. Need more tokens? Upgrade to Dev Tier today at https://console.groq.com/settings/billing', 'type': 'tokens', 'code': 'rate_limit_exceeded'}}",
+          "elapsed_s": 0.1566
+        }
+      ],
+      "checks": {
+        "content_present": true,
+        "scope_present": false,
+        "is_complete": false,
+        "has_conflict": false
+      },
+      "result": {
+        "title": "Hoàn thành nguyên mẫu ứng dụng quản lý thư viện cho đồ án nhóm 4 người. Phạm vi ",
+        "goal": null,
+        "time_constraint": null,
+        "clarification_issues": [],
+        "resolved_issue_keys": [],
+        "field_review_notes": {},
+        "content": "Hoàn thành nguyên mẫu ứng dụng quản lý thư viện cho đồ án nhóm 4 người. Phạm vi gồm đăng nhập, phân quyền thủ thư và độc giả, quản lý 500 đầu sách, tìm kiếm theo tên/tác giả, mượn trả, theo dõi quá hạn và báo cáo thống kê tháng. Đầu ra là mã nguồn backend FastAPI, frontend web, database PostgreSQL, tài liệu API, 30 ca kiểm thử chức năng, báo cáo PDF 25 trang, 15 slide và video demo 5 phút. Không triển khai thanh toán, không gửi email thật và không triển khai lên cloud. Thiết kế giao diện đã có; cần rà soát tính nhất quán giữa API và màn hình, dữ liệu demo không chứa thông tin người thật. Tôi phụ trách tích hợp và báo cáo; các thành viên khác đã cung cấp module đăng nhập và danh mục sách. Bắt đầu 12/11/2026 lúc 18:00, hạn chót 30/11/2026 lúc 17:00 giờ Việt Nam. Tôi rảnh thứ Hai, thứ Tư và thứ Sáu từ 18:00 đến 21:00, thứ Bảy từ 09:00 đến 12:00 và từ 14:00 đến 17:00 trong khoảng ngày 12 đến 29/11/2026. Giữ nguyên các lịch học đã có, không tự đổi lịch công việc khác. Ưu tiên demo chạy ổn định, sau đó kiểm thử, cuối cùng hoàn thiện tài liệu; chỉ ghi nhận yêu cầu ở bước này, chưa chia bước hoặc chốt lịch.",
+        "scope": null,
+        "free_time_slots": [],
+        "availability_update_mode": "merge",
+        "structured_free_windows": [],
+        "deadline": null,
+        "extra_requirements": [],
+        "is_complete": false,
+        "has_conflict": false,
+        "summary": "Đã ghi nhận công việc: 'Hoàn thành nguyên mẫu ứng dụng quản lý thư viện cho đồ án nhóm 4 người. Phạm vi gồm đăng nhập, phân quyền thủ thư và độc giả, quản lý 500 đầu sách, tìm kiếm theo tên/tác giả, mượn trả, theo dõi quá hạn và báo cáo thống kê tháng. Đầu ra là mã nguồn backend FastAPI, frontend web, database PostgreSQL, tài liệu API, 30 ca kiểm thử chức năng, báo cáo PDF 25 trang, 15 slide và video demo 5 phút. Không triển khai thanh toán, không gửi email thật và không triển khai lên cloud. Thiết kế giao diện đã có; cần rà soát tính nhất quán giữa API và màn hình, dữ liệu demo không chứa thông tin người thật. Tôi phụ trách tích hợp và báo cáo; các thành viên khác đã cung cấp module đăng nhập và danh mục sách. Bắt đầu 12/11/2026 lúc 18:00, hạn chót 30/11/2026 lúc 17:00 giờ Việt Nam. Tôi rảnh thứ Hai, thứ Tư và thứ Sáu từ 18:00 đến 21:00, thứ Bảy từ 09:00 đến 12:00 và từ 14:00 đến 17:00 trong khoảng ngày 12 đến 29/11/2026. Giữ nguyên các lịch học đã có, không tự đổi lịch công việc khác. Ưu tiên demo chạy ổn định, sau đó kiểm thử, cuối cùng hoàn thiện tài liệu; chỉ ghi nhận yêu cầu ở bước này, chưa chia bước hoặc chốt lịch.'. Mình cần bạn bổ sung/xác nhận thêm thông tin bên dưới để lên lịch chuẩn xác nhé.",
+        "clarification_questions": [
+          "Phạm vi hoặc kết quả đầu ra mong muốn của việc này là gì (ví dụ: số trang, số phần cần hoàn thiện)?",
+          "Bạn có những khung giờ rảnh cụ thể nào (từ mấy giờ đến mấy giờ) để mình sắp xếp các phiên tập trung?",
+          "Hạn chót (ngày và giờ) bạn cần hoàn thành xong công việc này là khi nào?"
+        ],
+        "generation_tier": "tier_3_rule_based"
+      }
+    },
+    {
+      "mode": "primary",
+      "case": "large",
+      "repetition": 3,
+      "elapsed_s": 4.5091,
+      "status": "timeout",
+      "winner": null,
+      "generation_tier": "tier_3_rule_based",
+      "coordinator_error": {
+        "error_type": "TimeoutError",
+        "http_status": null,
+        "error_message": "UF1 vượt trần thời gian xử lý (4.5s)."
+      },
+      "attempts": [
+        {
+          "model": "gemini-3.8-flash",
+          "start_s": 0.0002,
+          "status": "cancelled",
+          "elapsed_s": 4.5092
+        }
+      ],
+      "checks": {
+        "content_present": true,
+        "scope_present": false,
+        "is_complete": false,
+        "has_conflict": false
+      },
+      "result": {
+        "title": "Hoàn thành nguyên mẫu ứng dụng quản lý thư viện cho đồ án nhóm 4 người. Phạm vi ",
+        "goal": null,
+        "time_constraint": null,
+        "clarification_issues": [],
+        "resolved_issue_keys": [],
+        "field_review_notes": {},
+        "content": "Hoàn thành nguyên mẫu ứng dụng quản lý thư viện cho đồ án nhóm 4 người. Phạm vi gồm đăng nhập, phân quyền thủ thư và độc giả, quản lý 500 đầu sách, tìm kiếm theo tên/tác giả, mượn trả, theo dõi quá hạn và báo cáo thống kê tháng. Đầu ra là mã nguồn backend FastAPI, frontend web, database PostgreSQL, tài liệu API, 30 ca kiểm thử chức năng, báo cáo PDF 25 trang, 15 slide và video demo 5 phút. Không triển khai thanh toán, không gửi email thật và không triển khai lên cloud. Thiết kế giao diện đã có; cần rà soát tính nhất quán giữa API và màn hình, dữ liệu demo không chứa thông tin người thật. Tôi phụ trách tích hợp và báo cáo; các thành viên khác đã cung cấp module đăng nhập và danh mục sách. Bắt đầu 12/11/2026 lúc 18:00, hạn chót 30/11/2026 lúc 17:00 giờ Việt Nam. Tôi rảnh thứ Hai, thứ Tư và thứ Sáu từ 18:00 đến 21:00, thứ Bảy từ 09:00 đến 12:00 và từ 14:00 đến 17:00 trong khoảng ngày 12 đến 29/11/2026. Giữ nguyên các lịch học đã có, không tự đổi lịch công việc khác. Ưu tiên demo chạy ổn định, sau đó kiểm thử, cuối cùng hoàn thiện tài liệu; chỉ ghi nhận yêu cầu ở bước này, chưa chia bước hoặc chốt lịch.",
+        "scope": null,
+        "free_time_slots": [],
+        "availability_update_mode": "merge",
+        "structured_free_windows": [],
+        "deadline": null,
+        "extra_requirements": [],
+        "is_complete": false,
+        "has_conflict": false,
+        "summary": "Đã ghi nhận công việc: 'Hoàn thành nguyên mẫu ứng dụng quản lý thư viện cho đồ án nhóm 4 người. Phạm vi gồm đăng nhập, phân quyền thủ thư và độc giả, quản lý 500 đầu sách, tìm kiếm theo tên/tác giả, mượn trả, theo dõi quá hạn và báo cáo thống kê tháng. Đầu ra là mã nguồn backend FastAPI, frontend web, database PostgreSQL, tài liệu API, 30 ca kiểm thử chức năng, báo cáo PDF 25 trang, 15 slide và video demo 5 phút. Không triển khai thanh toán, không gửi email thật và không triển khai lên cloud. Thiết kế giao diện đã có; cần rà soát tính nhất quán giữa API và màn hình, dữ liệu demo không chứa thông tin người thật. Tôi phụ trách tích hợp và báo cáo; các thành viên khác đã cung cấp module đăng nhập và danh mục sách. Bắt đầu 12/11/2026 lúc 18:00, hạn chót 30/11/2026 lúc 17:00 giờ Việt Nam. Tôi rảnh thứ Hai, thứ Tư và thứ Sáu từ 18:00 đến 21:00, thứ Bảy từ 09:00 đến 12:00 và từ 14:00 đến 17:00 trong khoảng ngày 12 đến 29/11/2026. Giữ nguyên các lịch học đã có, không tự đổi lịch công việc khác. Ưu tiên demo chạy ổn định, sau đó kiểm thử, cuối cùng hoàn thiện tài liệu; chỉ ghi nhận yêu cầu ở bước này, chưa chia bước hoặc chốt lịch.'. Mình cần bạn bổ sung/xác nhận thêm thông tin bên dưới để lên lịch chuẩn xác nhé.",
+        "clarification_questions": [
+          "Phạm vi hoặc kết quả đầu ra mong muốn của việc này là gì (ví dụ: số trang, số phần cần hoàn thiện)?",
+          "Bạn có những khung giờ rảnh cụ thể nào (từ mấy giờ đến mấy giờ) để mình sắp xếp các phiên tập trung?",
+          "Hạn chót (ngày và giờ) bạn cần hoàn thành xong công việc này là khi nào?"
+        ],
+        "generation_tier": "tier_3_rule_based"
+      }
+    },
+    {
+      "mode": "backup",
+      "case": "large",
+      "repetition": 3,
+      "elapsed_s": 2.9202,
+      "status": "success",
+      "winner": "gemini-3.5-flash-lite",
+      "generation_tier": "tier_1_gemini",
+      "coordinator_error": null,
+      "attempts": [
+        {
+          "model": "gemini-3.5-flash-lite",
+          "start_s": 0.0003,
+          "status": "schema_valid",
+          "elapsed_s": 2.9198
+        }
+      ],
+      "checks": {
+        "content_present": true,
+        "scope_present": true,
+        "is_complete": true,
+        "has_conflict": false,
+        "start_at_preserved": true,
+        "time_constraint_end_preserved": true
+      },
+      "result": {
+        "title": "Nguyên mẫu ứng dụng thư viện",
+        "goal": "Hoàn thành nguyên mẫu ứng dụng quản lý thư viện cho đồ án nhóm 4 người",
+        "time_constraint": {
+          "kind": "deadline",
+          "start_at": "2026-11-12T18:00:00+07:00",
+          "deadline_at": "2026-11-30T17:00:00+07:00",
+          "finish_by_at": null,
+          "input_timezone": "Asia/Ho_Chi_Minh"
+        },
+        "clarification_issues": [],
+        "resolved_issue_keys": [],
+        "field_review_notes": {},
+        "content": "Hoàn thành nguyên mẫu ứng dụng quản lý thư viện cho đồ án nhóm 4 người. Tôi phụ trách tích hợp và báo cáo; các thành viên khác đã cung cấp module đăng nhập và danh mục sách.",
+        "scope": "Đăng nhập, phân quyền thủ thư và độc giả, quản lý 500 đầu sách, tìm kiếm theo tên/tác giả, mượn trả, theo dõi quá hạn và báo cáo thống kê tháng. Đầu ra: mã nguồn backend FastAPI, frontend web, database PostgreSQL, tài liệu API, 30 ca kiểm thử chức năng, báo cáo PDF 25 trang, 15 slide và video demo 5 phút.",
+        "free_time_slots": [
+          "Thứ Hai, thứ Tư, thứ Sáu từ 18:00 đến 21:00",
+          "Thứ Bảy từ 09:00 đến 12:00",
+          "Thứ Bảy từ 14:00 đến 17:00"
+        ],
+        "availability_update_mode": "merge",
+        "structured_free_windows": [
+          {
+            "kind": "weekly_rule",
+            "weekday": 1,
+            "date": null,
+            "start_local": "18:00",
+            "end_local": "21:00",
+            "raw_phrase": "thứ Hai từ 18:00 đến 21:00",
+            "is_ambiguous": false
+          },
+          {
+            "kind": "weekly_rule",
+            "weekday": 3,
+            "date": null,
+            "start_local": "18:00",
+            "end_local": "21:00",
+            "raw_phrase": "thứ Tư từ 18:00 đến 21:00",
+            "is_ambiguous": false
+          },
+          {
+            "kind": "weekly_rule",
+            "weekday": 5,
+            "date": null,
+            "start_local": "18:00",
+            "end_local": "21:00",
+            "raw_phrase": "thứ Sáu từ 18:00 đến 21:00",
+            "is_ambiguous": false
+          },
+          {
+            "kind": "weekly_rule",
+            "weekday": 6,
+            "date": null,
+            "start_local": "09:00",
+            "end_local": "12:00",
+            "raw_phrase": "thứ Bảy từ 09:00 đến 12:00",
+            "is_ambiguous": false
+          },
+          {
+            "kind": "weekly_rule",
+            "weekday": 6,
+            "date": null,
+            "start_local": "14:00",
+            "end_local": "17:00",
+            "raw_phrase": "thứ Bảy từ 14:00 đến 17:00",
+            "is_ambiguous": false
+          }
+        ],
+        "deadline": "2026-11-30T17:00:00+07:00",
+        "extra_requirements": [
+          "Không triển khai thanh toán, không gửi email thật và không triển khai lên cloud",
+          "Rà soát tính nhất quán giữa API và màn hình",
+          "Dữ liệu demo không chứa thông tin người thật",
+          "Ưu tiên demo chạy ổn định, sau đó kiểm thử, cuối cùng hoàn thiện tài liệu"
+        ],
+        "is_complete": true,
+        "has_conflict": false,
+        "summary": "Đã ghi nhận công việc hoàn thành nguyên mẫu ứng dụng quản lý thư viện với phạm vi backend, frontend, database, báo cáo và tài liệu. Hạn chót vào ngày 30/11/2026 lúc 17:00 cùng các khung giờ rảnh đã chọn.",
+        "clarification_questions": [],
+        "generation_tier": "tier_1_gemini"
+      }
+    }
+  ],
+  "finished_at": "2026-11-11T17:13:59.440757+07:00",
+  "run_options": {
+    "repetitions": 3,
+    "modes": [
+      "primary",
+      "backup",
+      "groq",
+      "groq_secondary",
+      "production"
+    ],
+    "cases": [
+      "small",
+      "medium",
+      "large",
+      "missing_fields"
+    ],
+    "pause_seconds": 0.5,
+    "cooldown_seconds": 0
+  },
+  "source_commit": "1ab4a25",
+  "sdk_versions": {
+    "google-genai": "2.34.0",
+    "groq": "1.7.0",
+    "pydantic": "2.14.2"
+  }
+}
