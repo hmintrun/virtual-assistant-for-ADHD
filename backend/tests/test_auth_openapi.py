@@ -60,3 +60,31 @@ def test_login_and_calendar_callbacks_stay_public():
     assert not legacy.include_in_schema
     assert not has_current_user(legacy.dependant)
     assert legacy.path not in schema["paths"]
+
+
+def test_uf5_to_uf7_openapi_declares_error_envelopes_and_summaries():
+    schema = app.openapi()
+    expected = (
+        ("/api/v1/runs/{run_id}/check-ins", "post", ("401", "404", "409", "422", "503")),
+        (
+            "/api/v1/runs/{run_id}/upcoming-schedule-context",
+            "get",
+            ("401", "404", "409", "422", "503"),
+        ),
+        ("/api/v1/proposals", "post", ("401", "404", "409", "422", "503")),
+        ("/api/v1/proposals/current", "get", ("401", "404", "503")),
+        ("/api/v1/proposals/{proposal_id}", "get", ("401", "404", "503")),
+        ("/api/v1/proposals/{proposal_id}/rebuild", "post", ("401", "404", "409", "422", "503")),
+        ("/api/v1/proposals/{proposal_id}/approve", "post", ("401", "404", "409", "422", "503")),
+        ("/api/v1/proposals/{proposal_id}/reject", "post", ("401", "404", "409", "422", "503")),
+        ("/api/v1/settings/change-requests/{change_request_id}/cancel", "post", ("401", "404", "409", "422")),
+        ("/api/v1/suggestions/current", "get", ("401", "422")),
+        ("/api/v1/suggestions/{suggestion_id}/response", "post", ("401", "404", "409", "422")),
+    )
+    for path, method, codes in expected:
+        operation = schema["paths"][path][method]
+        assert operation.get("summary"), f"Missing summary for {method.upper()} {path}"
+        for code in codes:
+            resp = operation["responses"][code]
+            ref = resp["content"]["application/json"]["schema"]["$ref"]
+            assert ref == "#/components/schemas/ErrorEnvelope", (path, method, code, ref)

@@ -35,6 +35,30 @@ uv run --frozen python -m pytest -q -ra
 
 Suite có test khởi chạy Uvicorn trên loopback với SQLite tạm, xác nhận UF1–UF2 rồi khởi động lại để kiểm receipt và dữ liệu. Test không cần khóa provider. Đặt `PLANNING_REVIEW_LEAD_SECONDS` để thay khoảng chờ xem lịch trước phiên đầu (mặc định 300 giây, tối thiểu 120); phương án đã quá giờ phải tạo lại để duyệt.
 
+### PostgreSQL 16 staging (W3-04)
+
+Từ `backend/`, khởi động PostgreSQL trên `127.0.0.1:5433` bằng Docker Compose. Giữ `.env.staging` trên máy để dùng lại mật khẩu của volume hiện có.
+
+```powershell
+if (-not (Test-Path .env.staging)) {
+    "PROPLAN_STAGING_PASSWORD=$([guid]::NewGuid().ToString('N'))" | Set-Content .env.staging
+}
+$env:PROPLAN_STAGING_PASSWORD = (Get-Content .env.staging -Raw | ConvertFrom-StringData).PROPLAN_STAGING_PASSWORD
+docker compose --env-file .env.staging -f compose.staging.yml up -d --wait
+$env:DATABASE_URL = "postgresql+asyncpg://proplan_staging:${env:PROPLAN_STAGING_PASSWORD}@127.0.0.1:5433/proplan_staging"
+git rev-parse HEAD
+uv run --frozen python -m alembic heads
+uv run --frozen python -m alembic upgrade head
+uv run --frozen python -m alembic current
+uv run --frozen python scripts/seed_staging.py
+```
+
+> Lưu ý: `DatabaseSettings` đọc `backend/.env` (không đọc `.env.staging`). Nếu chạy `uvicorn` ở một terminal mới, hãy set lại `$env:DATABASE_URL` hoặc cập nhật `DATABASE_URL` trong `backend/.env`.
+
+C01 chặn downgrade qua revision chuyển dữ liệu. Khi thử trên dữ liệu cũ, dùng bản sao và giữ snapshot DB trước khi nâng cấp để phục hồi về phiên bản trước C01.
+
+Kiểm bàn giao W3-04 trên DB thử riêng. Dùng một DB trống và một DB ở revision `20261101_01` có Draft, Task với hai Part, mỗi Part một Step, cùng một Candidate có giờ rảnh đã xác nhận. Sau upgrade, kiểm một head, thứ tự Step, phạm vi chưa chia và snapshot giờ rảnh. Qua API, tạo Draft, restart Backend và đọc lại nháp. Sau khi chốt Candidate, restart lần nữa và gửi lại cùng `Idempotency-Key`. Kết quả phải giống lần đầu và chỉ có một Task.
+
 Kiểm tra bổ sung SQL PostgreSQL bằng PGlite, từ thư mục `backend/` (cần Node/npm):
 
 ```powershell
