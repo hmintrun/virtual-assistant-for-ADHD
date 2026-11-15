@@ -8,13 +8,17 @@ import 'package:wakelock_plus/wakelock_plus.dart';
 
 import '../core/api_client.dart';
 import '../models/focus_session_model.dart';
+import '../models/outbox_record.dart';
 import '../models/task_model.dart';
 import '../models/planning_models.dart';
+import '../repositories/local_outbox_repository.dart';
 import '../repositories/local_run_repository.dart';
 import '../services/audio_recorder_service.dart';
 import '../services/alarm_service.dart';
+import '../services/clock_sync_service.dart';
 import '../services/dnd_service.dart';
 import '../services/focus_native_controller.dart';
+import '../services/outbox_replay_worker.dart';
 import '../services/timer_service.dart';
 import '../services/voice_service.dart';
 
@@ -148,6 +152,9 @@ class FocusProvider extends ChangeNotifier {
     LocalRunRepository? repository,
     Clock? clock,
     FlutterSecureStorage? storage,
+    LocalOutboxRepository? outboxRepository,
+    OutboxReplayWorker? outboxWorker,
+    ClockSyncService? clockSync,
   })  : _clock = clock ?? const SystemClock(),
         timer = timer ?? FocusTimerService(clock: clock),
         microTaskTimer = microTaskTimer ?? FocusTimerService(clock: clock),
@@ -157,7 +164,10 @@ class FocusProvider extends ChangeNotifier {
         _repository = repository ??
             (storage != null
                 ? SecureStorageRunRepository(storage: storage)
-                : SecureStorageRunRepository()) {
+                : SecureStorageRunRepository()),
+        _outboxRepository = outboxRepository,
+        _outboxWorker = outboxWorker,
+        _clockSync = clockSync {
     this.timer.onElapsed = _onSegmentElapsed;
     this.timer.addListener(_onTimerChanged);
     this.microTaskTimer.onElapsed = _onMicroTaskElapsed;
@@ -187,7 +197,14 @@ class FocusProvider extends ChangeNotifier {
   final DndService dnd;
   final ApiClient _api;
   final LocalRunRepository _repository;
+  final LocalOutboxRepository? _outboxRepository;
+  final OutboxReplayWorker? _outboxWorker;
+  final ClockSyncService? _clockSync;
   final List<ThoughtRecord> _thoughts = [];
+
+  LocalOutboxRepository? get outboxRepository => _outboxRepository;
+  OutboxReplayWorker? get outboxWorker => _outboxWorker;
+  ClockSyncService? get clockSync => _clockSync;
 
   FocusSessionInfo? _session;
   DateTime? _runEndsAt;
@@ -361,6 +378,9 @@ class FocusProvider extends ChangeNotifier {
 
   Future<void> restore() async {
     await _loadThoughts();
+    if (_outboxWorker != null) {
+      unawaited(_outboxWorker?.triggerReplay());
+    }
     final nativeRecovery = _usesNativeFocus
         ? await FocusNativeController.instance.recoverOnAppStart()
         : null;
@@ -796,9 +816,10 @@ class FocusProvider extends ChangeNotifier {
     _runError = null;
     _notify();
     try {
+      final respondedAt = _clockSync?.nowAdjustedIso() ?? _clock.now().toUtc().toIso8601String();
       final pending = _pendingResponse ??= {
         'expected_response_revision': checkIn['response_revision'],
-        'responded_at': _clock.now().toUtc().toIso8601String(),
+        'responded_at': respondedAt,
         'session_outcome': outcome,
         if (skipScope != null) 'skip_scope': skipScope,
         if (stepCompleted != null) 'step_completed': stepCompleted,
@@ -806,17 +827,42 @@ class FocusProvider extends ChangeNotifier {
           'remaining_note': remainingNote!.trim(),
       };
       await _persistRun();
-      final response = await _api.putData(
-        '/check-ins/${checkIn['checkin_id']}/response',
-        data: pending,
-        idempotencyKey: ApiClient.stableIdempotencyKey(
-            'checkin_${checkIn['checkin_id']}', pending.toString()),
-      );
-      _serverRun = {..._serverRun!, 'check_in': response};
-      _checkInDeadline?.cancel();
-      _pendingResponse = null;
-      await _restoreFocusMode();
-      await _repository.clearActiveRun();
+      if (_outboxRepository != null) {
+        final clientEventId = ApiClient.stableIdempotencyKey(
+            'checkin_${checkIn['checkin_id']}', pending.toString());
+        await _outboxRepository?.enqueueOutboxRecord(
+          OutboxRecord(
+            clientEventId: clientEventId,
+            eventType: OutboxEventType.checkinResponse,
+            targetResourceId: checkIn['checkin_id'] as String?,
+            endpoint: '/check-ins/${checkIn['checkin_id']}/response',
+            httpMethod: 'PUT',
+            payload: pending,
+            occurredAt: _clock.now(),
+            holdUntil: _clock.now().add(const Duration(seconds: 5)),
+          ),
+          holdDuration: const Duration(seconds: 5),
+        );
+        Timer(const Duration(milliseconds: 5200), () {
+          _outboxWorker?.triggerReplay();
+        });
+        _checkInDeadline?.cancel();
+        _pendingResponse = null;
+        await _restoreFocusMode();
+        await _repository.clearActiveRun();
+      } else {
+        final response = await _api.putData(
+          '/check-ins/${checkIn['checkin_id']}/response',
+          data: pending,
+          idempotencyKey: ApiClient.stableIdempotencyKey(
+              'checkin_${checkIn['checkin_id']}', pending.toString()),
+        );
+        _serverRun = {..._serverRun!, 'check_in': response};
+        _checkInDeadline?.cancel();
+        _pendingResponse = null;
+        await _restoreFocusMode();
+        await _repository.clearActiveRun();
+      }
     } on ApiException catch (error) {
       if (error.statusCode != null) {
         _pendingResponse = null;
@@ -1017,6 +1063,9 @@ class FocusProvider extends ChangeNotifier {
       } catch (_) {}
     }
     await _repository.deleteThought(thought.clientThoughtId);
+    if (_outboxRepository != null) {
+      await _outboxRepository?.cancelOutboxRecord(thought.clientThoughtId);
+    }
     if (_stage == FocusStage.thoughtSaved) _stage = _resumeStage;
     _scheduleOutboxFlush();
     await _persistRun();
@@ -1026,6 +1075,25 @@ class FocusProvider extends ChangeNotifier {
   Future<void> _saveThought(ThoughtRecord thought) async {
     await _repository.queueThought(thought);
     _thoughts.insert(0, thought);
+    if (_outboxRepository != null) {
+      await _outboxRepository?.enqueueOutboxRecord(
+        OutboxRecord(
+          clientEventId: thought.clientThoughtId,
+          eventType: OutboxEventType.thoughtCapture,
+          endpoint: '/thoughts',
+          httpMethod: 'POST',
+          payload: {
+            'client_thought_id': thought.clientThoughtId,
+            'input_type': thought.inputType,
+            if (thought.textContent != null) 'text_content': thought.textContent,
+            'attempt_count': thought.attemptCount,
+            'capture_state': thought.captureState,
+          },
+          occurredAt: thought.createdAt,
+          holdUntil: thought.undoDeadlineAt,
+        ),
+      );
+    }
   }
 
   Future<void> deleteThought(ThoughtRecord thought) async {
@@ -1067,6 +1135,9 @@ class FocusProvider extends ChangeNotifier {
     _deleteUndoExpiry = null;
     if (thought == null) return;
     await _repository.deleteThought(thought.clientThoughtId);
+    if (_outboxRepository != null) {
+      await _outboxRepository?.cancelOutboxRecord(thought.clientThoughtId);
+    }
     if (thought.localAudioPath != null) {
       try {
         await recorder.deleteRecording(thought.localAudioPath!);
