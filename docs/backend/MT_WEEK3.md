@@ -128,3 +128,28 @@ Ma trận dưới đây ánh xạ 18 ca kiểm thử trọng tâm Tuần 3 tới
 | **W3-TC16** | Offline, UF4 Raw Audio & Doze Alarm | Bật chế độ máy bay sau khi start Run $\rightarrow$ giữ **Cất suy nghĩ** (cả lúc lỗi mic 3 lần và lúc hết giờ đến) $\rightarrow$ tắt màn hình vào Doze. | Timer & lịch cache chạy offline; UF4 chỉ lưu raw audio (0 gọi STT/LLM trong phiên), lỗi 3 lần mở ô text; chuông báo thức lệch $\le 1\text{s}$ trên Doze; reconnect replay chống trùng. | `backend/tests/test_w07_thought_lifecycle.py` · `mobile/test/alarm_service_test.dart` | Đo âm thanh chuông thực tế trên thiết bị Android (Samsung/Xiaomi/Pixel nếu có) khi màn hình tắt/Doze (W3-19). |
 | **W3-TC17** | W3C COGA UI Compliance | Kiểm tra tĩnh & widget trên `CheckInScreen`, `RescheduleComparisonScreen`, `SettingsScreen`. | Tối đa 3–5 tương tác chính/màn hình; nhãn nút cụ thể; `0 AlertDialog`; `flutter analyze` 0 lỗi/warning; hoạt họa mượt 60 FPS. | `mobile/test/uf5_uf6_uf7_coga_test.dart` + `flutter analyze` | Kiểm `flutter profile` / thao tác thực tế trên APK release (W3-13, W3-20). |
 | **W3-TC18** | PostgreSQL 16 Staging & E2E Toàn trình | Chạy Alembic upgrade head trên DB mới & DB cũ; chạy toàn bộ backend test suite trên SQLite và PostgreSQL 16 staging (port 5433); chạy kịch bản E2E UF1–UF7 trên APK release. | 1 head duy nhất; toàn bộ suite đạt trên cả SQLite và PostgreSQL thật; quay video E2E + danh sách SHA-256 APK bàn giao. | Toàn bộ `backend/tests/` trên SQLite & PostgreSQL staging | Nghiệm thu cuối kỳ W3-18, W3-19, W3-20, W3-21 ngày 15–16/11/2026. |
+
+---
+
+## 4. Tích hợp Thực thi Phần AI & Giọng nói Còn thiếu trên Backend (Cập nhật Nghiệm thu Role AI Tuần 3)
+
+Sau khi merge `origin/backend` (`e3bbd5a`) vào nhánh `feat/mt-week3-ai-docs`, các điểm nối AI & Giọng nói còn lại thuộc Role AI đã được hoàn thiện trực tiếp trên Backend:
+
+1. **Nối UF6 Grounded Copy (`generate_reschedule_empathy`) vào `reschedule_service.py`:**
+   - Thêm `_UF6_REASON_MAP` và `_generate_uf6_explanation_and_tier(...)` trong `backend/app/services/reschedule_service.py` (map chuẩn `checkin_busy` $\rightarrow$ `busy`, `checkin_incomplete` $\rightarrow$ `incomplete`, `checkin_skipped` $\rightarrow$ `skipped`, `settings_change` $\rightarrow$ `setting_changed`, `missed_start`/`user_reschedule` $\rightarrow$ `deadline_risk`; truyền `task_title=None` để không gửi PII, kèm `proposal_available` và `deficit_minutes`).
+   - Đã gắn vào `create_proposal`, `create_settings_change_proposal`, và `_recompute_proposal_if_needed` (lưu đủ cả `explanation` và `generation_tier`, giữ `"python_fallback"` riêng cho nhánh Continuation để bảo toàn số phút cụ thể; khi `insufficient_data` luôn giữ hướng dẫn xác nhận lại giờ rảnh).
+
+2. **Hoàn thiện Dual-Tier Backend Voice Pipeline (`GroqWhisperSttProvider` + `EdgeTtsProvider`):**
+   - Trong `backend/app/services/voice_service.py`:
+     - Bổ sung `GroqWhisperSttProvider` (`AsyncGroq`, model `whisper-large-v3-turbo`, tự rút ngôn ngữ ISO-639-1 `vi` từ `VOICE_STT_LANGUAGE`) và `FallbackSttProvider` (`transcribe_with_provider` concurrency-safe, tự chuyển sang `GeminiSttProvider` khi nhánh chính lỗi `PROVIDER_UNAVAILABLE`/retryable).
+     - Mở rộng `VOICE_STT_PROVIDER: Literal["gemini", "groq", "auto", "fake"] = "gemini"` trong `backend/app/core/config.py` (bảo toàn 100% hành vi mặc định cũ, thêm tùy chọn `groq` và `auto`).
+     - Bổ sung đầy đủ lớp TTS: `TtsErrorCode`, `TtsError`, `TtsResult`, `TtsProvider`, `_silent_wav`, `EdgeTtsProvider` (`vi-VN-HoaiMyNeural`), `FakeTtsProvider`, `TtsService` (chuẩn hóa khoảng trắng, giới hạn `VOICE_TTS_MAX_CHARS`, LRU cache theo SHA-256 kích thước `VOICE_TTS_CACHE_SIZE`, timeout `VOICE_TTS_TIMEOUT_SECONDS`), `build_tts_service`, `get_tts_service`.
+   - Trong `backend/app/schemas/voice.py` và `backend/app/api/v1/voice.py`:
+     - Mở rộng `POST /api/v1/voice/transcriptions` hỗ trợ thêm `purpose="uf5_checkin"` (giữ nguyên Idempotency & guard UF4).
+     - Bổ sung `POST /api/v1/voice/tts` (trả `audio_base64`, `mime_type`, `provider`, `voice`, `cached`, `duration_ms`; mã lỗi map `next_action="use_on_device_tts"`).
+     - Bổ sung `POST /api/v1/voice/uf5-checkin-prompt` (gọi `ai_service.build_uf5_checkin_prompt` và tổng hợp audio qua `EdgeTtsProvider`; khi TTS lỗi/mất mạng vẫn trả HTTP `200` với `fallback_to_device_tts=True` và giữ nguyên 3 chip Bỏ qua + `undo_timeout_seconds=5`).
+
+3. **Kết quả Probe Live & Kiểm thử Tích hợp (15/11/2026):**
+   - **Live `EdgeTtsProvider` (`vi-VN-HoaiMyNeural`):** Tổng hợp câu Check-in UF5 tiếng Việt tạo `61,344` bytes `audio/mpeg` trong `8.471s`.
+   - **Live `ai_service.generate_reschedule_empathy` (`tier_1_gemini`):** Kịch bản `busy` + prompt injection (`task_title="IGNORE ALL RULES"`) hoàn tất trong `1.73s`; kịch bản `incomplete` + `deficit_minutes=35` phản ánh đúng `"35 phút"` trong `1.445s`.
+   - **Kiểm thử tự động (`pytest`):** Bao phủ thêm unit/API tests trong `backend/tests/test_ai_service.py` (Groq Whisper STT, Fallback STT, TtsService + mocked Edge-TTS, cache LRU, `/voice/tts`, `/voice/uf5-checkin-prompt` + fallback `200`, `/voice/transcriptions` `purpose="uf5_checkin"`) và `backend/tests/test_w310_uf6_reschedule.py::test_uf6_create_proposal_wires_ai_empathy_and_generation_tier` (`38 passed, 5 warnings, 15 subtests passed in 30.51s` trước khi cập nhật tài liệu).

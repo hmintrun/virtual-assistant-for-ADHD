@@ -75,11 +75,57 @@ from app.schemas.reschedule import (
     UpcomingScheduleContextData,
 )
 from app.services import command_service, draft_service, run_service
+from app.services.ai_service import ai_service
 
 STANDARD_INTER_SESSION_GAP_SECONDS = 900
 SourceRevisions = ProposalSourceRevisions
 FeasibilityData = ProposalFeasibilityData
 GenerationTier = ProposalGenerationTier
+
+_UF6_REASON_MAP: dict[str, str] = {
+    "checkin_busy": "busy",
+    "busy": "busy",
+    "checkin_incomplete": "incomplete",
+    "incomplete": "incomplete",
+    "partial": "incomplete",
+    "checkin_skipped": "skipped",
+    "skipped": "skipped",
+    "settings_change": "setting_changed",
+    "setting_changed": "setting_changed",
+    "early_completion_pull_forward": "setting_changed",
+    "missed_start": "deadline_risk",
+    "user_reschedule": "deadline_risk",
+    "expand_next_horizon": "deadline_risk",
+    "deadline_risk": "deadline_risk",
+}
+
+
+async def _generate_uf6_explanation_and_tier(
+    trigger_reason: str,
+    feasibility: FeasibilityData,
+) -> tuple[str, GenerationTier]:
+    """Sinh lời giải thích Guilt-free UF6 qua AI Service (fallback Python an toàn)."""
+    mapped_reason = _UF6_REASON_MAP.get(
+        (trigger_reason or "").strip().lower(),
+        "deadline_risk",
+    )
+    deficit_secs = feasibility.deficit_seconds or 0
+    deficit_minutes = (deficit_secs + 59) // 60 if deficit_secs > 0 else None
+    proposal_available = feasibility.status in ("feasible", "valid") and feasibility.confirmable
+
+    empathy = await ai_service.generate_reschedule_empathy(
+        trigger_reason=mapped_reason,
+        task_title=None,
+        proposal_available=proposal_available,
+        deficit_minutes=deficit_minutes,
+    )
+    parts = [empathy.empathetic_note.strip()]
+    if feasibility.status == "insufficient_data":
+        parts.append("Mình giữ nguyên lịch cũ và cần bạn xác nhận lại giờ rảnh trước khi xếp lịch mới.")
+    if empathy.encouragement_tip and empathy.encouragement_tip.strip():
+        parts.append(empathy.encouragement_tip.strip())
+    explanation = " ".join(part for part in parts if part)
+    return explanation, empathy.generation_tier
 ScheduleVersionData = ProposalScheduleVersionData
 SessionData = ProposalSessionData
 
@@ -1501,6 +1547,7 @@ async def create_proposal(
             approval_envelope=approval_envelope,
             request_text=payload.request_text,
         )
+        gen_tier: GenerationTier = "python_fallback"
     else:
         (
             target_uuid,
@@ -1527,6 +1574,10 @@ async def create_proposal(
             approval_envelope=None,
             request_text=payload.request_text,
         )
+        explanation, gen_tier = await _generate_uf6_explanation_and_tier(
+            payload.trigger_reason,
+            feasibility,
+        )
 
     # Duy trì tối đa 1 proposal pending / user: supersede bản cũ trước khi insert bản mới
     supersedes_id = await _supersede_existing_pending_proposal(db, owner, calc_now)
@@ -1548,7 +1599,7 @@ async def create_proposal(
         proposed_changes=packed_changes,
         feasibility=feasibility.model_dump(mode="json", by_alias=True),
         explanation=explanation,
-        generation_tier="python_fallback",
+        generation_tier=gen_tier,
         pending_notification_state="not_needed",
         pending_notification_sent_at=None,
     )
@@ -1667,6 +1718,10 @@ async def create_settings_change_proposal(
         approval_envelope=None,
         request_text=request_text,
     )
+    explanation, gen_tier = await _generate_uf6_explanation_and_tier(
+        "settings_change",
+        feasibility,
+    )
 
     supersedes_id = await _supersede_existing_pending_proposal(db, owner, calc_now)
 
@@ -1687,7 +1742,7 @@ async def create_settings_change_proposal(
         proposed_changes=packed_changes,
         feasibility=feasibility.model_dump(mode="json", by_alias=True),
         explanation=explanation,
-        generation_tier="python_fallback",
+        generation_tier=gen_tier,
         pending_notification_state="not_needed",
         pending_notification_sent_at=None,
     )
@@ -1846,6 +1901,7 @@ async def rebuild_proposal(
             request_text=effective_req_text,
         )
         row.target_task_id = target_uuid
+        gen_tier: GenerationTier = "python_fallback"
     else:
         (
             target_uuid,
@@ -1871,6 +1927,10 @@ async def rebuild_proposal(
             approval_envelope=None,
             request_text=effective_req_text,
         )
+        explanation, gen_tier = await _generate_uf6_explanation_and_tier(
+            row.trigger_reason,
+            feasibility,
+        )
 
     row.affected_task_ids = affected_tasks
     row.base_schedule_revision = base_sched_rev
@@ -1880,6 +1940,7 @@ async def rebuild_proposal(
     row.proposed_changes = packed_changes
     row.feasibility = feasibility.model_dump(mode="json", by_alias=True)
     row.explanation = explanation
+    row.generation_tier = gen_tier
     await db.flush()
 
     return await _proposal_row_to_schema(db, owner, row, calc_now)

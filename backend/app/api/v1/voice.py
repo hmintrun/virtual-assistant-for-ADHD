@@ -1,4 +1,5 @@
-# Router cho API chuyển giọng nói thành chữ (Dòng 8 trên API Sheet: POST /api/v1/voice/transcriptions)
+# Router cho API giọng nói (STT POST /voice/transcriptions, TTS POST /voice/tts, Prompt UF5 POST /voice/uf5-checkin-prompt)
+import base64
 import hashlib
 import json
 from typing import Annotated, Literal
@@ -10,11 +11,25 @@ from app.api.deps import CurrentUserDep, DbSessionDep
 from app.core.config import settings
 from app.core.errors import AppError
 from app.repositories import run_repository, thought_repository
-from app.schemas.common import FieldError, SuccessEnvelope, build_response_meta
-from app.schemas.voice import TranscriptionData
+from app.schemas.common import ErrorEnvelope, FieldError, SuccessEnvelope, build_response_meta
+from app.schemas.voice import (
+    TranscriptionData,
+    TtsSynthesisData,
+    TtsSynthesizeRequest,
+    UF5VoiceCheckInPromptRequest,
+    UF5VoiceCheckInPromptResponse,
+)
 from app.services import command_service
+from app.services.ai_service import ai_service
 from app.services.draft_service import resolve_user_uuid
-from app.services.voice_service import SttError, SttErrorCode, get_voice_service
+from app.services.voice_service import (
+    SttError,
+    SttErrorCode,
+    TtsError,
+    TtsErrorCode,
+    get_tts_service,
+    get_voice_service,
+)
 
 router = APIRouter(prefix="/voice", tags=["voice"])
 
@@ -78,6 +93,58 @@ def _stt_error_to_app_error(exc: SttError) -> AppError:
     )
 
 
+_TTS_ERROR_MAP: dict[TtsErrorCode, tuple[int, str, str, str]] = {
+    TtsErrorCode.INVALID_INPUT: (
+        422,
+        "TTS_INVALID_INPUT",
+        "Văn bản đọc không được để trống.",
+        "use_on_device_tts",
+    ),
+    TtsErrorCode.TEXT_TOO_LONG: (
+        422,
+        "TTS_TEXT_TOO_LONG",
+        "Đoạn văn bản quá dài để tổng hợp giọng nói một lượt.",
+        "use_on_device_tts",
+    ),
+    TtsErrorCode.EMPTY_AUDIO: (
+        503,
+        "TTS_EMPTY_AUDIO",
+        "Không tạo được âm thanh lúc này. Ứng dụng sẽ dùng giọng đọc trên máy.",
+        "use_on_device_tts",
+    ),
+    TtsErrorCode.PROVIDER_UNAVAILABLE: (
+        503,
+        "TTS_UNAVAILABLE",
+        "Dịch vụ đọc giọng nói tạm chưa sẵn sàng. Ứng dụng sẽ dùng giọng đọc trên máy.",
+        "use_on_device_tts",
+    ),
+    TtsErrorCode.TIMEOUT: (
+        504,
+        "TTS_TIMEOUT",
+        "Tổng hợp giọng nói mất nhiều thời gian hơn dự kiến.",
+        "use_on_device_tts",
+    ),
+    TtsErrorCode.PROVIDER_ERROR: (
+        503,
+        "TTS_PROVIDER_ERROR",
+        "Dịch vụ đọc giọng nói gặp sự cố. Ứng dụng sẽ dùng giọng đọc trên máy.",
+        "use_on_device_tts",
+    ),
+}
+
+
+def _tts_error_to_app_error(exc: TtsError) -> AppError:
+    """Đổi lỗi TTS sang AppError (chỉ dẫn client chuyển sang flutter_tts trên thiết bị)."""
+    status_code, code, message, next_action = _TTS_ERROR_MAP[exc.code]
+    return AppError(
+        status_code=status_code,
+        code=code,
+        message=message,
+        next_action=next_action,
+        retryable=exc.retryable,
+    )
+
+
 # Lưu biên nhận Idempotency-Key tạm thời cho lệnh chuyển âm: (user_id, idempotency_key) -> (fingerprint, TranscriptionData)
 _VOICE_IDEMPOTENCY_STORE: dict[tuple[str, str], tuple[str, TranscriptionData]] = {}
 
@@ -85,8 +152,8 @@ _VOICE_IDEMPOTENCY_STORE: dict[tuple[str, str], tuple[str, TranscriptionData]] =
 @router.post("/transcriptions", response_model=SuccessEnvelope[TranscriptionData])
 async def create_transcription(
     purpose: Annotated[
-        Literal["uf1_input", "thought_to_draft"],
-        Form(description="Mục đích chuyển giọng nói: uf1_input hoặc thought_to_draft"),
+        Literal["uf1_input", "thought_to_draft", "uf5_checkin"],
+        Form(description="Mục đích chuyển giọng nói: uf1_input, thought_to_draft hoặc uf5_checkin"),
     ],
     device_id: Annotated[
         str,
@@ -261,5 +328,90 @@ async def create_transcription(
     )
     return SuccessEnvelope(
         data=data,
+        meta=build_response_meta(),
+    )
+
+
+@router.post(
+    "/tts",
+    response_model=SuccessEnvelope[TtsSynthesisData],
+    summary="Tổng hợp giọng nói tiếng Việt qua Edge-TTS",
+    responses={
+        401: {"model": ErrorEnvelope, "description": "Chưa đăng nhập hoặc thiếu Bearer Token"},
+        422: {"model": ErrorEnvelope, "description": "Văn bản TTS rỗng hoặc vượt độ dài cho phép"},
+        503: {"model": ErrorEnvelope, "description": "Edge-TTS tạm lỗi, chuyển về flutter_tts on-device"},
+        504: {"model": ErrorEnvelope, "description": "Edge-TTS quá thời gian chờ"},
+    },
+)
+async def synthesize_speech(
+    payload: TtsSynthesizeRequest,
+    current_user: CurrentUserDep,
+) -> SuccessEnvelope[TtsSynthesisData]:
+    """Tổng hợp giọng nói tiếng Việt từ văn bản và trả về âm thanh mã hóa Base64."""
+    _ = current_user
+    try:
+        result = await get_tts_service().synthesize(payload.text, voice=payload.voice)
+    except TtsError as exc:
+        raise _tts_error_to_app_error(exc) from exc
+
+    return SuccessEnvelope(
+        data=TtsSynthesisData(
+            audio_base64=base64.b64encode(result.audio_bytes).decode("ascii"),
+            mime_type=result.mime_type,
+            provider=result.provider,
+            voice=result.voice,
+            cached=result.cached,
+            duration_ms=result.latency_ms,
+        ),
+        meta=build_response_meta(),
+    )
+
+
+@router.post(
+    "/uf5-checkin-prompt",
+    response_model=SuccessEnvelope[UF5VoiceCheckInPromptResponse],
+    summary="Sinh lời nhắc Voice Check-in 2 chiều + 3 chip Bỏ qua + audio TTS cho UF5",
+    responses={
+        401: {"model": ErrorEnvelope, "description": "Chưa đăng nhập hoặc thiếu Bearer Token"},
+        422: {"model": ErrorEnvelope, "description": "Tham số ngữ cảnh check-in không hợp lệ"},
+    },
+)
+async def create_uf5_checkin_prompt(
+    payload: UF5VoiceCheckInPromptRequest,
+    current_user: CurrentUserDep,
+) -> SuccessEnvelope[UF5VoiceCheckInPromptResponse]:
+    """Tạo câu hỏi Check-in 2 chiều không phán xét (UF5) kèm audio TTS hoặc cờ fallback on-device."""
+    _ = current_user
+    prompt = ai_service.build_uf5_checkin_prompt(
+        kind=payload.kind,
+        is_final_session_of_step=payload.is_final_session_of_step,
+        expected_output=payload.expected_output,
+        session_outcome=payload.session_outcome,
+    )
+    audio_base64: str | None = None
+    audio_mime_type: str | None = None
+    tts_provider: str | None = None
+    fallback_to_device_tts = False
+
+    if payload.include_audio:
+        try:
+            tts_result = await get_tts_service().synthesize(
+                prompt.prompt_text,
+                voice=payload.voice,
+            )
+            audio_base64 = base64.b64encode(tts_result.audio_bytes).decode("ascii")
+            audio_mime_type = tts_result.mime_type
+            tts_provider = tts_result.provider
+        except TtsError:
+            fallback_to_device_tts = True
+
+    return SuccessEnvelope(
+        data=UF5VoiceCheckInPromptResponse(
+            prompt=prompt,
+            audio_base64=audio_base64,
+            audio_mime_type=audio_mime_type,
+            tts_provider=tts_provider,
+            fallback_to_device_tts=fallback_to_device_tts,
+        ),
         meta=build_response_meta(),
     )

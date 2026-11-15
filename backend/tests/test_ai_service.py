@@ -3,15 +3,25 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
+import tempfile
 import unittest
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
+from fastapi.testclient import TestClient
 from google.genai import types
 
+from app.api.deps import get_current_user
+from app.api.v1 import voice as voice_router
 from app.core.config import Settings
+from app.core.database import Base, get_db, make_engine, session_factory
+from app.core.security import resolve_dev_current_user
+from app.main import app
 from app.schemas.common import TimeConstraint
 from app.schemas.schedule import (
     FeasibilityReportSchema,
@@ -33,6 +43,21 @@ from app.schemas.task import (
     TaskExtractionResult,
 )
 from app.services.ai_service import AIService, ai_service
+from app.services.draft_service import ensure_dev_seed_in_db
+from app.services.voice_service import (
+    FakeSttProvider,
+    FakeTtsProvider,
+    FallbackSttProvider,
+    GroqWhisperSttProvider,
+    SttError,
+    SttErrorCode,
+    TtsError,
+    TtsErrorCode,
+    TtsService,
+    VoiceService,
+    build_tts_service,
+    build_voice_service,
+)
 
 
 class TestAIService(unittest.TestCase):
@@ -1055,6 +1080,229 @@ class TestAIService(unittest.TestCase):
         self.assertEqual(res.time_constraint.input_timezone, "Asia/Ho_Chi_Minh")
         validated = TimeConstraint.model_validate(res.time_constraint.model_dump())
         self.assertEqual(validated.deadline_at, future_deadline)
+
+    def test_groq_whisper_and_fallback_stt_provider(self) -> None:
+        """Kiểm tra GroqWhisperSttProvider và FallbackSttProvider chuyển nhánh khi Groq lỗi."""
+        captured_calls: list[dict[str, Any]] = []
+
+        class _FakeTranscriptions:
+            async def create(self, **kwargs: Any) -> Any:
+                captured_calls.append(kwargs)
+                return SimpleNamespace(text="  Hoàn thiện phần kết luận báo cáo  ")
+
+        fake_client = SimpleNamespace(
+            audio=SimpleNamespace(transcriptions=_FakeTranscriptions())
+        )
+        groq_provider = GroqWhisperSttProvider(
+            api_key="gsk_test_key",
+            model="whisper-large-v3-turbo",
+            language_code="vi-VN",
+        )
+        with patch.object(groq_provider, "_get_client", return_value=fake_client):
+            svc = VoiceService(groq_provider, timeout_seconds=5.0, max_audio_bytes=1024 * 1024)
+            res = asyncio.run(svc.transcribe(b"RIFF-audio", content_type="audio/wav"))
+
+        self.assertEqual(res.text, "Hoàn thiện phần kết luận báo cáo")
+        self.assertEqual(res.provider, "groq")
+        self.assertEqual(captured_calls[0]["language"], "vi")
+        self.assertEqual(captured_calls[0]["model"], "whisper-large-v3-turbo")
+
+        # Thiếu Groq API key -> PROVIDER_UNAVAILABLE
+        no_key_provider = GroqWhisperSttProvider(
+            api_key="",
+            model="whisper-large-v3-turbo",
+            language_code="vi-VN",
+        )
+        with self.assertRaises(SttError) as ctx:
+            asyncio.run(no_key_provider.transcribe(b"RIFF", "audio/wav"))
+        self.assertEqual(ctx.exception.code, SttErrorCode.PROVIDER_UNAVAILABLE)
+
+        # FallbackSttProvider: Groq unavailable -> tự chuyển sang Gemini/fallback
+        class _FailGroq:
+            name = "groq"
+
+            async def transcribe(self, audio: bytes, mime_type: str) -> str:
+                raise SttError(SttErrorCode.PROVIDER_UNAVAILABLE, "groq_down")
+
+        class _OkGemini:
+            name = "gemini"
+
+            async def transcribe(self, audio: bytes, mime_type: str) -> str:
+                return "Chép lời từ Gemini dự phòng"
+
+        fb_svc = VoiceService(
+            FallbackSttProvider(primary=_FailGroq(), fallback=_OkGemini()),
+            timeout_seconds=5.0,
+            max_audio_bytes=1024 * 1024,
+        )
+        fb_res = asyncio.run(fb_svc.transcribe(b"RIFF-audio", filename="clip.m4a"))
+        self.assertEqual(fb_res.text, "Chép lời từ Gemini dự phòng")
+        self.assertEqual(fb_res.provider, "gemini")
+
+        # Kiểm tra build_voice_service với VOICE_STT_PROVIDER="auto" và "groq"
+        auto_cfg = Settings(
+            _env_file=None,
+            GEMINI_API_KEY="",
+            GROQ_API_KEY="",
+            VOICE_STT_PROVIDER="auto",
+        )
+        auto_svc = build_voice_service(auto_cfg)
+        self.assertEqual(auto_svc.provider_name, "groq->gemini")
+
+    def test_tts_service_fake_edge_mock_cache_and_validation(self) -> None:
+        """Kiểm tra TtsService: FakeTtsProvider, EdgeTtsProvider mock, LRU cache và validate input."""
+        fake_svc = TtsService(
+            FakeTtsProvider(),
+            default_voice="vi-VN-HoaiMyNeural",
+            timeout_seconds=5.0,
+            max_chars=120,
+            cache_size=4,
+        )
+        first = asyncio.run(fake_svc.synthesize("  Phiên   làm việc   đã xong rồi nhé!  "))
+        self.assertFalse(first.cached)
+        self.assertEqual(first.mime_type, "audio/wav")
+        self.assertTrue(first.audio_bytes.startswith(b"RIFF"))
+        second = asyncio.run(fake_svc.synthesize("Phiên làm việc đã xong rồi nhé!"))
+        self.assertTrue(second.cached)
+        self.assertEqual(second.audio_bytes, first.audio_bytes)
+
+        with self.assertRaises(TtsError) as empty_ctx:
+            asyncio.run(fake_svc.synthesize("   "))
+        self.assertEqual(empty_ctx.exception.code, TtsErrorCode.INVALID_INPUT)
+
+        with self.assertRaises(TtsError) as long_ctx:
+            asyncio.run(fake_svc.synthesize("a" * 121))
+        self.assertEqual(long_ctx.exception.code, TtsErrorCode.TEXT_TOO_LONG)
+
+        # EdgeTtsProvider mock stream
+        class _FakeCommunicate:
+            def __init__(self, text: str, voice: str, receive_timeout: int = 15) -> None:
+                self.text = text
+                self.voice = voice
+
+            async def stream(self):  # type: ignore[no-untyped-def]
+                yield {"type": "WordBoundary", "text": "Xin"}
+                yield {"type": "audio", "data": b"ID3-mp3-1"}
+                yield {"type": "audio", "data": b"-mp3-2"}
+
+        with patch("app.services.voice_service.edge_tts.Communicate", _FakeCommunicate):
+            edge_svc = build_tts_service(
+                Settings(_env_file=None, VOICE_TTS_PROVIDER="edge_tts")
+            )
+            edge_res = asyncio.run(edge_svc.synthesize("Xin chào bạn"))
+        self.assertEqual(edge_res.provider, "edge_tts")
+        self.assertEqual(edge_res.mime_type, "audio/mpeg")
+        self.assertEqual(edge_res.audio_bytes, b"ID3-mp3-1-mp3-2")
+
+    def test_voice_api_tts_uf5_prompt_fallback_and_uf5_checkin_stt(self) -> None:
+        """Kiểm tra endpoint /voice/tts, /voice/uf5-checkin-prompt (kể cả fallback on-device) và /voice/transcriptions purpose=uf5_checkin."""
+        dev_user = resolve_dev_current_user()
+        fake_tts = build_tts_service(Settings(_env_file=None, VOICE_TTS_PROVIDER="fake"))
+        fake_stt = VoiceService(
+            FakeSttProvider("Mình vừa xong phần mở đầu rồi"),
+            timeout_seconds=5.0,
+            max_audio_bytes=1024 * 1024,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            db_path = Path(tmp_dir) / "voice_api_test.db"
+            engine = make_engine(f"sqlite+aiosqlite:///{db_path.as_posix()}")
+            sf = session_factory(engine)
+
+            async def _init_db() -> None:
+                async with engine.begin() as conn:
+                    await conn.run_sync(Base.metadata.create_all)
+                async with sf() as session:
+                    await ensure_dev_seed_in_db(session)
+                    await session.commit()
+
+            asyncio.run(_init_db())
+
+            async def _override_db():
+                async with sf() as session:
+                    yield session
+
+            app.dependency_overrides[get_current_user] = lambda: dev_user
+            app.dependency_overrides[get_db] = _override_db
+            try:
+                with (
+                    patch.object(voice_router, "get_tts_service", return_value=fake_tts),
+                    patch.object(voice_router, "get_voice_service", return_value=fake_stt),
+                    TestClient(app) as client,
+                ):
+                    tts_resp = client.post(
+                        "/api/v1/voice/tts",
+                        json={"text": "Bạn nghỉ 5 phút nhé"},
+                    )
+                    self.assertEqual(tts_resp.status_code, 200, tts_resp.text)
+                    tts_data = tts_resp.json()["data"]
+                    self.assertEqual(tts_data["provider"], "fake")
+                    self.assertEqual(tts_data["mime_type"], "audio/wav")
+                    self.assertTrue(base64.b64decode(tts_data["audio_base64"]).startswith(b"RIFF"))
+
+                    prompt_resp = client.post(
+                        "/api/v1/voice/uf5-checkin-prompt",
+                        json={
+                            "kind": "final",
+                            "is_final_session_of_step": True,
+                            "expected_output": "Xong dàn ý 3 mục",
+                            "session_outcome": "completed",
+                            "include_audio": True,
+                        },
+                    )
+                    self.assertEqual(prompt_resp.status_code, 200, prompt_resp.text)
+                    p_data = prompt_resp.json()["data"]
+                    self.assertTrue(p_data["prompt"]["asks_step_completion"])
+                    self.assertEqual(len(p_data["prompt"]["skip_chips"]), 3)
+                    self.assertFalse(p_data["fallback_to_device_tts"])
+                    self.assertIsNotNone(p_data["audio_base64"])
+
+                    stt_resp = client.post(
+                        "/api/v1/voice/transcriptions",
+                        headers={"Idempotency-Key": "uf5-checkin-voice-1"},
+                        data={"purpose": "uf5_checkin", "device_id": "pixel_8"},
+                        files={"file": ("checkin.wav", b"RIFF-fake-pcm", "audio/wav")},
+                    )
+                    self.assertEqual(stt_resp.status_code, 200, stt_resp.text)
+                    self.assertEqual(stt_resp.json()["data"]["input_source"], "voice")
+                    self.assertEqual(
+                        stt_resp.json()["data"]["text"],
+                        "Mình vừa xong phần mở đầu rồi",
+                    )
+
+                # Khi TTS lỗi mạng/timeout -> /uf5-checkin-prompt vẫn trả 200 + fallback_to_device_tts=True
+                failing_tts = AsyncMock()
+                failing_tts.synthesize = AsyncMock(
+                    side_effect=TtsError(TtsErrorCode.TIMEOUT, "network_timeout")
+                )
+                with (
+                    patch.object(voice_router, "get_tts_service", return_value=failing_tts),
+                    TestClient(app) as client,
+                ):
+                    fb_resp = client.post(
+                        "/api/v1/voice/uf5-checkin-prompt",
+                        json={"kind": "final", "include_audio": True},
+                    )
+                    self.assertEqual(fb_resp.status_code, 200, fb_resp.text)
+                    fb_data = fb_resp.json()["data"]
+                    self.assertTrue(fb_data["fallback_to_device_tts"])
+                    self.assertIsNone(fb_data["audio_base64"])
+                    self.assertEqual(len(fb_data["prompt"]["skip_chips"]), 3)
+
+                    err_tts_resp = client.post(
+                        "/api/v1/voice/tts",
+                        json={"text": "Xin chào"},
+                    )
+                    self.assertEqual(err_tts_resp.status_code, 504)
+                    self.assertEqual(err_tts_resp.json()["error"]["code"], "TTS_TIMEOUT")
+                    self.assertEqual(
+                        err_tts_resp.json()["error"]["next_action"],
+                        "use_on_device_tts",
+                    )
+            finally:
+                voice_router._VOICE_IDEMPOTENCY_STORE.clear()
+                app.dependency_overrides.clear()
+                asyncio.run(engine.dispose())
 
 
 if __name__ == "__main__":
