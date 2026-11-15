@@ -2,6 +2,7 @@
 from datetime import UTC, datetime
 from typing import Any, Literal, cast
 from uuid import NAMESPACE_DNS, UUID, uuid4, uuid5
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import ValidationError
 from sqlalchemy import select, update
@@ -1376,19 +1377,74 @@ async def analyze_draft(
                 )
     else:
         unresolved = []
+    complete_time: TimeConstraint | None = None
     proposed_time = extracted.time_constraint
-    if proposed_time is not None:
+    has_proposed_time = proposed_time is not None and any(
+        getattr(proposed_time, field) is not None
+        for field in ("start_at", "deadline_at", "finish_by_at")
+    )
+    if has_proposed_time or extracted.deadline is not None:
         old_time = current_draft.summary.time_constraint
         values = (
             old_time.model_dump(mode="json")
             if old_time
             else dict(context.get("time_constraint") or {})
         )
-        incoming = proposed_time.model_dump(mode="json", exclude_none=True)
+        incoming = (
+            proposed_time.model_dump(mode="json", exclude_none=True)
+            if proposed_time is not None
+            else {}
+        )
         if incoming.get("kind") and incoming["kind"] != values.get("kind"):
             values.pop("deadline_at", None)
             values.pop("finish_by_at", None)
         values.update(incoming)
+        if (
+            values.get("deadline_at") is None
+            and values.get("finish_by_at") is None
+            and extracted.deadline is not None
+        ):
+            values["deadline_at"] = extracted.deadline.isoformat()
+            values.setdefault("kind", "deadline")
+
+        raw_tz = str(values.get("input_timezone") or timezone_name or "Asia/Ho_Chi_Minh").strip()
+        try:
+            tz_info = ZoneInfo(raw_tz)
+            resolved_tz = raw_tz
+        except ZoneInfoNotFoundError:
+            try:
+                tz_info = ZoneInfo(timezone_name)
+                resolved_tz = timezone_name
+            except ZoneInfoNotFoundError:
+                tz_info = UTC
+                resolved_tz = "UTC"
+        values["input_timezone"] = resolved_tz
+        if values.get("finish_by_at") is not None and values.get("deadline_at") is None:
+            values["kind"] = "window"
+        else:
+            values["kind"] = str(values.get("kind") or "deadline")
+            if values["kind"] == "window" and values.get("finish_by_at") is None:
+                values["kind"] = "deadline"
+
+        for dt_key in ("start_at", "deadline_at", "finish_by_at"):
+            raw_dt = values.get(dt_key)
+            if isinstance(raw_dt, str):
+                parsed_dt = datetime.fromisoformat(raw_dt)
+                if parsed_dt.tzinfo is None:
+                    parsed_dt = parsed_dt.replace(tzinfo=tz_info)
+                values[dt_key] = parsed_dt.isoformat()
+            elif isinstance(raw_dt, datetime):
+                parsed_dt = raw_dt if raw_dt.tzinfo is not None else raw_dt.replace(tzinfo=tz_info)
+                values[dt_key] = parsed_dt.isoformat()
+
+        end_key = "deadline_at" if values["kind"] == "deadline" else "finish_by_at"
+        end_raw = values.get(end_key)
+        if end_raw is not None and values.get("start_at") is None:
+            now_in_tz = datetime.now(tz_info)
+            end_dt = datetime.fromisoformat(str(end_raw))
+            if end_dt > now_in_tz:
+                values["start_at"] = now_in_tz.isoformat()
+
         context["time_constraint"] = values
         try:
             complete_time = TimeConstraint.model_validate(values)
@@ -1424,24 +1480,6 @@ async def analyze_draft(
                 new_field_sources["time_constraint"] = FieldSource(
                     source="ai_suggested", source_ref=f"summary_revision:{next_summary_rev}"
                 )
-    elif extracted.deadline is not None:
-        old_time = current_draft.summary.time_constraint
-        old_end = (
-            (old_time.deadline_at if old_time.kind == "deadline" else old_time.finish_by_at)
-            if old_time
-            else None
-        )
-        if old_end != extracted.deadline:
-            context["time_constraint"] = {"deadline_at": extracted.deadline.isoformat()}
-            ai_issues.append(
-                ClarificationIssue(
-                    code="AI_TIME_REVIEW_REQUIRED",
-                    field_path="time_constraint",
-                    message="Đã nhận mốc hoàn tất, cần xác nhận mốc bắt đầu và kiểu thời gian.",
-                    question="Bạn xác nhận mốc bắt đầu và thời gian hoàn tất nhé?",
-                    blocking=True,
-                )
-            )
     ai_issues.extend(
         item.model_copy(
             update={"code": item.code if item.code.startswith("AI_") else f"AI_{item.code}"}
@@ -1503,10 +1541,8 @@ async def analyze_draft(
         if i.code.startswith("AI_") and i.code != "AI_FALLBACK_NOTICE"
     }
     for key, issue in active_keys.items():
-        if (
-            issue.code == "AI_TIME_INCOMPLETE"
-            and proposed_time is not None
-            and complete_time is not None
+        if issue.code == "AI_TIME_INCOMPLETE" and (
+            complete_time is not None or current_draft.summary.time_constraint is not None
         ):
             continue
         if (
@@ -1516,11 +1552,21 @@ async def analyze_draft(
         ):
             continue
         # Field-review decisions stay with the user; generic semantic resolutions
-        # must reference the exact current question and a non-empty user reply.
-        resolved = (
-            key in extracted.resolved_issue_keys
-            and bool(payload.message)
-            and issue.code == "AI_CLARIFICATION"
+        # accept exact/short resolved keys, completion, or removal on a non-fallback AI pass.
+        resolved = issue.code == "AI_CLARIFICATION" and (
+            extracted.is_complete
+            or (
+                bool(input_text)
+                and (
+                    key in extracted.resolved_issue_keys
+                    or issue.field_path in extracted.resolved_issue_keys
+                    or issue.question in extracted.resolved_issue_keys
+                    or (
+                        extracted.generation_tier != "tier_3_rule_based"
+                        and issue.question not in extracted.clarification_questions
+                    )
+                )
+            )
         )
         if not resolved and issue not in ai_issues:
             ai_issues.append(issue)

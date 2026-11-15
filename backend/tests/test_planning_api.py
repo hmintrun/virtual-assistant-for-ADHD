@@ -11,7 +11,12 @@ from app.core.database import make_engine, session_factory
 from app.main import app
 from app.models import Base, CommandReceipt, PlanningDraft, Reminder, Task
 from app.models.settings import Availability as AvailabilityRow
-from app.schemas.task import LLMTaskDecompositionPayload, LLMTaskExtractionPayload, StepPromptItem
+from app.schemas.task import (
+    ExtractedTimeConstraint,
+    LLMTaskDecompositionPayload,
+    LLMTaskExtractionPayload,
+    StepPromptItem,
+)
 from app.services import plan_service
 from app.services.ai_service import UF1_FALLBACK_NOTICE, UF1_FALLBACK_QUESTIONS, ai_service
 from app.services.draft_service import resolve_draft_uuid, resolve_user_uuid
@@ -801,6 +806,123 @@ async def test_nonempty_legacy_selection_is_not_guessed(api):
         },
     )
     assert response.status_code == 422
+
+
+async def test_uf1_deadline_without_start_at_and_resolved_ai_clarification_can_confirm(
+    api, monkeypatch
+):
+    client, _ = api
+    future_deadline = (datetime.now(UTC) + timedelta(days=5)).replace(microsecond=0)
+    created = await post(
+        client,
+        "/drafts",
+        "uf1-start-at-create",
+        {
+            "client_draft_id": "uf1-start-at-create",
+            "input_source": "text",
+            "raw_input": "Viết báo cáo 5 trang trước thứ 6 tuần này",
+        },
+    )
+    assert created.status_code == 201, created.text
+    draft = created.json()["data"]
+    draft_id = draft["draft_id"]
+
+    turn = 0
+
+    async def extracted(**kwargs):
+        nonlocal turn
+        turn += 1
+        if turn == 1:
+            return LLMTaskExtractionPayload(
+                title="Viết báo cáo",
+                content="Viết báo cáo môn học",
+                scope="Hoàn thành 5 trang",
+                time_constraint=ExtractedTimeConstraint(
+                    kind="deadline",
+                    start_at=None,
+                    deadline_at=future_deadline,
+                    input_timezone=None,
+                ),
+                free_time_slots=[],
+                structured_free_windows=[],
+                is_complete=False,
+                summary="Đã có nội dung, phạm vi và hạn chót; thiếu giờ rảnh.",
+                clarification_questions=["Bạn cần nộp định dạng PDF hay Word?"],
+            ), "tier_1_gemini"
+        return LLMTaskExtractionPayload(
+            title="Viết báo cáo",
+            content="Viết báo cáo môn học",
+            scope="Hoàn thành 5 trang",
+            time_constraint=ExtractedTimeConstraint(
+                kind="deadline",
+                start_at=None,
+                deadline_at=future_deadline,
+                input_timezone=None,
+            ),
+            free_time_slots=["Thứ 3 từ 19:00 đến 21:00"],
+            structured_free_windows=[
+                {
+                    "kind": "weekly_rule",
+                    "weekday": 2,
+                    "start_local": "19:00",
+                    "end_local": "21:00",
+                    "raw_phrase": "Thứ 3 từ 19:00 đến 21:00",
+                    "is_ambiguous": False,
+                }
+            ],
+            is_complete=True,
+            resolved_issue_keys=[],
+            summary="Đã đủ 4 thông tin bắt buộc.",
+            clarification_questions=[],
+        ), "tier_1_gemini"
+
+    with monkeypatch.context() as context:
+        context.setattr(ai_service, "_execute_hedged_structured", extracted)
+        turn1 = await post(
+            client,
+            f"/drafts/{draft_id}/analyze",
+            "uf1-turn1",
+            {
+                "expected_summary_revision": draft["summary_revision"],
+                "expected_planning_input_revision": draft["planning_input_revision"],
+                "raw_input": "Viết báo cáo 5 trang trước thứ 6 tuần này",
+            },
+        )
+        assert turn1.status_code == 200, turn1.text
+        draft1 = turn1.json()["data"]
+        assert draft1["summary"]["time_constraint"] is not None
+        assert draft1["summary"]["time_constraint"]["start_at"] is not None
+        assert not any(
+            i["code"] == "AI_TIME_INCOMPLETE" for i in draft1["summary"]["clarification_issues"]
+        )
+        assert any(
+            i["code"] == "AI_CLARIFICATION" and i["question"] == "Bạn cần nộp định dạng PDF hay Word?"
+            for i in draft1["summary"]["clarification_issues"]
+        )
+        assert draft1["summary"]["can_plan"] is False
+
+        turn2 = await post(
+            client,
+            f"/drafts/{draft_id}/analyze",
+            "uf1-turn2",
+            {
+                "expected_summary_revision": draft1["summary_revision"],
+                "expected_planning_input_revision": draft1["planning_input_revision"],
+                "message": "Nộp PDF, mình rảnh tối thứ 3 từ 19h đến 21h",
+            },
+        )
+        assert turn2.status_code == 200, turn2.text
+        draft2 = turn2.json()["data"]
+        assert draft2["summary"]["can_plan"] is True
+        assert not any(i["blocking"] for i in draft2["summary"]["clarification_issues"])
+
+    confirmed = await post(
+        client,
+        f"/drafts/{draft_id}/confirm-summary",
+        "uf1-confirm",
+        {"expected_summary_revision": draft2["summary_revision"]},
+    )
+    assert confirmed.status_code == 200, confirmed.text
 
 
 async def test_review_feasibility_preserves_deficit_and_infeasible_status(api, monkeypatch):
