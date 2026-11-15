@@ -6,10 +6,16 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Depends
 
 from app.api.deps import CurrentUserDep, DbSessionDep
-from app.schemas.auth import GoogleLoginData, GoogleLoginRequest, VerifiedGoogleIdentity
+from app.schemas.auth import (
+    GoogleLoginData,
+    GoogleLoginRequest,
+    RefreshTokenRequest,
+    TokenBundle,
+    VerifiedGoogleIdentity,
+)
 from app.schemas.common import ErrorEnvelope, SuccessEnvelope, build_response_meta
 from app.schemas.user import CurrentUser
-from app.services.auth_service import login_with_google
+from app.services.auth_service import login_with_google, refresh_app_tokens
 from app.services.google_identity_verifier import verify_google_identity
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
@@ -31,6 +37,15 @@ async def google_login(
     ],
 ):
     data = await login_with_google(db, payload.id_token, verifier=verifier)
+    return SuccessEnvelope(data=data, meta=build_response_meta())
+
+
+@router.post("/refresh", response_model=SuccessEnvelope[TokenBundle], responses=errors)
+async def refresh_token_endpoint(
+    payload: RefreshTokenRequest,
+    db: DbSessionDep,
+):
+    data = await refresh_app_tokens(db, payload.refresh_token)
     return SuccessEnvelope(data=data, meta=build_response_meta())
 
 

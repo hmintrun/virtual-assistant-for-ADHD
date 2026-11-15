@@ -14,6 +14,7 @@ from uuid import UUID, uuid4
 
 from pydantic import BaseModel, ValidationError
 from sqlalchemy import func, or_, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
@@ -36,10 +37,7 @@ from app.models.user import User
 from app.models.user import UserPreference as PreferenceRow
 from app.schemas.availability import Availability, DraftAvailability
 from app.schemas.calendar import (
-    BusyInterval,
-    BusyIntervalSource,
     CalendarContext,
-    CalendarError,
     PlanningContextCreateRequest,
 )
 from app.schemas.common import (
@@ -224,20 +222,47 @@ def _require_draft(draft: PlanningDraft, summary_revision: int, input_revision: 
         raise _error("PLAN_NOT_CONFIRMABLE", "Bản nháp còn thông tin cần làm rõ.")
 
 
-async def get_preferences(*, user_id: str, db: AsyncSession) -> UserPreference:
+async def get_preferences(
+    *, user_id: str, db: AsyncSession, commit_if_created: bool = False
+) -> UserPreference:
+    owner_uuid = draft_service.resolve_user_uuid(user_id)
     row = await db.scalar(
         select(PreferenceRow)
-        .where(PreferenceRow.user_id == draft_service.resolve_user_uuid(user_id))
-        .with_for_update()
+        .where(PreferenceRow.user_id == owner_uuid)
         .execution_options(populate_existing=True)
     )
     if row is None:
-        raise _error(
-            "POLICY_NOT_CONFIGURED",
-            "Chưa có cấu hình làm việc/nghỉ đã lưu cho người dùng.",
-            503,
-            "configure_preferences",
+        created = False
+        new_row = PreferenceRow(
+            user_id=owner_uuid,
+            revision=1,
+            effective_revision=1,
+            work_interval_seconds=settings.DEFAULT_WORK_INTERVAL_SECONDS,
+            rest_interval_seconds=settings.DEFAULT_REST_INTERVAL_SECONDS,
+            micro_task_seconds=settings.DEFAULT_MICRO_TASK_SECONDS,
+            reminder_offsets=[900, 600, 300],
+            buffer_multiplier=settings.DEFAULT_BUFFER_MULTIPLIER,
+            reminder_style="gentle",
         )
+        try:
+            if not db.in_transaction():
+                await db.begin()
+            async with db.begin_nested():
+                db.add(new_row)
+                await db.flush()
+            row = new_row
+            created = True
+        except IntegrityError:
+            row = await db.scalar(
+                select(PreferenceRow)
+                .where(PreferenceRow.user_id == owner_uuid)
+                .execution_options(populate_existing=True)
+            )
+            if row is None:
+                # Lỗi ràng buộc toàn vẹn khác (ví dụ FK user_id không tồn tại), không che giấu bằng default giả.
+                raise
+        if created and commit_if_created:
+            await db.commit()
     return UserPreference(
         revision=row.revision,
         effective_revision=row.effective_revision,

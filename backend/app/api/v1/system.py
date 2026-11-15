@@ -3,8 +3,10 @@
 from typing import Annotated
 
 from fastapi import APIRouter, Header, Path, Request
+from sqlalchemy import text
 
 from app.api.deps import CurrentUserDep, DbSessionDep
+from app.core.errors import AppError
 from app.schemas.calendar import CalendarContext, PlanningContextCreateRequest
 from app.schemas.common import (
     CapabilitiesData,
@@ -35,6 +37,21 @@ _DEFAULT_CAPABILITIES = CapabilitiesData(
     ),
     policy_state="requires_configuration_before_release",
 )
+
+
+@router.get("/health", summary="Kiểm tra trạng thái hoạt động Backend & Database")
+async def health_check(db: DbSessionDep) -> dict[str, str]:
+    try:
+        await db.execute(text("SELECT 1"))
+    except Exception:
+        raise AppError(
+            status_code=503,
+            code="DATABASE_UNAVAILABLE",
+            message="Cơ sở dữ liệu hiện không sẵn sàng.",
+            retryable=True,
+            next_action="retry_later",
+        ) from None
+    return {"status": "ok", "database": "ok"}
 
 
 @router.get("/capabilities", response_model=SuccessEnvelope[CapabilitiesData])

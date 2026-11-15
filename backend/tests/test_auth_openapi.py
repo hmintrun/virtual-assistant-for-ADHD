@@ -50,6 +50,7 @@ def test_login_and_calendar_callbacks_stay_public():
     schema = app.openapi()
     for path, method in (
         ("/api/v1/auth/google", "post"),
+        ("/api/v1/auth/refresh", "post"),
         ("/api/v1/calendar/oauth/callback", "get"),
     ):
         assert not schema["paths"][path][method].get("security")

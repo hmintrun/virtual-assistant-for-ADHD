@@ -6,7 +6,9 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.api.deps import DbSessionDep
 from app.api.v1.router import api_router
+from app.api.v1.system import health_check
 from app.core.config import settings
 from app.core.database import get_engine, session_factory
 from app.core.errors import register_exception_handlers
@@ -59,3 +61,8 @@ app.add_middleware(
 
 register_exception_handlers(app)
 app.include_router(api_router)
+
+
+@app.get("/health", include_in_schema=False)
+async def root_health_check(db: DbSessionDep) -> dict[str, str]:
+    return await health_check(db=db)

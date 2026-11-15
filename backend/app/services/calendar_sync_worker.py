@@ -11,7 +11,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 from sqlalchemy import or_, select
@@ -19,7 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.calendar import CalendarConnection, CalendarEventLink, CalendarSyncJob
 from app.services.calendar_service import CalendarService, _resolve_uuid
-from app.services.google_calendar_client import CalendarAuthError, CalendarConflictError, get_calendar_client
+from app.services.google_calendar_client import CalendarAuthError, CalendarConflictError
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +43,7 @@ async def process_sync_job(
     cal_service: CalendarService,
 ) -> str:
     """Xử lý một CalendarSyncJob đơn lẻ."""
-    now_utc = datetime.now(timezone.utc)
+    now_utc = datetime.now(UTC)
     client = cal_service.client
     job_id = job.id
     conn_id = job.connection_id
@@ -69,6 +69,7 @@ async def process_sync_job(
     try:
         access_token = await cal_service.get_valid_access_token(conn)
     except CalendarAuthError as exc:
+        await db.rollback()
         logger.warning("Permanent token acquisition failed for job %s: %s", job_id, exc)
         job_row = await db.get(CalendarSyncJob, job_id)
         if job_row:
@@ -78,7 +79,8 @@ async def process_sync_job(
             await db.commit()
         return "failed"
     except Exception as exc:
-        # ISSUE-A: Lỗi mạng tạm thời khi refresh token -> đưa vào retry backoff, không khai tử ngay
+        # ISSUE-A: Lỗi mạng tạm thời khi refresh token -> rollback transaction trước khi ghi retry backoff
+        await db.rollback()
         logger.warning("Transient token acquisition error for job %s: %s", job_id, exc)
         job_row = await db.get(CalendarSyncJob, job_id)
         if job_row:
@@ -104,11 +106,24 @@ async def process_sync_job(
     # 4. Thực thi theo loại operation
     try:
         if job.operation == "create":
-            res = await client.create_event(
-                access_token=access_token,
-                calendar_id=conn.write_calendar_id,
-                event_payload=job.payload_snapshot,
-            )
+            try:
+                res = await client.create_event(
+                    access_token=access_token,
+                    calendar_id=conn.write_calendar_id,
+                    event_payload=job.payload_snapshot,
+                )
+            except CalendarConflictError:
+                existing_id = (job.payload_snapshot or {}).get("id")
+                if not existing_id:
+                    raise
+                existing_event = await client.get_event(
+                    access_token=access_token,
+                    calendar_id=conn.write_calendar_id,
+                    event_id=str(existing_id),
+                )
+                if existing_event is None:
+                    raise
+                res = existing_event
             created_event_id = res.get("id")
             if link:
                 link.google_event_id = created_event_id
@@ -206,24 +221,19 @@ async def process_sync_job(
         return "conflict"
 
     except CalendarAuthError as exc:
-        # BUG-15 & BUG-17: Token hết hạn/thu hồi trong lúc gọi Google (401)
+        # BUG-15 & BUG-17 & RISK-I05: Token hết hạn/thu hồi -> cần kết nối lại, dừng retry vô ích
         await db.rollback()
         logger.warning("[CalendarWorker] Auth failure on job %s: %s", job_id, exc)
         job_row, conn_row, _ = await _reload_sync_entities(db, job_id, conn_id, None)
         if conn_row:
             conn_row.connection_state = "needs_reconnect"
         if job_row:
-            job_row.attempt_count += 1
-            if job_row.attempt_count >= 5:
-                job_row.job_state = "failed"
-                job_row.last_error_code = "AUTH_EXPIRED"
-            else:
-                job_row.job_state = "queued"
-                job_row.next_retry_at = now_utc + timedelta(seconds=2 ** job_row.attempt_count)
-                job_row.last_error_code = "AUTH_EXPIRED"
-                job_row.lease_expires_at = None
+            job_row.job_state = "failed"
+            job_row.last_error_code = "AUTH_EXPIRED"
+            job_row.attempt_count = 5
+            job_row.lease_expires_at = None
         await db.commit()
-        return "retry"
+        return "failed"
 
     except Exception as exc:
         # BUG-17: Rollback any failed partial session state before updating job metadata
@@ -258,7 +268,7 @@ async def process_calendar_sync_jobs(
     limit: int = 10,
 ) -> int:
     """Quét và xử lý các sync jobs đang chờ trong hàng đợi."""
-    now_utc = datetime.now(timezone.utc)
+    now_utc = datetime.now(UTC)
     stmt = (
         select(CalendarSyncJob)
         .where(

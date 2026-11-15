@@ -8,6 +8,7 @@ from typing import Any
 from uuid import UUID
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import AppError
@@ -45,8 +46,8 @@ DEFAULT_REMINDER_STYLE = "gentle"
 BUFFER_POLICY_MIN = 1.0
 BUFFER_POLICY_MAX = 2.0
 BUFFER_DELTA_THRESHOLD = 0.2
-SUGGESTION_MIN_SAMPLES = 5
-SUGGESTION_SLIDING_WINDOW = 15
+SUGGESTION_MIN_SAMPLES = 7
+SUGGESTION_SLIDING_WINDOW = 10
 SUGGESTION_COOLDOWN_SECONDS = 7 * 24 * 3600
 ANNOYANCE_COOLDOWN_SECONDS = 14 * 24 * 3600
 
@@ -334,6 +335,12 @@ async def apply_settings_change(
             target_task_id=proposal_target_id,
             allowed_task_ids=allowed_ids,
             request_text="Đề xuất điều chỉnh lịch do thay đổi cài đặt UF7",
+            override_preferences=dict(pref_values) if pref_values else None,
+            override_availability=(
+                payload.changes.availability.model_dump(mode="json")
+                if payload.changes.availability is not None
+                else None
+            ),
             now=now,
         )
         proposal_uuid = UUID(proposal.proposal_id)
@@ -645,6 +652,7 @@ async def get_current_suggestion(
     user_id: str,
     kind: SuggestionKind | None = None,
     now: datetime | None = None,
+    commit_if_created: bool = False,
 ) -> AdaptationSuggestionData | None:
     """Đọc gợi ý pending hiện hành hoặc đánh giá A20 từ các mẫu Step hoàn thành sạch."""
     calc_now = _utc_now(now)
@@ -663,10 +671,59 @@ async def get_current_suggestion(
     if kind not in (None, "buffer_multiplier"):
         return None
 
-    preferences = await db.scalar(select(PreferenceRow).where(PreferenceRow.user_id == owner))
+    preferences = await db.scalar(
+        select(PreferenceRow)
+        .where(PreferenceRow.user_id == owner)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    pref_created = False
+    if preferences is None:
+        # Đảm bảo luôn có PreferenceRow để SELECT ... FOR UPDATE thực sự khóa được row trên PostgreSQL.
+        new_pref = PreferenceRow(
+            user_id=owner,
+            work_interval_seconds=DEFAULT_WORK_INTERVAL_SECONDS,
+            rest_interval_seconds=DEFAULT_REST_INTERVAL_SECONDS,
+            micro_task_seconds=DEFAULT_MICRO_TASK_SECONDS,
+            reminder_offsets=list(DEFAULT_REMINDER_OFFSETS),
+            effective_revision=1,
+            buffer_multiplier=DEFAULT_BUFFER_MULTIPLIER,
+            reminder_style=DEFAULT_REMINDER_STYLE,
+            created_at=calc_now,
+            updated_at=calc_now,
+        )
+        try:
+            async with db.begin_nested():
+                db.add(new_pref)
+                await db.flush()
+            pref_created = True
+        except IntegrityError:
+            existing_pref = await db.scalar(
+                select(PreferenceRow.user_id).where(PreferenceRow.user_id == owner)
+            )
+            if existing_pref is None:
+                raise
+        preferences = await db.scalar(
+            select(PreferenceRow)
+            .where(PreferenceRow.user_id == owner)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+    # Kiểm tra lại sau khi khóa hàng PreferenceRow để tránh tạo trùng pending suggestion đồng thời.
+    pending_row = await db.scalar(
+        pending_stmt.order_by(SuggestionRow.created_at.desc())
+        .limit(1)
+        .execution_options(populate_existing=True)
+    )
+    if pending_row is not None:
+        if pref_created and commit_if_created:
+            await db.commit()
+        return _suggestion_to_schema(pending_row)
     if preferences is not None:
         cooldown_until = _as_utc(preferences.suggestion_cooldown_until)
         if cooldown_until is not None and cooldown_until > calc_now:
+            if pref_created and commit_if_created:
+                await db.commit()
             return None
 
     last_rejected = await db.scalar(
@@ -697,11 +754,15 @@ async def get_current_suggestion(
         cooldown_seconds=SUGGESTION_COOLDOWN_SECONDS,
     )
     if eval_result is None:
+        if pref_created and commit_if_created:
+            await db.commit()
         return None
 
     # Quy tắc UF7 (A20): chỉ tạo gợi ý khi |k_user - k_history| > 0.2.
     diff = abs(Decimal(str(eval_result["suggested_value"])) - Decimal(str(current_buffer)))
     if diff <= Decimal(str(BUFFER_DELTA_THRESHOLD)):
+        if pref_created and commit_if_created:
+            await db.commit()
         return None
 
     created = SuggestionRow(
@@ -719,8 +780,11 @@ async def get_current_suggestion(
         created_at=calc_now,
         updated_at=calc_now,
     )
-    db.add(created)
-    await db.commit()
+    async with db.begin_nested():
+        db.add(created)
+        await db.flush()
+    if commit_if_created:
+        await db.commit()
     await db.refresh(created)
     return _suggestion_to_schema(created)
 
@@ -911,6 +975,7 @@ async def respond_to_suggestion(
         db,
         owner=owner,
         request_text=f"Cập nhật {kind} từ gợi ý trợ lý",
+        override_preferences=dict(pref_delta),
         now=now,
     )
     proposal_uuid = UUID(proposal.proposal_id)

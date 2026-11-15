@@ -39,6 +39,7 @@ class Settings(BaseSettings):
     JWT_ISSUER: str = "proplan-va"
     JWT_AUDIENCE: str = "proplan-va-api"
     ACCESS_TOKEN_TTL_SECONDS: int = Field(default=3600, ge=60, le=86400)
+    REFRESH_TOKEN_TTL_SECONDS: int = Field(default=30 * 86400, ge=300, le=90 * 86400)
     AUTH_CLOCK_SKEW_SECONDS: int = Field(default=0, ge=0, le=60)
     GOOGLE_SIGN_IN_AUDIENCES: list[str] = []
     GOOGLE_AUTH_TIMEOUT_SECONDS: float = Field(default=5.0, gt=0, le=30)

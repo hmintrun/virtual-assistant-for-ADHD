@@ -49,7 +49,15 @@ class ProposalFeasibilityData(ApiModel):
 
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
-    status: Literal["feasible", "deficit", "insufficient_data", "valid", "conflict", "unsolvable"]
+    status: Literal[
+        "feasible",
+        "infeasible",
+        "deficit",
+        "insufficient_data",
+        "valid",
+        "conflict",
+        "unsolvable",
+    ]
     confirmable: bool
     deficit_seconds: int | None = Field(default=None, alias="deficit_seconds")
     blocking_reasons: list[BlockingReason] = Field(default_factory=list)

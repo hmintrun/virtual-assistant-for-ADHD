@@ -989,7 +989,8 @@ async def test_qa_bug3_batch_job1_conflict_and_job2_auth_error_then_job3_ok(monk
             l1 = await db.get(CalendarEventLink, link1_id)
             assert r1 is not None and r1.job_state == "conflict" and r1.lease_expires_at is None
             assert l1 is not None and l1.sync_state == "conflict"
-            assert r2 is not None and r2.job_state == "queued" and r2.attempt_count == 1
+            assert r2 is not None and r2.job_state == "failed" and r2.attempt_count == 5
+            assert r2.last_error_code == "AUTH_EXPIRED" and r2.lease_expires_at is None
             assert c2 is not None and c2.connection_state == "needs_reconnect"
             assert r3 is not None and r3.job_state == "completed"
     finally:

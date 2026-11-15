@@ -959,11 +959,11 @@ async def test_suggestions_current_evaluation_dirty_filter_threshold_and_cooldow
     monkeypatch.setattr(settings_service, "_utc_now", lambda now=None: now or fixed_now)
 
     try:
-        # 1) Dưới 5 mẫu sạch -> data: null; lọc bỏ mẫu bẩn -> vẫn null
+        # 1) Dưới 7 mẫu sạch (6 mẫu) -> data: null; lọc bỏ mẫu bẩn -> vẫn null
         async with sf() as db:
             user_below = await _seed_user_with_prefs(db, buffer_multiplier=1.05)
             await _seed_completed_steps_for_suggestion(
-                db, user_below, [1.5, 1.5, 1.5, 1.5], include_dirty_samples=True
+                db, user_below, [1.5, 1.5, 1.5, 1.5, 1.5, 1.5], include_dirty_samples=True
             )
 
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
@@ -977,7 +977,7 @@ async def test_suggestions_current_evaluation_dirty_filter_threshold_and_cooldow
         async with sf() as db:
             user_eq = await _seed_user_with_prefs(db, buffer_multiplier=1.05)
             await _seed_completed_steps_for_suggestion(
-                db, user_eq, [1.25, 1.25, 1.25, 1.25, 1.25], include_dirty_samples=False
+                db, user_eq, [1.25, 1.25, 1.25, 1.25, 1.25, 1.25, 1.25], include_dirty_samples=False
             )
 
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
@@ -985,11 +985,11 @@ async def test_suggestions_current_evaluation_dirty_filter_threshold_and_cooldow
             assert r_eq.status_code == 200
             assert r_eq.json()["data"] is None
 
-        # 3) Đủ 5 mẫu sạch với ratio > 2.0 -> kẹp miền [1.0, 2.0] thành 2.0, model_revision is None
+        # 3) Đủ 7 mẫu sạch với ratio > 2.0 -> kẹp miền [1.0, 2.0] thành 2.0, model_revision is None
         async with sf() as db:
             user_ok = await _seed_user_with_prefs(db, buffer_multiplier=1.1)
             await _seed_completed_steps_for_suggestion(
-                db, user_ok, [2.4, 2.5, 2.6, 2.5, 2.7], include_dirty_samples=True
+                db, user_ok, [2.4, 2.5, 2.6, 2.5, 2.7, 2.5, 2.6], include_dirty_samples=True
             )
 
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
@@ -998,7 +998,7 @@ async def test_suggestions_current_evaluation_dirty_filter_threshold_and_cooldow
             s_data = r_ok.json()["data"]
             assert s_data is not None
             assert s_data["kind"] == "buffer_multiplier"
-            assert s_data["sample_count"] == 5
+            assert s_data["sample_count"] == 7
             assert s_data["suggested_value"] == 2.0
             assert s_data["model_revision"] is None
             assert s_data["status"] == "pending"

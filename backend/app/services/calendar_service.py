@@ -6,11 +6,12 @@ import hashlib
 import json
 import logging
 import secrets
-from datetime import UTC, datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any
-from uuid import UUID, uuid4, uuid5, NAMESPACE_DNS
+from uuid import NAMESPACE_DNS, UUID, uuid4, uuid5
 
 from sqlalchemy import delete, or_, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.calendar import (
@@ -108,7 +109,7 @@ class CalendarService:
         state = secrets.token_urlsafe(32)
         state_hash = _hash_state(state)
 
-        now_utc = datetime.now(timezone.utc)
+        now_utc = datetime.now(UTC)
         # BUG-13: Chỉ dọn dẹp các authorization đã hết hạn hoặc đã tiêu thụ, giữ lại các session khác đang mở của user
         await self.db.execute(
             delete(CalendarAuthorization).where(
@@ -218,6 +219,21 @@ class CalendarService:
             CalendarConnection.account_ref == account_ref,
         )
         existing_conn = (await self.db.execute(conn_stmt)).scalar_one_or_none()
+        if existing_conn is None and account_ref not in ("unknown@google.com", "unknown@gmail.com"):
+            unknown_stmt = (
+                select(CalendarConnection)
+                .where(
+                    CalendarConnection.user_id == uid,
+                    CalendarConnection.provider == "google",
+                    CalendarConnection.account_ref.in_(
+                        ("unknown@google.com", "unknown@gmail.com")
+                    ),
+                )
+                .order_by(CalendarConnection.created_at.desc())
+            )
+            existing_conn = (await self.db.execute(unknown_stmt)).scalars().first()
+            if existing_conn is not None:
+                existing_conn.account_ref = account_ref
 
         if existing_conn:
             conn = existing_conn
@@ -330,7 +346,7 @@ class CalendarService:
             try:
                 stored_at = datetime.fromisoformat(stored_at_str)
                 # Đệm an toàn 5 phút (300s) trước khi token hết hạn thực sự
-                if datetime.now(timezone.utc) >= stored_at + timedelta(seconds=max(0, expires_in - 300)):
+                if datetime.now(UTC) >= stored_at + timedelta(seconds=max(0, expires_in - 300)):
                     is_expired = True
             except Exception:
                 pass
@@ -340,7 +356,7 @@ class CalendarService:
                 new_token_data = await self.client.refresh_access_token(refresh_token)
                 access_token = new_token_data.get("access_token")
                 new_expires_in = new_token_data.get("expires_in", 3600)
-                now_utc = datetime.now(timezone.utc)
+                now_utc = datetime.now(UTC)
                 creds["access_token"] = access_token
                 creds["expires_in"] = new_expires_in
                 creds["stored_at"] = now_utc.isoformat()
@@ -376,6 +392,33 @@ class CalendarService:
 
         access_token = await self.get_valid_access_token(conn)
         raw_items = await self.client.list_calendar_list(access_token)
+        if conn.account_ref in ("unknown@google.com", "unknown@gmail.com"):
+            for item in raw_items:
+                cal_id = item.get("id")
+                if (
+                    item.get("primary")
+                    and isinstance(cal_id, str)
+                    and "@" in cal_id
+                    and cal_id.strip() != "primary"
+                ):
+                    resolved_email = cal_id.strip()
+                    conflict_id = await self.db.scalar(
+                        select(CalendarConnection.id).where(
+                            CalendarConnection.user_id == conn.user_id,
+                            CalendarConnection.provider == conn.provider,
+                            CalendarConnection.account_ref == resolved_email,
+                            CalendarConnection.id != conn.id,
+                        )
+                    )
+                    if conflict_id is None:
+                        conn.account_ref = resolved_email
+                        try:
+                            await self.db.commit()
+                            await self.db.refresh(conn)
+                        except IntegrityError:
+                            await self.db.rollback()
+                            conn = await self.get_connection_by_id(user_id, connection_id) or conn
+                    break
 
         read_ids = set(conn.read_calendar_ids or [])
         write_id = conn.write_calendar_id
@@ -456,7 +499,7 @@ class CalendarService:
                 "existing_event_action": existing_event_action,
             },
             status="pending",
-            expires_at=datetime.now(timezone.utc) + timedelta(minutes=15),
+            expires_at=datetime.now(UTC) + timedelta(minutes=15),
         )
         self.db.add(preview)
         await self.db.commit()
@@ -491,7 +534,7 @@ class CalendarService:
                 "Phiên bản bản xem trước không khớp (đã bị cập nhật).", status_code=409
             )
 
-        now_utc = datetime.now(timezone.utc)
+        now_utc = datetime.now(UTC)
         if preview.expires_at and preview.expires_at < now_utc:
             preview.status = "expired"
             await self.db.commit()
@@ -534,11 +577,13 @@ class CalendarService:
                     write_id = new_cal.get("id")
                 except Exception as e:
                     logger.error("Failed to provision secondary calendar: %s", e)
-                    raise CalendarClientError(f"Không thể tạo lịch ProPlan VA Focus: {e}", status_code=502)
+                    raise CalendarClientError(
+                        f"Không thể tạo lịch ProPlan VA Focus: {e}", status_code=502
+                    ) from e
 
         conn.read_calendar_ids = read_ids
         conn.write_calendar_id = write_id
-        conn.last_successful_sync_at = datetime.now(timezone.utc)
+        conn.last_successful_sync_at = datetime.now(UTC)
         preview.status = "confirmed"
 
         await self.db.commit()

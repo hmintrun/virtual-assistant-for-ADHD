@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import logging
 from abc import ABC, abstractmethod
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from urllib.parse import quote, urlencode
 
@@ -182,15 +182,35 @@ class GoogleCalendarClient(CalendarClientInterface):
             token_data = resp.json()
 
             account_ref = "unknown@google.com"
+            auth_headers = {"Authorization": f"Bearer {token_data.get('access_token')}"}
             try:
                 info_resp = await client.get(
                     "https://www.googleapis.com/oauth2/v3/userinfo",
-                    headers={"Authorization": f"Bearer {token_data.get('access_token')}"},
+                    headers=auth_headers,
                 )
                 if info_resp.status_code == 200:
-                    account_ref = info_resp.json().get("email", account_ref)
+                    email = info_resp.json().get("email")
+                    if isinstance(email, str) and email.strip():
+                        account_ref = email.strip()
             except Exception as e:
                 logger.debug("Failed to fetch userinfo email: %s", e)
+
+            if account_ref in ("unknown@google.com", "unknown@gmail.com"):
+                try:
+                    cal_resp = await client.get(
+                        f"{GOOGLE_CALENDAR_BASE_URL}/users/me/calendarList/primary",
+                        headers=auth_headers,
+                    )
+                    if cal_resp.status_code == 200:
+                        cal_id = cal_resp.json().get("id")
+                        if (
+                            isinstance(cal_id, str)
+                            and cal_id.strip()
+                            and cal_id.strip() != "primary"
+                        ):
+                            account_ref = cal_id.strip()
+                except Exception as e:
+                    logger.debug("Failed to fetch primary calendar id: %s", e)
 
             token_data["account_ref"] = account_ref
             return token_data
@@ -264,8 +284,8 @@ class GoogleCalendarClient(CalendarClientInterface):
         async with httpx.AsyncClient(timeout=25.0) as client:
             while True:
                 params: dict[str, Any] = {
-                    "timeMin": time_min.astimezone(timezone.utc).isoformat(),
-                    "timeMax": time_max.astimezone(timezone.utc).isoformat(),
+                    "timeMin": time_min.astimezone(UTC).isoformat(),
+                    "timeMax": time_max.astimezone(UTC).isoformat(),
                     "singleEvents": "true",
                     "orderBy": "startTime",
                     "maxResults": 250,
