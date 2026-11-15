@@ -1541,29 +1541,61 @@ async def analyze_draft(
         if i.code.startswith("AI_") and i.code != "AI_FALLBACK_NOTICE"
     }
     for key, issue in active_keys.items():
-        if issue.code == "AI_TIME_INCOMPLETE" and (
-            complete_time is not None or current_draft.summary.time_constraint is not None
+        if (
+            not issue.code.endswith("_REVIEW_REQUIRED")
+            and (
+                issue.code in {"AI_TIME_INCOMPLETE", "AI_MISSING_TIME_CONSTRAINT"}
+                or issue.field_path == "time_constraint"
+            )
+            and (complete_time is not None or current_draft.summary.time_constraint is not None)
         ):
             continue
         if (
-            issue.code == "AI_AVAILABILITY_INCOMPLETE"
+            not issue.code.endswith("_REVIEW_REQUIRED")
+            and (
+                issue.code in {"AI_AVAILABILITY_INCOMPLETE", "AI_MISSING_AVAILABILITY"}
+                or issue.field_path == "availability"
+            )
             and availability_state is not None
             and not unresolved
         ):
             continue
+        if (
+            not issue.code.endswith("_REVIEW_REQUIRED")
+            and issue.field_path in {"scope", "title", "description", "goal"}
+            and bool(
+                merged_updates.get(issue.field_path)
+                or getattr(current_draft.summary, issue.field_path, None)
+            )
+            and (
+                extracted.is_complete
+                or (
+                    extracted.generation_tier != "tier_3_rule_based"
+                    and not any(i.field_path == issue.field_path for i in ai_issues)
+                )
+            )
+        ):
+            continue
         # Field-review decisions stay with the user; generic semantic resolutions
         # accept exact/short resolved keys, completion, or removal on a non-fallback AI pass.
-        resolved = issue.code == "AI_CLARIFICATION" and (
+        raw_code = issue.code.removeprefix("AI_")
+        resolved = not issue.code.endswith("_REVIEW_REQUIRED") and (
             extracted.is_complete
             or (
                 bool(input_text)
                 and (
                     key in extracted.resolved_issue_keys
+                    or issue.code in extracted.resolved_issue_keys
+                    or raw_code in extracted.resolved_issue_keys
                     or issue.field_path in extracted.resolved_issue_keys
                     or issue.question in extracted.resolved_issue_keys
                     or (
                         extracted.generation_tier != "tier_3_rule_based"
                         and issue.question not in extracted.clarification_questions
+                        and not any(
+                            i.code == issue.code and i.field_path == issue.field_path
+                            for i in ai_issues
+                        )
                     )
                 )
             )

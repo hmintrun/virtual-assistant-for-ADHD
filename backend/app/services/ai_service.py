@@ -236,7 +236,9 @@ class AIService:
     def _extraction_profile(self) -> ExecutionTimingProfile:
         """UF1 dùng cùng một deadline cho Flash-Lite và nhánh Qwen dự phòng."""
         hard = self._settings.AI_UF1_TIMEOUT_SECONDS
-        return ExecutionTimingProfile(hard, hard, hard, groq_hedge_at=None)
+        fast_fail = self._settings.AI_UF1_GROQ_FAST_FAIL_SECONDS
+        groq_hedge_at = fast_fail if (fast_fail >= 1.0 and hard - fast_fail >= 1.0) else None
+        return ExecutionTimingProfile(hard, hard, hard, groq_hedge_at=groq_hedge_at)
 
     def _interactive_profile(self) -> ExecutionTimingProfile:
         """Khung thời gian A cho chỉnh kế hoạch bằng ngôn ngữ tự nhiên và UF6."""
@@ -435,9 +437,13 @@ class AIService:
                     )
                 )
 
-        def _start_groq() -> None:
+        def _start_groq(*, from_hedge: bool = False) -> None:
             nonlocal groq_task
-            if is_uf1 and loop.time() > min(deadline, t0 + self._settings.AI_UF1_GROQ_FAST_FAIL_SECONDS):
+            if (
+                is_uf1
+                and not from_hedge
+                and loop.time() > min(deadline, t0 + self._settings.AI_UF1_GROQ_FAST_FAIL_SECONDS)
+            ):
                 return
             if groq_task is None and has_groq:
                 groq_task = asyncio.create_task(
@@ -534,7 +540,7 @@ class AIService:
                     and groq_hedge_at is not None
                     and now >= t0 + groq_hedge_at
                 ):
-                    _start_groq()
+                    _start_groq(from_hedge=True)
 
                 # 6. Nếu toàn bộ các nhánh có thể chạy đều đã thất bại -> thoát sớm về Tier 3 Rule-based
                 backup_exhausted = not can_use_backup or (

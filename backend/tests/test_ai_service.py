@@ -308,13 +308,14 @@ class TestAIService(unittest.TestCase):
 
     def test_primary_preferred_over_faster_warm_backup(self) -> None:
         """
-        UF6 chọn model chính (3.6-flash) nếu model chính xong trong cửa sổ ưu tiên dù Flash-Lite trả sớm hơn.
+        UF6 chọn model chính nếu model chính xong trong cửa sổ ưu tiên dù Flash-Lite trả sớm hơn.
         """
         cfg = Settings(
             _env_file=None,
             GEMINI_API_KEY="AIzaSyTestKey",
             GROQ_API_KEY="",
             GOOGLE_CREDENTIALS_PATH="",
+            GEMINI_FLASH_MODEL="gemini-3.8-flash",
             AI_WARM_BACKUP_DELAY_SECONDS=0.02,
             AI_PRIMARY_PRIORITY_SECONDS=0.18,
             AI_TIMEOUT_SECONDS=0.25,
@@ -359,6 +360,7 @@ class TestAIService(unittest.TestCase):
             GEMINI_API_KEY="AIzaSyTestKey",
             GROQ_API_KEY="",
             GOOGLE_CREDENTIALS_PATH="",
+            GEMINI_FLASH_MODEL="gemini-3.8-flash",
             AI_UF2_WARM_BACKUP_DELAY_SECONDS=0.02,
             AI_UF2_PRIMARY_PRIORITY_SECONDS=0.10,
             AI_UF2_TIMEOUT_SECONDS=0.20,
@@ -1306,17 +1308,72 @@ class TestAIService(unittest.TestCase):
                 asyncio.run(engine.dispose())
 
     def test_default_ai_config_restores_warm_backup_and_frame_a_groq_window(self) -> None:
-        """Kiểm tra Settings mặc định: bỏ 3.8-flash, bật Warm Backup, mở đủ cửa sổ Groq >= 2s và cho phép .env nới UF1."""
+        """Kiểm tra Settings mặc định: dùng 3.5-flash-lite thống nhất theo mt, mở đủ cửa sổ Groq >= 2s và UF1 timeout 6.0s."""
         default_cfg = Settings(_env_file=None)
         self.assertNotIn("3.8-flash", default_cfg.GEMINI_FLASH_MODEL)
         self.assertNotIn("3.8-flash", default_cfg.GEMINI_BACKUP_MODEL)
-        self.assertNotEqual(default_cfg.GEMINI_FLASH_MODEL, default_cfg.GEMINI_BACKUP_MODEL)
+        self.assertEqual(default_cfg.GEMINI_FLASH_MODEL, "gemini-3.5-flash-lite")
+        self.assertEqual(default_cfg.GEMINI_BACKUP_MODEL, "gemini-3.5-flash-lite")
+        self.assertEqual(default_cfg.GEMINI_UF1_MODEL, "gemini-3.5-flash-lite")
+        self.assertNotIn("3.6-flash", default_cfg.GEMINI_FLASH_MODEL)
+        self.assertEqual(default_cfg.AI_UF1_TIMEOUT_SECONDS, 6.0)
+        self.assertGreaterEqual(
+            default_cfg.AI_UF1_TIMEOUT_SECONDS - default_cfg.AI_UF1_GROQ_FAST_FAIL_SECONDS,
+            2.0,
+        )
         self.assertGreaterEqual(
             default_cfg.AI_TIMEOUT_SECONDS - default_cfg.AI_GROQ_HEDGE_DELAY_SECONDS,
             2.0,
         )
-        custom_uf1 = Settings(_env_file=None, AI_UF1_TIMEOUT_SECONDS=6.0)
-        self.assertEqual(custom_uf1.AI_UF1_TIMEOUT_SECONDS, 6.0)
+        custom_uf1 = Settings(_env_file=None, AI_UF1_TIMEOUT_SECONDS=7.5)
+        self.assertEqual(custom_uf1.AI_UF1_TIMEOUT_SECONDS, 7.5)
+
+    def test_uf1_stalled_gemini_rescued_by_hedged_groq_before_deadline(self) -> None:
+        """Khi Gemini UF1 bị treo quá mốc fast-fail/hedge (1.0s), nhánh Groq hedge song song kịp trả kết quả trước deadline (2.2s)."""
+        cfg = Settings(
+            _env_file=None,
+            GEMINI_API_KEY="AIzaSyTestKey",
+            GROQ_API_KEY="gsk_TestKey",
+            GOOGLE_CREDENTIALS_PATH="",
+            AI_UF1_TIMEOUT_SECONDS=2.2,
+            AI_UF1_GROQ_FAST_FAIL_SECONDS=1.0,
+        )
+        service = AIService(app_settings=cfg)
+
+        async def _stalled_gemini(**_: Any) -> LLMTaskExtractionPayload:
+            await asyncio.sleep(5.0)
+            raise AssertionError("Gemini treo phải bị hủy khi chạm deadline UF1")
+
+        async def _hedged_groq(**_: Any) -> LLMTaskExtractionPayload:
+            await asyncio.sleep(0.1)
+            return LLMTaskExtractionPayload(
+                title="Ôn tập Cấu trúc dữ liệu",
+                content="Ôn tập cây nhị phân và đồ thị",
+                scope="Hoàn thành 10 bài tập tự luận",
+                free_time_slots=["Tối thứ 5 từ 19:00 đến 21:00"],
+                deadline=datetime.now(UTC) + timedelta(days=4),
+                is_complete=True,
+                summary="Groq hedge cứu hộ thành công khi Gemini UF1 treo.",
+            )
+
+        with (
+            patch.object(service, "_get_gemini_client", return_value=object()),
+            patch.object(service, "_get_groq_client", return_value=object()),
+            patch.object(service, "_call_gemini_structured", side_effect=_stalled_gemini) as gemini,
+            patch.object(service, "_call_groq_structured", side_effect=_hedged_groq) as groq,
+        ):
+            res = asyncio.run(
+                service.extract_task_intent(
+                    "Ôn tập Cấu trúc dữ liệu 10 bài trước cuối tuần, rảnh tối thứ 5 19h-21h"
+                )
+            )
+
+        gemini.assert_awaited_once()
+        groq.assert_awaited_once()
+        self.assertEqual(res.generation_tier, "tier_2_groq")
+        self.assertEqual(res.title, "Ôn tập Cấu trúc dữ liệu")
+        self.assertEqual(res.scope, "Hoàn thành 10 bài tập tự luận")
+        self.assertTrue(res.is_complete)
 
     def test_frame_a_groq_rescues_when_gemini_primary_and_backup_stall(self) -> None:
         """Khung A theo tỷ lệ: khi cả Primary & Warm Backup treo, Groq bắt kịp trước deadline nhờ hedge sớm."""

@@ -62,7 +62,7 @@ class Settings(BaseSettings):
     GOOGLE_CLOUD_LOCATION: str = "global"
 
     # Định danh Model AI & Voice (Đã kiểm chứng thực nghiệm trên Postpay Tier 1 & Groq 2026)
-    GEMINI_FLASH_MODEL: str = "gemini-3.6-flash"
+    GEMINI_FLASH_MODEL: str = "gemini-3.5-flash-lite"
     GEMINI_BACKUP_MODEL: str = "gemini-3.5-flash-lite"
     GEMINI_UF1_MODEL: str = "gemini-3.5-flash-lite"
     GROQ_FALLBACK_MODEL: str = "qwen/qwen3.8-27b"
@@ -115,11 +115,11 @@ class Settings(BaseSettings):
     VOICE_TTS_CACHE_SIZE: int = Field(default=64, ge=0, le=512)
 
     # UF1: Flash-Lite MINIMAL từ đầu; chuyển Qwen khi lỗi trong ngưỡng còn đủ thời gian dưới trần.
-    AI_UF1_TIMEOUT_SECONDS: float = Field(default=4.5, gt=0.0, le=15.0)
-    AI_UF1_GROQ_FAST_FAIL_SECONDS: float = Field(default=3.5, ge=0.0, le=4.5)
+    AI_UF1_TIMEOUT_SECONDS: float = Field(default=6.0, gt=0.0, le=15.0)
+    AI_UF1_GROQ_FAST_FAIL_SECONDS: float = Field(default=3.5, ge=0.0, le=15.0)
 
     # Khung thời gian A — Chỉnh kế hoạch bằng ngôn ngữ tự nhiên và UF6:
-    # 0.0s Primary (3.6-flash) -> 1.5s Warm Backup (3.5-flash-lite) -> 2.2s Groq (còn 2.3s) -> ưu tiên Primary tới 3.0s -> cắt 4.5s
+    # 0.0s Primary (3.5-flash-lite) -> 1.5s Warm Backup (3.5-flash-lite) -> 2.2s Groq (còn 2.3s) -> ưu tiên Primary tới 3.0s -> cắt 4.5s
     AI_TIMEOUT_SECONDS: float = Field(default=4.5, gt=0.0, le=20.0)
     AI_PRIMARY_PRIORITY_SECONDS: float = Field(default=3.0, gt=0.0, le=20.0)
     AI_WARM_BACKUP_DELAY_SECONDS: float = Field(default=1.5, ge=0.0, le=20.0)

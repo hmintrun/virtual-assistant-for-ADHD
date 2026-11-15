@@ -11,6 +11,7 @@ from app.core.database import make_engine, session_factory
 from app.main import app
 from app.models import Base, CommandReceipt, PlanningDraft, Reminder, Task
 from app.models.settings import Availability as AvailabilityRow
+from app.schemas.common import ClarificationIssue
 from app.schemas.task import (
     ExtractedTimeConstraint,
     LLMTaskDecompositionPayload,
@@ -920,6 +921,136 @@ async def test_uf1_deadline_without_start_at_and_resolved_ai_clarification_can_c
         client,
         f"/drafts/{draft_id}/confirm-summary",
         "uf1-confirm",
+        {"expected_summary_revision": draft2["summary_revision"]},
+    )
+    assert confirmed.status_code == 200, confirmed.text
+
+
+async def test_uf1_round2_clears_ai_missing_availability_and_scope_when_resolved(
+    api, monkeypatch
+):
+    client, _ = api
+    future_deadline = (datetime.now(UTC) + timedelta(days=5)).replace(microsecond=0)
+    created = await post(
+        client,
+        "/drafts",
+        "uf1-bug02-create",
+        {
+            "client_draft_id": "uf1-bug02-create",
+            "input_source": "text",
+            "raw_input": "Ôn tập hệ cơ sở dữ liệu trước thứ 7",
+        },
+    )
+    assert created.status_code == 201, created.text
+    draft = created.json()["data"]
+    draft_id = draft["draft_id"]
+
+    avail_question = "Bạn thường rảnh vào những khung giờ nào để mình xếp phiên tập trung?"
+    scope_question = "Bạn muốn ôn tập những chương nào?"
+    turn = 0
+
+    async def extracted(**kwargs):
+        nonlocal turn
+        turn += 1
+        if turn == 1:
+            return LLMTaskExtractionPayload(
+                title="Ôn tập hệ cơ sở dữ liệu",
+                content="Ôn tập môn Hệ cơ sở dữ liệu",
+                scope=None,
+                time_constraint=ExtractedTimeConstraint(
+                    kind="deadline",
+                    start_at=None,
+                    deadline_at=future_deadline,
+                    input_timezone="Asia/Ho_Chi_Minh",
+                ),
+                free_time_slots=[],
+                structured_free_windows=[],
+                is_complete=False,
+                summary="Thiếu phạm vi và khung giờ rảnh.",
+                clarification_questions=[avail_question, scope_question],
+                clarification_issues=[
+                    ClarificationIssue(
+                        code="MISSING_AVAILABILITY",
+                        field_path="availability",
+                        message="Chưa có khung giờ rảnh.",
+                        question=avail_question,
+                        blocking=True,
+                    ),
+                    ClarificationIssue(
+                        code="MISSING_SCOPE",
+                        field_path="scope",
+                        message="Chưa rõ phạm vi ôn tập.",
+                        question=scope_question,
+                        blocking=False,
+                    ),
+                ],
+            ), "tier_1_gemini"
+        return LLMTaskExtractionPayload(
+            title="Ôn tập hệ cơ sở dữ liệu",
+            content="Ôn tập môn Hệ cơ sở dữ liệu",
+            scope="Hoàn thành 3 chương SQL và chuẩn hóa",
+            time_constraint=ExtractedTimeConstraint(
+                kind="deadline",
+                start_at=None,
+                deadline_at=future_deadline,
+                input_timezone="Asia/Ho_Chi_Minh",
+            ),
+            free_time_slots=["Thứ 4 từ 19:00 đến 21:00"],
+            structured_free_windows=[
+                {
+                    "kind": "weekly_rule",
+                    "weekday": 3,
+                    "start_local": "19:00",
+                    "end_local": "21:00",
+                    "raw_phrase": "Thứ 4 từ 19:00 đến 21:00",
+                    "is_ambiguous": False,
+                }
+            ],
+            is_complete=True,
+            resolved_issue_keys=[f"AI_MISSING_AVAILABILITY|availability|{avail_question}"],
+            summary="Đã đủ 4 thông tin bắt buộc.",
+            clarification_questions=[],
+            clarification_issues=[],
+        ), "tier_1_gemini"
+
+    with monkeypatch.context() as context:
+        context.setattr(ai_service, "_execute_hedged_structured", extracted)
+        turn1 = await post(
+            client,
+            f"/drafts/{draft_id}/analyze",
+            "uf1-bug02-turn1",
+            {
+                "expected_summary_revision": draft["summary_revision"],
+                "expected_planning_input_revision": draft["planning_input_revision"],
+                "raw_input": "Ôn tập hệ cơ sở dữ liệu trước thứ 7",
+            },
+        )
+        assert turn1.status_code == 200, turn1.text
+        draft1 = turn1.json()["data"]
+        issue_codes_r1 = {i["code"] for i in draft1["summary"]["clarification_issues"]}
+        assert "AI_MISSING_AVAILABILITY" in issue_codes_r1
+        assert "AI_MISSING_SCOPE" in issue_codes_r1
+        assert draft1["summary"]["can_plan"] is False
+
+        turn2 = await post(
+            client,
+            f"/drafts/{draft_id}/analyze",
+            "uf1-bug02-turn2",
+            {
+                "expected_summary_revision": draft1["summary_revision"],
+                "expected_planning_input_revision": draft1["planning_input_revision"],
+                "message": "Ôn 3 chương SQL và chuẩn hóa, rảnh tối thứ 4 từ 19:00 đến 21:00",
+            },
+        )
+        assert turn2.status_code == 200, turn2.text
+        draft2 = turn2.json()["data"]
+        assert draft2["summary"]["can_plan"] is True
+        assert draft2["summary"]["clarification_issues"] == []
+
+    confirmed = await post(
+        client,
+        f"/drafts/{draft_id}/confirm-summary",
+        "uf1-bug02-confirm",
         {"expected_summary_revision": draft2["summary_revision"]},
     )
     assert confirmed.status_code == 200, confirmed.text
