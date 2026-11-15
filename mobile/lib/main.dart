@@ -120,7 +120,10 @@ class ProPlanApp extends StatelessWidget {
                       : const GoogleCalendarScreen(),
               '/settings': (_) => const SettingsScreen(),
               '/thoughts': (_) => const ThoughtInboxScreen(),
-              '/schedule-change': (_) => const ScheduleChangeReasonScreen(),
+              '/schedule-change': (_) => const ScheduleComparisonScreen(
+                    reason: 'Đề xuất chờ duyệt',
+                    trigger: 'resume',
+                  ),
               '/help': (_) => const HelpScreen(),
               '/account': (_) => const AccountScreen(),
             }

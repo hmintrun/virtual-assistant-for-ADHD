@@ -813,7 +813,10 @@ class _FocusScreenState extends State<FocusScreen> with WidgetsBindingObserver {
           label: 'Đồng bộ kết thúc phiên',
           onPressed: focus.runCommandBusy ? null : focus.syncRunEnd,
         ),
-      if (focus.hasPendingCheckInResponse)
+      if (focus.canUndoSkip)
+        SecondaryCta(
+            label: 'Hoàn tác bỏ qua', onPressed: focus.undoSkippedCheckIn)
+      else if (focus.hasPendingCheckInResponse)
         PrimaryCta(
           label: 'Gửi lại kết quả phiên',
           onPressed: focus.runCommandBusy ? null : focus.retryCheckInResponse,
@@ -855,6 +858,14 @@ class _FocusScreenState extends State<FocusScreen> with WidgetsBindingObserver {
           child: const Text('Nghỉ giải lao'),
         ),
       ],
+      if (!focus.canAnswerCheckIn && focus.serverRunId != null)
+        SecondaryCta(
+          label: 'Xem phương án đổi lịch',
+          onPressed: () => Navigator.of(context).push(MaterialPageRoute<void>(
+            builder: (_) => ScheduleChangeReasonScreen(
+                session: session, runId: focus.serverRunId),
+          )),
+        ),
       PrimaryCta(
         label: 'Quay về trang trước',
         onPressed: () => Navigator.of(context).pop(),
@@ -896,14 +907,15 @@ class _FocusScreenState extends State<FocusScreen> with WidgetsBindingObserver {
                 ],
               )),
     );
-    if (scope != null && mounted) {
-      await focus.answerCheckIn('skipped', skipScope: scope);
-      if (mounted && !focus.canAnswerCheckIn && scope == 'postpone_session') {
-        await Navigator.of(context).push(MaterialPageRoute<void>(
-          builder: (_) => ScheduleChangeReasonScreen(session: session),
-        ));
-      }
-    }
+    if (scope == null || !mounted) return;
+    await focus.queueSkippedCheckIn(scope);
+    if (!mounted || !focus.canUndoSkip) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      content: const Text('Đã chọn bỏ qua.'),
+      duration: const Duration(seconds: 5),
+      action: SnackBarAction(
+          label: 'Hoàn tác', onPressed: focus.undoSkippedCheckIn),
+    ));
   }
 
   Future<void> _reviewOutcome(
@@ -944,7 +956,11 @@ class _FocusScreenState extends State<FocusScreen> with WidgetsBindingObserver {
     await Navigator.of(context).push(MaterialPageRoute<void>(
       builder: (_) => outcome == 'completed'
           ? NextFocusActionScreen(session: session)
-          : ScheduleChangeReasonScreen(session: session),
+          : ScheduleChangeReasonScreen(
+              session: session,
+              runId: focus.serverRunId,
+              initialReason:
+                  outcome == 'busy' ? 'checkin_busy' : 'checkin_incomplete'),
     ));
   }
 

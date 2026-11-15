@@ -126,6 +126,21 @@ class ApiClient {
     }
   }
 
+  String? get ownerId => _session?.active == true ? _session!.ownerId : null;
+
+  Future<Map<String, dynamic>?> getOptionalData(String path) async {
+    try {
+      final response = await dio.get<Map<String, dynamic>>(path);
+      final body = response.data;
+      if (body != null && body.containsKey('data') && body['data'] == null) {
+        return null;
+      }
+      return _unwrap(body);
+    } on DioException catch (error) {
+      throw ApiException.fromDio(error);
+    }
+  }
+
   Future<List<Map<String, dynamic>>> getListData(
     String path, {
     Map<String, dynamic>? queryParameters,

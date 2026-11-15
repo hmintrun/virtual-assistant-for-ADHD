@@ -211,6 +211,70 @@ class FocusProvider extends ChangeNotifier {
   Map<String, dynamic>? _serverRun;
   Map<String, dynamic>? _pendingEnd;
   Map<String, dynamic>? _pendingResponse;
+  DateTime? _skipUndoUntil;
+  Timer? _skipSendTimer;
+
+  bool get canUndoSkip =>
+      _skipUndoUntil?.isAfter(_clock.now()) == true &&
+      _pendingResponse != null &&
+      !_runCommandBusy;
+
+  Future<void> queueSkippedCheckIn(String scope) async {
+    final checkIn = _checkIn;
+    if (checkIn == null ||
+        !canAnswerCheckIn ||
+        _pendingResponse != null ||
+        _runCommandBusy) return;
+    _skipUndoUntil = _clock.now().add(const Duration(seconds: 5));
+    _runCommandBusy = true;
+    _pendingResponse = {
+      'expected_response_revision': checkIn['response_revision'],
+      'responded_at': _clock.now().toUtc().toIso8601String(),
+      'session_outcome': 'skipped',
+      'skip_scope': scope,
+    };
+    try {
+      await _persistRun();
+      _scheduleSkippedCheckIn();
+    } catch (_) {
+      _skipUndoUntil = null;
+      _pendingResponse = null;
+      _runError = 'Chưa lưu được lựa chọn. Hãy thử lại.';
+    } finally {
+      _runCommandBusy = false;
+      _notify();
+    }
+  }
+
+  Future<void> undoSkippedCheckIn() async {
+    if (!canUndoSkip) return;
+    final pending = _pendingResponse;
+    final deadline = _skipUndoUntil;
+    _skipSendTimer?.cancel();
+    _runCommandBusy = true;
+    _pendingResponse = null;
+    _skipUndoUntil = null;
+    try {
+      await _persistRun();
+    } catch (_) {
+      _pendingResponse = pending;
+      _skipUndoUntil = deadline;
+      _scheduleSkippedCheckIn();
+    } finally {
+      _runCommandBusy = false;
+      _notify();
+    }
+  }
+
+  void _scheduleSkippedCheckIn() {
+    final deadline = _skipUndoUntil;
+    if (_disposed || deadline == null || _pendingResponse == null) return;
+    _skipSendTimer?.cancel();
+    _skipSendTimer = Timer(deadline.difference(_clock.now()), () async {
+      await retryCheckInResponse();
+    });
+  }
+
   Map<String, dynamic>? _startRequest;
   bool _runCommandBusy = false;
   String? _runError;
@@ -218,6 +282,7 @@ class FocusProvider extends ChangeNotifier {
   bool get runCommandBusy => _runCommandBusy;
   String? get runError => _runError;
   bool get needsEndSync => _pendingEnd != null;
+  String? get serverRunId => _serverRun?['run_id'] as String?;
   Map<String, dynamic>? get _checkIn =>
       _serverRun?['check_in'] as Map<String, dynamic>?;
   String? get _focusOwnerId =>
@@ -379,7 +444,7 @@ class FocusProvider extends ChangeNotifier {
   Future<void> restore() async {
     await _loadThoughts();
     if (_outboxWorker != null) {
-      unawaited(_outboxWorker?.triggerReplay());
+      unawaited(_outboxWorker.triggerReplay());
     }
     final nativeRecovery = _usesNativeFocus
         ? await FocusNativeController.instance.recoverOnAppStart()
@@ -399,6 +464,13 @@ class FocusProvider extends ChangeNotifier {
       _serverRun = json['server_run'] as Map<String, dynamic>?;
       _pendingEnd = json['pending_end'] as Map<String, dynamic>?;
       _pendingResponse = json['pending_response'] as Map<String, dynamic>?;
+      _skipUndoUntil =
+          DateTime.tryParse(json['skip_undo_until'] as String? ?? '');
+      _scheduleSkippedCheckIn();
+      if (_skipUndoUntil == null &&
+          _pendingResponse?['session_outcome'] == 'skipped') {
+        _skipSendTimer = Timer(Duration.zero, retryCheckInResponse);
+      }
       if (json['stage'] == FocusStage.ended.name) {
         _stage = FocusStage.ended;
         _watchCheckInDeadline();
@@ -795,7 +867,7 @@ class FocusProvider extends ChangeNotifier {
 
   Future<void> retryCheckInResponse() async {
     final pending = _pendingResponse;
-    if (pending == null) return;
+    if (pending == null || canUndoSkip) return;
     await answerCheckIn(
       pending['session_outcome'] as String,
       skipScope: pending['skip_scope'] as String?,
@@ -811,12 +883,15 @@ class FocusProvider extends ChangeNotifier {
     bool? stepCompleted,
   }) async {
     final checkIn = _checkIn;
-    if (checkIn == null || !canAnswerCheckIn || _runCommandBusy) return;
+    if (checkIn == null || !canAnswerCheckIn || _runCommandBusy || canUndoSkip)
+      return;
+    _skipUndoUntil = null;
     _runCommandBusy = true;
     _runError = null;
     _notify();
     try {
-      final respondedAt = _clockSync?.nowAdjustedIso() ?? _clock.now().toUtc().toIso8601String();
+      final respondedAt = _clockSync?.nowAdjustedIso() ??
+          _clock.now().toUtc().toIso8601String();
       final pending = _pendingResponse ??= {
         'expected_response_revision': checkIn['response_revision'],
         'responded_at': respondedAt,
@@ -830,7 +905,7 @@ class FocusProvider extends ChangeNotifier {
       if (_outboxRepository != null) {
         final clientEventId = ApiClient.stableIdempotencyKey(
             'checkin_${checkIn['checkin_id']}', pending.toString());
-        await _outboxRepository?.enqueueOutboxRecord(
+        await _outboxRepository.enqueueOutboxRecord(
           OutboxRecord(
             clientEventId: clientEventId,
             eventType: OutboxEventType.checkinResponse,
@@ -869,6 +944,11 @@ class FocusProvider extends ChangeNotifier {
         await _persistRun();
       }
       _runError = error.message;
+      if (_pendingResponse?['session_outcome'] == 'skipped' && !_disposed) {
+        _skipSendTimer?.cancel();
+        _skipSendTimer =
+            Timer(const Duration(seconds: 15), retryCheckInResponse);
+      }
     } finally {
       _runCommandBusy = false;
       _notify();
@@ -1064,7 +1144,7 @@ class FocusProvider extends ChangeNotifier {
     }
     await _repository.deleteThought(thought.clientThoughtId);
     if (_outboxRepository != null) {
-      await _outboxRepository?.cancelOutboxRecord(thought.clientThoughtId);
+      await _outboxRepository.cancelOutboxRecord(thought.clientThoughtId);
     }
     if (_stage == FocusStage.thoughtSaved) _stage = _resumeStage;
     _scheduleOutboxFlush();
@@ -1076,7 +1156,7 @@ class FocusProvider extends ChangeNotifier {
     await _repository.queueThought(thought);
     _thoughts.insert(0, thought);
     if (_outboxRepository != null) {
-      await _outboxRepository?.enqueueOutboxRecord(
+      await _outboxRepository.enqueueOutboxRecord(
         OutboxRecord(
           clientEventId: thought.clientThoughtId,
           eventType: OutboxEventType.thoughtCapture,
@@ -1085,7 +1165,8 @@ class FocusProvider extends ChangeNotifier {
           payload: {
             'client_thought_id': thought.clientThoughtId,
             'input_type': thought.inputType,
-            if (thought.textContent != null) 'text_content': thought.textContent,
+            if (thought.textContent != null)
+              'text_content': thought.textContent,
             'attempt_count': thought.attemptCount,
             'capture_state': thought.captureState,
           },
@@ -1136,7 +1217,7 @@ class FocusProvider extends ChangeNotifier {
     if (thought == null) return;
     await _repository.deleteThought(thought.clientThoughtId);
     if (_outboxRepository != null) {
-      await _outboxRepository?.cancelOutboxRecord(thought.clientThoughtId);
+      await _outboxRepository.cancelOutboxRecord(thought.clientThoughtId);
     }
     if (thought.localAudioPath != null) {
       try {
@@ -1301,6 +1382,8 @@ class FocusProvider extends ChangeNotifier {
       if (_serverRun != null) 'server_run': _serverRun,
       if (_pendingEnd != null) 'pending_end': _pendingEnd,
       if (_pendingResponse != null) 'pending_response': _pendingResponse,
+      if (_skipUndoUntil != null)
+        'skip_undo_until': _skipUndoUntil!.toUtc().toIso8601String(),
       if (_runEndsAt != null) 'run_ends_at': _runEndsAt!.toIso8601String(),
       'segments': _segments.map((segment) => segment.toJson()).toList(),
       'segment_index': _segmentIndex,
@@ -1420,6 +1503,7 @@ class FocusProvider extends ChangeNotifier {
   @override
   void dispose() {
     _disposed = true;
+    _skipSendTimer?.cancel();
     _checkInDeadline?.cancel();
     _stopOfflineProbe();
     _undoExpiry?.cancel();

@@ -1,9 +1,40 @@
+import 'dart:convert';
+
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+
 import '../core/api_client.dart';
 
 class ScheduleService {
   ScheduleService(this._api);
 
   final ApiClient _api;
+  static const _storage = FlutterSecureStorage();
+  bool usedCache = false;
+
+  Future<List<Map<String, dynamic>>> loadCalendarMonth(
+      DateTime from, DateTime to) async {
+    usedCache = false;
+    final owner = _api.ownerId;
+    final key = 'proplan.calendar.$owner.${from.year}.${from.month}';
+    try {
+      final items = await loadSessions(from, to, includeTitles: true);
+      if (owner != null && owner == _api.ownerId) {
+        try {
+          await _storage.write(key: key, value: jsonEncode(items));
+        } catch (_) {}
+      }
+      return items;
+    } on ApiException catch (error) {
+      if (owner == null || owner != _api.ownerId || error.statusCode != null)
+        rethrow;
+      final cached = await _storage.read(key: key);
+      if (cached == null || owner != _api.ownerId) rethrow;
+      usedCache = true;
+      return (jsonDecode(cached) as List)
+          .whereType<Map<String, dynamic>>()
+          .toList();
+    }
+  }
 
   Future<List<Map<String, dynamic>>> loadSessions(
     DateTime from,

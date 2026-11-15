@@ -146,7 +146,7 @@ class _TaskSummaryScreenState extends State<TaskSummaryScreen> {
           (useAnswerAsAvailability ||
               useAnswerAsScope ||
               optionalRequirement.isNotEmpty ||
-              answer.isEmpty && hasFormChanges)) {
+              hasFormChanges)) {
         await task.updateDraftOnBackend(extraRequirement: optionalRequirement);
         if (mounted &&
             (optionalRequirement.isNotEmpty ||
@@ -154,6 +154,13 @@ class _TaskSummaryScreenState extends State<TaskSummaryScreen> {
           _clarificationController.clear();
         }
         _initialDeadline = task.deadline;
+        if (!task.canPlan &&
+            answer.isNotEmpty &&
+            !useAnswerAsScope &&
+            !useAnswerAsAvailability) {
+          await task.submitClarification(answer);
+          if (mounted && task.canPlan) _clarificationController.clear();
+        }
         if (mounted && useAnswerAsScope && task.scope.trim() == answer) {
           _scopeFocusNode.unfocus();
           _scopeController.text = task.scope;

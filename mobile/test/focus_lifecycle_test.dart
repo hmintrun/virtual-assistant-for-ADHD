@@ -95,6 +95,14 @@ void main() {
     expect(commands[2].headers['Idempotency-Key'],
         commands[1].headers['Idempotency-Key']);
 
+    await focus.queueSkippedCheckIn('skip_session');
+    expect(focus.canUndoSkip, isTrue);
+    expect((await repository.loadActiveRun())?['skip_undo_until'], isNotNull);
+    await focus.retryCheckInResponse();
+    expect(commands.last.path, '/runs/server-run/end');
+    await focus.undoSkippedCheckIn();
+    expect(focus.hasPendingCheckInResponse, isFalse);
+    expect((await repository.loadActiveRun())?['pending_response'], isNull);
     await focus.answerCheckIn('incomplete');
     expect(commands.last.method, 'PUT');
     expect(commands.last.path, '/check-ins/final-checkin/response');
