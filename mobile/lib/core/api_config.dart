@@ -10,6 +10,10 @@ class ApiConfig {
   /// - Android Emulator: 10.0.2.2:8000/api/v1
   /// - Windows / Web / iOS Simulator: 127.0.0.1:8000/api/v1
   static String get defaultBaseUrl {
+    // Máy thật: chạy với --dart-define=API_BASE_URL=... (giống ApiClient),
+    // vì 10.0.2.2 chỉ dùng được trên máy ảo Android.
+    const configured = String.fromEnvironment('API_BASE_URL');
+    if (configured.isNotEmpty) return configured;
     if (kIsWeb) return 'http://127.0.0.1:8000/api/v1';
     try {
       if (Platform.isAndroid) {

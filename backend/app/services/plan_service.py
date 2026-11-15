@@ -708,8 +708,16 @@ async def _sources(
                 "Đã có lịch bận nhưng ngữ cảnh chưa đủ phạm vi hoặc đã hết hạn. Hãy cập nhật lịch bận trước khi xếp lại.",
                 action="create_planning_context",
             )
+        # Kết nối user đã chủ động ngắt không còn là nguồn lịch → được xếp theo giờ
+        # rảnh nhập tay. Kết nối lỗi/thu hồi (needs_reconnect) vẫn chặn cho tới khi
+        # user xác nhận loại nguồn (excluded_sources) qua planning-context.
         configured = (
-            await db.scalars(select(CalendarConnection).where(CalendarConnection.user_id == owner))
+            await db.scalars(
+                select(CalendarConnection).where(
+                    CalendarConnection.user_id == owner,
+                    CalendarConnection.connection_state != "disconnected",
+                )
+            )
         ).all()
         if (
             context_ref is not None
@@ -759,7 +767,9 @@ async def _sources(
             and context.coverage_state not in {"complete", "manual_fallback"}
         )
     ):
-        # A22.1 làm sau: không coi một nguồn Google chưa đọc là không bận.
+        # Không coi một nguồn Google chưa đọc trọn là không bận. Nguồn đã đọc
+        # thành công (coverage complete) thì khoảng bận của nó được trừ khỏi giờ
+        # rảnh trong compute_effective_free_intervals.
         raise _error(
             "CALENDAR_CONTEXT_UNAVAILABLE",
             "Nguồn Google chưa được kiểm; cần xem lại phạm vi nguồn.",

@@ -5,6 +5,7 @@ import '../core/api_client.dart';
 import '../core/theme.dart';
 import '../models/planning_models.dart';
 import '../providers/task_provider.dart';
+import '../widgets/calendar_fallback.dart';
 import '../widgets/melbel_ui.dart';
 import 'drafts_screen.dart';
 import 'candidate_review_screen.dart';
@@ -182,17 +183,36 @@ class _TaskSummaryScreenState extends State<TaskSummaryScreen> {
             builder: (_) => const CandidateReviewScreen(),
           ));
     } on ApiException catch (error) {
-      if (mounted) {
+      if (!mounted) return;
+      if (isCalendarUnavailable(error)) {
+        showCalendarFallbackSnackBar(context,
+            onUseManualAvailability: _generateWithManualAvailability);
+      } else {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(error.message)),
-        );
+            SnackBar(content: Text('Chưa cập nhật được bản nháp: $error')));
       }
-    } catch (_) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-          content: Text('Chưa cập nhật được công việc. Thử lại nhé.'),
-        ));
-      }
+    } finally {
+      if (mounted) setState(() => _isSubmitting = false);
+    }
+  }
+
+  /// User đã thấy lỗi đọc Google Calendar và chọn xếp theo giờ rảnh nhập tay.
+  Future<void> _generateWithManualAvailability() async {
+    final task = context.read<TaskProvider>();
+    if (_isSubmitting || task.isApiBusy) return;
+    setState(() => _isSubmitting = true);
+    try {
+      await task.generateCandidateOnBackend(useManualAvailability: true);
+      if (!mounted) return;
+      await Navigator.push(
+          context,
+          MaterialPageRoute<void>(
+            builder: (_) => const CandidateReviewScreen(),
+          ));
+    } catch (error) {
+      if (mounted)
+        ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Chưa tạo được phương án: $error')));
     } finally {
       if (mounted) setState(() => _isSubmitting = false);
     }

@@ -102,13 +102,23 @@ async def process_sync_job(
         link = await db.get(CalendarEventLink, link_id)
 
     # 4. Thực thi theo loại operation
+    job_id = job.id
     try:
         if job.operation == "create":
-            res = await client.create_event(
-                access_token=access_token,
-                calendar_id=conn.write_calendar_id,
-                event_payload=job.payload_snapshot,
-            )
+            try:
+                res = await client.create_event(
+                    access_token=access_token,
+                    calendar_id=conn.write_calendar_id,
+                    event_payload=job.payload_snapshot,
+                )
+            except CalendarConflictError:
+                # Event id cố định theo session: 409 khi tạo nghĩa là lần thử trước
+                # đã tạo thành công nhưng mất phản hồi → coi là đã đồng bộ, không
+                # tạo thêm bản trùng (W3-15: retry giữ nguyên số sự kiện).
+                payload_id = (job.payload_snapshot or {}).get("id")
+                if not payload_id:
+                    raise
+                res = {"id": payload_id, "etag": link.google_etag if link else None}
             created_event_id = res.get("id")
             if link:
                 link.google_event_id = created_event_id

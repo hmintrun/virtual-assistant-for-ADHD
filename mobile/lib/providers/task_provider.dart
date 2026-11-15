@@ -7,6 +7,7 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import '../core/api_client.dart';
 import '../models/planning_models.dart';
 import '../models/task_model.dart';
+import '../services/calendar_api.dart';
 import '../services/planning_api.dart';
 
 class AvailabilitySlot {
@@ -52,13 +53,16 @@ class TaskProvider extends ChangeNotifier {
   final String _storageKey;
   static const _storage = FlutterSecureStorage();
 
-  TaskProvider({PlanningApi? planningApi, String? ownerId})
+  TaskProvider(
+      {PlanningApi? planningApi, String? ownerId, CalendarApi? calendarApi})
       : _storageKey = ownerId == null
             ? 'proplan.uf1.current_draft.v1'
             : 'proplan.uf1.current_draft.v1.$ownerId',
-        _planningApi = planningApi ?? PlanningApi(ownerId: ownerId);
+        _planningApi = planningApi ?? PlanningApi(ownerId: ownerId),
+        _calendarApi = calendarApi ?? CalendarApi();
 
   final PlanningApi _planningApi;
+  final CalendarApi _calendarApi;
 
   String _title = '';
   String _rawInputText = '';
@@ -452,7 +456,12 @@ class TaskProvider extends ChangeNotifier {
     });
   }
 
-  Future<void> generateCandidateOnBackend({String? stepProposal}) async {
+  /// [useManualAvailability]: user đã thấy lỗi đọc Google Calendar và chủ động
+  /// chọn xếp theo giờ rảnh nhập tay (W3-15: thu hồi quyền vẫn lập được lịch).
+  Future<void> generateCandidateOnBackend({
+    String? stepProposal,
+    bool useManualAvailability = false,
+  }) async {
     final source = _draft;
     if (source == null ||
         source.summaryConfirmedRevision != source.summaryRevision) {
@@ -468,13 +477,46 @@ class TaskProvider extends ChangeNotifier {
         );
         _draft = current;
       }
+      // Chụp lịch bận Google (nếu user đã chọn lịch đọc) để thuật toán xếp
+      // phiên né giờ bận. Không có lịch nào → null, xếp theo giờ rảnh như cũ.
+      final calendarContextRef = await _createCalendarContext(
+        current,
+        useManualAvailability: useManualAvailability,
+      );
       final generated = await _accept(
-        _planningApi.createCandidate(current),
+        _planningApi.createCandidate(
+          current,
+          calendarContextRef: calendarContextRef,
+        ),
         revision,
       );
       _candidate = generated;
       await _persist();
     });
+  }
+
+  /// Khoảng chụp lịch bận = [start_at, hạn chót] của Draft: luôn phủ trọn
+  /// phạm vi Backend xếp lịch, và giữ cố định giữa các lần xếp lại (Backend
+  /// không cho bản chụp mới hẹp hơn bản cũ).
+  Future<Map<String, dynamic>?> _createCalendarContext(
+    PlanningDraftModel draft, {
+    bool useManualAvailability = false,
+  }) async {
+    final constraint = draft.summary['time_constraint'];
+    if (constraint is! Map) return null;
+    DateTime? read(String key) =>
+        DateTime.tryParse(constraint[key] as String? ?? '');
+    final end = read('deadline_at') ?? read('finish_by_at');
+    if (end == null) return null;
+    final start = read('start_at') ?? DateTime.now();
+    if (!start.isBefore(end)) return null;
+    return _calendarApi.createPlanningContextForDraft(
+      draftId: draft.draftId,
+      summaryRevision: draft.summaryRevision,
+      from: start,
+      to: end,
+      useManualAvailability: useManualAvailability,
+    );
   }
 
   Future<void> refreshCandidateFromBackend() async {

@@ -50,6 +50,7 @@ def _resolve_uuid(value: str | UUID) -> UUID:
     try:
         return UUID(str(value))
     except ValueError:
+        # Match the Draft service owner namespace in dev_user mode.
         return uuid5(NAMESPACE_DNS, f"proplan.user:{value}")
 
 

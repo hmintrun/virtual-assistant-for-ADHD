@@ -6,6 +6,7 @@ import '../services/voice_service.dart';
 import '../models/focus_session_model.dart';
 import '../providers/focus_provider.dart';
 import '../providers/task_provider.dart';
+import '../widgets/calendar_fallback.dart';
 import '../widgets/melbel_ui.dart';
 import 'candidate_review_screen.dart';
 import 'focus_screen.dart';
@@ -74,7 +75,7 @@ class _DecompositionChoiceScreenState extends State<DecompositionChoiceScreen>
     if (_isListening) setState(() => _isListening = false);
   }
 
-  Future<void> _generateCandidate() async {
+  Future<void> _generateCandidate({bool useManualAvailability = false}) async {
     final task = context.read<TaskProvider>();
     if (_isGenerating || task.isApiBusy) return;
     setState(() => _isGenerating = true);
@@ -82,6 +83,7 @@ class _DecompositionChoiceScreenState extends State<DecompositionChoiceScreen>
       final proposal = _intentController.text.trim();
       await task.generateCandidateOnBackend(
         stepProposal: proposal.isEmpty ? null : proposal,
+        useManualAvailability: useManualAvailability,
       );
       if (!mounted) return;
       await Navigator.push(
@@ -89,10 +91,18 @@ class _DecompositionChoiceScreenState extends State<DecompositionChoiceScreen>
         MaterialPageRoute<void>(builder: (_) => const CandidateReviewScreen()),
       );
     } catch (error) {
-      if (mounted)
+      if (!mounted) return;
+      if (isCalendarUnavailable(error)) {
+        showCalendarFallbackSnackBar(
+          context,
+          onUseManualAvailability: () =>
+              _generateCandidate(useManualAvailability: true),
+        );
+      } else {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text('Chưa tạo được phương án: $error')),
         );
+      }
     } finally {
       if (mounted) setState(() => _isGenerating = false);
     }

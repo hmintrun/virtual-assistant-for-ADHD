@@ -275,12 +275,18 @@ class PlanningApi {
         data: {'expected_summary_revision': draft.summaryRevision},
       );
 
-  Future<PlanCandidateModel> createCandidate(PlanningDraftModel draft) async {
+  /// [calendarContextRef] (`context_id` + `revision`) cho Backend biết dùng
+  /// đúng bản chụp lịch bận Google nào khi xếp phiên.
+  Future<PlanCandidateModel> createCandidate(
+    PlanningDraftModel draft, {
+    Map<String, dynamic>? calendarContextRef,
+  }) async {
     final body = <String, dynamic>{
       'source_summary_revision': draft.summaryRevision,
       'source_planning_input_revision': draft.planningInputRevision,
       'selected_step_keys': null,
       'planning_horizon': null,
+      if (calendarContextRef != null) 'calendar_context_ref': calendarContextRef,
     };
     final json = await _command(
       operation: 'candidate_${draft.draftId}',

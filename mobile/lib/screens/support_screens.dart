@@ -177,10 +177,11 @@ class _AccountScreenState extends State<AccountScreen> {
           const SizedBox(height: 20),
           Text('Tài khoản và lịch Google',
               style: Theme.of(context).textTheme.titleMedium),
-          const _HelpRow(
-            icon: Icons.cloud_sync_outlined,
-            title: 'Đồng bộ Google',
-            subtitle: 'Chưa liên kết tài khoản',
+          ListTile(
+            leading: const Icon(Icons.cloud_sync_outlined),
+            title: const Text('Google Calendar'),
+            trailing: const Icon(Icons.chevron_right),
+            onTap: () => Navigator.pushNamed(context, '/google-calendar'),
           ),
           FutureBuilder<Map<String, dynamic>>(
             future: _connection,
