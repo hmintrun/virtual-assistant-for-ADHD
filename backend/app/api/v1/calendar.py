@@ -676,8 +676,23 @@ async def refresh_calendar(
         raise _not_found("Không tìm thấy kết nối lịch.")
 
     processed = await process_calendar_sync_jobs(db, user_id=current_user.user_id, limit=20)
+    try:
+        reconciled = await service.reconcile_external_link_changes(
+            current_user.user_id, connection_id
+        )
+    except CalendarAuthError as exc:
+        raise _calendar_auth_error(exc) from exc
+    except CalendarClientError as exc:
+        raise _calendar_client_error(exc) from exc
+
     return SuccessEnvelope(
-        data={"status": "refreshed", "jobs_processed": str(processed)},
+        data={
+            "status": "refreshed",
+            "jobs_processed": str(processed),
+            "links_checked": str(reconciled["links_checked"]),
+            "links_deleted_externally": str(reconciled["links_deleted_externally"]),
+            "links_diverged": str(reconciled["links_diverged"]),
+        },
         meta=build_response_meta(),
     )
 

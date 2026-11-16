@@ -349,6 +349,10 @@ class ProposalData(ApiModel):
     explanation: str
     generation_tier: ProposalGenerationTier = "python_fallback"
     stale: bool = False
+    pending_notification_state: Literal["not_needed", "not_sent", "pending", "sent"] = (
+        "not_sent"
+    )
+    pending_notification_sent_at: datetime | None = None
     created_at: datetime
     updated_at: datetime
 

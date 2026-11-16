@@ -249,6 +249,12 @@ class FakeSttProvider:
         return self._text
 
 
+_DEFAULT_STT_PROMPT = (
+    "ProPlan VA, ADHD, Pomodoro, Focus Session, Micro-task, deadline, "
+    "lịch bận, Google Calendar, cất suy nghĩ, phiên tập trung."
+)
+
+
 class GroqWhisperSttProvider:
     """Groq Whisper (``whisper-large-v3-turbo``) dùng làm nhánh STT tốc độ cao / dự phòng."""
 
@@ -261,11 +267,13 @@ class GroqWhisperSttProvider:
         model: str,
         language_code: str,
         timeout_seconds: float = 20.0,
+        prompt: str | None = _DEFAULT_STT_PROMPT,
     ) -> None:
         self._api_key = api_key
         self._model = model
         self._language = _iso_language_code(language_code)
         self._timeout_seconds = timeout_seconds
+        self._prompt: str | None = (prompt or "").strip() or None
         self._client: AsyncGroq | None = None
 
     def _get_client(self) -> AsyncGroq:
@@ -283,13 +291,23 @@ class GroqWhisperSttProvider:
         client = self._get_client()
         ext = _MIME_TO_EXTENSION.get(mime_type, ".m4a")
         try:
-            response = await client.audio.transcriptions.create(
-                model=self._model,
-                file=(f"audio{ext}", audio, mime_type),
-                language=self._language,
-                response_format="json",
-                temperature=0.0,
-            )
+            if self._prompt is not None:
+                response = await client.audio.transcriptions.create(
+                    model=self._model,
+                    file=(f"audio{ext}", audio, mime_type),
+                    language=self._language,
+                    prompt=self._prompt,
+                    response_format="json",
+                    temperature=0.0,
+                )
+            else:
+                response = await client.audio.transcriptions.create(
+                    model=self._model,
+                    file=(f"audio{ext}", audio, mime_type),
+                    language=self._language,
+                    response_format="json",
+                    temperature=0.0,
+                )
             return (getattr(response, "text", None) or "").strip()
         except Exception as exc:
             raise map_provider_exception(exc) from exc
@@ -344,10 +362,12 @@ class VoiceService:
         *,
         timeout_seconds: float,
         max_audio_bytes: int,
+        fallback_provider: SttProvider | None = None,
     ) -> None:
         self._provider = provider
         self._timeout_seconds = timeout_seconds
         self._max_audio_bytes = max_audio_bytes
+        self._fallback_provider = fallback_provider
 
     @property
     def provider_name(self) -> str:
@@ -376,11 +396,35 @@ class VoiceService:
                     timeout=self._timeout_seconds,
                 )
             else:
-                text = await asyncio.wait_for(
-                    self._provider.transcribe(audio, mime_type),
-                    timeout=self._timeout_seconds,
-                )
-                active_provider = self._provider.name
+                try:
+                    text = await asyncio.wait_for(
+                        self._provider.transcribe(audio, mime_type),
+                        timeout=self._timeout_seconds,
+                    )
+                    active_provider = self._provider.name
+                except Exception as primary_exc:
+                    mapped_primary = (
+                        primary_exc
+                        if isinstance(primary_exc, SttError)
+                        else map_provider_exception(primary_exc)
+                    )
+                    if self._fallback_provider is not None and (
+                        mapped_primary.retryable
+                        or mapped_primary.code == SttErrorCode.PROVIDER_UNAVAILABLE
+                    ):
+                        logger.warning(
+                            "STT nhánh chính (%s) gặp sự cố %s; chuyển sang dự phòng (%s).",
+                            self._provider.name,
+                            mapped_primary.code,
+                            self._fallback_provider.name,
+                        )
+                        text = await asyncio.wait_for(
+                            self._fallback_provider.transcribe(audio, mime_type),
+                            timeout=self._timeout_seconds,
+                        )
+                        active_provider = self._fallback_provider.name
+                    else:
+                        raise mapped_primary from primary_exc
         except SttError as exc:
             self._log_failure(exc, started)
             raise
@@ -432,6 +476,7 @@ def build_voice_service(app_settings: Settings | None = None) -> VoiceService:
     """Tạo VoiceService theo cấu hình ``VOICE_STT_PROVIDER`` (``gemini``, ``groq``, ``auto``, ``fake``)."""
     cfg = app_settings or settings
     provider: SttProvider
+    fallback: SttProvider | None = None
     if cfg.VOICE_STT_PROVIDER == "fake":
         provider = FakeSttProvider()
     elif cfg.VOICE_STT_PROVIDER == "groq":
@@ -443,10 +488,12 @@ def build_voice_service(app_settings: Settings | None = None) -> VoiceService:
         )
     else:
         provider = _build_gemini_stt_provider(cfg)
+        fallback = _build_groq_stt_provider(cfg) if cfg.has_groq_key else None
     return VoiceService(
         provider,
         timeout_seconds=cfg.VOICE_STT_TIMEOUT_SECONDS,
         max_audio_bytes=cfg.VOICE_MAX_AUDIO_BYTES,
+        fallback_provider=fallback,
     )
 
 
@@ -537,13 +584,16 @@ class EdgeTtsProvider:
 
     name = "edge_tts"
 
-    def __init__(self, *, receive_timeout: int = 15) -> None:
+    def __init__(
+        self,
+        *,
+        receive_timeout: int = 15,
+        retry_delay_seconds: float = 0.15,
+    ) -> None:
         self._receive_timeout = receive_timeout
+        self._retry_delay_seconds = retry_delay_seconds
 
-    async def synthesize(self, text: str, voice: str) -> tuple[bytes, str]:
-        cleaned = (text or "").strip()
-        if not cleaned:
-            raise TtsError(TtsErrorCode.INVALID_INPUT, "empty_text")
+    async def _synthesize_once(self, cleaned: str, voice: str) -> bytes:
         communicate = edge_tts.Communicate(
             text=cleaned,
             voice=voice,
@@ -571,7 +621,30 @@ class EdgeTtsProvider:
         audio_bytes = audio_buf.getvalue()
         if not audio_bytes:
             raise TtsError(TtsErrorCode.EMPTY_AUDIO, "no_audio_chunks")
-        return audio_bytes, "audio/mpeg"
+        return audio_bytes
+
+    async def synthesize(self, text: str, voice: str) -> tuple[bytes, str]:
+        cleaned = (text or "").strip()
+        if not cleaned:
+            raise TtsError(TtsErrorCode.INVALID_INPUT, "empty_text")
+        for attempt in range(2):
+            try:
+                audio_bytes = await self._synthesize_once(cleaned, voice)
+                return audio_bytes, "audio/mpeg"
+            except TtsError as exc:
+                if attempt == 0 and exc.code in (
+                    TtsErrorCode.EMPTY_AUDIO,
+                    TtsErrorCode.PROVIDER_ERROR,
+                ):
+                    logger.warning(
+                        "EdgeTTS lỗi %s ở lần thử 1; chờ %.2fs và thử lại lần 2.",
+                        exc.code,
+                        self._retry_delay_seconds,
+                    )
+                    await asyncio.sleep(self._retry_delay_seconds)
+                    continue
+                raise
+        raise TtsError(TtsErrorCode.EMPTY_AUDIO, "no_audio_chunks")
 
 
 class FakeTtsProvider:

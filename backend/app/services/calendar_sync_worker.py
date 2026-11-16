@@ -64,6 +64,7 @@ async def process_sync_job(
         job.attempt_count = 5  # Đánh dấu không retry nữa
         await db.commit()
         return "failed"
+    write_calendar_id: str = conn.write_calendar_id
 
     # 2. Lấy Access Token
     try:
@@ -99,6 +100,8 @@ async def process_sync_job(
     # 3. Lấy Event Link tương ứng (làm mới lại phòng trường hợp get_valid_access_token vừa commit)
     job = await db.get(CalendarSyncJob, job_id) or job
     conn = await db.get(CalendarConnection, conn_id) or conn
+    if conn.write_calendar_id:
+        write_calendar_id = conn.write_calendar_id
     link: CalendarEventLink | None = None
     if link_id:
         link = await db.get(CalendarEventLink, link_id)
@@ -109,7 +112,7 @@ async def process_sync_job(
             try:
                 res = await client.create_event(
                     access_token=access_token,
-                    calendar_id=conn.write_calendar_id,
+                    calendar_id=write_calendar_id,
                     event_payload=job.payload_snapshot,
                 )
             except CalendarConflictError:
@@ -118,7 +121,7 @@ async def process_sync_job(
                     raise
                 existing_event = await client.get_event(
                     access_token=access_token,
-                    calendar_id=conn.write_calendar_id,
+                    calendar_id=write_calendar_id,
                     event_id=str(existing_id),
                 )
                 if existing_event is None:
@@ -154,7 +157,7 @@ async def process_sync_job(
 
             res = await client.update_event(
                 access_token=access_token,
-                calendar_id=conn.write_calendar_id,
+                calendar_id=write_calendar_id,
                 event_id=target_google_event_id,
                 event_payload=job.payload_snapshot,
                 expected_etag=job.expected_google_etag,
@@ -185,7 +188,7 @@ async def process_sync_job(
 
             await client.delete_event(
                 access_token=access_token,
-                calendar_id=conn.write_calendar_id,
+                calendar_id=write_calendar_id,
                 event_id=target_google_event_id,
                 expected_etag=job.expected_google_etag,
             )

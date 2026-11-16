@@ -67,6 +67,7 @@ from app.schemas.reschedule import (
     ProposedSessionAddItem,
     ProposedSessionCancelItem,
     ProposedSessionMoveItem,
+    ProposedStepItem,
     RebuildProposalRequest,
     RejectProposalData,
     RejectProposalRequest,
@@ -1129,6 +1130,17 @@ async def _proposal_row_to_schema(
         proposal.proposed_changes
     )
     stale, _, _ = await _evaluate_proposal_staleness(db, owner, proposal, now)
+    notif_state = (
+        proposal.pending_notification_state
+        if proposal.pending_notification_state
+        in ("not_needed", "not_sent", "pending", "sent")
+        else "not_sent"
+    )
+    notif_sent_at = (
+        _ensure_aware(proposal.pending_notification_sent_at)
+        if proposal.pending_notification_sent_at is not None
+        else None
+    )
     return ProposalData(
         proposal_id=str(proposal.id),
         status=cast(ProposalStatus, proposal.status),
@@ -1152,6 +1164,8 @@ async def _proposal_row_to_schema(
         explanation=proposal.explanation,
         generation_tier=cast(GenerationTier, proposal.generation_tier),
         stale=stale,
+        pending_notification_state=notif_state,
+        pending_notification_sent_at=notif_sent_at,
         created_at=_ensure_aware(proposal.created_at),
         updated_at=_ensure_aware(proposal.updated_at),
     )
@@ -1727,6 +1741,35 @@ async def _build_normal_proposal_plan(
                 next_action="reload",
             )
 
+    if trigger_reason == "expand_next_horizon":
+        if target_row is None:
+            candidate_tasks = (
+                await db.scalars(
+                    select(TaskRow)
+                    .where(
+                        TaskRow.user_id == owner,
+                        TaskRow.status.not_in(("completed", "cancelled")),
+                        TaskRow.unexpanded_scope.is_not(None),
+                    )
+                    .order_by(TaskRow.created_at.asc())
+                )
+            ).all()
+            for cand_t in candidate_tasks:
+                if cand_t.unexpanded_scope and cand_t.unexpanded_scope.strip():
+                    if not allowed_task_ids or str(cand_t.id) in allowed_task_ids:
+                        target_row = cand_t
+                        target_uuid = cand_t.id
+                        break
+        if target_row is None or not (
+            target_row.unexpanded_scope and target_row.unexpanded_scope.strip()
+        ):
+            raise AppError(
+                status_code=409,
+                code="INVALID_STATE_TRANSITION",
+                message="Công việc này không còn phần phạm vi nào chưa mở rộng.",
+                next_action="reload_and_review",
+            )
+
     avail_row = await db.scalar(
         select(AvailabilityRow)
         .where(AvailabilityRow.user_id == owner)
@@ -1897,6 +1940,7 @@ async def _build_normal_proposal_plan(
     moves: list[ProposedSessionMoveItem] = []
     adds: list[ProposedSessionAddItem] = []
     cancels: list[ProposedSessionCancelItem] = []
+    steps_to_add: list[ProposedStepItem] = []
     affected_tasks: list[str] = []
     blocking_reasons: list[BlockingReason] = []
     seen_blocking_codes: set[str] = set()
@@ -2187,8 +2231,113 @@ async def _build_normal_proposal_plan(
                 candidate_end + timedelta(seconds=STANDARD_INTER_SESSION_GAP_SECONDS),
             )
 
+    if trigger_reason == "expand_next_horizon" and target_row is not None:
+        existing_task_steps = (
+            await db.scalars(
+                select(StepRow)
+                .where(StepRow.user_id == owner, StepRow.task_id == target_row.id)
+                .order_by(StepRow.order_index.asc())
+            )
+        ).all()
+        next_order_idx = (
+            max((st.order_index for st in existing_task_steps), default=-1) + 1
+        )
+        raw_unexpanded = (target_row.unexpanded_scope or "").strip()
+        raw_parts = [
+            seg.strip(" -•\t")
+            for line in raw_unexpanded.splitlines()
+            for seg in line.split(";")
+            if seg.strip(" -•\t")
+        ]
+        if not raw_parts:
+            raw_parts = [raw_unexpanded]
+        raw_parts = raw_parts[:6]
+
+        base_est_per_step = max(300, round(new_work_int / max(new_buffer, 1.0)))
+        for idx, part_title in enumerate(raw_parts):
+            steps_to_add.append(
+                ProposedStepItem(
+                    step_id=str(uuid4()),
+                    task_id=str(target_row.id),
+                    title=part_title[:200],
+                    order_index=next_order_idx + idx,
+                    estimated_base_seconds=base_est_per_step,
+                )
+            )
+
+        task_free, t_deadline = _task_free_windows(target_row)
+        horizon_sess_counter = 0
+        for st_item in steps_to_add:
+            target_work = calculate_buffered_work(
+                st_item.estimated_base_seconds, new_buffer
+            )
+            micro_text = f"Mở tài liệu và bắt đầu 2 phút cho: {st_item.title[:80]}"
+            micro_secs = new_micro_sec if new_micro_sec > 0 else 120
+            avail_slots = _subtract_blocked_from_free(task_free, fixed_intervals)
+            rem_work = target_work
+            step_cursor = task_cursors.get(target_row.id, initial_cursor)
+            planned_horizon: list[
+                tuple[datetime, datetime, int, int, int, list[SessionSegment]]
+            ] = []
+            for slot_s, slot_e in avail_slots:
+                if rem_work <= 0:
+                    break
+                left = max(slot_s, step_cursor)
+                cap = int((slot_e - left).total_seconds())
+                if cap <= 0:
+                    continue
+                segs, work, rest, dur = fit_session_to_slot(
+                    rem_work, cap, new_work_int, new_rest_int
+                )
+                if work <= 0:
+                    continue
+                if work < rem_work and work < min(300, new_work_int):
+                    continue
+                right = left + timedelta(seconds=dur)
+                planned_horizon.append((left, right, work, rest, dur, segs))
+                rem_work -= work
+                step_cursor = right + timedelta(
+                    seconds=STANDARD_INTER_SESSION_GAP_SECONDS
+                )
+            if rem_work > 0:
+                _record_blocking(t_deadline, step_cursor, rem_work, task_free)
+            for p_idx, (p_s, p_e, p_work, p_rest, p_dur, p_segs) in enumerate(
+                planned_horizon
+            ):
+                horizon_sess_counter += 1
+                adds.append(
+                    ProposedSessionAddItem(
+                        temp_session_id=f"temp_horizon_{horizon_sess_counter}",
+                        action="create_session",
+                        task_id=str(target_row.id),
+                        step_id=st_item.step_id,
+                        source_run_id=None,
+                        before=None,
+                        after=ProposedSessionAddAfter(
+                            step_id=st_item.step_id,
+                            start=p_s,
+                            end=p_e,
+                            work_seconds=p_work,
+                            rest_seconds=p_rest,
+                            duration_seconds=p_dur,
+                            micro_task_text=micro_text,
+                            micro_task_seconds=micro_secs if p_idx == 0 else 0,
+                            segments=p_segs,
+                        ),
+                        reason="expand_next_horizon",
+                    )
+                )
+                fixed_intervals.append((p_s, p_e, f"horizon:{horizon_sess_counter}"))
+                cur_cursor = task_cursors.get(target_row.id, initial_cursor)
+                task_cursors[target_row.id] = max(
+                    cur_cursor,
+                    p_e + timedelta(seconds=STANDARD_INTER_SESSION_GAP_SECONDS),
+                )
+        if str(target_row.id) not in affected_tasks:
+            affected_tasks.append(str(target_row.id))
+
     if target_uuid is not None and str(target_uuid) not in affected_tasks and (
-        moves or adds or cancels or trigger_reason == "settings_change"
+        moves or adds or cancels or steps_to_add or trigger_reason == "settings_change"
     ):
         affected_tasks.insert(0, str(target_uuid))
     if not affected_tasks and trigger_reason == "settings_change" and effective_allowed:
@@ -2198,11 +2347,20 @@ async def _build_normal_proposal_plan(
         sessions_to_move=moves,
         sessions_to_add=adds,
         sessions_to_cancel=cancels,
-        steps_to_add=[],
+        steps_to_add=steps_to_add,
         next_horizon_from=calc_now if trigger_reason == "expand_next_horizon" else None,
         next_horizon_to=(calc_now + timedelta(days=14))
         if trigger_reason == "expand_next_horizon"
         else None,
+    )
+    horizon_preview = (
+        {
+            "expanded_steps_count": len(steps_to_add),
+            "added_sessions_count": len(adds),
+            "unexpanded_scope": None,
+        }
+        if trigger_reason == "expand_next_horizon"
+        else None
     )
     if deficit_seconds > 0:
         feasibility = FeasibilityData(
@@ -2210,7 +2368,7 @@ async def _build_normal_proposal_plan(
             confirmable=False,
             deficit_seconds=deficit_seconds,
             blocking_reasons=blocking_reasons,
-            next_horizon_preview=None,
+            next_horizon_preview=horizon_preview,
         )
         explanation = (
             "Không đủ khung giờ rảnh khả dụng trước hạn chót để xếp lại toàn bộ các phiên. "
@@ -2222,7 +2380,7 @@ async def _build_normal_proposal_plan(
             confirmable=True,
             deficit_seconds=0,
             blocking_reasons=[],
-            next_horizon_preview=None,
+            next_horizon_preview=horizon_preview,
         )
         explanation = (
             "Mình đã sắp xếp lại các phiên vào khung giờ rảnh tiếp theo, đảm bảo khoảng nghỉ 15 phút giữa các phiên và giữ nguyên các công việc khác."
@@ -2358,6 +2516,8 @@ async def create_proposal(
             calc_now=calc_now,
         )
         effective_allowed = list(dict.fromkeys(payload.allowed_task_ids))
+        if target_uuid is not None and str(target_uuid) not in effective_allowed:
+            effective_allowed.append(str(target_uuid))
         packed_changes = _pack_proposed_changes(
             changes,
             calculated_at=calc_now,
@@ -2393,7 +2553,7 @@ async def create_proposal(
         feasibility=feasibility.model_dump(mode="json", by_alias=True),
         explanation=explanation,
         generation_tier=gen_tier,
-        pending_notification_state="not_needed",
+        pending_notification_state="pending",
         pending_notification_sent_at=None,
     )
     db.add(new_proposal)
@@ -2542,7 +2702,7 @@ async def create_settings_change_proposal(
         feasibility=feasibility.model_dump(mode="json", by_alias=True),
         explanation=explanation,
         generation_tier=gen_tier,
-        pending_notification_state="not_needed",
+        pending_notification_state="pending",
         pending_notification_sent_at=None,
     )
     db.add(new_proposal)
@@ -2568,6 +2728,11 @@ async def get_current_proposal(
     )
     if row is None:
         return None
+    if row.pending_notification_state in ("pending", "not_sent"):
+        row.pending_notification_state = "sent"
+        row.pending_notification_sent_at = calc_now
+        await db.flush()
+        await db.commit()
     return await _proposal_row_to_schema(db, owner, row, calc_now)
 
 
@@ -2595,6 +2760,11 @@ async def get_proposal_detail(
             message="Không tìm thấy đề xuất điều chỉnh lịch.",
             next_action="reload",
         )
+    if row.status == "pending" and row.pending_notification_state in ("pending", "not_sent"):
+        row.pending_notification_state = "sent"
+        row.pending_notification_sent_at = calc_now
+        await db.flush()
+        await db.commit()
     return await _proposal_row_to_schema(db, owner, row, calc_now)
 
 
@@ -3207,6 +3377,11 @@ async def approve_proposal(
     )
 
     # 1. Áp dụng steps_to_add (nếu có)
+    eff_buf = (
+        float(pref_row.buffer_multiplier)
+        if pref_row is not None and pref_row.buffer_multiplier
+        else 1.2
+    )
     for st_item in changes.steps_to_add:
         st_uuid = UUID(st_item.step_id)
         existing_st = await db.scalar(
@@ -3223,11 +3398,29 @@ async def approve_proposal(
                     expected_output=st_item.title,
                     estimated_base_seconds=st_item.estimated_base_seconds,
                     remaining_base_seconds=st_item.estimated_base_seconds,
-                    buffer_multiplier=1.2,
+                    buffer_multiplier=eff_buf,
                     estimate_source="reschedule",
                     status="pending",
                 )
             )
+    if row.trigger_reason == "expand_next_horizon":
+        expanded_task_uuids: set[UUID] = set()
+        if row.target_task_id is not None:
+            expanded_task_uuids.add(row.target_task_id)
+        for st_item in changes.steps_to_add:
+            try:
+                expanded_task_uuids.add(UUID(st_item.task_id))
+            except ValueError:
+                pass
+        for exp_tid in expanded_task_uuids:
+            exp_task = await db.scalar(
+                select(TaskRow).where(TaskRow.id == exp_tid, TaskRow.user_id == owner)
+            )
+            if exp_task is not None:
+                exp_task.unexpanded_scope = None
+                exp_task.decomposition_state = "complete"
+                exp_task.revision += 1
+                exp_task.updated_at = approve_now
     await db.flush()
 
     # 2. Áp dụng sessions_to_cancel
@@ -3280,7 +3473,8 @@ async def approve_proposal(
             step_id=UUID(after.step_id),
             scheduled_start=add_start,
             scheduled_end=add_end,
-            micro_task_text=after.micro_task_text,
+            micro_task_text=after.micro_task_text
+            or "Mở tài liệu và bắt đầu 2 phút đầu tiên.",
             micro_task_seconds=after.micro_task_seconds,
             work_seconds=after.work_seconds,
             rest_seconds=after.rest_seconds,

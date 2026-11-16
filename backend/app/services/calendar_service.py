@@ -17,8 +17,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.calendar import (
     CalendarAuthorization,
     CalendarConnection,
+    CalendarEventLink,
     CalendarPreview,
+    CalendarSyncJob,
 )
+from app.models.session import Session
 from app.models.user import User
 from app.schemas.calendar import (
     CalendarConnectionRead,
@@ -42,6 +45,13 @@ logger = logging.getLogger(__name__)
 def _hash_state(state: str) -> str:
     """Băm state token bằng SHA256 để lưu trữ an toàn trong DB."""
     return hashlib.sha256(state.encode("utf-8")).hexdigest()
+
+
+def _ensure_utc(dt: datetime) -> datetime:
+    """Chuẩn hóa datetime về UTC có nhận biết múi giờ."""
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=UTC)
+    return dt.astimezone(UTC)
 
 
 def _resolve_uuid(value: str | UUID) -> UUID:
@@ -602,3 +612,125 @@ class CalendarService:
         await self.db.commit()
         await self.db.refresh(conn)
         return conn
+
+    async def reconcile_external_link_changes(
+        self, user_id: str | UUID, connection_id: str | UUID
+    ) -> dict[str, int]:
+        """Đối soát thay đổi bên ngoài trên Google Calendar cho các CalendarEventLink hiện hành (A22.3 / K19 / K20)."""
+        from app.services.planning.calendar_ingestion import normalize_google_event
+
+        conn = await self.get_connection_by_id(user_id, connection_id)
+        if not conn:
+            raise CalendarClientError("Không tìm thấy kết nối lịch.", status_code=404)
+
+        if conn.connection_state == "disconnected":
+            return {
+                "links_checked": 0,
+                "links_deleted_externally": 0,
+                "links_diverged": 0,
+            }
+
+        active_links = (
+            await self.db.scalars(
+                select(CalendarEventLink).where(
+                    CalendarEventLink.user_id == conn.user_id,
+                    CalendarEventLink.connection_id == conn.id,
+                    CalendarEventLink.is_current.is_(True),
+                    CalendarEventLink.google_event_id.is_not(None),
+                )
+            )
+        ).all()
+        if not active_links:
+            return {
+                "links_checked": 0,
+                "links_deleted_externally": 0,
+                "links_diverged": 0,
+            }
+
+        link_ids = [lk.id for lk in active_links]
+        conn_id = conn.id
+        conn_user_id = conn.user_id
+
+        access_token = await self.get_valid_access_token(conn)
+
+        active_links = (
+            await self.db.scalars(
+                select(CalendarEventLink).where(
+                    CalendarEventLink.user_id == conn_user_id,
+                    CalendarEventLink.connection_id == conn_id,
+                    CalendarEventLink.id.in_(link_ids),
+                    CalendarEventLink.is_current.is_(True),
+                )
+            )
+        ).all()
+
+        pending_job_link_ids = set(
+            (
+                await self.db.scalars(
+                    select(CalendarSyncJob.event_link_id).where(
+                        CalendarSyncJob.user_id == conn_user_id,
+                        CalendarSyncJob.connection_id == conn_id,
+                        CalendarSyncJob.event_link_id.in_(link_ids),
+                        CalendarSyncJob.job_state.in_(("queued", "running", "retry")),
+                    )
+                )
+            ).all()
+        )
+
+        links_checked = 0
+        links_deleted_externally = 0
+        links_diverged = 0
+
+        for link in active_links:
+            if not link.google_event_id:
+                continue
+            links_checked += 1
+            remote_event = await self.client.get_event(
+                access_token, link.google_calendar_id, str(link.google_event_id)
+            )
+            now_utc = datetime.now(UTC)
+
+            if (
+                remote_event is None
+                or str(remote_event.get("status", "")).lower() == "cancelled"
+            ):
+                link.sync_state = "deleted_externally"
+                link.is_current = False
+                link.updated_at = now_utc
+                links_deleted_externally += 1
+                continue
+
+            sess = await self.db.get(Session, link.session_id)
+            norm = normalize_google_event(
+                remote_event, str(conn_id), link.google_calendar_id
+            )
+            time_drifted = False
+            if sess is not None and norm is not None:
+                sess_start = _ensure_utc(sess.scheduled_start)
+                sess_end = _ensure_utc(sess.scheduled_end)
+                rem_start = _ensure_utc(norm.start_at)
+                rem_end = _ensure_utc(norm.end_at)
+                if (
+                    abs((rem_start - sess_start).total_seconds()) > 1
+                    or abs((rem_end - sess_end).total_seconds()) > 1
+                ):
+                    time_drifted = True
+
+            remote_etag = remote_event.get("etag")
+            etag_drifted = bool(
+                link.google_etag is not None
+                and remote_etag is not None
+                and str(remote_etag) != str(link.google_etag)
+            )
+
+            if (time_drifted or etag_drifted) and link.id not in pending_job_link_ids:
+                link.sync_state = "diverged"
+                link.updated_at = now_utc
+                links_diverged += 1
+
+        await self.db.commit()
+        return {
+            "links_checked": links_checked,
+            "links_deleted_externally": links_deleted_externally,
+            "links_diverged": links_diverged,
+        }

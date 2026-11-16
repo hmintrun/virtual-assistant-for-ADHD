@@ -343,6 +343,7 @@ async def test_legacy_availability_revision_supports_model_and_dictionary(
     payload, monkeypatch, dictionary_ref, current_revision
 ):
     from sqlalchemy import update
+
     from app.core.database import make_engine, session_factory
     from app.core.errors import AppError
     from app.models import Base, User, UserPreference

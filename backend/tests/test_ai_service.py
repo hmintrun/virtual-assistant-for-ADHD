@@ -45,6 +45,7 @@ from app.schemas.task import (
 from app.services.ai_service import AIService, ai_service
 from app.services.draft_service import ensure_dev_seed_in_db
 from app.services.voice_service import (
+    EdgeTtsProvider,
     FakeSttProvider,
     FakeTtsProvider,
     FallbackSttProvider,
@@ -1442,6 +1443,131 @@ class TestAIService(unittest.TestCase):
             self.assertEqual(resp.json()["data"]["mime_type"], "audio/wav")
         finally:
             app.dependency_overrides.clear()
+
+    def test_edge_tts_provider_retries_once_on_empty_or_no_audio_received(self) -> None:
+        """RISK-03: EdgeTtsProvider thử lại 1 lần khi gặp NoAudioReceived/empty chunks và dừng sau 2 lần lỗi."""
+
+        class NoAudioReceived(Exception):
+            pass
+
+        attempts = 0
+
+        class _FlakyCommunicate:
+            def __init__(self, text: str, voice: str, receive_timeout: int = 15) -> None:
+                self.text = text
+                self.voice = voice
+
+            async def stream(self):  # type: ignore[no-untyped-def]
+                nonlocal attempts
+                attempts += 1
+                if attempts == 1:
+                    raise NoAudioReceived("No audio was received")
+                yield {"type": "audio", "data": b"ID3-recovered-mp3"}
+
+        provider = EdgeTtsProvider(receive_timeout=5, retry_delay_seconds=0.01)
+        with patch("app.services.voice_service.edge_tts.Communicate", _FlakyCommunicate):
+            audio_bytes, mime = asyncio.run(
+                provider.synthesize("Xin chào thử lại", "vi-VN-HoaiMyNeural")
+            )
+        self.assertEqual(attempts, 2)
+        self.assertEqual(audio_bytes, b"ID3-recovered-mp3")
+        self.assertEqual(mime, "audio/mpeg")
+
+        # 2 lần liên tiếp rỗng -> ném EMPTY_AUDIO
+        empty_attempts = 0
+
+        class _AlwaysEmptyCommunicate:
+            def __init__(self, text: str, voice: str, receive_timeout: int = 15) -> None:
+                pass
+
+            async def stream(self):  # type: ignore[no-untyped-def]
+                nonlocal empty_attempts
+                empty_attempts += 1
+                if False:
+                    yield {}
+
+        with patch("app.services.voice_service.edge_tts.Communicate", _AlwaysEmptyCommunicate):
+            with self.assertRaises(TtsError) as err_ctx:
+                asyncio.run(provider.synthesize("Xin chào lỗi", "vi-VN-HoaiMyNeural"))
+        self.assertEqual(empty_attempts, 2)
+        self.assertEqual(err_ctx.exception.code, TtsErrorCode.EMPTY_AUDIO)
+
+    def test_groq_stt_prompt_hint_and_gemini_to_groq_fallback(self) -> None:
+        """RISK-05: GroqWhisperSttProvider truyền prompt gợi ý từ vựng và VoiceService(gemini) tự dự phòng sang Groq."""
+        captured_calls: list[dict[str, Any]] = []
+
+        class _FakeTranscriptions:
+            async def create(self, **kwargs: Any) -> Any:
+                captured_calls.append(kwargs)
+                return SimpleNamespace(text="Tạo phiên Focus Session 25 phút")
+
+        fake_client = SimpleNamespace(
+            audio=SimpleNamespace(transcriptions=_FakeTranscriptions())
+        )
+        groq_provider = GroqWhisperSttProvider(
+            api_key="gsk_test_key",
+            model="whisper-large-v3-turbo",
+            language_code="vi-VN",
+        )
+        with patch.object(groq_provider, "_get_client", return_value=fake_client):
+            text = asyncio.run(groq_provider.transcribe(b"RIFF-audio", "audio/wav"))
+        self.assertEqual(text, "Tạo phiên Focus Session 25 phút")
+        self.assertIn("prompt", captured_calls[0])
+        self.assertIn("ProPlan VA", captured_calls[0]["prompt"])
+        self.assertIn("Focus Session", captured_calls[0]["prompt"])
+
+        # Kiểm tra build_voice_service với VOICE_STT_PROVIDER="gemini" + GROQ_API_KEY
+        gem_cfg = Settings(
+            _env_file=None,
+            GEMINI_API_KEY="AIzaSyTestKey",
+            GROQ_API_KEY="gsk_TestKey",
+            VOICE_STT_PROVIDER="gemini",
+        )
+        gem_svc = build_voice_service(gem_cfg)
+        self.assertEqual(gem_svc.provider_name, "gemini")
+        self.assertIsNotNone(gem_svc._fallback_provider)
+
+        for err_code in (
+            SttErrorCode.RATE_LIMITED,
+            SttErrorCode.TIMEOUT,
+            SttErrorCode.PROVIDER_ERROR,
+        ):
+            with (
+                patch.object(
+                    gem_svc._provider,
+                    "transcribe",
+                    AsyncMock(side_effect=SttError(err_code, "gemini_transient_err")),
+                ),
+                patch.object(
+                    gem_svc._fallback_provider,
+                    "transcribe",
+                    AsyncMock(return_value="Chép lời từ Groq dự phòng"),
+                ) as mock_groq_fb,
+            ):
+                res = asyncio.run(gem_svc.transcribe(b"RIFF-audio", content_type="audio/wav"))
+                self.assertEqual(res.provider, "groq")
+                self.assertEqual(res.text, "Chép lời từ Groq dự phòng")
+                mock_groq_fb.assert_awaited_once()
+
+        # Lỗi đầu vào UNSUPPORTED_AUDIO không được gọi fallback
+        with (
+            patch.object(
+                gem_svc._provider,
+                "transcribe",
+                AsyncMock(
+                    side_effect=SttError(SttErrorCode.UNSUPPORTED_AUDIO, "corrupt_header")
+                ),
+            ),
+            patch.object(
+                gem_svc._fallback_provider,
+                "transcribe",
+                AsyncMock(return_value="Không được gọi"),
+            ) as mock_groq_no_fb,
+        ):
+            with self.assertRaises(SttError) as bad_ctx:
+                asyncio.run(gem_svc.transcribe(b"RIFF-audio", content_type="audio/wav"))
+            self.assertEqual(bad_ctx.exception.code, SttErrorCode.UNSUPPORTED_AUDIO)
+            mock_groq_no_fb.assert_not_awaited()
 
 
 if __name__ == "__main__":

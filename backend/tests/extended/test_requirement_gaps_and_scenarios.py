@@ -200,11 +200,188 @@ class TestRequirementGapsAndADHDScenarios(unittest.TestCase):
     def test_gap_4_chronic_task_avoidance_escalation(self):
         """Cần contract/fixture đúng số lần hoãn trước khi kiểm cơ chế can thiệp."""
 
-    @pytest.mark.skip(
-        reason="Chưa có API/contract tiếp tục chặng Rolling Horizon; cần test chuyển chặng thực, không kiểm tên hàm."
-    )
     def test_gap_5_rolling_horizon_continuation_missing(self):
-        """Rolling continuation còn thiếu, không suy từ hasattr service."""
+        """I03 & I07: Mở rộng chặng Rolling Horizon qua UF6 expand_next_horizon và cập nhật pending_notification_state."""
+        from app.schemas.reschedule import (
+            ApproveProposalRequest,
+            CreateProposalRequest,
+            ProposalSourceRevisions,
+        )
+        from app.services import reschedule_service
+
+        async def run():
+            engine, factory = await self._async_setup_db()
+            try:
+                now = datetime.now(UTC).replace(
+                    hour=8, minute=0, second=0, microsecond=0
+                ) + timedelta(days=1)
+                availability = DraftAvailability(
+                    timezone="UTC",
+                    weekly_rules=[
+                        WeeklyRule(weekday=w, start_local="08:00", end_local="21:00")
+                        for w in range(1, 8)
+                    ],
+                )
+                async with factory() as db:
+                    draft = await draft_service.create_draft(
+                        user_id="user_a",
+                        idempotency_key="gap5_draft_create",
+                        payload=CreateDraftRequest(
+                            client_draft_id="gap5_draft",
+                            input_source="text",
+                            raw_input="Dự án nghiên cứu Rolling Horizon",
+                            summary=SummaryInput(
+                                title="Dự án nghiên cứu",
+                                description="Thực hiện nghiên cứu 3 giai đoạn",
+                                scope="3 giai đoạn",
+                                time_constraint=TimeConstraint(
+                                    kind="deadline",
+                                    start_at=now,
+                                    deadline_at=now + timedelta(days=28),
+                                    input_timezone="UTC",
+                                ),
+                                availability=availability,
+                            ),
+                        ),
+                        db=db,
+                    )
+                async with factory() as db:
+                    await draft_service.confirm_draft_summary(
+                        user_id="user_a",
+                        draft_id=draft.draft_id,
+                        idempotency_key="gap5_draft_confirm",
+                        payload=ConfirmSummaryRequest(
+                            expected_summary_revision=draft.summary_revision
+                        ),
+                        db=db,
+                    )
+                async with factory() as db:
+                    candidate = await plan_service.create_candidate(
+                        user_id="user_a",
+                        draft_id=draft.draft_id,
+                        idempotency_key="gap5_cand_create",
+                        payload=GenerateCandidateRequest(
+                            source_summary_revision=draft.summary_revision,
+                            source_planning_input_revision=draft.planning_input_revision,
+                            manual_steps=[
+                                ManualStepInput(
+                                    order_index=0,
+                                    title="Giai đoạn 1: Khảo sát",
+                                    expected_output="Báo cáo khảo sát",
+                                    estimated_base_seconds=1250,
+                                )
+                            ],
+                            unexpanded_scope="Giai đoạn 2: Thử nghiệm mô hình\nGiai đoạn 3: Viết tổng kết",
+                        ),
+                        db=db,
+                    )
+                async with factory() as db:
+                    confirmed = await plan_service.confirm_candidate(
+                        user_id="user_a",
+                        candidate_id=candidate.candidate_id,
+                        idempotency_key="gap5_cand_confirm",
+                        payload=ConfirmCandidateRequest(
+                            expected_review_revision=candidate.review_revision,
+                            expected_summary_revision=candidate.source_summary_revision,
+                            expected_planning_input_revision=candidate.source_planning_input_revision,
+                            expected_source_revisions=candidate.source_revisions,
+                        ),
+                        db=db,
+                    )
+                task_id = confirmed.task.task_id
+                self.assertEqual(confirmed.task.decomposition_state, "partial")
+
+                async with factory() as db:
+                    owner = draft_service.resolve_user_uuid("user_a")
+                    revs, _ = await reschedule_service._compute_db_source_revisions(
+                        db, owner, target_task_id=task_id
+                    )
+                    sched_rev = await reschedule_service._get_current_schedule_revision(db, owner)
+                    proposal = await reschedule_service.create_proposal(
+                        db,
+                        user_id="user_a",
+                        idempotency_key="gap5_prop_create",
+                        payload=CreateProposalRequest(
+                            trigger_reason="expand_next_horizon",
+                            target_task_id=task_id,
+                            allowed_task_ids=[task_id],
+                            expected_base_schedule_revision=sched_rev,
+                            expected_source_revisions=ProposalSourceRevisions.model_validate(
+                                revs.model_dump()
+                            ),
+                        ),
+                        now=now + timedelta(days=1),
+                    )
+                # I07: Khi mới tạo, pending_notification_state == "pending" và chưa có sent_at
+                self.assertEqual(proposal.pending_notification_state, "pending")
+                self.assertIsNone(proposal.pending_notification_sent_at)
+                self.assertEqual(len(proposal.proposed_changes.steps_to_add), 2)
+                self.assertGreaterEqual(len(proposal.proposed_changes.sessions_to_add), 2)
+
+                # Khi đọc đề xuất hiện tại (GET /proposals/current), trạng thái chuyển sang "sent"
+                read_time = now + timedelta(days=1, seconds=30)
+                async with factory() as db:
+                    current_prop = await reschedule_service.get_current_proposal(
+                        db, user_id="user_a", now=read_time
+                    )
+                assert current_prop is not None
+                self.assertEqual(current_prop.pending_notification_state, "sent")
+                self.assertEqual(current_prop.pending_notification_sent_at, read_time)
+
+                # Duyệt đề xuất mở rộng chặng tiếp theo
+                async with factory() as db:
+                    approved = await reschedule_service.approve_proposal(
+                        db,
+                        user_id="user_a",
+                        proposal_id=proposal.proposal_id,
+                        idempotency_key="gap5_prop_approve",
+                        payload=ApproveProposalRequest(
+                            expected_proposal_revision=proposal.proposal_revision,
+                            expected_base_schedule_revision=proposal.base_schedule_revision,
+                            expected_source_revisions=proposal.source_revisions,
+                        ),
+                        now=now + timedelta(days=1, minutes=2),
+                    )
+                self.assertEqual(approved.status, "approved")
+
+                # Kiểm tra Task đã chuyển sang decomposition_state="complete" và xóa unexpanded_scope
+                async with factory() as db:
+                    updated_task = await plan_service.get_task_by_id(
+                        user_id="user_a", task_id=task_id, db=db
+                    )
+                self.assertEqual(updated_task.decomposition_state, "complete")
+                self.assertIsNone(updated_task.unexpanded_scope)
+                self.assertEqual(len(updated_task.steps), 3)
+
+                # Gọi lại expand_next_horizon khi đã hết unexpanded_scope phải trả 409 INVALID_STATE_TRANSITION
+                async with factory() as db:
+                    owner = draft_service.resolve_user_uuid("user_a")
+                    revs2, _ = await reschedule_service._compute_db_source_revisions(
+                        db, owner, target_task_id=task_id
+                    )
+                    sched_rev2 = await reschedule_service._get_current_schedule_revision(db, owner)
+                    with self.assertRaises(AppError) as ctx:
+                        await reschedule_service.create_proposal(
+                            db,
+                            user_id="user_a",
+                            idempotency_key="gap5_prop_repeat",
+                            payload=CreateProposalRequest(
+                                trigger_reason="expand_next_horizon",
+                                target_task_id=task_id,
+                                allowed_task_ids=[task_id],
+                                expected_base_schedule_revision=sched_rev2,
+                                expected_source_revisions=ProposalSourceRevisions.model_validate(
+                                    revs2.model_dump()
+                                ),
+                            ),
+                            now=now + timedelta(days=1, minutes=5),
+                        )
+                    self.assertEqual(ctx.exception.status_code, 409)
+                    self.assertEqual(ctx.exception.code, "INVALID_STATE_TRANSITION")
+            finally:
+                await engine.dispose()
+
+        asyncio.run(run())
 
     @pytest.mark.skip(
         reason="Quy tắc ép nghỉ sau 90 phút chưa chốt; contract durations hiện hành cho phép rest_interval_seconds=0."

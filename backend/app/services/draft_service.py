@@ -5,15 +5,18 @@ from uuid import NAMESPACE_DNS, UUID, uuid4, uuid5
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import ValidationError
-from sqlalchemy import select, update
+from sqlalchemy import delete, select, update
 from sqlalchemy.exc import MultipleResultsFound
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import AppError
 from app.core.security import dev_seed_enabled
 from app.models.base import Base
+from app.models.calendar import PlanningContext as PlanningContextModel
+from app.models.planning import PlanCandidate as PlanCandidateModel
 from app.models.planning import PlanningDraft as PlanningDraftModel
 from app.models.settings import Availability as AvailabilityModel
+from app.models.task import Task as TaskModel
 from app.models.user import User as UserModel
 from app.models.user import UserPreference as UserPreferenceModel
 from app.repositories import run_repository, thought_repository
@@ -860,6 +863,78 @@ async def get_draft_by_id(
             next_action="reload",
         )
     return _row_to_schema(row, fallback_draft_id=draft_id)
+
+
+async def delete_draft(
+    *,
+    user_id: str,
+    draft_id: str,
+    db: AsyncSession | None = None,
+) -> dict[str, Any]:
+    """Xóa vĩnh viễn bản nháp UF1 chưa chốt thành Task chính thức."""
+    if db is None:
+        raise AppError(
+            status_code=500,
+            code="DATABASE_REQUIRED",
+            message="Thao tác yêu cầu kết nối cơ sở dữ liệu.",
+            next_action="reload",
+        )
+    await ensure_dev_seed_in_db(db)
+    did = resolve_draft_uuid(draft_id)
+    uid = resolve_user_uuid(user_id)
+    row = (
+        await db.execute(
+            select(PlanningDraftModel)
+            .where(
+                PlanningDraftModel.id == did,
+                PlanningDraftModel.user_id == uid,
+            )
+            .execution_options(populate_existing=True)
+        )
+    ).scalar_one_or_none()
+    if row is None:
+        raise AppError(
+            status_code=404,
+            code="RESOURCE_NOT_FOUND",
+            message="Không tìm thấy bản nháp.",
+            next_action="reload",
+        )
+
+    draft_schema = _row_to_schema(row, fallback_draft_id=draft_id)
+    has_task = (
+        await db.scalar(
+            select(TaskModel.id)
+            .where(TaskModel.user_id == uid, TaskModel.source_draft_id == row.id)
+            .limit(1)
+        )
+    ) is not None
+    if (
+        row.stage == "confirmed"
+        or draft_schema.confirmed_task_id is not None
+        or has_task
+    ):
+        raise AppError(
+            status_code=409,
+            code="INVALID_STATE_TRANSITION",
+            message="Bản nháp đã chốt thành công việc chính thức, không thể xóa.",
+            next_action="reload_and_review",
+        )
+
+    await db.execute(
+        delete(PlanningContextModel).where(
+            PlanningContextModel.user_id == uid,
+            PlanningContextModel.source_draft_id == row.id,
+        )
+    )
+    await db.execute(
+        delete(PlanCandidateModel).where(
+            PlanCandidateModel.user_id == uid,
+            PlanCandidateModel.draft_id == row.id,
+        )
+    )
+    await db.delete(row)
+    await db.commit()
+    return {"draft_id": draft_schema.draft_id, "deleted": True}
 
 
 @durable_command("patch_draft", PlanningDraft)

@@ -6,6 +6,7 @@ from fastapi import APIRouter, Header, Path, Request
 from sqlalchemy import text
 
 from app.api.deps import CurrentUserDep, DbSessionDep
+from app.core.config import settings
 from app.core.errors import AppError
 from app.schemas.calendar import CalendarContext, PlanningContextCreateRequest
 from app.schemas.common import (
@@ -24,18 +25,18 @@ _DEFAULT_CAPABILITIES = CapabilitiesData(
     policy_revision="demo-policy",
     offline_start_supported=False,
     configured_parameters=ConfiguredParameters(
-        buffer_multiplier_range=None,
-        minimum_sample_count=None,
-        audio_max_seconds=None,
-        audio_max_bytes=None,
-        preview_ttl_seconds=None,
+        buffer_multiplier_range=[1.0, 2.0],
+        minimum_sample_count=7,
+        audio_max_seconds=120,
+        audio_max_bytes=int(settings.VOICE_MAX_AUDIO_BYTES),
+        preview_ttl_seconds=900,
         default_reminder_offset_seconds=900,
         default_reminder_offsets=[900, 600, 300],
         start_grace_seconds=900,
         min_inter_session_gap_seconds=900,
         checkin_timeout_seconds=300,
     ),
-    policy_state="requires_configuration_before_release",
+    policy_state="ready",
 )
 
 

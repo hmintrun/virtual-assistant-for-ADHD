@@ -13,14 +13,14 @@ from __future__ import annotations
 import logging
 import zoneinfo
 from dataclasses import dataclass
-from datetime import UTC, date, datetime, time, timezone
+from datetime import UTC, date, datetime, time
 from typing import Any
 from uuid import UUID
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.calendar import CalendarConnection, CalendarEventLink
+from app.models.calendar import CalendarEventLink
 from app.models.session import Session
 from app.models.step import Step
 from app.schemas.calendar import (

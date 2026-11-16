@@ -314,7 +314,7 @@ class GoogleCalendarClient(CalendarClientInterface):
         url = _calendar_events_url(calendar_id, event_id)
         async with httpx.AsyncClient(timeout=15.0) as client:
             resp = await client.get(url, headers=headers)
-            if resp.status_code == 404:
+            if resp.status_code in (404, 410):
                 return None
             if resp.status_code == 401:
                 raise CalendarAuthError("Access token expired")
