@@ -8,18 +8,12 @@ from __future__ import annotations
 
 import zoneinfo
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
-
-from app.schemas.calendar import BusyInterval
-from app.schemas.common import TimeInterval
-
-if TYPE_CHECKING:
-    from app.models.execution import SessionRun
-    from app.models.session import Session
 from datetime import UTC, date, datetime, timedelta
+from typing import Any
 
 from app.schemas.availability import Availability, DraftAvailability
-from app.schemas.common import ClarificationIssue, TimeConstraint
+from app.schemas.calendar import BusyInterval
+from app.schemas.common import ClarificationIssue, TimeConstraint, TimeInterval
 from app.schemas.draft import TaskSummary
 
 

@@ -6,18 +6,22 @@ import hashlib
 import json
 import logging
 import secrets
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any
-from uuid import UUID, uuid4, uuid5, NAMESPACE_DNS
+from uuid import NAMESPACE_DNS, UUID, uuid4, uuid5
 
 from sqlalchemy import delete, or_, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.calendar import (
     CalendarAuthorization,
     CalendarConnection,
+    CalendarEventLink,
     CalendarPreview,
+    CalendarSyncJob,
 )
+from app.models.session import Session
 from app.models.user import User
 from app.schemas.calendar import (
     CalendarConnectionRead,
@@ -43,6 +47,13 @@ def _hash_state(state: str) -> str:
     return hashlib.sha256(state.encode("utf-8")).hexdigest()
 
 
+def _ensure_utc(dt: datetime) -> datetime:
+    """Chuẩn hóa datetime về UTC có nhận biết múi giờ."""
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=UTC)
+    return dt.astimezone(UTC)
+
+
 def _resolve_uuid(value: str | UUID) -> UUID:
     """Chuyển đổi string sang UUID đối tượng nếu cần, hỗ trợ chuỗi dev identifier."""
     if isinstance(value, UUID):
@@ -50,7 +61,7 @@ def _resolve_uuid(value: str | UUID) -> UUID:
     try:
         return UUID(str(value))
     except ValueError:
-        return uuid5(NAMESPACE_DNS, f"proplan.identifier:{value}")
+        return uuid5(NAMESPACE_DNS, f"proplan.user:{value}")
 
 
 async def _ensure_user_exists(db: AsyncSession, user_id: UUID) -> None:
@@ -108,7 +119,7 @@ class CalendarService:
         state = secrets.token_urlsafe(32)
         state_hash = _hash_state(state)
 
-        now_utc = datetime.now(timezone.utc)
+        now_utc = datetime.now(UTC)
         # BUG-13: Chỉ dọn dẹp các authorization đã hết hạn hoặc đã tiêu thụ, giữ lại các session khác đang mở của user
         await self.db.execute(
             delete(CalendarAuthorization).where(
@@ -144,18 +155,15 @@ class CalendarService:
         _, auth_url = await self.create_authorization(user_id, redirect_uri=redirect_uri)
         return auth_url
 
-    async def handle_oauth_callback(
+    async def _consume_valid_authorization(
         self,
-        user_id: str | UUID | None,
-        code: str,
         state: str,
-        redirect_uri: str | None = None,
-    ) -> tuple[CalendarConnection, str | None]:
-        """Xác thực mã callback từ Google và tạo hoặc cập nhật CalendarConnection với Fernet encryption."""
+        user_id: str | UUID | None = None,
+    ) -> tuple[CalendarAuthorization, UUID, str | None]:
+        """Xác thực state token chưa hết hạn/tiêu thụ, đánh dấu đã tiêu thụ và trả về metadata."""
         state_hash = _hash_state(state)
-        now_utc = datetime.now(timezone.utc)
+        now_utc = datetime.now(UTC)
 
-        # Tìm authorization record theo state_hash
         query = select(CalendarAuthorization).where(
             CalendarAuthorization.state_hash == state_hash,
             CalendarAuthorization.consumed_at.is_(None),
@@ -177,6 +185,31 @@ class CalendarService:
         return_target = auth_intent.return_target
         auth_intent.consumed_at = now_utc
         await self.db.commit()
+        return auth_intent, uid, return_target
+
+    async def handle_oauth_error(
+        self,
+        state: str,
+        user_id: str | UUID | None = None,
+    ) -> str | None:
+        """Xác thực và tiêu thụ authorization intent khi Google OAuth callback trả lỗi/từ chối."""
+        _, _, return_target = await self._consume_valid_authorization(state=state, user_id=user_id)
+        return return_target
+
+    async def handle_oauth_callback(
+        self,
+        user_id: str | UUID | None,
+        code: str,
+        state: str,
+        redirect_uri: str | None = None,
+    ) -> tuple[CalendarConnection, str | None]:
+        """Xác thực mã callback từ Google và tạo hoặc cập nhật CalendarConnection với Fernet encryption."""
+        now_utc = datetime.now(UTC)
+        auth_intent, uid, return_target = await self._consume_valid_authorization(
+            state=state, user_id=user_id
+        )
+        if not code:
+            raise CalendarAuthError("Thiếu mã xác thực OAuth từ Google.")
 
         # Đổi authorization code lấy token
         target_redirect_uri = redirect_uri or auth_intent.redirect_uri or None
@@ -196,6 +229,21 @@ class CalendarService:
             CalendarConnection.account_ref == account_ref,
         )
         existing_conn = (await self.db.execute(conn_stmt)).scalar_one_or_none()
+        if existing_conn is None and account_ref not in ("unknown@google.com", "unknown@gmail.com"):
+            unknown_stmt = (
+                select(CalendarConnection)
+                .where(
+                    CalendarConnection.user_id == uid,
+                    CalendarConnection.provider == "google",
+                    CalendarConnection.account_ref.in_(
+                        ("unknown@google.com", "unknown@gmail.com")
+                    ),
+                )
+                .order_by(CalendarConnection.created_at.desc())
+            )
+            existing_conn = (await self.db.execute(unknown_stmt)).scalars().first()
+            if existing_conn is not None:
+                existing_conn.account_ref = account_ref
 
         if existing_conn:
             conn = existing_conn
@@ -288,6 +336,11 @@ class CalendarService:
 
     async def get_valid_access_token(self, connection: CalendarConnection) -> str:
         """Lấy access_token hợp lệ từ Fernet credential_ref, tự động refresh nếu hết hạn."""
+        if connection.connection_state == "disconnected":
+            raise CalendarAuthError(
+                "Kết nối Google Calendar đã bị ngắt. Vui lòng kết nối lại."
+            )
+
         creds = _deserialize_credentials_safe(
             connection.credential_ref,
             user_id=connection.user_id,
@@ -303,7 +356,7 @@ class CalendarService:
             try:
                 stored_at = datetime.fromisoformat(stored_at_str)
                 # Đệm an toàn 5 phút (300s) trước khi token hết hạn thực sự
-                if datetime.now(timezone.utc) >= stored_at + timedelta(seconds=max(0, expires_in - 300)):
+                if datetime.now(UTC) >= stored_at + timedelta(seconds=max(0, expires_in - 300)):
                     is_expired = True
             except Exception:
                 pass
@@ -313,7 +366,7 @@ class CalendarService:
                 new_token_data = await self.client.refresh_access_token(refresh_token)
                 access_token = new_token_data.get("access_token")
                 new_expires_in = new_token_data.get("expires_in", 3600)
-                now_utc = datetime.now(timezone.utc)
+                now_utc = datetime.now(UTC)
                 creds["access_token"] = access_token
                 creds["expires_in"] = new_expires_in
                 creds["stored_at"] = now_utc.isoformat()
@@ -349,6 +402,33 @@ class CalendarService:
 
         access_token = await self.get_valid_access_token(conn)
         raw_items = await self.client.list_calendar_list(access_token)
+        if conn.account_ref in ("unknown@google.com", "unknown@gmail.com"):
+            for item in raw_items:
+                cal_id = item.get("id")
+                if (
+                    item.get("primary")
+                    and isinstance(cal_id, str)
+                    and "@" in cal_id
+                    and cal_id.strip() != "primary"
+                ):
+                    resolved_email = cal_id.strip()
+                    conflict_id = await self.db.scalar(
+                        select(CalendarConnection.id).where(
+                            CalendarConnection.user_id == conn.user_id,
+                            CalendarConnection.provider == conn.provider,
+                            CalendarConnection.account_ref == resolved_email,
+                            CalendarConnection.id != conn.id,
+                        )
+                    )
+                    if conflict_id is None:
+                        conn.account_ref = resolved_email
+                        try:
+                            await self.db.commit()
+                            await self.db.refresh(conn)
+                        except IntegrityError:
+                            await self.db.rollback()
+                            conn = await self.get_connection_by_id(user_id, connection_id) or conn
+                    break
 
         read_ids = set(conn.read_calendar_ids or [])
         write_id = conn.write_calendar_id
@@ -429,7 +509,7 @@ class CalendarService:
                 "existing_event_action": existing_event_action,
             },
             status="pending",
-            expires_at=datetime.now(timezone.utc) + timedelta(minutes=15),
+            expires_at=datetime.now(UTC) + timedelta(minutes=15),
         )
         self.db.add(preview)
         await self.db.commit()
@@ -464,15 +544,20 @@ class CalendarService:
                 "Phiên bản bản xem trước không khớp (đã bị cập nhật).", status_code=409
             )
 
-        now_utc = datetime.now(timezone.utc)
+        now_utc = datetime.now(UTC)
         if preview.expires_at and preview.expires_at < now_utc:
             preview.status = "expired"
             await self.db.commit()
             raise CalendarClientError("Bản xem trước cấu hình đã hết hạn. Vui lòng tạo bản xem trước mới.", status_code=409)
 
         conn = await self.db.get(CalendarConnection, preview.connection_id)
-        if not conn:
+        if not conn or conn.user_id != uid:
             raise CalendarClientError("Không tìm thấy kết nối liên quan.", status_code=404)
+        if conn.connection_state != "connected":
+            raise CalendarClientError(
+                "Kết nối lịch không ở trạng thái đang kết nối. Vui lòng kết nối lại.",
+                status_code=409,
+            )
 
         payload = preview.payload or {}
         read_ids = payload.get("read_calendar_ids", [])
@@ -502,11 +587,13 @@ class CalendarService:
                     write_id = new_cal.get("id")
                 except Exception as e:
                     logger.error("Failed to provision secondary calendar: %s", e)
-                    raise CalendarClientError(f"Không thể tạo lịch ProPlan VA Focus: {e}", status_code=502)
+                    raise CalendarClientError(
+                        f"Không thể tạo lịch ProPlan VA Focus: {e}", status_code=502
+                    ) from e
 
         conn.read_calendar_ids = read_ids
         conn.write_calendar_id = write_id
-        conn.last_successful_sync_at = datetime.now(timezone.utc)
+        conn.last_successful_sync_at = datetime.now(UTC)
         preview.status = "confirmed"
 
         await self.db.commit()
@@ -525,3 +612,125 @@ class CalendarService:
         await self.db.commit()
         await self.db.refresh(conn)
         return conn
+
+    async def reconcile_external_link_changes(
+        self, user_id: str | UUID, connection_id: str | UUID
+    ) -> dict[str, int]:
+        """Đối soát thay đổi bên ngoài trên Google Calendar cho các CalendarEventLink hiện hành (A22.3 / K19 / K20)."""
+        from app.services.planning.calendar_ingestion import normalize_google_event
+
+        conn = await self.get_connection_by_id(user_id, connection_id)
+        if not conn:
+            raise CalendarClientError("Không tìm thấy kết nối lịch.", status_code=404)
+
+        if conn.connection_state == "disconnected":
+            return {
+                "links_checked": 0,
+                "links_deleted_externally": 0,
+                "links_diverged": 0,
+            }
+
+        active_links = (
+            await self.db.scalars(
+                select(CalendarEventLink).where(
+                    CalendarEventLink.user_id == conn.user_id,
+                    CalendarEventLink.connection_id == conn.id,
+                    CalendarEventLink.is_current.is_(True),
+                    CalendarEventLink.google_event_id.is_not(None),
+                )
+            )
+        ).all()
+        if not active_links:
+            return {
+                "links_checked": 0,
+                "links_deleted_externally": 0,
+                "links_diverged": 0,
+            }
+
+        link_ids = [lk.id for lk in active_links]
+        conn_id = conn.id
+        conn_user_id = conn.user_id
+
+        access_token = await self.get_valid_access_token(conn)
+
+        active_links = (
+            await self.db.scalars(
+                select(CalendarEventLink).where(
+                    CalendarEventLink.user_id == conn_user_id,
+                    CalendarEventLink.connection_id == conn_id,
+                    CalendarEventLink.id.in_(link_ids),
+                    CalendarEventLink.is_current.is_(True),
+                )
+            )
+        ).all()
+
+        pending_job_link_ids = set(
+            (
+                await self.db.scalars(
+                    select(CalendarSyncJob.event_link_id).where(
+                        CalendarSyncJob.user_id == conn_user_id,
+                        CalendarSyncJob.connection_id == conn_id,
+                        CalendarSyncJob.event_link_id.in_(link_ids),
+                        CalendarSyncJob.job_state.in_(("queued", "running", "retry")),
+                    )
+                )
+            ).all()
+        )
+
+        links_checked = 0
+        links_deleted_externally = 0
+        links_diverged = 0
+
+        for link in active_links:
+            if not link.google_event_id:
+                continue
+            links_checked += 1
+            remote_event = await self.client.get_event(
+                access_token, link.google_calendar_id, str(link.google_event_id)
+            )
+            now_utc = datetime.now(UTC)
+
+            if (
+                remote_event is None
+                or str(remote_event.get("status", "")).lower() == "cancelled"
+            ):
+                link.sync_state = "deleted_externally"
+                link.is_current = False
+                link.updated_at = now_utc
+                links_deleted_externally += 1
+                continue
+
+            sess = await self.db.get(Session, link.session_id)
+            norm = normalize_google_event(
+                remote_event, str(conn_id), link.google_calendar_id
+            )
+            time_drifted = False
+            if sess is not None and norm is not None:
+                sess_start = _ensure_utc(sess.scheduled_start)
+                sess_end = _ensure_utc(sess.scheduled_end)
+                rem_start = _ensure_utc(norm.start_at)
+                rem_end = _ensure_utc(norm.end_at)
+                if (
+                    abs((rem_start - sess_start).total_seconds()) > 1
+                    or abs((rem_end - sess_end).total_seconds()) > 1
+                ):
+                    time_drifted = True
+
+            remote_etag = remote_event.get("etag")
+            etag_drifted = bool(
+                link.google_etag is not None
+                and remote_etag is not None
+                and str(remote_etag) != str(link.google_etag)
+            )
+
+            if (time_drifted or etag_drifted) and link.id not in pending_job_link_ids:
+                link.sync_state = "diverged"
+                link.updated_at = now_utc
+                links_diverged += 1
+
+        await self.db.commit()
+        return {
+            "links_checked": links_checked,
+            "links_deleted_externally": links_deleted_externally,
+            "links_diverged": links_diverged,
+        }

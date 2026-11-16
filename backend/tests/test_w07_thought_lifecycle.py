@@ -11,7 +11,7 @@ from app.api.v1 import voice
 from app.core.errors import AppError
 from app.models import CommandReceipt, Task, Thought, User
 from app.models.planning import PlanningDraft
-from app.schemas.thought import ThoughtDeleteRequest, ThoughtToDraftRequest
+from app.schemas.thought import ThoughtData, ThoughtDeleteRequest, ThoughtToDraftRequest
 from app.services import command_service, thought_service
 from app.services.voice_service import SttError, SttErrorCode, SttResult
 from tests import test_w05_execution_checkin as baseline
@@ -491,3 +491,61 @@ async def test_thought_link_reflects_task_only_after_candidate_confirm(w05_clien
     listing = (await w05_client.get("/api/v1/thoughts")).json()["data"]["items"]
     assert listing[0]["converted_task_id"] == task_id
     assert (await delete(w05_client, row, revision=detail["thought_revision"])).status_code == 409
+
+
+async def test_thought_text_fallback_attempts_4_and_5_succeed_and_persist_in_db(
+    w05_client, w05_env
+):
+    for attempt in (4, 5):
+        res = await capture(
+            w05_client,
+            input_type="text",
+            attempt_count=attempt,
+            text_content=f"Suy nghĩ nhập tay lần {attempt}",
+        )
+        assert res.status_code == 201, res.text
+        data = res.json()["data"]
+        assert data["attempt_count"] == attempt
+        assert data["input_type"] == "text"
+        async with w05_env["sessions"]() as db:
+            saved = await db.scalar(select(Thought).where(Thought.id == UUID(data["thought_id"])))
+            assert saved is not None
+            assert saved.attempt_count == attempt
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"input_type": "audio", "attempt_count": 4, "text_content": None},
+        {"input_type": "audio", "attempt_count": 1, "text_content": "Không được có text"},
+        {"input_type": "text", "attempt_count": 1, "text_content": "Hợp lệ", "client_thought_id": "   "},
+    ],
+)
+async def test_thought_validation_rejects_audio_over_3_zero_ai_and_blank_id(w05_client, changes):
+    res = await capture(w05_client, **changes)
+    assert res.status_code == 422, res.text
+
+
+async def test_thought_data_preserves_legacy_whitespace_and_opaque_ids(w05_client):
+    legacy = ThoughtData(
+        thought_id=str(uuid4()),
+        thought_revision=1,
+        client_thought_id="   ",
+        source_run_id=None,
+        input_type="audio",
+        capture_state="captured_offline",
+        attempt_count=1,
+        text_content=None,
+    )
+    assert legacy.client_thought_id == "   "
+
+    opaque = " item "
+    res = await capture(
+        w05_client,
+        client_thought_id=opaque,
+        input_type="text",
+        attempt_count=1,
+        text_content="Ghi chú giữ nguyên ID",
+    )
+    assert res.status_code == 201, res.text
+    assert res.json()["data"]["client_thought_id"] == opaque

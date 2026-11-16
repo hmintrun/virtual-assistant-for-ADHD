@@ -13,16 +13,18 @@ Hỗ trợ:
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
-from typing import Annotated, Any
+from datetime import UTC, datetime, timedelta
+from typing import Annotated
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 from uuid import UUID
 
-from fastapi import APIRouter, HTTPException, Query, status
+from fastapi import APIRouter, Query, status
 from fastapi.responses import RedirectResponse
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
 from app.api.deps import CurrentUserDep, DbSessionDep
+from app.core.errors import AppError
 from app.models.calendar import CalendarPreview, CalendarSyncJob
 from app.schemas.calendar import (
     CalendarAuthorizationRequest,
@@ -49,6 +51,48 @@ from app.services.google_calendar_client import CalendarAuthError, CalendarClien
 from app.services.planning.calendar_ingestion import normalize_google_event
 
 router = APIRouter(prefix="/calendar", tags=["calendar"])
+
+
+def _calendar_auth_error(exc: CalendarAuthError) -> AppError:
+    return AppError(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        code="CALENDAR_AUTH_REQUIRED",
+        message=exc.message,
+        next_action="reconnect_google_calendar",
+    )
+
+
+def _calendar_client_error(exc: CalendarClientError) -> AppError:
+    code = "CALENDAR_CLIENT_ERROR"
+    next_action = "retry_later"
+    if exc.status_code == 404:
+        code = "RESOURCE_NOT_FOUND"
+        next_action = "check_calendar_connection"
+    elif exc.status_code == 409:
+        code = "CALENDAR_CONFLICT"
+        next_action = "reload_and_review"
+    elif exc.status_code == 400:
+        code = "VALIDATION_ERROR"
+        next_action = "fix_request"
+    elif exc.status_code == 403:
+        code = "CALENDAR_PERMISSION_DENIED"
+        next_action = "reconnect_google_calendar"
+    return AppError(
+        status_code=exc.status_code,
+        code=code,
+        message=exc.message,
+        next_action=next_action,
+        retryable=exc.status_code >= 500,
+    )
+
+
+def _not_found(message: str) -> AppError:
+    return AppError(
+        status_code=404,
+        code="RESOURCE_NOT_FOUND",
+        message=message,
+        next_action="check_resource",
+    )
 
 
 # 45 | POST /api/v1/calendar/authorizations
@@ -95,6 +139,16 @@ async def get_authorization_url(
     return SuccessEnvelope(data=OAuthAuthUrlResponse(auth_url=auth_url), meta=build_response_meta())
 
 
+def _append_query_params(url: str, params: dict[str, str | None]) -> str:
+    """Nối các tham số query vào deep-link/redirect URL mà vẫn giữ nguyên query cũ."""
+    parsed = urlparse(url)
+    query_items = dict(parse_qsl(parsed.query, keep_blank_values=True))
+    for key, val in params.items():
+        if val is not None:
+            query_items[key] = val
+    return urlunparse(parsed._replace(query=urlencode(query_items)))
+
+
 # 46 | GET /api/v1/calendar/oauth/callback
 @router.get(
     "/oauth/callback",
@@ -102,23 +156,35 @@ async def get_authorization_url(
     response_class=RedirectResponse,
 )
 async def oauth_callback(
-    code: Annotated[str, Query(min_length=1, description="Authorization code do Google cấp")],
     state: Annotated[str, Query(min_length=1, description="State token bảo vệ chống CSRF")],
     db: DbSessionDep,
-    current_user: CurrentUserDep | None = None,
+    code: Annotated[str | None, Query(description="Authorization code do Google cấp")] = None,
+    error: Annotated[str | None, Query(description="Mã lỗi OAuth từ Google nếu có")] = None,
+    error_description: Annotated[str | None, Query(description="Mô tả chi tiết lỗi OAuth từ Google")] = None,
 ) -> RedirectResponse:
     service = CalendarService(db)
-    user_id = current_user.user_id if current_user else None
+    if error or not code:
+        try:
+            return_target = await service.handle_oauth_error(state=state)
+        except CalendarAuthError as exc:
+            raise _calendar_auth_error(exc) from exc
+        base_target = return_target or "proplan://calendar/connected"
+        target_url = _append_query_params(
+            base_target,
+            {"error": error or "missing_code", "error_description": error_description},
+        )
+        return RedirectResponse(url=target_url, status_code=302)
+
     try:
         conn, return_target = await service.handle_oauth_callback(
-            user_id=user_id,
+            user_id=None,
             code=code,
             state=state,
         )
     except CalendarAuthError as exc:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=exc.message)
+        raise _calendar_auth_error(exc) from exc
     except CalendarClientError as exc:
-        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=exc.message)
+        raise _calendar_client_error(exc) from exc
 
     target_url = return_target or f"proplan://calendar/connected?connection_id={conn.id}"
     return RedirectResponse(url=target_url, status_code=302)
@@ -131,12 +197,19 @@ async def oauth_callback(
     response_class=RedirectResponse,
 )
 async def oauth2_callback_legacy(
-    code: Annotated[str, Query(min_length=1)],
     state: Annotated[str, Query(min_length=1)],
     db: DbSessionDep,
-    current_user: CurrentUserDep | None = None,
+    code: Annotated[str | None, Query()] = None,
+    error: Annotated[str | None, Query()] = None,
+    error_description: Annotated[str | None, Query()] = None,
 ) -> RedirectResponse:
-    return await oauth_callback(code=code, state=state, db=db, current_user=current_user)
+    return await oauth_callback(
+        state=state,
+        db=db,
+        code=code,
+        error=error,
+        error_description=error_description,
+    )
 
 
 # 47 | GET /api/v1/calendar/connections
@@ -168,7 +241,7 @@ async def get_connection_detail(
     service = CalendarService(db)
     conn = await service.get_connection_by_id(current_user.user_id, connection_id)
     if not conn:
-        raise HTTPException(status_code=404, detail="Không tìm thấy kết nối lịch tương ứng.")
+        raise _not_found("Không tìm thấy kết nối lịch tương ứng.")
 
     data = CalendarConnectionRead(
         connection_id=str(conn.id),
@@ -200,9 +273,9 @@ async def get_calendars(
             user_id=current_user.user_id, connection_id=connection_id
         )
     except CalendarAuthError as exc:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=exc.message)
+        raise _calendar_auth_error(exc) from exc
     except CalendarClientError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=exc.message)
+        raise _calendar_client_error(exc) from exc
 
     return SuccessEnvelope(data=calendar_list, meta=build_response_meta())
 
@@ -229,7 +302,7 @@ async def create_configuration_preview(
             existing_event_action=payload.existing_event_action,
         )
     except CalendarClientError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=exc.message)
+        raise _calendar_client_error(exc) from exc
 
     data = CalendarConfigurationPreviewResponse(
         preview_id=str(preview.id),
@@ -262,7 +335,7 @@ async def confirm_configuration_preview(
             expected_preview_revision=payload.expected_preview_revision,
         )
     except CalendarClientError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=exc.message)
+        raise _calendar_client_error(exc) from exc
 
     data = CalendarConnectionRead(
         connection_id=str(conn.id),
@@ -299,7 +372,7 @@ async def update_selection(
             write_calendar_id=payload.write_calendar_id,
         )
     except CalendarClientError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=exc.message)
+        raise _calendar_client_error(exc) from exc
 
     return SuccessEnvelope(data=updated, meta=build_response_meta())
 
@@ -319,7 +392,7 @@ async def disconnect_connection(
     try:
         conn = await service.disconnect(user_id=current_user.user_id, connection_id=connection_id)
     except CalendarClientError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=exc.message)
+        raise _calendar_client_error(exc) from exc
 
     data = CalendarConnectionRead(
         connection_id=str(conn.id),
@@ -352,16 +425,16 @@ async def get_connection_events(
     service = CalendarService(db)
     conn = await service.get_connection_by_id(current_user.user_id, connection_id)
     if not conn:
-        raise HTTPException(status_code=404, detail="Không tìm thấy kết nối lịch.")
+        raise _not_found("Không tìm thấy kết nối lịch.")
     try:
         access_token = await service.get_valid_access_token(conn)
-        q_start = from_at or datetime.now(timezone.utc)
+        q_start = from_at or datetime.now(UTC)
         q_end = to_at or (q_start + timedelta(days=14))
         raw_events = await service.client.list_events(access_token, google_calendar_id, q_start, q_end)
     except CalendarAuthError as exc:
-        raise HTTPException(status_code=401, detail=exc.message)
+        raise _calendar_auth_error(exc) from exc
     except CalendarClientError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=exc.message)
+        raise _calendar_client_error(exc) from exc
     events: list[CalendarEvent] = []
     for raw in raw_events[:limit]:
         norm = normalize_google_event(raw, str(connection_id), google_calendar_id)
@@ -386,19 +459,19 @@ async def get_connection_event_detail(
     service = CalendarService(db)
     conn = await service.get_connection_by_id(current_user.user_id, connection_id)
     if not conn:
-        raise HTTPException(status_code=404, detail="Không tìm thấy kết nối lịch.")
+        raise _not_found("Không tìm thấy kết nối lịch.")
     try:
         access_token = await service.get_valid_access_token(conn)
         raw = await service.client.get_event(access_token, google_calendar_id, event_id)
     except CalendarAuthError as exc:
-        raise HTTPException(status_code=401, detail=exc.message)
+        raise _calendar_auth_error(exc) from exc
     except CalendarClientError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=exc.message)
+        raise _calendar_client_error(exc) from exc
     if not raw:
-        raise HTTPException(status_code=404, detail="Không tìm thấy sự kiện trên Google Calendar.")
+        raise _not_found("Không tìm thấy sự kiện trên Google Calendar.")
     norm = normalize_google_event(raw, str(connection_id), google_calendar_id)
     if not norm:
-        raise HTTPException(status_code=404, detail="Sự kiện không hợp lệ hoặc đã bị hủy.")
+        raise _not_found("Sự kiện không hợp lệ hoặc đã bị hủy.")
     return SuccessEnvelope(data=norm, meta=build_response_meta())
 
 
@@ -417,13 +490,15 @@ async def create_event_change_preview(
     service = CalendarService(db)
     conn = await service.get_connection_by_id(current_user.user_id, conn_id)
     if not conn:
-        raise HTTPException(status_code=404, detail="Không tìm thấy kết nối lịch tương ứng.")
+        raise _not_found("Không tìm thấy kết nối lịch tương ứng.")
 
     # BUG-16: Kiểm tra bắt buộc có google_event_id khi update hoặc delete
     if payload.operation in ("update", "delete") and not payload.google_event_id:
-        raise HTTPException(
+        raise AppError(
             status_code=400,
-            detail="Thao tác cập nhật hoặc xóa sự kiện yêu cầu cung cấp google_event_id.",
+            code="VALIDATION_ERROR",
+            message="Thao tác cập nhật hoặc xóa sự kiện yêu cầu cung cấp google_event_id.",
+            next_action="fix_request",
         )
 
     preview_payload = {
@@ -442,7 +517,7 @@ async def create_event_change_preview(
         payload=preview_payload,
         status="pending",
         source_revisions={},
-        expires_at=datetime.now(timezone.utc) + timedelta(minutes=15),
+        expires_at=datetime.now(UTC) + timedelta(minutes=15),
     )
     db.add(preview)
     await db.commit()
@@ -473,25 +548,29 @@ async def confirm_event_change_preview(
 ) -> SuccessEnvelope[CalendarSyncJobRead]:
     preview = await db.get(CalendarPreview, preview_id)
     if not preview or preview.user_id != _resolve_uuid(current_user.user_id):
-        raise HTTPException(status_code=404, detail="Bản xem trước thay đổi không tồn tại.")
+        raise _not_found("Bản xem trước thay đổi không tồn tại.")
 
     if (
         payload.expected_preview_revision is not None
         and preview.base_connection_revision is not None
         and preview.base_connection_revision != payload.expected_preview_revision
     ):
-        raise HTTPException(
+        raise AppError(
             status_code=409,
-            detail="Phiên bản bản xem trước không khớp (đã bị cập nhật).",
+            code="REVISION_CONFLICT",
+            message="Phiên bản bản xem trước không khớp (đã bị cập nhật).",
+            next_action="reload_and_review",
         )
 
-    now_utc = datetime.now(timezone.utc)
+    now_utc = datetime.now(UTC)
     if preview.expires_at and preview.expires_at < now_utc:
         preview.status = "expired"
         await db.commit()
-        raise HTTPException(
+        raise AppError(
             status_code=409,
-            detail="Bản xem trước thay đổi đã hết hạn (15 phút). Vui lòng tạo bản xem trước mới.",
+            code="PREVIEW_EXPIRED",
+            message="Bản xem trước thay đổi đã hết hạn (15 phút). Vui lòng tạo bản xem trước mới.",
+            next_action="create_preview",
         )
 
     uid = _resolve_uuid(current_user.user_id)
@@ -522,7 +601,12 @@ async def confirm_event_change_preview(
         return SuccessEnvelope(data=data, meta=build_response_meta())
 
     if preview.status != "pending":
-        raise HTTPException(status_code=409, detail="Bản xem trước đã được xử lý hoặc hết hạn.")
+        raise AppError(
+            status_code=409,
+            code="PREVIEW_ALREADY_PROCESSED",
+            message="Bản xem trước đã được xử lý hoặc hết hạn.",
+            next_action="create_preview",
+        )
 
     preview_data = preview.payload or {}
     op = preview_data.get("operation", "create")
@@ -589,11 +673,26 @@ async def refresh_calendar(
     service = CalendarService(db)
     conn = await service.get_connection_by_id(current_user.user_id, connection_id)
     if not conn:
-        raise HTTPException(status_code=404, detail="Không tìm thấy kết nối lịch.")
+        raise _not_found("Không tìm thấy kết nối lịch.")
 
     processed = await process_calendar_sync_jobs(db, user_id=current_user.user_id, limit=20)
+    try:
+        reconciled = await service.reconcile_external_link_changes(
+            current_user.user_id, connection_id
+        )
+    except CalendarAuthError as exc:
+        raise _calendar_auth_error(exc) from exc
+    except CalendarClientError as exc:
+        raise _calendar_client_error(exc) from exc
+
     return SuccessEnvelope(
-        data={"status": "refreshed", "jobs_processed": str(processed)},
+        data={
+            "status": "refreshed",
+            "jobs_processed": str(processed),
+            "links_checked": str(reconciled["links_checked"]),
+            "links_deleted_externally": str(reconciled["links_deleted_externally"]),
+            "links_diverged": str(reconciled["links_diverged"]),
+        },
         meta=build_response_meta(),
     )
 
@@ -612,7 +711,7 @@ async def get_sync_job(
     uid = _resolve_uuid(current_user.user_id)
     job = await db.get(CalendarSyncJob, job_id)
     if not job or job.user_id != uid:
-        raise HTTPException(status_code=404, detail="Không tìm thấy sync job.")
+        raise _not_found("Không tìm thấy sync job.")
 
     data = CalendarSyncJobRead(
         job_id=str(job.id),
@@ -643,7 +742,7 @@ async def retry_sync_job(
     uid = _resolve_uuid(current_user.user_id)
     job = await db.get(CalendarSyncJob, job_id)
     if not job or job.user_id != uid:
-        raise HTTPException(status_code=404, detail="Không tìm thấy sync job.")
+        raise _not_found("Không tìm thấy sync job.")
 
     job.job_state = "queued"
     job.attempt_count = 0

@@ -93,6 +93,11 @@ def record(db, user_id, key, digest, operation, result):
         and isinstance(getattr(nested_checkin, "checkin_id", None), str)
     ):
         refs["checkin_id"] = nested_checkin.checkin_id
+    extra_meta = {
+        k: v
+        for k, v in (db.info.pop("command_result_meta", None) or {}).items()
+        if isinstance(k, str) and k.startswith("_")
+    }
     db.add(
         CommandReceipt(
             user_id=owner_uuid(user_id),
@@ -102,6 +107,7 @@ def record(db, user_id, key, digest, operation, result):
             state="applied",
             result_reference={
                 **refs,
+                **extra_meta,
                 "_response": result.model_dump(mode="json", exclude_unset=True),
             },
             applied_at=datetime.now(UTC),
@@ -160,6 +166,7 @@ def durable_command(operation, result_type: type[BaseModel], *, resource_arg: st
                 raise
             finally:
                 db.info.pop("defer_command_commit", None)
+                db.info.pop("command_result_meta", None)
 
         return wrapped
 

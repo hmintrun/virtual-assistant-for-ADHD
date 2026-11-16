@@ -1,18 +1,22 @@
 # Tầng Service điều phối nghiệp vụ cho bản nháp công việc UF1 (PlanningDraft)
-import json
 from datetime import UTC, datetime
 from typing import Any, Literal, cast
 from uuid import NAMESPACE_DNS, UUID, uuid4, uuid5
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import ValidationError
-from sqlalchemy import select, update
+from sqlalchemy import delete, select, update
 from sqlalchemy.exc import MultipleResultsFound
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import AppError
+from app.core.security import dev_seed_enabled
 from app.models.base import Base
+from app.models.calendar import PlanningContext as PlanningContextModel
+from app.models.planning import PlanCandidate as PlanCandidateModel
 from app.models.planning import PlanningDraft as PlanningDraftModel
 from app.models.settings import Availability as AvailabilityModel
+from app.models.task import Task as TaskModel
 from app.models.user import User as UserModel
 from app.models.user import UserPreference as UserPreferenceModel
 from app.repositories import run_repository, thought_repository
@@ -101,34 +105,6 @@ def _build_seed_draft(draft_id: str, client_draft_id: str) -> PlanningDraft:
         user_step_proposal=None,
         planning_input_revision=5,
     )
-
-
-# Kho dữ liệu giả lập tạm thời theo từng chủ sở hữu (user_id, draft_id) khi chưa ghép DB (Bước 5.1)
-# Ghi chú phụ thuộc F04/F07: Khi role Database bàn giao model/migration, thay các biến dưới đây bằng truy vấn AsyncSession.
-_FAKE_DRAFTS_BY_OWNER: dict[tuple[str, str], PlanningDraft] = {
-    ("user_a", "draft_1"): _build_seed_draft("draft_1", "draft_may_1"),
-    ("user_a", "draft_025"): _build_seed_draft("draft_025", "draft_may_025"),
-    ("user_b", "draft_b_1"): _build_seed_draft("draft_b_1", "draft_may_b_1"),
-}
-
-# Ánh xạ (user_id, client_draft_id) -> draft_id để chống nhân bản Draft khi gửi lại cùng client_draft_id
-_CLIENT_DRAFT_INDEX: dict[tuple[str, str], str] = {
-    ("user_a", "draft_may_1"): "draft_1",
-    ("user_a", "draft_may_025"): "draft_025",
-    ("user_b", "draft_may_b_1"): "draft_b_1",
-}
-
-# Lưu biên nhận Idempotency-Key cho thao tác tạo Draft: (user_id, idempotency_key) -> (payload_fingerprint, draft_id)
-_CREATE_IDEMPOTENCY_STORE: dict[tuple[str, str], tuple[str, str]] = {}
-
-# Lưu biên nhận Idempotency-Key cho thao tác sửa Draft: (user_id, idempotency_key) -> (payload_fingerprint, PlanningDraft)
-_PATCH_IDEMPOTENCY_STORE: dict[tuple[str, str], tuple[str, PlanningDraft]] = {}
-
-# Lưu biên nhận Idempotency-Key cho thao tác xác nhận UF1: (user_id, idempotency_key) -> (payload_fingerprint, ConfirmSummaryResult)
-_CONFIRM_SUMMARY_IDEMPOTENCY_STORE: dict[tuple[str, str], tuple[str, ConfirmSummaryResult]] = {}
-
-# Lưu biên nhận Idempotency-Key cho thao tác phân tích AI UF1: (user_id, idempotency_key) -> (payload_fingerprint, PlanningDraft)
-_ANALYZE_IDEMPOTENCY_STORE: dict[tuple[str, str], tuple[str, PlanningDraft]] = {}
 
 
 # Phiên bản nguồn giờ rảnh hiện tại theo từng chủ sở hữu (user_id, availability_id) -> revision
@@ -237,6 +213,8 @@ def _row_to_schema(row: PlanningDraftModel, fallback_draft_id: str | None = None
 
 async def ensure_dev_seed_in_db(db: AsyncSession) -> None:
     """Bước 5.1 (F07, T23): Khởi tạo bảng và seed idempotent cho User A, User B cùng các Draft mẫu."""
+    if not dev_seed_enabled():
+        return
     if db.info.get("dev_seed_ready"):
         return
     bind = db.get_bind()
@@ -295,9 +273,7 @@ async def ensure_dev_seed_in_db(db: AsyncSession) -> None:
         did = resolve_draft_uuid(raw_did)
         existing_draft = await db.get(PlanningDraftModel, did)
         if existing_draft is None:
-            seed_dto = _FAKE_DRAFTS_BY_OWNER.get(
-                (raw_uid, raw_did), _build_seed_draft(raw_did, client_did)
-            )
+            seed_dto = _build_seed_draft(raw_did, client_did)
             db.add(
                 PlanningDraftModel(
                     id=did,
@@ -449,8 +425,6 @@ async def _persist_draft_to_db(
             await db.commit()
         else:
             await db.flush()
-    _FAKE_DRAFTS_BY_OWNER[(user_id, draft.draft_id)] = draft
-    _CLIENT_DRAFT_INDEX[(user_id, draft.client_draft_id)] = draft.draft_id
 
 
 async def get_user_availability(user_id: str, db: AsyncSession) -> Availability | None:
@@ -762,49 +736,23 @@ async def create_draft(
     db: AsyncSession | None = None,
 ) -> PlanningDraft:
     """Dòng 2 (POST /api/v1/drafts): Tạo bản nháp mới, chống nhân bản qua Idempotency-Key và client_draft_id."""
-    if db is not None:
-        await ensure_dev_seed_in_db(db)
-    fingerprint = json.dumps(payload.model_dump(mode="json"), sort_keys=True)
-    idem_record = _CREATE_IDEMPOTENCY_STORE.get((user_id, idempotency_key)) if db is None else None
-    if idem_record is not None:
-        saved_fingerprint, saved_draft_id = idem_record
-        if saved_fingerprint != fingerprint:
-            raise AppError(
-                status_code=409,
-                code="IDEMPOTENCY_KEY_REUSED",
-                message=(
-                    "Mã lệnh đã được dùng với nội dung khác. "
-                    "Giữ mã cũ khi retry đúng nội dung; tạo mã mới cho ý định mới."
-                ),
-                next_action="use_original_payload_or_new_command",
-            )
-        return await get_draft_by_id(user_id=user_id, draft_id=saved_draft_id, db=db)
-
-    if db is not None:
-        uid = resolve_user_uuid(user_id)
-        stmt = select(PlanningDraftModel).where(
-            PlanningDraftModel.user_id == uid,
-            PlanningDraftModel.client_draft_id == payload.client_draft_id,
+    if db is None:
+        raise AppError(
+            status_code=500,
+            code="DATABASE_REQUIRED",
+            message="Thao tác yêu cầu kết nối cơ sở dữ liệu.",
+            next_action="reload",
         )
-        existing_row = (await db.execute(stmt)).scalar_one_or_none()
-        if existing_row is not None:
-            existing_dto = _row_to_schema(existing_row)
-            _FAKE_DRAFTS_BY_OWNER[(user_id, existing_dto.draft_id)] = existing_dto
-            _CLIENT_DRAFT_INDEX[(user_id, payload.client_draft_id)] = existing_dto.draft_id
-            _CREATE_IDEMPOTENCY_STORE[(user_id, idempotency_key)] = (
-                fingerprint,
-                existing_dto.draft_id,
-            )
-            return existing_dto
+    await ensure_dev_seed_in_db(db)
 
-    existing_draft_id = _CLIENT_DRAFT_INDEX.get((user_id, payload.client_draft_id))
-    if db is None and existing_draft_id is not None:
-        existing_draft = _FAKE_DRAFTS_BY_OWNER[(user_id, existing_draft_id)]
-        _CREATE_IDEMPOTENCY_STORE[(user_id, idempotency_key)] = (
-            fingerprint,
-            existing_draft_id,
-        )
-        return existing_draft
+    uid = resolve_user_uuid(user_id)
+    stmt = select(PlanningDraftModel).where(
+        PlanningDraftModel.user_id == uid,
+        PlanningDraftModel.client_draft_id == payload.client_draft_id,
+    )
+    existing_row = (await db.execute(stmt)).scalar_one_or_none()
+    if existing_row is not None:
+        return _row_to_schema(existing_row)
 
     new_draft_id = f"draft_{uuid4().hex}"
     summary = _build_initial_summary(payload.raw_input, payload.summary)
@@ -827,7 +775,6 @@ async def create_draft(
         planning_input_revision=1,
     )
     await _persist_draft_to_db(db, user_id, new_draft)
-    _CREATE_IDEMPOTENCY_STORE[(user_id, idempotency_key)] = (fingerprint, new_draft_id)
     return new_draft
 
 
@@ -839,32 +786,27 @@ async def list_drafts(
     db: AsyncSession | None = None,
 ) -> DraftListData:
     """Dòng 3 (GET /api/v1/drafts): Liệt kê các bản nháp thuộc về user_id có phân trang."""
-    if db is not None:
-        await ensure_dev_seed_in_db(db)
-        uid = resolve_user_uuid(user_id)
-        rows = (
-            (
-                await db.execute(
-                    select(PlanningDraftModel)
-                    .where(PlanningDraftModel.user_id == uid)
-                    .order_by(PlanningDraftModel.created_at)
-                )
-            )
-            .scalars()
-            .all()
+    if db is None:
+        raise AppError(
+            status_code=500,
+            code="DATABASE_REQUIRED",
+            message="Thao tác yêu cầu kết nối cơ sở dữ liệu.",
+            next_action="reload",
         )
-        for row in rows:
-            dto = _row_to_schema(row)
-            if (user_id, dto.draft_id) not in _FAKE_DRAFTS_BY_OWNER:
-                _FAKE_DRAFTS_BY_OWNER[(user_id, dto.draft_id)] = dto
-
-    user_drafts = (
-        [_row_to_schema(row) for row in rows]
-        if db is not None
-        else [
-            draft for (owner_id, _), draft in _FAKE_DRAFTS_BY_OWNER.items() if owner_id == user_id
-        ]
+    await ensure_dev_seed_in_db(db)
+    uid = resolve_user_uuid(user_id)
+    rows = (
+        (
+            await db.execute(
+                select(PlanningDraftModel)
+                .where(PlanningDraftModel.user_id == uid)
+                .order_by(PlanningDraftModel.created_at)
+            )
+        )
+        .scalars()
+        .all()
     )
+    user_drafts = [_row_to_schema(row) for row in rows]
     start_index = 0
     if cursor is not None:
         for idx, draft in enumerate(user_drafts):
@@ -892,35 +834,107 @@ async def get_draft_by_id(
     draft_id: str,
     db: AsyncSession | None = None,
 ) -> PlanningDraft:
-    """Tìm bản nháp trong phạm vi của user_id (qua AsyncSession và bộ nhớ đồng bộ). Không tồn tại hoặc khác chủ sở hữu đều trả 404."""
-    in_mem = _FAKE_DRAFTS_BY_OWNER.get((user_id, draft_id))
-    if db is not None:
-        await ensure_dev_seed_in_db(db)
-        did = resolve_draft_uuid(draft_id)
-        uid = resolve_user_uuid(user_id)
-        row = (
-            await db.execute(
-                select(PlanningDraftModel)
-                .where(
-                    PlanningDraftModel.id == did,
-                    PlanningDraftModel.user_id == uid,
-                )
-                .execution_options(populate_existing=True)
+    """Tìm bản nháp trong phạm vi của user_id qua cơ sở dữ liệu. Không tồn tại hoặc khác chủ sở hữu đều trả 404."""
+    if db is None:
+        raise AppError(
+            status_code=500,
+            code="DATABASE_REQUIRED",
+            message="Thao tác yêu cầu kết nối cơ sở dữ liệu.",
+            next_action="reload",
+        )
+    await ensure_dev_seed_in_db(db)
+    did = resolve_draft_uuid(draft_id)
+    uid = resolve_user_uuid(user_id)
+    row = (
+        await db.execute(
+            select(PlanningDraftModel)
+            .where(
+                PlanningDraftModel.id == did,
+                PlanningDraftModel.user_id == uid,
             )
-        ).scalar_one_or_none()
-        if row is not None:
-            db_dto = _row_to_schema(row, fallback_draft_id=draft_id)
-            _FAKE_DRAFTS_BY_OWNER[(user_id, draft_id)] = db_dto
-            return db_dto
-
-    if db is not None or in_mem is None:
+            .execution_options(populate_existing=True)
+        )
+    ).scalar_one_or_none()
+    if row is None:
         raise AppError(
             status_code=404,
             code="RESOURCE_NOT_FOUND",
             message="Không tìm thấy tài nguyên trong phạm vi bạn được phép truy cập.",
             next_action="reload",
         )
-    return in_mem
+    return _row_to_schema(row, fallback_draft_id=draft_id)
+
+
+async def delete_draft(
+    *,
+    user_id: str,
+    draft_id: str,
+    db: AsyncSession | None = None,
+) -> dict[str, Any]:
+    """Xóa vĩnh viễn bản nháp UF1 chưa chốt thành Task chính thức."""
+    if db is None:
+        raise AppError(
+            status_code=500,
+            code="DATABASE_REQUIRED",
+            message="Thao tác yêu cầu kết nối cơ sở dữ liệu.",
+            next_action="reload",
+        )
+    await ensure_dev_seed_in_db(db)
+    did = resolve_draft_uuid(draft_id)
+    uid = resolve_user_uuid(user_id)
+    row = (
+        await db.execute(
+            select(PlanningDraftModel)
+            .where(
+                PlanningDraftModel.id == did,
+                PlanningDraftModel.user_id == uid,
+            )
+            .execution_options(populate_existing=True)
+        )
+    ).scalar_one_or_none()
+    if row is None:
+        raise AppError(
+            status_code=404,
+            code="RESOURCE_NOT_FOUND",
+            message="Không tìm thấy bản nháp.",
+            next_action="reload",
+        )
+
+    draft_schema = _row_to_schema(row, fallback_draft_id=draft_id)
+    has_task = (
+        await db.scalar(
+            select(TaskModel.id)
+            .where(TaskModel.user_id == uid, TaskModel.source_draft_id == row.id)
+            .limit(1)
+        )
+    ) is not None
+    if (
+        row.stage == "confirmed"
+        or draft_schema.confirmed_task_id is not None
+        or has_task
+    ):
+        raise AppError(
+            status_code=409,
+            code="INVALID_STATE_TRANSITION",
+            message="Bản nháp đã chốt thành công việc chính thức, không thể xóa.",
+            next_action="reload_and_review",
+        )
+
+    await db.execute(
+        delete(PlanningContextModel).where(
+            PlanningContextModel.user_id == uid,
+            PlanningContextModel.source_draft_id == row.id,
+        )
+    )
+    await db.execute(
+        delete(PlanCandidateModel).where(
+            PlanCandidateModel.user_id == uid,
+            PlanCandidateModel.draft_id == row.id,
+        )
+    )
+    await db.delete(row)
+    await db.commit()
+    return {"draft_id": draft_schema.draft_id, "deleted": True}
 
 
 @durable_command("patch_draft", PlanningDraft)
@@ -933,28 +947,6 @@ async def patch_draft(
     db: AsyncSession | None = None,
 ) -> PlanningDraft:
     """Dòng 6 (PATCH /api/v1/drafts/{draft_id}): Sửa đúng trường gửi lên, kiểm revision và cập nhật trạng thái."""
-    fingerprint = json.dumps(
-        {
-            "draft_id": draft_id,
-            "body": payload.model_dump(mode="json", exclude_unset=True),
-        },
-        sort_keys=True,
-    )
-    idem_record = _PATCH_IDEMPOTENCY_STORE.get((user_id, idempotency_key)) if db is None else None
-    if idem_record is not None:
-        saved_fingerprint, saved_result = idem_record
-        if saved_fingerprint != fingerprint:
-            raise AppError(
-                status_code=409,
-                code="IDEMPOTENCY_KEY_REUSED",
-                message=(
-                    "Mã lệnh đã được dùng với nội dung khác. "
-                    "Giữ mã cũ khi retry đúng nội dung; tạo mã mới cho ý định mới."
-                ),
-                next_action="use_original_payload_or_new_command",
-            )
-        return saved_result
-
     draft = await get_draft_by_id(user_id=user_id, draft_id=draft_id, db=db)
 
     # Kiểm tra xung đột revision (409 REVISION_CONFLICT)
@@ -1105,7 +1097,6 @@ async def patch_draft(
         }
     )
     await _persist_draft_to_db(db, user_id, updated_draft, expected=draft)
-    _PATCH_IDEMPOTENCY_STORE[(user_id, idempotency_key)] = (fingerprint, updated_draft)
     return updated_draft
 
 
@@ -1119,30 +1110,6 @@ async def confirm_draft_summary(
     db: AsyncSession | None = None,
 ) -> ConfirmSummaryResult:
     """Dòng 7 (POST /api/v1/drafts/{draft_id}/confirm-summary): Xác nhận bảng tóm tắt UF1 (A02.2, T04)."""
-    fingerprint = json.dumps(
-        {
-            "draft_id": draft_id,
-            "body": payload.model_dump(mode="json"),
-        },
-        sort_keys=True,
-    )
-    idem_record = (
-        _CONFIRM_SUMMARY_IDEMPOTENCY_STORE.get((user_id, idempotency_key)) if db is None else None
-    )
-    if idem_record is not None:
-        saved_fingerprint, saved_result = idem_record
-        if saved_fingerprint != fingerprint:
-            raise AppError(
-                status_code=409,
-                code="IDEMPOTENCY_KEY_REUSED",
-                message=(
-                    "Mã lệnh đã được dùng với nội dung khác. "
-                    "Giữ mã cũ khi retry đúng nội dung; tạo mã mới cho ý định mới."
-                ),
-                next_action="use_original_payload_or_new_command",
-            )
-        return saved_result
-
     draft = await get_draft_by_id(user_id=user_id, draft_id=draft_id, db=db)
 
     # 1. Kiểm tra phiên bản bảng tóm tắt người dùng đang xem (409 REVISION_CONFLICT)
@@ -1237,10 +1204,6 @@ async def confirm_draft_summary(
         summary_revision=confirmed_draft.summary_revision,
         planning_input_revision=confirmed_draft.planning_input_revision,
     )
-    _CONFIRM_SUMMARY_IDEMPOTENCY_STORE[(user_id, idempotency_key)] = (
-        fingerprint,
-        result,
-    )
     return result
 
 
@@ -1254,28 +1217,6 @@ async def analyze_draft(
     db: AsyncSession | None = None,
 ) -> PlanningDraft:
     """Dòng 5 (POST /api/v1/drafts/{draft_id}/analyze): Gọi AI trích xuất & làm rõ 1 vòng (I01, A01/A02.1, T03, T18)."""
-    fingerprint = json.dumps(
-        {
-            "draft_id": draft_id,
-            "body": payload.model_dump(mode="json", exclude_unset=True),
-        },
-        sort_keys=True,
-    )
-    idem_record = _ANALYZE_IDEMPOTENCY_STORE.get((user_id, idempotency_key)) if db is None else None
-    if idem_record is not None:
-        saved_fingerprint, saved_draft = idem_record
-        if saved_fingerprint != fingerprint:
-            raise AppError(
-                status_code=409,
-                code="IDEMPOTENCY_KEY_REUSED",
-                message=(
-                    "Mã lệnh đã được dùng với nội dung khác. "
-                    "Giữ mã cũ khi retry đúng nội dung; tạo mã mới cho ý định mới."
-                ),
-                next_action="use_original_payload_or_new_command",
-            )
-        return saved_draft
-
     # Pha 1: Đọc snapshot hiện tại và kiểm tra cả 2 revision trước khi gọi AI
     snapshot_draft = await get_draft_by_id(user_id=user_id, draft_id=draft_id, db=db)
     if (
@@ -1511,19 +1452,74 @@ async def analyze_draft(
                 )
     else:
         unresolved = []
+    complete_time: TimeConstraint | None = None
     proposed_time = extracted.time_constraint
-    if proposed_time is not None:
+    has_proposed_time = proposed_time is not None and any(
+        getattr(proposed_time, field) is not None
+        for field in ("start_at", "deadline_at", "finish_by_at")
+    )
+    if has_proposed_time or extracted.deadline is not None:
         old_time = current_draft.summary.time_constraint
         values = (
             old_time.model_dump(mode="json")
             if old_time
             else dict(context.get("time_constraint") or {})
         )
-        incoming = proposed_time.model_dump(mode="json", exclude_none=True)
+        incoming = (
+            proposed_time.model_dump(mode="json", exclude_none=True)
+            if proposed_time is not None
+            else {}
+        )
         if incoming.get("kind") and incoming["kind"] != values.get("kind"):
             values.pop("deadline_at", None)
             values.pop("finish_by_at", None)
         values.update(incoming)
+        if (
+            values.get("deadline_at") is None
+            and values.get("finish_by_at") is None
+            and extracted.deadline is not None
+        ):
+            values["deadline_at"] = extracted.deadline.isoformat()
+            values.setdefault("kind", "deadline")
+
+        raw_tz = str(values.get("input_timezone") or timezone_name or "Asia/Ho_Chi_Minh").strip()
+        try:
+            tz_info = ZoneInfo(raw_tz)
+            resolved_tz = raw_tz
+        except ZoneInfoNotFoundError:
+            try:
+                tz_info = ZoneInfo(timezone_name)
+                resolved_tz = timezone_name
+            except ZoneInfoNotFoundError:
+                tz_info = UTC
+                resolved_tz = "UTC"
+        values["input_timezone"] = resolved_tz
+        if values.get("finish_by_at") is not None and values.get("deadline_at") is None:
+            values["kind"] = "window"
+        else:
+            values["kind"] = str(values.get("kind") or "deadline")
+            if values["kind"] == "window" and values.get("finish_by_at") is None:
+                values["kind"] = "deadline"
+
+        for dt_key in ("start_at", "deadline_at", "finish_by_at"):
+            raw_dt = values.get(dt_key)
+            if isinstance(raw_dt, str):
+                parsed_dt = datetime.fromisoformat(raw_dt)
+                if parsed_dt.tzinfo is None:
+                    parsed_dt = parsed_dt.replace(tzinfo=tz_info)
+                values[dt_key] = parsed_dt.isoformat()
+            elif isinstance(raw_dt, datetime):
+                parsed_dt = raw_dt if raw_dt.tzinfo is not None else raw_dt.replace(tzinfo=tz_info)
+                values[dt_key] = parsed_dt.isoformat()
+
+        end_key = "deadline_at" if values["kind"] == "deadline" else "finish_by_at"
+        end_raw = values.get(end_key)
+        if end_raw is not None and values.get("start_at") is None:
+            now_in_tz = datetime.now(tz_info)
+            end_dt = datetime.fromisoformat(str(end_raw))
+            if end_dt > now_in_tz:
+                values["start_at"] = now_in_tz.isoformat()
+
         context["time_constraint"] = values
         try:
             complete_time = TimeConstraint.model_validate(values)
@@ -1559,24 +1555,6 @@ async def analyze_draft(
                 new_field_sources["time_constraint"] = FieldSource(
                     source="ai_suggested", source_ref=f"summary_revision:{next_summary_rev}"
                 )
-    elif extracted.deadline is not None:
-        old_time = current_draft.summary.time_constraint
-        old_end = (
-            (old_time.deadline_at if old_time.kind == "deadline" else old_time.finish_by_at)
-            if old_time
-            else None
-        )
-        if old_end != extracted.deadline:
-            context["time_constraint"] = {"deadline_at": extracted.deadline.isoformat()}
-            ai_issues.append(
-                ClarificationIssue(
-                    code="AI_TIME_REVIEW_REQUIRED",
-                    field_path="time_constraint",
-                    message="Đã nhận mốc hoàn tất, cần xác nhận mốc bắt đầu và kiểu thời gian.",
-                    question="Bạn xác nhận mốc bắt đầu và thời gian hoàn tất nhé?",
-                    blocking=True,
-                )
-            )
     ai_issues.extend(
         item.model_copy(
             update={"code": item.code if item.code.startswith("AI_") else f"AI_{item.code}"}
@@ -1639,23 +1617,63 @@ async def analyze_draft(
     }
     for key, issue in active_keys.items():
         if (
-            issue.code == "AI_TIME_INCOMPLETE"
-            and proposed_time is not None
-            and complete_time is not None
+            not issue.code.endswith("_REVIEW_REQUIRED")
+            and (
+                issue.code in {"AI_TIME_INCOMPLETE", "AI_MISSING_TIME_CONSTRAINT"}
+                or issue.field_path == "time_constraint"
+            )
+            and (complete_time is not None or current_draft.summary.time_constraint is not None)
         ):
             continue
         if (
-            issue.code == "AI_AVAILABILITY_INCOMPLETE"
+            not issue.code.endswith("_REVIEW_REQUIRED")
+            and (
+                issue.code in {"AI_AVAILABILITY_INCOMPLETE", "AI_MISSING_AVAILABILITY"}
+                or issue.field_path == "availability"
+            )
             and availability_state is not None
             and not unresolved
         ):
             continue
+        if (
+            not issue.code.endswith("_REVIEW_REQUIRED")
+            and issue.field_path in {"scope", "title", "description", "goal"}
+            and bool(
+                merged_updates.get(issue.field_path)
+                or getattr(current_draft.summary, issue.field_path, None)
+            )
+            and (
+                extracted.is_complete
+                or (
+                    extracted.generation_tier != "tier_3_rule_based"
+                    and not any(i.field_path == issue.field_path for i in ai_issues)
+                )
+            )
+        ):
+            continue
         # Field-review decisions stay with the user; generic semantic resolutions
-        # must reference the exact current question and a non-empty user reply.
-        resolved = (
-            key in extracted.resolved_issue_keys
-            and bool(payload.message)
-            and issue.code == "AI_CLARIFICATION"
+        # accept exact/short resolved keys, completion, or removal on a non-fallback AI pass.
+        raw_code = issue.code.removeprefix("AI_")
+        resolved = not issue.code.endswith("_REVIEW_REQUIRED") and (
+            extracted.is_complete
+            or (
+                bool(input_text)
+                and (
+                    key in extracted.resolved_issue_keys
+                    or issue.code in extracted.resolved_issue_keys
+                    or raw_code in extracted.resolved_issue_keys
+                    or issue.field_path in extracted.resolved_issue_keys
+                    or issue.question in extracted.resolved_issue_keys
+                    or (
+                        extracted.generation_tier != "tier_3_rule_based"
+                        and issue.question not in extracted.clarification_questions
+                        and not any(
+                            i.code == issue.code and i.field_path == issue.field_path
+                            for i in ai_issues
+                        )
+                    )
+                )
+            )
         )
         if not resolved and issue not in ai_issues:
             ai_issues.append(issue)
@@ -1699,8 +1717,4 @@ async def analyze_draft(
         }
     )
     await _persist_draft_to_db(db, user_id, updated_draft, expected=snapshot_draft)
-    _ANALYZE_IDEMPOTENCY_STORE[(user_id, idempotency_key)] = (
-        fingerprint,
-        updated_draft,
-    )
     return updated_draft

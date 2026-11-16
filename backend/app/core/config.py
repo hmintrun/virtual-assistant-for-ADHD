@@ -33,6 +33,17 @@ class Settings(BaseSettings):
         description="Khóa bí mật ký JWT; ẩn khỏi repr/log để bảo mật.",
     )
 
+    # App authentication is separate from Calendar OAuth/credential encryption.
+    AUTH_MODE: Literal["dev_user", "google"] = "dev_user"
+    JWT_SECRET_KEY: str = Field(default="", repr=False)
+    JWT_ISSUER: str = "proplan-va"
+    JWT_AUDIENCE: str = "proplan-va-api"
+    ACCESS_TOKEN_TTL_SECONDS: int = Field(default=3600, ge=60, le=86400)
+    REFRESH_TOKEN_TTL_SECONDS: int = Field(default=30 * 86400, ge=300, le=90 * 86400)
+    AUTH_CLOCK_SKEW_SECONDS: int = Field(default=30, ge=0, le=300)
+    GOOGLE_SIGN_IN_AUDIENCES: list[str] = []
+    GOOGLE_AUTH_TIMEOUT_SECONDS: float = Field(default=5.0, gt=0, le=30)
+
     # Cơ sở dữ liệu (SQLite cho Dev, PostgreSQL cho Production)
     DATABASE_URL: str = "sqlite+aiosqlite:///./proplan.db"
 
@@ -51,8 +62,9 @@ class Settings(BaseSettings):
     GOOGLE_CLOUD_LOCATION: str = "global"
 
     # Định danh Model AI & Voice (Đã kiểm chứng thực nghiệm trên Postpay Tier 1 & Groq 2026)
-    GEMINI_FLASH_MODEL: str = "gemini-3.8-flash"
+    GEMINI_FLASH_MODEL: str = "gemini-3.5-flash-lite"
     GEMINI_BACKUP_MODEL: str = "gemini-3.5-flash-lite"
+    GEMINI_UF1_MODEL: str = "gemini-3.5-flash-lite"
     GROQ_FALLBACK_MODEL: str = "qwen/qwen3.8-27b"
     GROQ_SECONDARY_FALLBACK_MODEL: str = "openai/gpt-oss-20b"
     GROQ_STT_MODEL: str = "whisper-large-v3-turbo"
@@ -85,9 +97,9 @@ class Settings(BaseSettings):
     ENABLE_CALENDAR_SYNC_WORKER: bool = True
     TESTING: bool = False
 
-    # Voice STT (V01 & A21) — chọn sau khảo sát STT tiếng Việt 01/11/2026: Gemini Transcribe smart.
+    # Voice STT (V01 & A21) — hỗ trợ Gemini Transcribe và Groq Whisper (whisper-large-v3-turbo).
     # Dự phòng khi Backend lỗi/mất mạng nằm ở Mobile (speech_to_text on-device).
-    VOICE_STT_PROVIDER: Literal["gemini", "fake"] = "gemini"
+    VOICE_STT_PROVIDER: Literal["gemini", "groq", "auto", "fake"] = "gemini"
     GEMINI_STT_MODEL: str = "gemini-3.5-transcribe"
     GEMINI_STT_MODE: Literal["smart", "verbatim"] = "smart"
     VOICE_STT_LANGUAGE: str = "vi-VN"
@@ -95,19 +107,29 @@ class Settings(BaseSettings):
     VOICE_STT_TIMEOUT_SECONDS: float = Field(default=20.0, gt=0.0, le=120.0)
     VOICE_MAX_AUDIO_BYTES: int = Field(default=10 * 1024 * 1024, gt=0)
 
-    # Khung thời gian A — Luồng tương tác trực tiếp (UF1 & UF6):
-    # 0.0s chạy 3.8-flash -> 2.6s Warm Backup 3.5-flash-lite -> 3.5s Groq -> ưu tiên 3.8-flash tới 4.0s -> cắt cứng 4.5s
+    # Voice TTS (W3-09) — ưu tiên Edge-TTS trên Backend, fallback sang flutter_tts on-device.
+    VOICE_TTS_PROVIDER: Literal["edge_tts", "fake"] = "edge_tts"
+    VOICE_TTS_DEFAULT_VOICE: str = "vi-VN-HoaiMyNeural"
+    VOICE_TTS_TIMEOUT_SECONDS: float = Field(default=10.0, gt=0.0, le=60.0)
+    VOICE_TTS_MAX_CHARS: int = Field(default=600, gt=0, le=2000)
+    VOICE_TTS_CACHE_SIZE: int = Field(default=64, ge=0, le=512)
+
+    # UF1: Flash-Lite MINIMAL từ đầu; chuyển Qwen khi lỗi trong ngưỡng còn đủ thời gian dưới trần.
+    AI_UF1_TIMEOUT_SECONDS: float = Field(default=6.0, gt=0.0, le=15.0)
+    AI_UF1_GROQ_FAST_FAIL_SECONDS: float = Field(default=3.5, ge=0.0, le=15.0)
+
+    # Khung thời gian A — Chỉnh kế hoạch bằng ngôn ngữ tự nhiên và UF6:
+    # 0.0s Primary (3.5-flash-lite) -> 1.5s Warm Backup (3.5-flash-lite) -> 2.2s Groq (còn 2.3s) -> ưu tiên Primary tới 3.0s -> cắt 4.5s
     AI_TIMEOUT_SECONDS: float = Field(default=4.5, gt=0.0, le=20.0)
-    AI_PRIMARY_PRIORITY_SECONDS: float = Field(default=4.0, gt=0.0, le=20.0)
-    AI_WARM_BACKUP_DELAY_SECONDS: float = Field(default=2.6, ge=0.0, le=20.0)
-    AI_GROQ_HEDGE_DELAY_SECONDS: float = Field(default=3.5, ge=0.0, le=20.0)
+    AI_PRIMARY_PRIORITY_SECONDS: float = Field(default=3.0, gt=0.0, le=20.0)
+    AI_WARM_BACKUP_DELAY_SECONDS: float = Field(default=1.5, ge=0.0, le=20.0)
+    AI_GROQ_HEDGE_DELAY_SECONDS: float = Field(default=2.2, ge=0.0, le=20.0)
 
     # Khung thời gian B — Luồng chia nhỏ công việc (UF2 - có màn hình Breathing Circle):
-    # 0.0s chạy 3.8-flash -> 3.1s Warm Backup 3.5-flash-lite -> 4.4s Groq -> ưu tiên 3.8-flash tới 5.4s -> cắt cứng 6.0s
-    AI_UF2_TIMEOUT_SECONDS: float = Field(default=6.0, gt=0.0, le=25.0)
-    AI_UF2_PRIMARY_PRIORITY_SECONDS: float = Field(default=5.4, gt=0.0, le=25.0)
-    AI_UF2_WARM_BACKUP_DELAY_SECONDS: float = Field(default=3.1, ge=0.0, le=25.0)
-    AI_UF2_GROQ_HEDGE_DELAY_SECONDS: float = Field(default=4.4, ge=0.0, le=25.0)
+    AI_UF2_TIMEOUT_SECONDS: float = Field(default=9.0, gt=0.0, le=25.0)
+    AI_UF2_PRIMARY_PRIORITY_SECONDS: float = Field(default=4.5, gt=0.0, le=25.0)
+    AI_UF2_WARM_BACKUP_DELAY_SECONDS: float = Field(default=2.0, ge=0.0, le=25.0)
+    AI_UF2_GROQ_HEDGE_DELAY_SECONDS: float = Field(default=5.0, ge=0.0, le=25.0)
 
     # Cấu hình mặc định của Trợ lý ở Giai đoạn Lập kế hoạch Tuần 1 (O01 UserPreference)
     DEFAULT_WORK_INTERVAL_SECONDS: int = 1500  # 25 phút tập trung

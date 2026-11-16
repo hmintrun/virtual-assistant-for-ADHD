@@ -342,59 +342,122 @@ async def test_patch_nested_summary_omitted_and_null_keep_models_valid(env, payl
 async def test_legacy_availability_revision_supports_model_and_dictionary(
     payload, monkeypatch, dictionary_ref, current_revision
 ):
+    from sqlalchemy import update
+
+    from app.core.database import make_engine, session_factory
     from app.core.errors import AppError
+    from app.models import Base, User, UserPreference
+    from app.models.planning import PlanningDraft as PlanningDraftModel
+    from app.models.settings import Availability as AvailabilityModel
     from app.schemas.common import AvailabilityRef
     from app.schemas.draft import ConfirmSummaryRequest, TaskSummary
     from app.services import draft_service
 
-    owner, draft_id = "legacy-owner", "legacy-draft"
-    ref = AvailabilityRef(availability_id="legacy-hours", revision=2)
-    summary = TaskSummary.model_validate(
-        {
-            **payload["summary"],
-            "availability": None,
-            "availability_ref": ref,
-            "clarification_issues": [],
-            "can_plan": True,
-            "field_sources": {},
-        }
-    )
-    if dictionary_ref:
-        summary = summary.model_copy(update={"availability_ref": ref.model_dump()})
-    draft = draft_service._build_seed_draft(draft_id, "legacy-client").model_copy(
-        update={
-            "summary": summary,
-            "summary_revision": 1,
-            "planning_input_revision": 1,
-            "summary_confirmed_revision": None,
-        }
-    )
-    monkeypatch.setattr(draft_service, "_FAKE_DRAFTS_BY_OWNER", {(owner, draft_id): draft})
-    monkeypatch.setattr(draft_service, "_CONFIRM_SUMMARY_IDEMPOTENCY_STORE", {})
-    monkeypatch.setattr(
-        draft_service,
-        "_CURRENT_AVAILABILITY_REVISIONS",
-        {
-            (owner, "legacy-hours"): current_revision,
-        },
-    )
+    engine = make_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    factory = session_factory(engine)
 
-    async def confirm():
-        return await draft_service.confirm_draft_summary(
-            user_id=owner,
-            draft_id=draft_id,
-            idempotency_key="legacy-confirm",
-            payload=ConfirmSummaryRequest(expected_summary_revision=1),
-        )
+    try:
+        async with factory() as db:
+            owner, draft_id = "legacy-owner", "legacy-draft"
+            owner_uid = draft_service.resolve_user_uuid(owner)
+            draft_uid = draft_service.resolve_draft_uuid(draft_id)
+            avail_uid = uuid4()
 
-    if current_revision == 3:
-        with pytest.raises(AppError) as error:
-            await confirm()
-        assert error.value.code == "SOURCE_CHANGED"
-        assert (
-            draft_service._FAKE_DRAFTS_BY_OWNER[(owner, draft_id)].summary_confirmed_revision
-            is None
-        )
-    else:
-        confirmed = await confirm()
-        assert confirmed.summary_confirmed_revision == 1
+            user = User(id=owner_uid, email="legacy@test.example", display_name="Legacy Owner")
+            db.add(user)
+            await db.flush()
+
+            pref = UserPreference(
+                user_id=owner_uid,
+                work_interval_seconds=1500,
+                rest_interval_seconds=300,
+                effective_revision=1,
+                buffer_multiplier=1.2,
+                reminder_style="gentle",
+                micro_task_seconds=120,
+                reminder_offsets=[900],
+            )
+            avail = AvailabilityModel(
+                id=avail_uid,
+                user_id=owner_uid,
+                timezone="UTC",
+                weekly_rules=[],
+                date_overrides=payload["summary"]["availability"]["date_overrides"],
+                task_limits=[],
+                source="user_confirmed",
+                confirmed_at=datetime.now(UTC),
+            )
+            db.add(avail)
+            await db.flush()
+            await db.execute(
+                update(AvailabilityModel)
+                .where(AvailabilityModel.id == avail_uid)
+                .values(revision=current_revision)
+            )
+            await db.commit()
+
+            ref = AvailabilityRef(availability_id=str(avail_uid), revision=2)
+            summary = TaskSummary.model_validate(
+                {
+                    **payload["summary"],
+                    "availability": None,
+                    "availability_ref": ref,
+                    "clarification_issues": [],
+                    "can_plan": True,
+                    "field_sources": {},
+                }
+            )
+            if dictionary_ref:
+                summary = summary.model_copy(update={"availability_ref": ref.model_dump()})
+            draft = draft_service._build_seed_draft(draft_id, "legacy-client").model_copy(
+                update={
+                    "summary": summary,
+                    "summary_revision": 1,
+                    "planning_input_revision": 1,
+                    "summary_confirmed_revision": None,
+                }
+            )
+            draft_row = PlanningDraftModel(
+                id=draft_uid,
+                user_id=owner_uid,
+                client_draft_id=draft.client_draft_id,
+                stage=draft.stage,
+                raw_input=draft.raw_input,
+                input_source=draft.input_source,
+                summary=draft_service._serialize_summary_payload(draft),
+                summary_revision=draft.summary_revision,
+                summary_confirmed_revision=draft.summary_confirmed_revision,
+                planning_input_revision=draft.planning_input_revision,
+                user_step_proposal=draft.user_step_proposal,
+            )
+            db.add_all([pref, draft_row])
+            await db.commit()
+
+            async def confirm():
+                return await draft_service.confirm_draft_summary(
+                    user_id=owner,
+                    draft_id=draft_id,
+                    idempotency_key="legacy-confirm",
+                    payload=ConfirmSummaryRequest(expected_summary_revision=1),
+                    db=db,
+                )
+
+            if current_revision == 3:
+                with pytest.raises(AppError) as error:
+                    await confirm()
+                assert error.value.code == "SOURCE_CHANGED"
+                reloaded = await draft_service.get_draft_by_id(
+                    user_id=owner, draft_id=draft_id, db=db
+                )
+                assert reloaded.summary_confirmed_revision is None
+            else:
+                confirmed = await confirm()
+                assert confirmed.summary_confirmed_revision == 1
+                reloaded = await draft_service.get_draft_by_id(
+                    user_id=owner, draft_id=draft_id, db=db
+                )
+                assert reloaded.summary_confirmed_revision == 1
+    finally:
+        await engine.dispose()

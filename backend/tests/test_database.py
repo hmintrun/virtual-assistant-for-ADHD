@@ -173,7 +173,7 @@ def test_thought_draft_task_forward_references(engine):
         assert draft.source_thought_id == thought.id and task.source_draft_id == draft.id
         assert "converted_task_id" not in Thought.__table__.c
         assert "confirmed_task_id" not in PlanningDraft.__table__.c
-        thought.attempt_count = 4
+        thought.attempt_count = 6
         with pytest.raises(IntegrityError):
             db.commit()
 

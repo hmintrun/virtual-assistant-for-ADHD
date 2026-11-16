@@ -20,6 +20,7 @@ from app.api.deps import get_current_user
 from app.core.database import get_db
 from app.main import app
 from app.models import Base
+from app.models.planning import PlanningDraft as PlanningDraftRow
 from app.models.user import UserPreference as PreferenceRow
 from app.schemas.settings import UserPreference
 from app.schemas.user import CurrentUser
@@ -113,19 +114,91 @@ class TestUnimplementedAndHiddenGaps(unittest.TestCase):
         )
         self.assertEqual(pref.reminder_offsets, [1800, 300])
 
-    @pytest.mark.xfail(
-        strict=True,
-        raises=MissingEndpoint,
-        reason="DELETE /drafts/{id} chưa triển khai (HTTP 405).",
-    )
     def test_gap_missing_draft_deletion_api(self):
-        with TestClient(app) as client:
-            response = client.delete("/api/v1/drafts/draft_sample_123")
-        if response.status_code == 405 and not endpoint_registered(
-            "DELETE", "/api/v1/drafts/draft_sample_123"
-        ):
-            raise MissingEndpoint("DELETE Draft trả 405: method chưa có")
-        self.assertIn(response.status_code, (200, 204), response.text)
+        """Feedback: 'Không có API DELETE /api/v1/drafts/{id} để xoá vĩnh viễn các bản nháp rác.'"""
+
+        async def run():
+            engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+            factory = async_sessionmaker(engine, expire_on_commit=False)
+            previous_overrides = app.dependency_overrides.copy()
+            try:
+                async with engine.begin() as conn:
+                    await conn.run_sync(Base.metadata.create_all)
+                async with factory() as db:
+                    await draft_service.ensure_dev_seed_in_db(db)
+
+                async def test_db():
+                    async with factory() as db:
+                        yield db
+
+                async def test_user():
+                    return CurrentUser(user_id="user_a", is_active=True)
+
+                app.dependency_overrides[get_db] = test_db
+                app.dependency_overrides[get_current_user] = test_user
+
+                self.assertTrue(endpoint_registered("DELETE", "/api/v1/drafts/draft_1"))
+                async with httpx.AsyncClient(
+                    transport=httpx.ASGITransport(app=app), base_url="http://test"
+                ) as client:
+                    created = await client.post(
+                        "/api/v1/drafts",
+                        json={
+                            "client_draft_id": "client_delete_draft_1",
+                            "raw_input": "Bản nháp rác cần xóa",
+                            "input_source": "text",
+                        },
+                        headers={"Idempotency-Key": "create_for_delete_1"},
+                    )
+                    self.assertEqual(created.status_code, 201, created.text)
+                    draft_id = created.json()["data"]["draft_id"]
+
+                    deleted = await client.delete(f"/api/v1/drafts/{draft_id}")
+                    self.assertEqual(deleted.status_code, 200, deleted.text)
+                    self.assertEqual(
+                        deleted.json()["data"],
+                        {"draft_id": draft_id, "deleted": True},
+                    )
+
+                    after_get = await client.get(f"/api/v1/drafts/{draft_id}")
+                    self.assertEqual(after_get.status_code, 404, after_get.text)
+
+                    missing_del = await client.delete(f"/api/v1/drafts/{draft_id}")
+                    self.assertEqual(missing_del.status_code, 404, missing_del.text)
+
+                    # Bản nháp đã chốt (stage = 'confirmed') không được xóa (409)
+                    created_confirmed = await client.post(
+                        "/api/v1/drafts",
+                        json={
+                            "client_draft_id": "client_delete_confirmed_1",
+                            "raw_input": "Bản nháp đã chốt",
+                            "input_source": "text",
+                        },
+                        headers={"Idempotency-Key": "create_for_delete_confirmed_1"},
+                    )
+                    self.assertEqual(created_confirmed.status_code, 201, created_confirmed.text)
+                    conf_draft_id = created_confirmed.json()["data"]["draft_id"]
+                    async with factory() as db:
+                        row = await db.get(
+                            PlanningDraftRow,
+                            draft_service.resolve_draft_uuid(conf_draft_id),
+                        )
+                        assert row is not None
+                        row.stage = "confirmed"
+                        await db.commit()
+
+                    conflict_del = await client.delete(f"/api/v1/drafts/{conf_draft_id}")
+                    self.assertEqual(conflict_del.status_code, 409, conflict_del.text)
+                    self.assertEqual(
+                        conflict_del.json()["error"]["code"],
+                        "INVALID_STATE_TRANSITION",
+                    )
+            finally:
+                app.dependency_overrides.clear()
+                app.dependency_overrides.update(previous_overrides)
+                await engine.dispose()
+
+        asyncio.run(run())
 
     def test_session_execution_router_rejects_incomplete_request(self):
         """Router đã có: thiếu body/key phải trả validation, không coi là Run thành công."""
