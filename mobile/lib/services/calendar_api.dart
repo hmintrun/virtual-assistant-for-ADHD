@@ -140,7 +140,10 @@ class CalendarApi {
     );
     final confirmed = await _api.postData(
       '/calendar/configuration-previews/${preview['preview_id']}/confirm',
-      data: {'expected_preview_revision': 1},
+      data: {
+        if (preview['preview_revision'] case final int revision)
+          'expected_preview_revision': revision,
+      },
     );
     return CalendarConnection.fromJson(confirmed);
   }

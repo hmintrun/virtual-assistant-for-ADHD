@@ -8,6 +8,7 @@ import '../providers/focus_provider.dart';
 import '../providers/task_provider.dart';
 import '../widgets/melbel_ui.dart';
 import '../services/schedule_service.dart';
+import '../services/adaptation_api.dart';
 import 'focus_screen.dart';
 import 'task_entry_screen.dart';
 
@@ -18,10 +19,59 @@ class HomeScreen extends StatefulWidget {
   State<HomeScreen> createState() => _HomeScreenState();
 }
 
-class _HomeScreenState extends State<HomeScreen> {
+class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   final _schedule = ScheduleService(ApiClient());
+  final _adaptation = AdaptationApi(ApiClient());
+  bool _showPendingProposal = false;
+  bool _showSuggestion = false;
   Future<List<Map<String, dynamic>>>? _sessions;
   Object? _confirmedTask;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    _refreshAdaptation();
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) _refreshAdaptation();
+  }
+
+  Future<bool> _hasCurrent(
+      Future<Map<String, dynamic>?> Function() load) async {
+    try {
+      return await load() != null;
+    } on ApiException {
+      return false;
+    }
+  }
+
+  Future<void> _refreshAdaptation() async {
+    final current = await Future.wait([
+      _hasCurrent(_adaptation.currentProposal),
+      _hasCurrent(_adaptation.suggestion),
+    ]);
+    if (!mounted) return;
+    setState(() {
+      _showPendingProposal = current[0];
+      _showSuggestion = current[1];
+    });
+  }
+
+  Future<void> _openAdaptation(String route) async {
+    await Navigator.of(context).pushNamed(route);
+    if (!mounted) return;
+    _refreshAdaptation();
+    _refreshSchedule();
+  }
 
   void _loadWhenTaskChanges() {
     final confirmed = context.watch<TaskProvider>().confirmedTask;
@@ -165,6 +215,16 @@ class _HomeScreenState extends State<HomeScreen> {
         child: ListView(
           padding: const EdgeInsets.fromLTRB(20, 16, 20, 32),
           children: [
+            if (_showPendingProposal)
+              SecondaryCta(
+                label: 'Xem đề xuất đổi lịch',
+                onPressed: () => _openAdaptation('/schedule-change'),
+              ),
+            if (_showSuggestion)
+              SecondaryCta(
+                label: 'Xem gợi ý cài đặt',
+                onPressed: () => _openAdaptation('/settings'),
+              ),
             MelbelEntrance(
               child: MelbelCard(
                 color: theme.colorScheme.surfaceContainerHigh,

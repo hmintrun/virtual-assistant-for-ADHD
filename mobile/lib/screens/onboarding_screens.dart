@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
 import '../core/theme.dart';
+import '../core/api_client.dart';
 import '../providers/theme_provider.dart';
 import '../services/alarm_service.dart';
 import '../services/auth_service.dart';
@@ -61,8 +62,7 @@ class LoginScreen extends StatelessWidget {
   }
 }
 
-/// D-04–D-10. Preferences and permission choices stay local in this prototype;
-/// values are not represented as server-saved until the contracts are ready.
+/// D-04–D-10. Nhịp làm việc và mốc nhắc được lưu qua change request.
 class SetupFlowScreen extends StatefulWidget {
   const SetupFlowScreen({super.key});
 
@@ -82,6 +82,8 @@ class _SetupFlowScreenState extends State<SetupFlowScreen>
   bool _voiceReadout = true;
   bool _breakReminder = true;
   bool _requestingPermission = false;
+  bool _savingPreferences = false;
+  final _api = ApiClient();
   bool _waitingForDndSettings = false;
 
   bool get _isAndroid =>
@@ -187,7 +189,43 @@ class _SetupFlowScreenState extends State<SetupFlowScreen>
     }
   }
 
-  void _openHome() {
+  Future<void> _openHome() async {
+    if (_savingPreferences) return;
+    setState(() => _savingPreferences = true);
+    try {
+      final preferences = await _api.getData('/preferences');
+      if (!mounted) return;
+      final revision =
+          preferences['effective_revision'] ?? preferences['revision'];
+      final offsets = switch (_reminderFrequency) {
+        'Ít' => [300],
+        'Nhiều' => [900, 600, 300],
+        _ => [600, 300],
+      };
+      final payload = {
+        'expected_preferences_revision': revision,
+        'changes': {
+          'preferences': {
+            'work_interval_seconds': _focusMinutes * 60,
+            'rest_interval_seconds': _breakMinutes * 60,
+            'reminder_offsets': offsets,
+          },
+        },
+      };
+      await _api.postData(
+        '/settings/change-requests',
+        data: payload,
+        idempotencyKey: ApiClient.stableIdempotencyKey(
+            'onboarding_preferences', payload.toString()),
+      );
+    } on ApiException catch (error) {
+      if (mounted)
+        _showPermissionMessage('Chưa lưu thiết lập: ${error.message}');
+      return;
+    } finally {
+      if (mounted) setState(() => _savingPreferences = false);
+    }
+    if (!mounted) return;
     Navigator.of(context).pushNamedAndRemoveUntil('/home', (_) => false);
   }
 
@@ -253,7 +291,7 @@ class _SetupFlowScreenState extends State<SetupFlowScreen>
                   width: double.infinity,
                   height: 56,
                   child: FilledButton(
-                    onPressed: _requestingPermission
+                    onPressed: _requestingPermission || _savingPreferences
                         ? null
                         : () => _handlePermission(),
                     child: Text(_step == 3
@@ -265,7 +303,7 @@ class _SetupFlowScreenState extends State<SetupFlowScreen>
                 ),
                 if ((_step == 3 && _isAndroid) || _step >= 4)
                   TextButton(
-                    onPressed: _requestingPermission
+                    onPressed: _requestingPermission || _savingPreferences
                         ? null
                         : _step == 3
                             ? _openHome

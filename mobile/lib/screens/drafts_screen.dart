@@ -17,7 +17,7 @@ class DraftSavedScreen extends StatelessWidget {
 
     return Scaffold(
       appBar: const MelbelAppBar(
-        title: 'Draft Stored',
+        title: 'Hộp nháp',
         showBack: true,
       ),
       body: SafeArea(

@@ -20,6 +20,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
   Map<String, dynamic>? _suggestion;
   String? _suggestionError;
   Map<String, dynamic>? _preferences;
+  Map<String, dynamic>? _pendingChange;
+  int? get _effectiveRevision =>
+      (_preferences?['effective_revision'] ?? _preferences?['revision'])
+          as int?;
   int? _work;
   int? _rest;
   double? _bufferMultiplier;
@@ -77,7 +81,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   Future<void> _respond(String action, {Object? editedValue}) async {
     final suggestion = _suggestion;
-    final revision = _preferences?['revision'] as int?;
+    final revision = _effectiveRevision;
     if (_busy || suggestion == null || revision == null) return;
     setState(() => _busy = true);
     try {
@@ -85,7 +89,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
           editedValue: editedValue);
       if (mounted) await _load();
     } on ApiException catch (error) {
-      if (mounted) setState(() => _suggestionError = error.message);
+      if (mounted) await _handleCommandError(error);
     } finally {
       if (mounted) setState(() => _busy = false);
     }
@@ -142,7 +146,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   double? _parseBuffer(String text) {
     final value = double.tryParse(text.replaceAll(',', '.'));
-    return value != null && value.isFinite && value > 0 ? value : null;
+    return value != null && value >= 1 && value <= 2 ? value : null;
   }
 
   Future<void> _editBuffer(double current) async {
@@ -150,7 +154,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     if (!mounted || result == null) return;
     final value = _parseBuffer(result);
     setState(() {
-      _error = value == null ? 'Nhập hệ số đệm lớn hơn 0.' : null;
+      _error = value == null ? 'Nhập hệ số đệm từ 1,0 đến 2,0.' : null;
       if (value != null) _bufferMultiplier = value;
     });
   }
@@ -198,7 +202,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
   Future<void> _save() async {
     final changes = _changes;
     if (_busy || changes.isEmpty) return;
-    final revision = _preferences!['revision'];
+    final revision = _effectiveRevision;
+    if (revision == null) return;
     final payload = {
       'expected_preferences_revision': revision,
       'changes': {'preferences': changes},
@@ -215,6 +220,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
             ApiClient.stableIdempotencyKey('preferences', payload.toString()),
       );
       if (!mounted) return;
+      _pendingChange = result;
       await _load();
       if (!mounted) return;
       if (result['pending_proposal_id'] case final String proposalId) {
@@ -238,29 +244,39 @@ class _SettingsScreenState extends State<SettingsScreen> {
         ),
       ));
     } on ApiException catch (error) {
+      if (mounted) await _handleCommandError(error);
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Future<void> _handleCommandError(ApiException error) async {
+    if (error.statusCode == 409) {
+      _pendingChange = null;
+      await _load();
       if (!mounted) return;
-      setState(() => _error = error.message);
-      if (error.code == 'POLICY_NOT_CONFIGURED') {
-        await Navigator.of(context).push(MaterialPageRoute<void>(
-          builder: (context) => FocusReviewPage(
-            title: 'Chia lại phiên',
-            children: [
-              const ReviewHeader('Lịch cần được xem lại',
-                  'Thay đổi thời lượng có thể ảnh hưởng các phiên đã chốt.'),
-              MelbelCard(
-                  child: Text(
-                      'Đang áp dụng: ${(_preferences?['work_interval_seconds'] as int? ?? 0) ~/ 60} phút làm · ${(_preferences?['rest_interval_seconds'] as int? ?? 0) ~/ 60} phút nghỉ')),
-              MelbelCard(
-                  child: Text(
-                      'Bạn chọn: ${(_work ?? 0) ~/ 60} phút làm · ${(_rest ?? 0) ~/ 60} phút nghỉ')),
-              const Text(
-                  'Chưa thể tạo phương án. Lịch và cấu hình hiện tại vẫn được giữ.'),
-              PrimaryCta(
-                  label: 'Về cài đặt', onPressed: () => Navigator.pop(context)),
-            ],
-          ),
-        ));
-      }
+      setState(() {
+        _error ??= 'Cài đặt đã thay đổi. Hãy kiểm tra lại trước khi lưu.';
+      });
+      return;
+    }
+    setState(() => _error = error.message);
+  }
+
+  Future<void> _cancelChange(String id, int revision) async {
+    if (_busy) return;
+    setState(() => _busy = true);
+    final path = '/settings/change-requests/${Uri.encodeComponent(id)}/cancel';
+    try {
+      await _api.postData(
+        path,
+        data: {'expected_request_revision': revision},
+        idempotencyKey: ApiClient.stableIdempotencyKey(path, '$revision'),
+      );
+      _pendingChange = null;
+      if (mounted) await _load();
+    } on ApiException catch (error) {
+      if (mounted) await _handleCommandError(error);
     } finally {
       if (mounted) setState(() => _busy = false);
     }
@@ -297,6 +313,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
   Widget build(BuildContext context) {
     final theme = context.watch<ThemeProvider>();
     final pending = _preferences?['pending_proposal_id'] as String?;
+    final change =
+        pending != null && pending == _pendingChange?['pending_proposal_id']
+            ? _pendingChange
+            : null;
     return FocusReviewPage(
       title: 'Cài đặt',
       children: [
@@ -341,6 +361,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
             SecondaryCta(
                 label: 'Xem thay đổi chờ duyệt',
                 onPressed: _busy ? null : () => _reviewProposal(pending)),
+          if (change?['change_request_id'] case final String id)
+            if (change?['request_revision'] case final int revision)
+              TextButton(
+                onPressed: _busy ? null : () => _cancelChange(id, revision),
+                child: const Text('Hủy yêu cầu đổi cài đặt'),
+              ),
           if (_suggestionError != null) Text(_suggestionError!),
           if (_suggestion case final suggestion?)
             MelbelCard(

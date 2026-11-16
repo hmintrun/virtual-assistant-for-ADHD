@@ -164,7 +164,9 @@ class CandidateReviewScreen extends StatelessWidget {
                     : () => Navigator.push(
                           context,
                           MaterialPageRoute<void>(
-                            builder: (_) => const DecompositionChoiceScreen(),
+                            builder: (_) => const DecompositionChoiceScreen(
+                              returnToReview: true,
+                            ),
                           ),
                         ),
                 icon: const Icon(Icons.tune),

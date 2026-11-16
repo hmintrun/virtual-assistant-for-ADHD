@@ -46,9 +46,7 @@ class ApiClient {
             if (session == null ||
                 !session.active ||
                 error.response?.statusCode != 401 ||
-                (request.path.startsWith('/calendar/') &&
-                    error.response?.data is Map &&
-                    (error.response?.data as Map)['detail'] is String) ||
+                _isCalendarAuthorizationError(error) ||
                 request.extra['auth_retried'] == true) {
               handler.next(error);
               return;
@@ -71,13 +69,22 @@ class ApiClient {
                     extra: {...request.extra, 'auth_retried': true},
                   )));
             } on DioException catch (retryError) {
-              if (session.active && retryError.response?.statusCode == 401) {
+              if (session.active &&
+                  retryError.response?.statusCode == 401 &&
+                  !_isCalendarAuthorizationError(retryError)) {
                 session.onUnauthorized?.call();
               }
               handler.next(retryError);
             }
           },
         ));
+  }
+
+  static bool _isCalendarAuthorizationError(DioException error) {
+    final body = error.response?.data;
+    if (body is! Map) return false;
+    final details = body['error'];
+    return details is Map && details['code'] == 'CALENDAR_AUTH_REQUIRED';
   }
 
   static const _configuredBaseUrl = String.fromEnvironment('API_BASE_URL');
@@ -171,6 +178,9 @@ class ApiClient {
         path,
         data: data,
         options: Options(
+            receiveTimeout: path == '/voice/transcriptions'
+                ? const Duration(seconds: 45)
+                : null,
             headers: idempotent
                 ? {
                     'Idempotency-Key':

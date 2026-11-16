@@ -22,7 +22,9 @@ Future<void> _open(BuildContext context, Widget page) => Navigator.push<void>(
 // ============================================================================
 
 class DecompositionChoiceScreen extends StatefulWidget {
-  const DecompositionChoiceScreen({super.key});
+  const DecompositionChoiceScreen({super.key, this.returnToReview = false});
+
+  final bool returnToReview;
 
   @override
   State<DecompositionChoiceScreen> createState() =>
@@ -86,6 +88,10 @@ class _DecompositionChoiceScreenState extends State<DecompositionChoiceScreen>
         useManualAvailability: useManualAvailability,
       );
       if (!mounted) return;
+      if (widget.returnToReview) {
+        Navigator.pop(context);
+        return;
+      }
       await Navigator.push(
         context,
         MaterialPageRoute<void>(builder: (_) => const CandidateReviewScreen()),

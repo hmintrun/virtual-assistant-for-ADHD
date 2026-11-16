@@ -21,6 +21,8 @@ class AuthService extends ChangeNotifier {
   Future<void>? _googleInitialization;
   StreamSubscription<GoogleSignInAuthenticationEvent>? _webEvents;
   Future<bool>? _renewing;
+  String? _refreshToken;
+  DateTime? _refreshExpiresAt;
 
   ApiSession? session;
   Map<String, dynamic>? user;
@@ -63,6 +65,9 @@ class AuthService extends ChangeNotifier {
       final profile = saved['user'] as Map<String, dynamic>;
       final owner = profile['user_id'] as String;
       final bound = ApiSession(owner, token: saved['token'] as String);
+      _refreshToken = saved['refresh_token'] as String?;
+      _refreshExpiresAt =
+          DateTime.tryParse(saved['refresh_expires_at'] as String? ?? '');
       _bind(bound, profile);
       try {
         final verified = await ApiClient().getData('/auth/me');
@@ -101,6 +106,34 @@ class AuthService extends ChangeNotifier {
   }
 
   Future<bool> _renew(ApiSession bound) async {
+    if (busy || !bound.active || session != bound) return false;
+    final refreshToken = _refreshToken;
+    final expiresAt = _refreshExpiresAt;
+    if (refreshToken != null &&
+        (expiresAt == null || expiresAt.isAfter(DateTime.now()))) {
+      try {
+        final data = await _publicApi.postData(
+          '/auth/refresh',
+          data: {'refresh_token': refreshToken},
+          idempotent: false,
+        );
+        if (session != bound || !bound.active || user == null) return false;
+        final profile = data['user'] as Map<String, dynamic>? ?? user!;
+        if (profile['user_id'] != bound.ownerId) return false;
+        await _saveTokens(data, profile, keepRefreshToken: true);
+        bound.token = data['access_token'] as String;
+        user = profile;
+        needsSignIn = false;
+        error = null;
+        notifyListeners();
+        return true;
+      } on ApiException catch (failure) {
+        if (failure.statusCode != 401 && failure.statusCode != 404)
+          return false;
+      } catch (_) {
+        return false;
+      }
+    }
     if (!configured || kIsWeb || busy || !bound.active) return false;
     try {
       await initializeGoogle();
@@ -157,12 +190,7 @@ class AuthService extends ChangeNotifier {
       throw const ApiException(
           'Hãy dùng lại tài khoản hiện tại hoặc đăng xuất trước khi đổi tài khoản.');
     }
-    await _storage.write(
-        key: _sessionKey,
-        value: jsonEncode({
-          'user': profile,
-          'token': token,
-        }));
+    await _saveTokens(data, profile);
     if (previous == null) {
       _bind(ApiSession(owner, token: token), profile);
     } else {
@@ -172,6 +200,30 @@ class AuthService extends ChangeNotifier {
     needsSignIn = false;
     error = null;
     notifyListeners();
+  }
+
+  Future<void> _saveTokens(
+    Map<String, dynamic> data,
+    Map<String, dynamic> profile, {
+    bool keepRefreshToken = false,
+  }) async {
+    final refresh = data['refresh_token'] as String? ??
+        (keepRefreshToken ? _refreshToken : null);
+    final expiresIn = data['refresh_expires_in'] as int?;
+    final expiresAt = expiresIn != null
+        ? DateTime.now().toUtc().add(Duration(seconds: expiresIn))
+        : (keepRefreshToken ? _refreshExpiresAt : null);
+    await _storage.write(
+      key: _sessionKey,
+      value: jsonEncode({
+        'user': profile,
+        'token': data['access_token'] as String,
+        'refresh_token': refresh,
+        'refresh_expires_at': expiresAt?.toIso8601String(),
+      }),
+    );
+    _refreshToken = refresh;
+    _refreshExpiresAt = expiresAt;
   }
 
   void _showError(Object failure) {
@@ -190,6 +242,8 @@ class AuthService extends ChangeNotifier {
     try {
       await _renewing;
       await _storage.delete(key: _sessionKey);
+      _refreshToken = null;
+      _refreshExpiresAt = null;
       session?.active = false;
       session = null;
       ApiSession.current = null;

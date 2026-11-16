@@ -46,7 +46,7 @@ class _TaskReadyScreenState extends State<TaskReadyScreen> {
     final availabilityStr = task.availabilitySummary;
 
     return Scaffold(
-      appBar: const MelbelAppBar(title: 'Ready State', showBack: true),
+      appBar: const MelbelAppBar(title: 'Sẵn sàng', showBack: true),
       body: SafeArea(
         top: false,
         child: ListView(

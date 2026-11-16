@@ -11,6 +11,9 @@ class PlanningDraftModel {
     this.rawInput,
     this.summaryConfirmedRevision,
     this.userStepProposal,
+    this.candidateRef,
+    this.sourceThoughtId,
+    this.confirmedTaskId,
     this.clientDraftId = '',
   });
 
@@ -24,6 +27,9 @@ class PlanningDraftModel {
   final String? rawInput;
   final int? summaryConfirmedRevision;
   final String? userStepProposal;
+  final JsonMap? candidateRef;
+  final String? sourceThoughtId;
+  final String? confirmedTaskId;
 
   bool get canPlan => summary['can_plan'] == true;
   String get title => summary['title'] as String? ?? '';
@@ -46,6 +52,9 @@ class PlanningDraftModel {
         rawInput: json['raw_input'] as String?,
         summaryConfirmedRevision: json['summary_confirmed_revision'] as int?,
         userStepProposal: json['user_step_proposal'] as String?,
+        candidateRef: json['candidate_ref'] as JsonMap?,
+        sourceThoughtId: json['source_thought_id'] as String?,
+        confirmedTaskId: json['confirmed_task_id'] as String?,
       );
 }
 

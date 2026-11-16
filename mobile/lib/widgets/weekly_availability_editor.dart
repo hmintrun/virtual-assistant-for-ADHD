@@ -259,8 +259,23 @@ class _WeeklyAvailabilityEditorState extends State<WeeklyAvailabilityEditor> {
                           ),
                           IconButton(
                             tooltip: 'Xóa khung giờ',
-                            onPressed: () =>
-                                setState(() => _rules.removeAt(index)),
+                            onPressed: () {
+                              setState(() => _rules.removeAt(index));
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                SnackBar(
+                                  content: const Text('Đã xóa khung giờ'),
+                                  duration: const Duration(seconds: 5),
+                                  action: SnackBarAction(
+                                    label: 'Hoàn tác',
+                                    onPressed: () {
+                                      if (!mounted) return;
+                                      setState(() => _rules.insert(
+                                          index.clamp(0, _rules.length), rule));
+                                    },
+                                  ),
+                                ),
+                              );
+                            },
                             icon: const Icon(Icons.remove_circle_outline),
                           ),
                         ],

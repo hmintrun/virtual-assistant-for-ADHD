@@ -137,10 +137,7 @@ class PlanningApi {
         'input_source': inputSource,
         'raw_input': rawInput,
         'summary': {
-          if (title.trim().isNotEmpty &&
-              title != rawInput &&
-              title.length <= 100)
-            'title': title,
+          if (title.trim().isNotEmpty && title != rawInput) 'title': title,
           if (availability != null) 'availability': availability,
           'importance': 3,
           if (scope.trim().isNotEmpty) 'scope': scope.trim(),
@@ -208,7 +205,7 @@ class PlanningApi {
     final deadlineChanged = deadline != null &&
         (oldEnd == null || !deadline.isAtSameMomentAs(oldEnd));
     final changes = <String, dynamic>{
-      if (title.length <= 100 && title != draft.title) 'title': title,
+      if (title != draft.title) 'title': title,
       if (scope != draft.scope) 'scope': scope,
       if (availability != null) 'availability': availability,
       if (extraRequirements != null) 'extra_requirements': extraRequirements,
@@ -286,7 +283,8 @@ class PlanningApi {
       'source_planning_input_revision': draft.planningInputRevision,
       'selected_step_keys': null,
       'planning_horizon': null,
-      if (calendarContextRef != null) 'calendar_context_ref': calendarContextRef,
+      if (calendarContextRef != null)
+        'calendar_context_ref': calendarContextRef,
     };
     final json = await _command(
       operation: 'candidate_${draft.draftId}',

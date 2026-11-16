@@ -54,7 +54,7 @@ class GoogleCalendarApi {
         'limit': 250,
       });
 
-  Future<String> previewWriteCalendar(
+  Future<({String id, int? revision})> previewWriteCalendar(
     String connectionId,
     List<String> readIds,
     String? writeId, {
@@ -69,13 +69,19 @@ class GoogleCalendarApi {
       },
       idempotent: false,
     );
-    return data['preview_id'] as String;
+    return (
+      id: data['preview_id'] as String,
+      revision: data['preview_revision'] as int?,
+    );
   }
 
-  Future<void> confirmPreview(String previewId) async {
+  Future<void> confirmPreview(({String id, int? revision}) preview) async {
     await _api.postData(
-      '/calendar/configuration-previews/${Uri.encodeComponent(previewId)}/confirm',
-      data: {'expected_preview_revision': 1},
+      '/calendar/configuration-previews/${Uri.encodeComponent(preview.id)}/confirm',
+      data: {
+        if (preview.revision case final int revision)
+          'expected_preview_revision': revision,
+      },
       idempotent: false,
     );
   }

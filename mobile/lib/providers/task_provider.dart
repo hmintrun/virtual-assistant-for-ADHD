@@ -84,8 +84,7 @@ class TaskProvider extends ChangeNotifier {
   bool get canRefreshCalendarSync =>
       _confirmedScheduleRevision != null &&
       (_confirmedTask?.sessions.isNotEmpty ?? false) &&
-      (_calendarSyncState == 'pending' ||
-          _calendarSyncState == 'outbox_queued');
+      _calendarSyncState == 'pending';
   String? get calendarSyncState => _calendarSyncState;
   bool _isApiBusy = false;
   String? _apiError;

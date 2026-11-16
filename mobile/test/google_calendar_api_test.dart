@@ -16,7 +16,8 @@ void main() {
                 {'title': 'Họp nhóm'},
               ],
             '/calendar/connections/account/configuration-previews' => {
-                'preview_id': 'preview'
+                'preview_id': 'preview',
+                'preview_revision': 7,
               },
             '/calendar/configuration-previews/preview/confirm' => {
                 'write_calendar_id': 'target'
@@ -51,6 +52,6 @@ void main() {
     await calendar.confirmPreview(preview);
     expect(
         requests.last.path, '/calendar/configuration-previews/preview/confirm');
-    expect(requests.last.data, {'expected_preview_revision': 1});
+    expect(requests.last.data, {'expected_preview_revision': 7});
   });
 }

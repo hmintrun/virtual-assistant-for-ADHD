@@ -523,6 +523,10 @@ class _ScheduleComparisonScreenState extends State<ScheduleComparisonScreen>
                   'Xem các thay đổi dưới đây.')),
           if (deficit != null && deficit > 0)
             Text('Còn thiếu ${(deficit / 60).ceil()} phút.'),
+          for (final item in items('steps_to_add'))
+            MelbelCard(
+              child: Text('Thêm bước: ${item['title']}'),
+            ),
           for (final item in items('sessions_to_move'))
             MelbelCard(
                 child: Text(
@@ -535,8 +539,9 @@ class _ScheduleComparisonScreenState extends State<ScheduleComparisonScreen>
                     'Thêm phiên: ${_time((item['after'] as Map?)?['start'])} – ${_time((item['after'] as Map?)?['end'])}')),
           for (final item in items('sessions_to_cancel'))
             MelbelCard(
-                child: Text(
-                    'Bỏ một phiên · ${item['reason'] ?? 'Theo phương án này'}')),
+                child: Text(item['reason'] == 'resegmented_by_settings_change'
+                    ? 'Bỏ một phiên để chia lại theo cài đặt mới'
+                    : 'Bỏ một phiên theo phương án này')),
         ],
         if (canApply)
           PrimaryCta(

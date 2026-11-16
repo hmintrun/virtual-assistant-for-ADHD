@@ -42,6 +42,16 @@ class AdaptationApi {
 
   Future<Map<String, dynamic>> createProposal(String runId, String reason,
       {String? requestText}) async {
+    try {
+      return await _createProposal(runId, reason, requestText);
+    } on ApiException catch (error) {
+      if (error.statusCode != 409 || error.code != 'REVISION_CONFLICT') rethrow;
+      return _createProposal(runId, reason, requestText);
+    }
+  }
+
+  Future<Map<String, dynamic>> _createProposal(
+      String runId, String reason, String? requestText) async {
     final context = await _api.getData(
         '/runs/${Uri.encodeComponent(runId)}/upcoming-schedule-context');
     final taskId = context['task_id'] as String;
