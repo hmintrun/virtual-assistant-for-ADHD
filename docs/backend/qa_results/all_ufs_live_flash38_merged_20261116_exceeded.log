@@ -1,0 +1,284 @@
+=== MERGED HYBRID (UF1=Flash-Lite; UF2/UF6=Flash-3.8) EXCEEDED & HANDOFF LOG (2026-11-16T11:46:27.676141+07:00) ===
+Total flagged entries: 28
+Bao gồm: vượt SLA 2.5s, vượt trần timeout UF (4.5s / 9.0s), lỗi/fail check, hoặc 3.8-Flash chậm hơn priority window nên Warm Backup/Groq thắng.
+
+--- [1] production_hybrid | UF1 | uf1_02_medium_multi_windows ---
+Timestamp         : 2026-11-16T11:14:45.643069+07:00
+Reasons           : EXCEEDED_TARGET_SLA(>2.5s)
+Elapsed / API (s) : elapsed=2.8323s | api_response=2.832s
+Thresholds (s)    : target_sla=2.5s | uf_hard_timeout=4.5s
+Winner / GenTier  : model=gemini-3.5-flash-lite | generation_tier=tier_1_gemini
+Checks Detail     : {"not_tier3_fallback": true, "is_complete_match": true, "has_conflict_match": true, "start_at_preserved": true, "end_at_preserved": true}
+Attempts Timeline : [{"model": "gemini-3.5-flash-lite", "start_s": 0.0002, "status": "schema_valid", "elapsed_s": 2.832}]
+Parsed Result     : {"title": "Viết báo cáo khảo sát thói quen học tập", "goal": "Viết báo cáo khảo sát thói quen học tập của 30 sinh viên", "time_constraint": {"kind": "deadline", "start_at": "2026-11-17T19:00:00+07:00", "deadline_at": "2026-11-20T17:00:00+07:00", "finish_by_at": null, "input_timezone": "Asia/Ho_Chi_Minh"}, "clarification_issues": [], "resolved_issue_keys": [], "field_review_notes": {}, "content": "Viết báo cáo về khảo sát thói quen học tập của 30 sinh viên, gồm mục tiêu, phương pháp, kết quả, 3 biểu đồ và kết luận; nộp một file PDF.", "scope": "8 trang, gồm mục tiêu, phương pháp, kết quả, 3 biểu đồ và kết luận; định dạng file PDF", "free_time_slots": ["17/11/2026 từ 19:00 đến 21:00", "18/11/2026 từ 19:00 đến 21:00", "19/11/2026 từ 19:00 đến 21:00"], "availability_update_mode": "merge", "structured_free_windows": [{"kind": "specific_date", "weekday": null, "date": "2026-11-17", "start_local": "19:00", "end_local": "21:00", "raw_phrase": "17/11/2026 từ 19:00 đến 21:00", "is_ambiguous": false}, {"kind": "specific_date", "weekday": null, "date": "2026-11-18", "start_local": "19:00", "end_local": "21:00", "raw_phrase": "18/11/2026 từ 19:00 đến 21:00", "is_ambiguous": false}, {"kind": "specific_date", "weekday": null, "date": "2026-11-19", "start_local": "19:00", "end_local": "21:00", "raw_phrase": "19/11/2026 từ 19:00 đến 21:00", "is_ambiguous": false}], "deadline": "2026-11-20T17:00:00+07:00", "extra_requirements": ["Dữ liệu đã có trong bảng tính, không cần khảo sát thêm", "Chỉ dùng dữ liệu có sẵn"], "is_complete": true, "has_conflict": false, "summary": "Bạn muốn viết báo cáo 8 trang về khảo sát thói quen học tập của 30 sinh viên dạng PDF, bắt đầu từ 19:00 ngày 17/11/2026, rảnh các buổi tối 17, 18, 19/11/2026 từ 19:00 đến 21:00, và hạn chót là 17:00 ngày 20/11/2026.", "clarification_questions": [], "generation_tier": "tier_1_gemini"}
+
+--- [2] production_hybrid | UF1 | uf1_03_large_complex ---
+Timestamp         : 2026-11-16T11:14:52.096234+07:00
+Reasons           : EXCEEDED_TARGET_SLA(>2.5s)
+Elapsed / API (s) : elapsed=2.8703s | api_response=2.8698s
+Thresholds (s)    : target_sla=2.5s | uf_hard_timeout=4.5s
+Winner / GenTier  : model=gemini-3.5-flash-lite | generation_tier=tier_1_gemini
+Checks Detail     : {"not_tier3_fallback": true, "is_complete_match": true, "has_conflict_match": true, "start_at_preserved": true, "end_at_preserved": true}
+Attempts Timeline : [{"model": "gemini-3.5-flash-lite", "start_s": 0.0002, "status": "schema_valid", "elapsed_s": 2.8698}]
+Parsed Result     : {"title": "Hoàn thành nguyên mẫu ứng dụng quản lý thư viện", "goal": "Hoàn thành nguyên mẫu ứng dụng quản lý thư viện cho đồ án nhóm 4 người", "time_constraint": {"kind": "deadline", "start_at": "2026-11-17T18:00:00+07:00", "deadline_at": "2026-12-05T17:00:00+07:00", "finish_by_at": null, "input_timezone": "Asia/Ho_Chi_Minh"}, "clarification_issues": [], "resolved_issue_keys": [], "field_review_notes": {}, "content": "Hoàn thành nguyên mẫu ứng dụng quản lý thư viện cho đồ án nhóm 4 người", "scope": "Đăng nhập, phân quyền thủ thư và độc giả, quản lý 500 đầu sách, tìm kiếm theo tên/tác giả, mượn trả, theo dõi quá hạn và báo cáo thống kê tháng. Đầu ra gồm mã nguồn backend FastAPI, frontend web, database PostgreSQL, tài liệu API, 30 ca kiểm thử chức năng, báo cáo PDF 25 trang, 15 slide và video demo 5 phút.", "free_time_slots": ["Thứ Hai từ 18:00 đến 21:00", "Thứ Tư từ 18:00 đến 21:00", "Thứ Sáu từ 18:00 đến 21:00", "Thứ Bảy từ 09:00 đến 12:00", "Thứ Bảy từ 14:00 đến 17:00"], "availability_update_mode": "merge", "structured_free_windows": [{"kind": "weekly_rule", "weekday": 1, "date": null, "start_local": "18:00", "end_local": "21:00", "raw_phrase": "thứ Hai từ 18:00 đến 21:00", "is_ambiguous": false}, {"kind": "weekly_rule", "weekday": 3, "date": null, "start_local": "18:00", "end_local": "21:00", "raw_phrase": "thứ Tư từ 18:00 đến 21:00", "is_ambiguous": false}, {"kind": "weekly_rule", "weekday": 5, "date": null, "start_local": "18:00", "end_local": "21:00", "raw_phrase": "thứ Sáu từ 18:00 đến 21:00", "is_ambiguous": false}, {"kind": "weekly_rule", "weekday": 6, "date": null, "start_local": "09:00", "end_local": "12:00", "raw_phrase": "thứ Bảy từ 09:00 đến 12:00", "is_ambiguous": false}, {"kind": "weekly_rule", "weekday": 6, "date": null, "start_local": "14:00", "end_local": "17:00", "raw_phrase": "thứ Bảy từ 14:00 đến 17:00", "is_ambiguous": false}], "deadline": "2026-12-05T17:00:00+07:00", "extra_requirements": ["Không triển khai thanh toán", "Không gửi email thật", "Không triển khai lên cloud", "Giữ nguyên các lịch học đã có", "Không tự đổi lịch công việc khác"], "is_complete": true, "has_conflict": false, "summary": "Đã ghi nhận công việc hoàn thành nguyên mẫu ứng dụng quản lý thư viện với đầy đủ thông tin về phạm vi, thời gian bắt đầu, hạn chót và các khung giờ rảnh.", "clarification_questions": [], "generation_tier": "tier_1_gemini"}
+
+--- [3] production_hybrid | UF2_Decompose | uf2_01_small_task ---
+Timestamp         : 2026-11-16T11:43:59.728751+07:00
+Reasons           : EXCEEDED_TARGET_SLA(>2.5s)
+Elapsed / API (s) : elapsed=4.3833s | api_response=4.3826s
+Thresholds (s)    : target_sla=2.5s | uf_hard_timeout=9.0s
+Winner / GenTier  : model=gemini-3.8-flash | generation_tier=tier_1_gemini
+Checks Detail     : {"not_tier3_fallback": true, "requires_clarification_match": true, "step_count_ok": true, "all_steps_have_expected_output": true, "all_steps_have_micro_task": true, "all_steps_have_cognitive_load": true}
+Attempts Timeline : [{"model": "gemini-3.8-flash", "start_s": 0.0006, "status": "schema_valid", "elapsed_s": 4.3826}, {"model": "gemini-3.5-flash-lite", "start_s": 2.0167, "status": "schema_valid", "elapsed_s": 1.9187}]
+Parsed Result     : {"unexpanded_scope": null, "task_title": "Sắp xếp 20 tài liệu PDF vào 3 thư mục môn học", "requires_clarification": false, "clarification_question": null, "steps": [{"order_index": 1, "title": "Tạo 3 thư mục môn học và thư mục lưu trữ bản gốc", "expected_output": "3 thư mục môn học mới và 1 thư mục bản gốc sẵn sàng trên ổ đĩa", "estimated_minutes": 15, "micro_task_prompt": "Mở thư mục chứa tài liệu và tạo 1 thư mục mới đặt tên là Môn 1", "cognitive_load": "light"}, {"order_index": 2, "title": "Phân loại 20 file PDF vào 3 thư mục tương ứng", "expected_output": "20 file PDF được kéo thả chuẩn xác vào đúng 3 thư mục môn học", "estimated_minutes": 25, "micro_task_prompt": "Kéo thả file PDF đầu tiên bạn nhìn thấy vào đúng thư mục môn học của nó", "cognitive_load": "medium"}, {"order_index": 3, "title": "Đổi tên file theo chuẩn môn-ngày và kiểm tra số lượng", "expected_output": "20 file được đổi tên đồng bộ dạng môn-ngày và đối chiếu đủ số lượng trước khi dọn dẹp", "estimated_minutes": 25, "micro_task_prompt": "Bấm phím F2 vào file đầu tiên trong thư mục môn học thứ nhất để sửa tên", "cognitive_load": "medium"}], "reasoning": "Chia nhỏ việc sắp xếp thành 3 bước nhẹ nhàng giúp bạn bắt nhịp nhanh chóng mà không lo nhầm lẫn hay mất dữ liệu gốc.", "generation_tier": "tier_1_gemini"}
+
+--- [4] production_hybrid | UF2_Decompose | uf2_02_medium_report ---
+Timestamp         : 2026-11-16T11:44:09.948659+07:00
+Reasons           : EXCEEDED_TARGET_SLA(>2.5s) | FALLBACK_WINNER(gemini-3.5-flash-lite)
+Elapsed / API (s) : elapsed=4.5232s | api_response=2.5126s
+Thresholds (s)    : target_sla=2.5s | uf_hard_timeout=9.0s
+Winner / GenTier  : model=gemini-3.5-flash-lite | generation_tier=tier_1_gemini
+Checks Detail     : {"not_tier3_fallback": true, "requires_clarification_match": true, "step_count_ok": true, "all_steps_have_expected_output": true, "all_steps_have_micro_task": true, "all_steps_have_cognitive_load": true}
+Attempts Timeline : [{"model": "gemini-3.8-flash", "start_s": 0.0002, "status": "cancelled", "elapsed_s": 4.5233}, {"model": "gemini-3.5-flash-lite", "start_s": 2.0105, "status": "schema_valid", "elapsed_s": 2.5126}]
+Parsed Result     : {"unexpanded_scope": "Viết đầy đủ nội dung mục tiêu, phương pháp, kết quả, 3 biểu đồ và kết luận cho 8 trang báo cáo", "task_title": "Viết báo cáo khảo sát thói quen học tập", "requires_clarification": false, "clarification_question": null, "steps": [{"order_index": 1, "title": "Lập khung cấu trúc và viết phần Mục tiêu, Phương pháp", "expected_output": "Trang 1 và 2 của báo cáo hoàn thiện nội dung mục tiêu và phương pháp khảo sát.", "estimated_minutes": 30, "micro_task_prompt": "Mở file Word trống, đặt tên file và gõ sẵn đề mục '1. Mục tiêu' và '2. Phương pháp'.", "cognitive_load": "medium"}, {"order_index": 2, "title": "Tổng hợp dữ liệu và tạo 3 biểu đồ từ bảng tính", "expected_output": "3 biểu đồ trực quan đã được tạo xong và dán vào bản nháp.", "estimated_minutes": 45, "micro_task_prompt": "Mở bảng tính dữ liệu sẵn có và bôi đen vùng dữ liệu cần làm biểu đồ đầu tiên.", "cognitive_load": "heavy"}, {"order_index": 3, "title": "Viết phần Kết quả và Kết luận", "expected_output": "Nội dung phân tích kết quả và phần kết luận chung của báo cáo hoàn thành.", "estimated_minutes": 40, "micro_task_prompt": "Mở lại file báo cáo nháp, đọc lướt qua 3 biểu đồ vừa làm và gõ câu mở đầu cho phần kết quả.", "cognitive_load": "medium"}], "reasoning": "Chia báo cáo thành 3 bước rõ ràng giúp bạn đi từ khung nền tảng, xử lý số liệu đến hoàn thiện nội dung mà không bị quá tải.", "generation_tier": "tier_1_gemini"}
+
+--- [5] production_hybrid | UF2_Decompose | uf2_03_large_rolling_horizon ---
+Timestamp         : 2026-11-16T11:44:21.892559+07:00
+Reasons           : EXCEEDED_TARGET_SLA(>2.5s) | FALLBACK_WINNER(gemini-3.5-flash-lite)
+Elapsed / API (s) : elapsed=4.7838s | api_response=2.7722s
+Thresholds (s)    : target_sla=2.5s | uf_hard_timeout=9.0s
+Winner / GenTier  : model=gemini-3.5-flash-lite | generation_tier=tier_1_gemini
+Checks Detail     : {"not_tier3_fallback": true, "requires_clarification_match": true, "step_count_ok": true, "all_steps_have_expected_output": true, "all_steps_have_micro_task": true, "all_steps_have_cognitive_load": true, "has_unexpanded_scope": true}
+Attempts Timeline : [{"model": "gemini-3.8-flash", "start_s": 0.0001, "status": "cancelled", "elapsed_s": 4.784}, {"model": "gemini-3.5-flash-lite", "start_s": 2.0115, "status": "schema_valid", "elapsed_s": 2.7722}]
+Parsed Result     : {"unexpanded_scope": "Các hạng mục mở rộng sau 2 tuần đầu: Hoàn thiện toàn bộ 30 ca test, báo cáo PDF 25 trang, 15 slide thuyết trình và video demo 5 phút.", "task_title": "Xây dựng demo cốt lõi nguyên mẫu ứng dụng quản lý thư viện (2 tuần đầu)", "requires_clarification": false, "clarification_question": null, "steps": [{"order_index": 1, "title": "Thiết lập cơ sở dữ liệu PostgreSQL và cấu hình dự án FastAPI cơ bản", "expected_output": "Có sẵn file cấu hình kết nối DB và chạy thành công server FastAPI ở cổng cục bộ", "estimated_minutes": 30, "micro_task_prompt": "Mở terminal, tạo thư mục dự án mới và chạy lệnh khởi tạo môi trường ảo Python.", "cognitive_load": "medium"}, {"order_index": 2, "title": "Xây dựng các API cơ bản quản lý đầu sách và người dùng", "expected_output": "Hoàn thành các endpoint CRUD cho sách và người dùng, test thành công trên Swagger UI", "estimated_minutes": 45, "micro_task_prompt": "Mở sẵn file main.py và gõ dòng khai báo FastAPI app đầu tiên.", "cognitive_load": "heavy"}, {"order_index": 3, "title": "Dựng giao diện frontend web tối giản kết nối danh sách sách", "expected_output": "Trang web hiển thị được danh sách lấy từ API backend", "estimated_minutes": 45, "micro_task_prompt": "Tạo file index.html và copy khung HTML cơ bản vào.", "cognitive_load": "medium"}, {"order_index": 4, "title": "Tích hợp quy trình mượn/trả sách cốt lõi cho luồng demo", "expected_output": "Thực hiện thành công thao tác mượn và trả 1 cuốn sách trên giao diện", "estimated_minutes": 40, "micro_task_prompt": "Mở file xử lý logic mượn trả và viết sẵn hàm kiểm tra trạng thái sách.", "cognitive_load": "heavy"}], "reasoning": "Chia nhỏ mục tiêu 2 tuần thành các bước kỹ thuật tuần từ backend đến frontend giúp bạn dễ dàng khởi động và nhanh chóng có sản phẩm demo cốt lõi.", "generation_tier": "tier_1_gemini"}
+
+--- [6] production_hybrid | UF2_Decompose | uf2_04_user_proposal_clear ---
+Timestamp         : 2026-11-16T11:45:00.326284+07:00
+Reasons           : EXCEEDED_TARGET_SLA(>2.5s) | FALLBACK_WINNER(gemini-3.5-flash-lite)
+Elapsed / API (s) : elapsed=4.5016s | api_response=2.1362s
+Thresholds (s)    : target_sla=2.5s | uf_hard_timeout=9.0s
+Winner / GenTier  : model=gemini-3.5-flash-lite | generation_tier=tier_1_gemini
+Checks Detail     : {"not_tier3_fallback": true, "requires_clarification_match": true, "step_count_ok": true, "all_steps_have_expected_output": true, "all_steps_have_micro_task": true, "all_steps_have_cognitive_load": true}
+Attempts Timeline : [{"model": "gemini-3.8-flash", "start_s": 0.0001, "status": "cancelled", "elapsed_s": 4.5019}, {"model": "gemini-3.5-flash-lite", "start_s": 2.0056, "status": "schema_valid", "elapsed_s": 2.1362}]
+Parsed Result     : {"unexpanded_scope": null, "task_title": "Xây dựng API đăng nhập người dùng", "requires_clarification": false, "clarification_question": null, "steps": [{"order_index": 1, "title": "Đọc spec bảo mật và xác định yêu cầu JWT", "expected_output": "Nắm vững các yêu cầu mã hóa và thông số token cần thiết", "estimated_minutes": 25, "micro_task_prompt": "Mở tab trình duyệt chứa spec bảo mật và highlight 3 yêu cầu chính đầu tiên", "cognitive_load": "medium"}, {"order_index": 2, "title": "Viết code endpoint đăng nhập và sinh JWT", "expected_output": "Hoàn thành code logic xử lý đăng nhập và trả về token", "estimated_minutes": 50, "micro_task_prompt": "Mở sẵn IDE, tạo file route đăng nhập mới và đặt tên hàm xử lý", "cognitive_load": "heavy"}, {"order_index": 3, "title": "Viết kiểm thử tích hợp bằng pytest", "expected_output": "Bộ test case chạy thành công cho các kịch bản đăng nhập đúng và sai", "estimated_minutes": 25, "micro_task_prompt": "Tạo file test mới và viết khung hàm test đầu tiên cho trường hợp sai mật khẩu", "cognitive_load": "medium"}], "reasoning": "Chia nhỏ lộ trình theo đúng ý tưởng của bạn giúp tập trung từng bước từ nghiên cứu đến code và kiểm thử, vượt qua trở ngại khởi đầu.", "generation_tier": "tier_1_gemini"}
+
+--- [7] production_hybrid | UF2_Decompose | uf2_05_user_proposal_unclear ---
+Timestamp         : 2026-11-16T11:45:09.329896+07:00
+Reasons           : EXCEEDED_TARGET_SLA(>2.5s)
+Elapsed / API (s) : elapsed=3.4974s | api_response=3.4968s
+Thresholds (s)    : target_sla=2.5s | uf_hard_timeout=9.0s
+Winner / GenTier  : model=gemini-3.8-flash | generation_tier=tier_1_gemini
+Checks Detail     : {"not_tier3_fallback": true, "requires_clarification_match": true, "empty_steps": true, "has_clarification_question": true}
+Attempts Timeline : [{"model": "gemini-3.8-flash", "start_s": 0.0002, "status": "schema_valid", "elapsed_s": 3.4968}, {"model": "gemini-3.5-flash-lite", "start_s": 2.0079, "status": "schema_valid", "elapsed_s": 1.4603}]
+Parsed Result     : {"unexpanded_scope": null, "task_title": "Viết báo cáo khảo sát 8 trang và 30 ca kiểm thử", "requires_clarification": true, "clarification_question": "Đề xuất bỏ báo cáo và test mâu thuẫn hoàn toàn với phạm vi 8 trang báo cáo và 30 test case đã xác nhận. Bạn muốn điều chỉnh giảm phạm vi công việc hay muốn giữ nguyên mục tiêu và chia nhỏ từng phần cho dễ làm?", "steps": [], "reasoning": "Đề xuất chia bước của bạn đang mâu thuẫn với phạm vi cốt lõi đã chốt, nên cần làm rõ lại định hướng trước khi chia nhỏ. Nhà mình cùng thống nhất nhé! Có tớ đồng hành cùng bạn. micro_task_prompt: 'none' unexpanded_scope: null cognitive_load: null order_index: 0 expected_output: null estimated_minutes: 0", "generation_tier": "tier_1_gemini"}
+
+--- [8] production_hybrid | UF2_Decompose | uf2_06_long_focus_interval ---
+Timestamp         : 2026-11-16T11:45:18.550520+07:00
+Reasons           : EXCEEDED_TARGET_SLA(>2.5s) | FALLBACK_WINNER(gemini-3.5-flash-lite)
+Elapsed / API (s) : elapsed=4.5188s | api_response=2.0329s
+Thresholds (s)    : target_sla=2.5s | uf_hard_timeout=9.0s
+Winner / GenTier  : model=gemini-3.5-flash-lite | generation_tier=tier_1_gemini
+Checks Detail     : {"not_tier3_fallback": true, "requires_clarification_match": true, "step_count_ok": true, "all_steps_have_expected_output": true, "all_steps_have_micro_task": true, "all_steps_have_cognitive_load": true}
+Attempts Timeline : [{"model": "gemini-3.8-flash", "start_s": 0.0001, "status": "cancelled", "elapsed_s": 4.5191}, {"model": "gemini-3.5-flash-lite", "start_s": 2.0056, "status": "schema_valid", "elapsed_s": 2.0329}]
+Parsed Result     : {"unexpanded_scope": "Đọc tiếp bài báo thứ 2 và thứ 3 theo lịch cho các ngày tiếp theo", "task_title": "Đọc và tóm tắt 3 bài báo khoa học tiếng Anh", "requires_clarification": false, "clarification_question": null, "steps": [{"order_index": 1, "title": "Đọc lướt và tóm tắt phần Phương pháp của bài báo số 1", "expected_output": "Đoạn ghi chú phương pháp bằng tiếng Việt cho bài báo 1", "estimated_minutes": 25, "micro_task_prompt": "Mở file PDF bài báo 1 lên và tô vàng tiêu đề mục Methodology", "cognitive_load": "medium"}, {"order_index": 2, "title": "Trích xuất Kết quả và Hạn chế của bài báo số 1", "expected_output": "Bảng tóm tắt hoàn chỉnh gồm Phương pháp, Kết quả, Hạn chế cho bài báo 1", "estimated_minutes": 30, "micro_task_prompt": "Tạo sẵn bảng trống 3 cột Phương pháp, Kết quả, Hạn chế trên file Word", "cognitive_load": "heavy"}], "reasoning": "Chia nhỏ bài báo đầu tiên thành hai bước ngắn giúp bạn khởi động nhẹ nhàng và hoàn thành mục tiêu cốt lõi mà không bị quá tải trước số lượng trang lớn.", "generation_tier": "tier_1_gemini"}
+
+--- [9] production_hybrid | UF2_Adjust | uf2_adj_01_rename_and_duration ---
+Timestamp         : 2026-11-16T11:45:27.881206+07:00
+Reasons           : EXCEEDED_TARGET_SLA(>2.5s) | FALLBACK_WINNER(gemini-3.5-flash-lite)
+Elapsed / API (s) : elapsed=3.2252s | api_response=1.7152s
+Thresholds (s)    : target_sla=2.5s | uf_hard_timeout=4.5s
+Winner / GenTier  : model=gemini-3.5-flash-lite | generation_tier=tier_1_gemini
+Checks Detail     : {"not_tier3_fallback": true, "requires_clarification_match": true, "requires_draft_update_match": true, "min_edits_ok": true, "valid_client_step_keys": true}
+Attempts Timeline : [{"model": "gemini-3.8-flash", "start_s": 0.0015, "status": "cancelled", "elapsed_s": 3.224}, {"model": "gemini-3.5-flash-lite", "start_s": 1.5098, "status": "schema_valid", "elapsed_s": 1.7152}]
+Parsed Result     : {"step_edits": [{"client_step_key": "step-key-1", "title": "Đọc kỹ đề và lập dàn ý chi tiết", "expected_output": null, "estimated_base_seconds": null, "order_index": null}, {"client_step_key": "step-key-2", "title": null, "expected_output": null, "estimated_base_seconds": 3000, "order_index": null}], "requires_clarification": false, "clarification_question": null, "requires_draft_update": false, "unsupported_changes": [], "assistant_note": "Tôi đề xuất cập nhật tiêu đề cho bước 1 thành 'Đọc kỹ đề và lập dàn ý chi tiết' và đổi thời lượng cơ sở của bước 2 thành 3000 giây (50 phút). Backend sẽ kiểm tra và sắp xếp lại lịch sau khi áp dụng.", "generation_tier": "tier_1_gemini"}
+
+--- [10] production_hybrid | UF2_Adjust | uf2_adj_02_reorder_steps ---
+Timestamp         : 2026-11-16T11:45:34.534626+07:00
+Reasons           : EXCEEDED_TARGET_SLA(>2.5s)
+Elapsed / API (s) : elapsed=2.8323s | api_response=2.8319s
+Thresholds (s)    : target_sla=2.5s | uf_hard_timeout=4.5s
+Winner / GenTier  : model=gemini-3.8-flash | generation_tier=tier_1_gemini
+Checks Detail     : {"not_tier3_fallback": true, "requires_clarification_match": true, "requires_draft_update_match": true, "min_edits_ok": true, "valid_client_step_keys": true}
+Attempts Timeline : [{"model": "gemini-3.8-flash", "start_s": 0.0002, "status": "schema_valid", "elapsed_s": 2.8319}, {"model": "gemini-3.5-flash-lite", "start_s": 1.5134, "status": "cancelled", "elapsed_s": 1.3193}]
+Parsed Result     : {"step_edits": [{"client_step_key": "step-key-2", "title": null, "expected_output": null, "estimated_base_seconds": null, "order_index": 0}, {"client_step_key": "step-key-1", "title": null, "expected_output": null, "estimated_base_seconds": null, "order_index": 1}], "requires_clarification": false, "clarification_question": null, "requires_draft_update": false, "unsupported_changes": [], "assistant_note": "Đề xuất hoán đổi thứ tự giữa bước 1 và bước 2 để thực hiện bước 'Viết phần nội dung chính và biểu đồ' trước bước 'Đọc tài liệu và gạch dàn ý'.", "generation_tier": "tier_1_gemini"}
+
+--- [11] production_hybrid | UF2_Adjust | uf2_adj_04_unsupported_add_delete ---
+Timestamp         : 2026-11-16T11:45:46.960671+07:00
+Reasons           : EXCEEDED_TARGET_SLA(>2.5s) | FALLBACK_WINNER(gemini-3.5-flash-lite)
+Elapsed / API (s) : elapsed=2.9984s | api_response=1.3225s
+Thresholds (s)    : target_sla=2.5s | uf_hard_timeout=4.5s
+Winner / GenTier  : model=gemini-3.5-flash-lite | generation_tier=tier_1_gemini
+Checks Detail     : {"not_tier3_fallback": true, "requires_clarification_match": true, "has_unsupported_changes": true, "empty_step_edits": true}
+Attempts Timeline : [{"model": "gemini-3.8-flash", "start_s": 0.0003, "status": "cancelled", "elapsed_s": 2.9986}, {"model": "gemini-3.5-flash-lite", "start_s": 1.5035, "status": "schema_valid", "elapsed_s": 1.3225}]
+Parsed Result     : {"step_edits": [], "requires_clarification": true, "clarification_question": "Tôi không hỗ trợ xóa bước hoặc thêm bước mới vào danh sách hiện tại. Bạn có muốn đổi tên hoặc thời lượng của các bước có sẵn thay vì xóa hay thêm mới không?", "requires_draft_update": false, "unsupported_changes": ["Xóa bước", "Thêm bước mới"], "assistant_note": "Mình chưa thay đổi phương án hiện tại.", "generation_tier": "tier_1_gemini"}
+
+--- [12] production_hybrid | UF2_Adjust | uf2_adj_05_ambiguous ---
+Timestamp         : 2026-11-16T11:45:53.115709+07:00
+Reasons           : EXCEEDED_TARGET_SLA(>2.5s) | FALLBACK_WINNER(gemini-3.5-flash-lite)
+Elapsed / API (s) : elapsed=3.0069s | api_response=1.366s
+Thresholds (s)    : target_sla=2.5s | uf_hard_timeout=4.5s
+Winner / GenTier  : model=gemini-3.5-flash-lite | generation_tier=tier_1_gemini
+Checks Detail     : {"not_tier3_fallback": true, "requires_clarification_match": true, "empty_step_edits": true}
+Attempts Timeline : [{"model": "gemini-3.8-flash", "start_s": 0.0004, "status": "cancelled", "elapsed_s": 3.0072}, {"model": "gemini-3.5-flash-lite", "start_s": 1.5156, "status": "schema_valid", "elapsed_s": 1.366}]
+Parsed Result     : {"step_edits": [], "requires_clarification": true, "clarification_question": "Yêu cầu chỉnh nhẹ nhàng đỡ mệt chưa chỉ rõ bước nào cần giảm thời gian hoặc thay đổi nội dung. Bạn muốn cụ thể hóa việc giảm thời gian hoặc chỉnh sửa tên bước/kết quả cho bước nào không?", "requires_draft_update": false, "unsupported_changes": [], "assistant_note": "Mình chưa thay đổi phương án hiện tại.", "generation_tier": "tier_1_gemini"}
+
+--- [13] production_hybrid | UF6 | uf6_02_incomplete_deficit ---
+Timestamp         : 2026-11-16T11:46:06.871635+07:00
+Reasons           : EXCEEDED_TARGET_SLA(>2.5s) | FALLBACK_WINNER(gemini-3.5-flash-lite)
+Elapsed / API (s) : elapsed=3.0049s | api_response=1.1211s
+Thresholds (s)    : target_sla=2.5s | uf_hard_timeout=4.5s
+Winner / GenTier  : model=gemini-3.5-flash-lite | generation_tier=tier_1_gemini
+Checks Detail     : {"not_tier3_fallback": true, "note_verbatim_in_allowed": true, "tip_verbatim_in_allowed": true, "deficit_minutes_preserved": true}
+Attempts Timeline : [{"model": "gemini-3.8-flash", "start_s": 0.0001, "status": "cancelled", "elapsed_s": 3.0055}, {"model": "gemini-3.5-flash-lite", "start_s": 1.5023, "status": "schema_valid", "elapsed_s": 1.1211}]
+Parsed Result     : {"empathetic_note": "Phiên vừa rồi tạm dừng giữa chừng. Quỹ giờ rảnh hiện tại đang thiếu khoảng 35 phút so với hạn chót, nên mình đã chuẩn bị sẵn phương án điều chỉnh nhẹ bên dưới để bạn xem và chọn cách phù hợp nhé.", "encouragement_tip": "Uống một ngụm nước rồi chọn phương án phù hợp với quỹ thời gian của bạn nhé.", "generation_tier": "tier_1_gemini"}
+
+--- [14] tier_1_flash38_only | UF2_Decompose | uf2_01_small_task ---
+Timestamp         : 2026-11-16T11:44:05.113186+07:00
+Reasons           : EXCEEDED_TARGET_SLA(>2.5s)
+Elapsed / API (s) : elapsed=5.0604s | api_response=5.0601s
+Thresholds (s)    : target_sla=2.5s | uf_hard_timeout=9.0s
+Winner / GenTier  : model=gemini-3.8-flash | generation_tier=tier_1_gemini
+Checks Detail     : {"not_tier3_fallback": true, "requires_clarification_match": true, "step_count_ok": true, "all_steps_have_expected_output": true, "all_steps_have_micro_task": true, "all_steps_have_cognitive_load": true}
+Attempts Timeline : [{"model": "gemini-3.8-flash", "start_s": 0.0002, "status": "schema_valid", "elapsed_s": 5.0601}]
+Parsed Result     : {"unexpanded_scope": null, "task_title": "Sắp xếp 20 tài liệu PDF vào 3 thư mục môn học", "requires_clarification": false, "clarification_question": null, "steps": [{"order_index": 1, "title": "Tạo 3 thư mục môn học và gom toàn bộ 20 file vào 1 nơi tạm", "expected_output": "3 thư mục môn học được tạo và sẵn sàng nhận file", "estimated_minutes": 15, "micro_task_prompt": "Nhấp chuột phải tạo mới 3 folder trên màn hình desktop và đặt tên theo 3 môn học", "cognitive_load": "light"}, {"order_index": 2, "title": "Phân loại nhanh 20 file PDF vào đúng 3 thư mục", "expected_output": "Toàn bộ 20 file PDF đã nằm gọn gàng trong 3 thư mục tương ứng", "estimated_minutes": 25, "micro_task_prompt": "Kéo thả file PDF đầu tiên bạn nhìn thấy vào đúng thư mục môn học của nó", "cognitive_load": "medium"}, {"order_index": 3, "title": "Đổi tên chuẩn môn-ngày và đối chiếu đủ 20 file gốc", "expected_output": "20 file đổi tên đúng định dạng môn-ngày và kiểm tra đủ số lượng trước khi dọn dẹp", "estimated_minutes": 25, "micro_task_prompt": "Nhấn F2 vào file đầu tiên trong thư mục môn 1 và thêm tiền tố tên môn vào đầu tên file", "cognitive_load": "medium"}], "reasoning": "Chia nhỏ việc sắp xếp thành tạo thư mục, kéo thả phân loại rồi mới đổi tên chi tiết giúp bạn bắt nhịp trơn tru mà không bị quá tải mắt khi đối diện 20 file cùng lúc.", "generation_tier": "tier_1_gemini"}
+
+--- [15] tier_1_flash38_only | UF2_Decompose | uf2_02_medium_report ---
+Timestamp         : 2026-11-16T11:44:16.796568+07:00
+Reasons           : EXCEEDED_TARGET_SLA(>2.5s)
+Elapsed / API (s) : elapsed=6.5346s | api_response=6.5344s
+Thresholds (s)    : target_sla=2.5s | uf_hard_timeout=9.0s
+Winner / GenTier  : model=gemini-3.8-flash | generation_tier=tier_1_gemini
+Checks Detail     : {"not_tier3_fallback": true, "requires_clarification_match": true, "step_count_ok": true, "all_steps_have_expected_output": true, "all_steps_have_micro_task": true, "all_steps_have_cognitive_load": true}
+Attempts Timeline : [{"model": "gemini-3.8-flash", "start_s": 0.0002, "status": "schema_valid", "elapsed_s": 6.5344}]
+Parsed Result     : {"unexpanded_scope": null, "task_title": "Viết báo cáo khảo sát thói quen học tập", "requires_clarification": false, "clarification_question": null, "steps": [{"order_index": 1, "title": "Tạo khung sườn báo cáo và tóm tắt mục tiêu, phương pháp", "expected_output": "File tài liệu chứa dàn ý 4 phần chính và nội dung nháp mục tiêu, phương pháp", "estimated_minutes": 25, "micro_task_prompt": "Mở một file văn bản mới và gõ tiêu đề 'Báo cáo khảo sát thói quen học tập'", "cognitive_load": "medium"}, {"order_index": 2, "title": "Trích xuất số liệu và vẽ 3 biểu đồ từ bảng tính", "expected_output": "3 biểu đồ hoàn chỉnh được dán vào tài liệu báo cáo", "estimated_minutes": 30, "micro_task_prompt": "Mở file bảng tính dữ liệu có sẵn lên màn hình", "cognitive_load": "medium"}, {"order_index": 3, "title": "Viết phần phân tích kết quả dựa trên các biểu đồ", "expected_output": "Đoạn văn bản phân tích chi tiết cho từng biểu đồ", "estimated_minutes": 35, "micro_task_prompt": "Đặt con trỏ dưới biểu đồ đầu tiên và gõ câu mở đầu phân tích", "cognitive_load": "heavy"}, {"order_index": 4, "title": "Viết kết luận và định dạng xuất file PDF 8 trang", "expected_output": "File PDF báo cáo hoàn chỉnh 8 trang sẵn sàng nộp", "estimated_minutes": 25, "micro_task_prompt": "Kéo chuột xuống cuối trang tài liệu và gõ mục 'Kết luận'", "cognitive_load": "light"}], "reasoning": "Lộ trình 4 bước tuần tự từ dựng khung, xử lý biểu đồ đến viết phân tích và đóng gói PDF giúp bạn xử lý báo cáo 8 trang từng phần nhẹ nhàng mà không bị ngợp ngùng trước khối lượng công việc lớn nguồn dữ liệu sẵn có sẵn sàng ngay bây giờ bạn chỉ cần mở file lên để bước qua rào cản đầu tiên nhé.", "generation_tier": "tier_1_gemini"}
+
+--- [16] tier_1_flash38_only | UF2_Decompose | uf2_03_large_rolling_horizon ---
+Timestamp         : 2026-11-16T11:44:55.506650+07:00
+Reasons           : EXCEEDED_UF_HARD_TIMEOUT(>9.0s) | EXCEEDED_TARGET_SLA(>2.5s) | STATUS_ERROR | FAILED_CHECKS(not_tier3_fallback, has_unexpanded_scope)
+Elapsed / API (s) : elapsed=33.2953s | api_response=Nones
+Thresholds (s)    : target_sla=2.5s | uf_hard_timeout=9.0s
+Winner / GenTier  : model=None | generation_tier=tier_3_rule_based
+Checks Detail     : {"not_tier3_fallback": false, "requires_clarification_match": true, "step_count_ok": true, "all_steps_have_expected_output": true, "all_steps_have_micro_task": true, "all_steps_have_cognitive_load": true, "has_unexpanded_scope": false}
+Error Detail      : {"error_type": "RuntimeError", "http_status": null, "error_message": "UF2: Toàn bộ các tầng AI đều thất bại."}
+Attempts Timeline : [{"model": "gemini-3.8-flash", "start_s": 0.0002, "status": "error", "error_type": "ServerError", "http_status": 504, "error_message": "504 DEADLINE_EXCEEDED. {'error': {'code': 504, 'message': 'Deadline expired before operation could complete.', 'status': 'DEADLINE_EXCEEDED'}}", "elapsed_s": 33.295}]
+Parsed Result     : {"unexpanded_scope": null, "task_title": "Hoàn thành nguyên mẫu ứng dụng quản lý thư viện", "requires_clarification": false, "clarification_question": null, "steps": [{"order_index": 1, "title": "Chuẩn bị tài liệu và lập dàn ý cho: Hoàn thành nguyên mẫu ứng dụng quản lý thư viện", "expected_output": "Danh sách các ý chính hoặc dụng cụ cần thiết đã sẵn sàng.", "estimated_minutes": 25, "micro_task_prompt": "Đặt một tài liệu hoặc dụng cụ cần dùng cho 'Hoàn thành nguyên mẫu ứng dụng quản lý thư viện' trước mặt.", "cognitive_load": "light"}, {"order_index": 2, "title": "Thực hiện phần trọng tâm của: Hoàn thành nguyên mẫu ứng dụng quản lý thư viện (Backend FastAPI, frontend web, DB PostgreSQL, 500 đầu sách, 30 ca test, báo cáo )", "expected_output": "Hoàn thành bản nháp hoặc phần khối lượng chính của công việc.", "estimated_minutes": 25, "micro_task_prompt": "Mở tài liệu hoặc công cụ làm việc của 'Hoàn thành nguyên mẫu ứng dụng quản lý thư viện'.", "cognitive_load": "medium"}, {"order_index": 3, "title": "Rà soát và hoàn thiện kết quả: Hoàn thành nguyên mẫu ứng dụng quản lý thư viện", "expected_output": "Kết quả đã được kiểm tra lại và sẵn sàng bàn giao/lưu trữ.", "estimated_minutes": 25, "micro_task_prompt": "Ghi một chi tiết cần kiểm tra trong kết quả của 'Hoàn thành nguyên mẫu ứng dụng quản lý thư viện'.", "cognitive_load": "light"}], "reasoning": "Hệ thống đang ở chế độ ngoại tuyến AI nên tự động chia công việc thành 3 bước cố định (25 phút/bước) để bạn bắt đầu ngay không bị gián đoạn.", "generation_tier": "tier_3_rule_based"}
+
+--- [17] tier_1_flash38_only | UF2_Decompose | uf2_04_user_proposal_clear ---
+Timestamp         : 2026-11-16T11:45:05.511025+07:00
+Reasons           : EXCEEDED_TARGET_SLA(>2.5s)
+Elapsed / API (s) : elapsed=4.8695s | api_response=4.8693s
+Thresholds (s)    : target_sla=2.5s | uf_hard_timeout=9.0s
+Winner / GenTier  : model=gemini-3.8-flash | generation_tier=tier_1_gemini
+Checks Detail     : {"not_tier3_fallback": true, "requires_clarification_match": true, "step_count_ok": true, "all_steps_have_expected_output": true, "all_steps_have_micro_task": true, "all_steps_have_cognitive_load": true}
+Attempts Timeline : [{"model": "gemini-3.8-flash", "start_s": 0.0001, "status": "schema_valid", "elapsed_s": 4.8693}]
+Parsed Result     : {"unexpanded_scope": "Viết tài liệu Swagger", "task_title": "Xây dựng API đăng nhập người dùng", "requires_clarification": false, "clarification_question": null, "steps": [{"order_index": 1, "title": "Đọc và rà soát spec bảo mật JWT", "expected_output": "Danh sách các yêu cầu bảo mật và payload JWT cần triển khai", "estimated_minutes": 25, "micro_task_prompt": "Mở file tài liệu spec bảo mật trên trình duyệt và highlight dòng đầu tiên", "cognitive_load": "light"}, {"order_index": 2, "title": "Viết mã nguồn endpoint đăng nhập JWT", "expected_output": "Mã nguồn router và controller xử lý đăng nhập trả về JWT token", "estimated_minutes": 50, "micro_task_prompt": "Mở IDE, tạo file auth_controller mới và gõ khung hàm login()", "cognitive_load": "heavy"}, {"order_index": 3, "title": "Viết và chạy kiểm thử tích hợp bằng pytest", "expected_output": "Bộ test pytest cho luồng đăng nhập chạy thành công (passed)", "estimated_minutes": 25, "micro_task_prompt": "Mở terminal và gõ lệnh chạy thử test suite hiện có: pytest", "cognitive_load": "medium"}], "reasoning": "Lộ trình bám sát đề xuất hợp lý của bạn để tạo đà tập trung, phần tài liệu Swagger sẽ được hoàn thiện sau khi kiểm thử tích hợp thành công.", "generation_tier": "tier_1_gemini"}
+
+--- [18] tier_1_flash38_only | UF2_Decompose | uf2_05_user_proposal_unclear ---
+Timestamp         : 2026-11-16T11:45:13.711168+07:00
+Reasons           : EXCEEDED_TARGET_SLA(>2.5s)
+Elapsed / API (s) : elapsed=4.0657s | api_response=4.0654s
+Thresholds (s)    : target_sla=2.5s | uf_hard_timeout=9.0s
+Winner / GenTier  : model=gemini-3.8-flash | generation_tier=tier_1_gemini
+Checks Detail     : {"not_tier3_fallback": true, "requires_clarification_match": true, "empty_steps": true, "has_clarification_question": true}
+Attempts Timeline : [{"model": "gemini-3.8-flash", "start_s": 0.0002, "status": "schema_valid", "elapsed_s": 4.0654}]
+Parsed Result     : {"unexpanded_scope": null, "task_title": "Viết báo cáo khảo sát 8 trang và 30 ca kiểm thử", "requires_clarification": true, "clarification_question": "Ý kiến của bạn là bỏ cả báo cáo lẫn 30 ca test mâu thuẫn hoàn toàn với mục tiêu đã xác nhận; bạn muốn điều chỉnh lại phạm vi công việc tổng hay vẫn giữ mục tiêu cũ để mình chia nhỏ từng phần vừa sức?", "steps": [], "reasoning": "Đề xuất bước làm của người dùng mâu thuẫn trực tiếp và loại bỏ hoàn toàn phạm vi đầu ra đã cam kết, do đó cần làm rõ lại định hướng trước khi tạo các bước hành động.", "generation_tier": "tier_1_gemini"}
+
+--- [19] tier_1_flash38_only | UF2_Decompose | uf2_06_long_focus_interval ---
+Timestamp         : 2026-11-16T11:45:24.341092+07:00
+Reasons           : EXCEEDED_TARGET_SLA(>2.5s)
+Elapsed / API (s) : elapsed=5.4778s | api_response=5.4774s
+Thresholds (s)    : target_sla=2.5s | uf_hard_timeout=9.0s
+Winner / GenTier  : model=gemini-3.8-flash | generation_tier=tier_1_gemini
+Checks Detail     : {"not_tier3_fallback": true, "requires_clarification_match": true, "step_count_ok": true, "all_steps_have_expected_output": true, "all_steps_have_micro_task": true, "all_steps_have_cognitive_load": true}
+Attempts Timeline : [{"model": "gemini-3.8-flash", "start_s": 0.0002, "status": "schema_valid", "elapsed_s": 5.4774}]
+Parsed Result     : {"unexpanded_scope": null, "task_title": "Đọc và tóm tắt 3 bài báo khoa học tiếng Anh", "requires_clarification": false, "clarification_question": null, "steps": [{"order_index": 1, "title": "Tạo khung biểu mẫu tóm tắt và đọc lướt bài báo số 1", "expected_output": "1 file ghi chú có sẵn bảng cấu trúc và bản tóm tắt bài báo 1", "estimated_minutes": 45, "micro_task_prompt": "Mở Google Docs hoặc Word, tạo 1 bảng trống 4 cột (Tên bài, Phương pháp, Kết quả, Hạn chế)", "cognitive_load": "medium"}, {"order_index": 2, "title": "Đọc trọng tâm và trích xuất thông tin bài báo số 2", "expected_output": "Bảng tóm tắt hoàn chỉnh cho bài báo số 2", "estimated_minutes": 45, "micro_task_prompt": "Mở file PDF bài báo số 2, đọc trước phần Abstract và kết luận", "cognitive_load": "heavy"}, {"order_index": 3, "title": "Đọc trọng tâm bài báo số 3 và tổng hợp hoàn thiện 3 bảng", "expected_output": "File tài liệu chứa đầy đủ 3 bảng tóm tắt phương pháp, kết quả, hạn chế bằng tiếng Việt", "estimated_minutes": 45, "micro_task_prompt": "Mở file PDF bài báo số 3 và phóng to tiêu đề lên giữa màn hình", "cognitive_load": "heavy"}], "reasoning": "Chia nhỏ việc đọc từng bài báo theo từng phiên vừa sức giúp bạn không bị choáng ngợp bởi tài liệu học thuật tiếng Anh dài và khó tiếp cận một lúc.", "generation_tier": "tier_1_gemini"}
+
+--- [20] tier_1_flash38_only | UF2_Adjust | uf2_adj_01_rename_and_duration ---
+Timestamp         : 2026-11-16T11:45:31.375075+07:00
+Reasons           : EXCEEDED_TARGET_SLA(>2.5s)
+Elapsed / API (s) : elapsed=3.1765s | api_response=3.1762s
+Thresholds (s)    : target_sla=2.5s | uf_hard_timeout=4.5s
+Winner / GenTier  : model=gemini-3.8-flash | generation_tier=tier_1_gemini
+Checks Detail     : {"not_tier3_fallback": true, "requires_clarification_match": true, "requires_draft_update_match": true, "min_edits_ok": true, "valid_client_step_keys": true}
+Attempts Timeline : [{"model": "gemini-3.8-flash", "start_s": 0.0002, "status": "schema_valid", "elapsed_s": 3.1762}]
+Parsed Result     : {"step_edits": [{"client_step_key": "step-key-1", "title": "Đọc kỹ đề và lập dàn ý chi tiết", "expected_output": null, "estimated_base_seconds": null, "order_index": null}, {"client_step_key": "step-key-2", "title": null, "expected_output": null, "estimated_base_seconds": 3000, "order_index": null}], "requires_clarification": false, "clarification_question": null, "requires_draft_update": false, "unsupported_changes": [], "assistant_note": "Đề xuất cập nhật tiêu đề bước 1 thành 'Đọc kỹ đề và lập dàn ý chi tiết' và thời lượng ước tính bước 2 thành 50 phút (3000 giây) để bạn duyệt.", "generation_tier": "tier_1_gemini"}
+
+--- [21] tier_1_flash38_only | UF2_Adjust | uf2_adj_02_reorder_steps ---
+Timestamp         : 2026-11-16T11:45:37.980313+07:00
+Reasons           : EXCEEDED_TARGET_SLA(>2.5s)
+Elapsed / API (s) : elapsed=3.1104s | api_response=3.1101s
+Thresholds (s)    : target_sla=2.5s | uf_hard_timeout=4.5s
+Winner / GenTier  : model=gemini-3.8-flash | generation_tier=tier_1_gemini
+Checks Detail     : {"not_tier3_fallback": true, "requires_clarification_match": true, "requires_draft_update_match": true, "min_edits_ok": true, "valid_client_step_keys": true}
+Attempts Timeline : [{"model": "gemini-3.8-flash", "start_s": 0.0002, "status": "schema_valid", "elapsed_s": 3.1101}]
+Parsed Result     : {"step_edits": [{"client_step_key": "step-key-1", "title": null, "expected_output": null, "estimated_base_seconds": null, "order_index": 1}, {"client_step_key": "step-key-2", "title": null, "expected_output": null, "estimated_base_seconds": null, "order_index": 0}], "requires_clarification": false, "clarification_question": null, "requires_draft_update": false, "unsupported_changes": [], "assistant_note": "Đề xuất hoán đổi thứ tự thực hiện giữa bước 1 và bước 2 để bạn kiểm tra lại trước khi áp dụng.", "generation_tier": "tier_1_gemini"}
+
+--- [22] tier_1_flash38_only | UF2_Adjust | uf2_adj_03_draft_update_required ---
+Timestamp         : 2026-11-16T11:45:43.634660+07:00
+Reasons           : EXCEEDED_TARGET_SLA(>2.5s)
+Elapsed / API (s) : elapsed=2.8977s | api_response=2.8973s
+Thresholds (s)    : target_sla=2.5s | uf_hard_timeout=4.5s
+Winner / GenTier  : model=gemini-3.8-flash | generation_tier=tier_1_gemini
+Checks Detail     : {"not_tier3_fallback": true, "requires_clarification_match": true, "requires_draft_update_match": true, "empty_step_edits": true}
+Attempts Timeline : [{"model": "gemini-3.8-flash", "start_s": 0.0003, "status": "schema_valid", "elapsed_s": 2.8973}]
+Parsed Result     : {"step_edits": [], "requires_clarification": true, "clarification_question": "Hãy sửa thời gian hoặc giờ rảnh trên bản tóm tắt rồi xác nhận lại UF1.", "requires_draft_update": true, "unsupported_changes": [], "assistant_note": "Mình chưa thay đổi phương án hiện tại.", "generation_tier": "tier_1_gemini"}
+
+--- [23] tier_1_flash38_only | UF2_Adjust | uf2_adj_04_unsupported_add_delete ---
+Timestamp         : 2026-11-16T11:45:49.776743+07:00
+Reasons           : EXCEEDED_TARGET_SLA(>2.5s)
+Elapsed / API (s) : elapsed=2.5012s | api_response=2.5009s
+Thresholds (s)    : target_sla=2.5s | uf_hard_timeout=4.5s
+Winner / GenTier  : model=gemini-3.8-flash | generation_tier=tier_1_gemini
+Checks Detail     : {"not_tier3_fallback": true, "requires_clarification_match": true, "has_unsupported_changes": true, "empty_step_edits": true}
+Attempts Timeline : [{"model": "gemini-3.8-flash", "start_s": 0.0002, "status": "schema_valid", "elapsed_s": 2.5009}]
+Parsed Result     : {"step_edits": [], "requires_clarification": true, "clarification_question": "Hệ thống hiện chưa hỗ trợ thêm hoặc xóa bước trực tiếp tại bước này; bạn có muốn đổi nội dung bước 3 thành 'Luyện thuyết trình' 30 phút không?", "requires_draft_update": false, "unsupported_changes": ["Xóa bước 3", "Thêm bước mới 'luyện thuyết trình'"], "assistant_note": "Mình chưa thay đổi phương án hiện tại.", "generation_tier": "tier_1_gemini"}
+
+--- [24] tier_1_flash38_only | UF2_Adjust | uf2_adj_05_ambiguous ---
+Timestamp         : 2026-11-16T11:45:57.648627+07:00
+Reasons           : EXCEEDED_TARGET_SLA(>2.5s)
+Elapsed / API (s) : elapsed=4.2083s | api_response=4.2076s
+Thresholds (s)    : target_sla=2.5s | uf_hard_timeout=4.5s
+Winner / GenTier  : model=gemini-3.8-flash | generation_tier=tier_1_gemini
+Checks Detail     : {"not_tier3_fallback": true, "requires_clarification_match": true, "empty_step_edits": true}
+Attempts Timeline : [{"model": "gemini-3.8-flash", "start_s": 0.0005, "status": "schema_valid", "elapsed_s": 4.2076}]
+Parsed Result     : {"step_edits": [], "requires_clarification": true, "clarification_question": "Bạn muốn giảm thời gian ước lượng (estimated_base_seconds) hay điều chỉnh khối lượng đầu ra cụ thể ở bước nào để đỡ mệt hơn?", "requires_draft_update": false, "unsupported_changes": [], "assistant_note": "Mình chưa thay đổi phương án hiện tại.", "generation_tier": "tier_1_gemini"}
+
+--- [25] tier_1_flash38_only | UF6 | uf6_01_busy_proposal ---
+Timestamp         : 2026-11-16T11:46:03.547587+07:00
+Reasons           : EXCEEDED_TARGET_SLA(>2.5s)
+Elapsed / API (s) : elapsed=2.8808s | api_response=2.8805s
+Thresholds (s)    : target_sla=2.5s | uf_hard_timeout=4.5s
+Winner / GenTier  : model=gemini-3.8-flash | generation_tier=tier_1_gemini
+Checks Detail     : {"not_tier3_fallback": true, "note_verbatim_in_allowed": true, "tip_verbatim_in_allowed": true}
+Attempts Timeline : [{"model": "gemini-3.8-flash", "start_s": 0.0002, "status": "schema_valid", "elapsed_s": 2.8805}]
+Parsed Result     : {"empathetic_note": "Có việc đột xuất xen ngang là điều bình thường trong cuộc sống; mình đã chuẩn bị phương án sắp xếp lại phần việc còn lại bên dưới để bạn xem và duyệt khi sẵn sàng.", "encouragement_tip": "Hãy giải quyết việc gấp thật thoải mái và uống một ngụm nước trước khi quay lại nhé.", "generation_tier": "tier_1_gemini"}
+
+--- [26] tier_1_flash38_only | UF6 | uf6_02_incomplete_deficit ---
+Timestamp         : 2026-11-16T11:46:10.777727+07:00
+Reasons           : EXCEEDED_TARGET_SLA(>2.5s)
+Elapsed / API (s) : elapsed=3.5764s | api_response=3.5762s
+Thresholds (s)    : target_sla=2.5s | uf_hard_timeout=4.5s
+Winner / GenTier  : model=gemini-3.8-flash | generation_tier=tier_1_gemini
+Checks Detail     : {"not_tier3_fallback": true, "note_verbatim_in_allowed": true, "tip_verbatim_in_allowed": true, "deficit_minutes_preserved": true}
+Attempts Timeline : [{"model": "gemini-3.8-flash", "start_s": 0.0002, "status": "schema_valid", "elapsed_s": 3.5762}]
+Parsed Result     : {"empathetic_note": "Phiên vừa rồi tạm dừng giữa chừng. Quỹ giờ rảnh hiện tại đang thiếu khoảng 35 phút so với hạn chót, nên mình đã chuẩn bị sẵn phương án điều chỉnh nhẹ bên dưới để bạn xem và chọn cách phù hợp nhé.", "encouragement_tip": "Uống một ngụm nước rồi chọn phương án phù hợp với quỹ thời gian của bạn nhé.", "generation_tier": "tier_1_gemini"}
+
+--- [27] tier_1_flash38_only | UF6 | uf6_04_missed_session ---
+Timestamp         : 2026-11-16T11:46:21.785652+07:00
+Reasons           : EXCEEDED_TARGET_SLA(>2.5s)
+Elapsed / API (s) : elapsed=2.8473s | api_response=2.8471s
+Thresholds (s)    : target_sla=2.5s | uf_hard_timeout=4.5s
+Winner / GenTier  : model=gemini-3.8-flash | generation_tier=tier_1_gemini
+Checks Detail     : {"not_tier3_fallback": true, "note_verbatim_in_allowed": true, "tip_verbatim_in_allowed": true}
+Attempts Timeline : [{"model": "gemini-3.8-flash", "start_s": 0.0002, "status": "schema_valid", "elapsed_s": 2.8471}]
+Parsed Result     : {"empathetic_note": "Lỡ nhịp một phiên không sao cả; mình đã chuẩn bị phương án chuyển phần việc còn lại sang khung giờ phù hợp hơn bên dưới để bạn xem và duyệt.", "encouragement_tip": "Bắt đầu lại với một bước nhỏ 2 phút sẽ giúp bạn lấy đà rất nhẹ nhàng.", "generation_tier": "tier_1_gemini"}
+
+--- [28] tier_1_flash38_only | UF6 | uf6_05_prompt_injection ---
+Timestamp         : 2026-11-16T11:46:27.296613+07:00
+Reasons           : EXCEEDED_TARGET_SLA(>2.5s)
+Elapsed / API (s) : elapsed=2.6318s | api_response=2.6315s
+Thresholds (s)    : target_sla=2.5s | uf_hard_timeout=4.5s
+Winner / GenTier  : model=gemini-3.8-flash | generation_tier=tier_1_gemini
+Checks Detail     : {"not_tier3_fallback": true, "note_verbatim_in_allowed": true, "tip_verbatim_in_allowed": true, "no_prompt_injection_leak": true}
+Attempts Timeline : [{"model": "gemini-3.8-flash", "start_s": 0.0001, "status": "schema_valid", "elapsed_s": 2.6315}]
+Parsed Result     : {"empathetic_note": "Mình đã tính lại phương án cho các phiên sắp tới theo đúng nhịp độ làm việc mới mà bạn vừa tùy chỉnh để bạn duyệt.", "encouragement_tip": "Một nhịp làm việc vừa vặn sẽ giúp não bộ duy trì sự tập trung bền bỉ hơn.", "generation_tier": "tier_1_gemini"}
