@@ -8,7 +8,10 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from collections.abc import Sequence
+import re
+import time
+from collections.abc import Awaitable, Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Literal, NamedTuple, TypeVar
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -66,6 +69,259 @@ class ExecutionTimingProfile(NamedTuple):
     primary_priority_until: float
     warm_backup_at: float
     groq_hedge_at: float | None
+
+
+CircuitState = Literal["closed", "open", "half_open"]
+ErrorCategory = Literal["auth", "rate_limit", "timeout", "transient"]
+
+
+@dataclass(slots=True)
+class ModelHealthRecord:
+    """Trạng thái sức khỏe và Circuit Breaker của một model AI."""
+
+    provider: Literal["gemini", "groq"]
+    model: str
+    state: CircuitState = "closed"
+    consecutive_failures: int = 0
+    open_until: float | None = None
+    probe_in_flight: bool = False
+    last_checked_at: str | None = None
+    last_latency_ms: int | None = None
+    last_error_type: str | None = None
+    last_error_category: ErrorCategory | None = None
+
+
+class _ProbePingSchema(BaseModel):
+    """Schema tối giản cho active probe kiểm tra provider còn hoạt động."""
+
+    ok: bool = True
+
+
+_RETRY_AFTER_SEC_RE = re.compile(r"try again in\s+(\d+(?:\.\d+)?)s", re.IGNORECASE)
+_RETRY_AFTER_MS_RE = re.compile(r"try again in\s+(\d+(?:\.\d+)?)ms", re.IGNORECASE)
+
+
+def _extract_error_http_status(exc: BaseException) -> int | None:
+    for attr in ("status_code", "code"):
+        val = getattr(exc, attr, None)
+        if isinstance(val, int):
+            return val
+    return None
+
+
+def _extract_retry_after_s(exc: BaseException) -> float | None:
+    msg = str(exc)
+    if m := _RETRY_AFTER_SEC_RE.search(msg):
+        return float(m.group(1))
+    if m_ms := _RETRY_AFTER_MS_RE.search(msg):
+        return float(m_ms.group(1)) / 1000.0
+    return None
+
+
+def _classify_provider_error(exc: BaseException) -> tuple[ErrorCategory, bool, float | None]:
+    """
+    Phân loại lỗi gọi AI thành `(category, retryable, explicit_cooldown_s)`:
+    - `auth`: Lỗi khóa/quyền (401/403/PermissionError) -> KHÔNG retry, mở cầu dao ngay.
+    - `rate_limit`: 429 / hết TPM-OTPM -> KHÔNG retry cùng model, nhảy model/tầng khác.
+    - `timeout`: Timeout / 504 -> KHÔNG retry khi quá hạn.
+    - `transient`: Lỗi mạng, 500/502/503, JSON/schema lỗi nhất thời -> CHO PHÉP retry nếu còn ngân sách.
+    """
+    status = _extract_error_http_status(exc)
+    type_name = type(exc).__name__.lower()
+    msg = str(exc).lower()
+
+    if (
+        status in (401, 403)
+        or isinstance(exc, PermissionError)
+        or "permission" in type_name
+        or "authentication" in type_name
+        or "unauthorized" in msg
+        or "forbidden" in msg
+        or "api key not valid" in msg
+        or "invalid api key" in msg
+    ):
+        return "auth", False, None
+
+    if (
+        status == 429
+        or "ratelimit" in type_name
+        or "rate limit" in msg
+        or "rate_limit" in msg
+        or "resource_exhausted" in msg
+    ):
+        return "rate_limit", False, _extract_retry_after_s(exc)
+
+    if (
+        status == 504
+        or isinstance(exc, TimeoutError)
+        or "timeout" in type_name
+        or "deadline_exceeded" in msg
+    ):
+        return "timeout", False, None
+
+    return "transient", True, None
+
+
+class ProviderHealthTracker:
+    """Theo dõi trạng thái sức khỏe từng `(provider, model)` với Circuit Breaker trong RAM."""
+
+    def __init__(
+        self,
+        *,
+        failure_threshold: int = 2,
+        cooldown_seconds: float = 30.0,
+        auth_cooldown_seconds: float = 120.0,
+    ) -> None:
+        self._failure_threshold = max(1, failure_threshold)
+        self._cooldown_seconds = max(0.05, cooldown_seconds)
+        self._auth_cooldown_seconds = max(0.05, auth_cooldown_seconds)
+        self._records: dict[tuple[str, str], ModelHealthRecord] = {}
+
+    def _get_or_create(self, provider: Literal["gemini", "groq"], model: str) -> ModelHealthRecord:
+        key = (provider, model)
+        rec = self._records.get(key)
+        if rec is None:
+            rec = ModelHealthRecord(provider=provider, model=model)
+            self._records[key] = rec
+        return rec
+
+    def can_attempt(self, provider: Literal["gemini", "groq"], model: str) -> bool:
+        """Đọc nhanh (<0.01ms) xem model có khả dụng hay đang bị ngắt cầu dao (không đổi state)."""
+        rec = self._records.get((provider, model))
+        if rec is None or rec.state == "closed":
+            return True
+
+        now = time.monotonic()
+        if rec.state == "open":
+            return rec.open_until is not None and now >= rec.open_until
+
+        return not rec.probe_in_flight
+
+    def acquire_attempt(self, provider: Literal["gemini", "groq"], model: str) -> bool:
+        """Kiểm tra và giữ slot thăm dò nếu đang ở trạng thái `half_open`."""
+        rec = self._records.get((provider, model))
+        if rec is None or rec.state == "closed":
+            return True
+
+        now = time.monotonic()
+        if rec.state == "open":
+            if rec.open_until is not None and now >= rec.open_until:
+                rec.state = "half_open"
+                rec.probe_in_flight = True
+                return True
+            return False
+
+        if not rec.probe_in_flight:
+            rec.probe_in_flight = True
+            return True
+        return False
+
+    # Giữ alias ngắn gọn để bên ngoài kiểm tra nhanh
+    is_model_available = can_attempt
+
+    def release_probe(self, provider: Literal["gemini", "groq"], model: str) -> None:
+        """Giải phóng cờ thăm dò khi request `half_open` bị hủy do nhánh khác thắng."""
+        rec = self._records.get((provider, model))
+        if rec is not None:
+            rec.probe_in_flight = False
+
+    def record_success(
+        self,
+        provider: Literal["gemini", "groq"],
+        model: str,
+        *,
+        latency_ms: int | None = None,
+    ) -> None:
+        rec = self._get_or_create(provider, model)
+        rec.state = "closed"
+        rec.consecutive_failures = 0
+        rec.open_until = None
+        rec.probe_in_flight = False
+        rec.last_checked_at = datetime.now(UTC).isoformat()
+        rec.last_latency_ms = latency_ms
+        rec.last_error_type = None
+        rec.last_error_category = None
+
+    def record_failure(
+        self,
+        provider: Literal["gemini", "groq"],
+        model: str,
+        exc: BaseException,
+        *,
+        latency_ms: int | None = None,
+    ) -> tuple[ErrorCategory, bool]:
+        """Ghi nhận lỗi provider; bỏ qua `CancelledError` vì đó là hủy tác vụ sau khi có winner."""
+        category, retryable, explicit_cooldown = _classify_provider_error(exc)
+        rec = self._get_or_create(provider, model)
+        was_half_open = rec.state == "half_open"
+        rec.consecutive_failures += 1
+        rec.probe_in_flight = False
+        rec.last_checked_at = datetime.now(UTC).isoformat()
+        rec.last_latency_ms = latency_ms
+        rec.last_error_type = type(exc).__name__
+        rec.last_error_category = category
+
+        should_open = (
+            was_half_open
+            or category == "auth"
+            or (category == "rate_limit" and explicit_cooldown is not None)
+            or rec.consecutive_failures >= self._failure_threshold
+        )
+        if should_open:
+            cooldown = (
+                self._auth_cooldown_seconds
+                if category == "auth"
+                else (
+                    min(60.0, max(1.0, explicit_cooldown))
+                    if explicit_cooldown is not None
+                    else self._cooldown_seconds
+                )
+            )
+            rec.state = "open"
+            rec.open_until = time.monotonic() + cooldown
+
+        return category, retryable
+
+    def reset(
+        self,
+        provider: Literal["gemini", "groq"] | None = None,
+        model: str | None = None,
+    ) -> None:
+        if provider is None and model is None:
+            self._records.clear()
+            return
+        for key in list(self._records):
+            if (provider is None or key[0] == provider) and (model is None or key[1] == model):
+                del self._records[key]
+
+    def snapshot(self) -> dict[str, dict[str, Any]]:
+        """Trả về ảnh chụp trạng thái sức khỏe từng `(provider, model)` để theo dõi/giám sát."""
+        now = time.monotonic()
+        out: dict[str, dict[str, Any]] = {}
+        for (provider, model), rec in self._records.items():
+            remaining = (
+                round(max(0.0, rec.open_until - now), 3)
+                if rec.state == "open" and rec.open_until is not None
+                else 0.0
+            )
+            effective_state: CircuitState = (
+                "half_open"
+                if rec.state == "open" and rec.open_until is not None and now >= rec.open_until
+                else rec.state
+            )
+            out[f"{provider}:{model}"] = {
+                "provider": provider,
+                "model": model,
+                "state": effective_state,
+                "healthy": effective_state != "open",
+                "consecutive_failures": rec.consecutive_failures,
+                "cooldown_remaining_s": remaining,
+                "last_checked_at": rec.last_checked_at,
+                "last_latency_ms": rec.last_latency_ms,
+                "last_error_type": rec.last_error_type,
+                "last_error_category": rec.last_error_category,
+            }
+        return out
 
 
 # ==============================================================================
@@ -153,11 +409,34 @@ QUY TẮC BẤT BIẾN (ZERO HALLUCINATION):
 class AIService:
     """Điều phối gọi LLM theo kiến trúc Quality-First Warm Backup + Cross-Provider Fallback."""
 
-    def __init__(self, app_settings: Settings | None = None) -> None:
+    def __init__(
+        self,
+        app_settings: Settings | None = None,
+        *,
+        failure_threshold: int = 2,
+        cooldown_seconds: float = 30.0,
+        auth_cooldown_seconds: float = 120.0,
+        max_transient_retries: int = 1,
+        min_retry_budget_seconds: float = 1.2,
+        retry_backoff_seconds: float = 0.08,
+    ) -> None:
         self._settings = app_settings or settings
         self._gemini_client: genai.Client | None = None
         self._groq_client: AsyncGroq | None = None
         self._cancelling_provider_tasks: set[asyncio.Task[Any]] = set()
+        self._health = ProviderHealthTracker(
+            failure_threshold=failure_threshold,
+            cooldown_seconds=cooldown_seconds,
+            auth_cooldown_seconds=auth_cooldown_seconds,
+        )
+        self._max_transient_retries = max(0, max_transient_retries)
+        self._min_retry_budget_seconds = max(0.0, min_retry_budget_seconds)
+        self._retry_backoff_seconds = max(0.0, retry_backoff_seconds)
+
+    @property
+    def health(self) -> ProviderHealthTracker:
+        """Truy cập bộ theo dõi trạng thái sức khỏe provider/model."""
+        return self._health
 
     def _cancel_provider_task(self, task: asyncio.Task[Any]) -> None:
         if not task.done():
@@ -292,6 +571,72 @@ class AIService:
             raise ValueError(f"Gemini ({target_model}) trả về nội dung rỗng.")
         return schema_cls.model_validate_json(raw_text)
 
+    def _eligible_groq_models(self, *, allow_secondary: bool = True) -> list[str]:
+        candidates = [self._settings.GROQ_FALLBACK_MODEL.strip()]
+        secondary = self._settings.GROQ_SECONDARY_FALLBACK_MODEL.strip()
+        if allow_secondary and secondary and secondary not in candidates:
+            candidates.append(secondary)
+        return [m for m in candidates if m]
+
+    async def _invoke_gemini_with_retry(
+        self,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+        schema_cls: type[SchemaT],
+        model_name: str,
+        thinking_level: types.ThinkingLevel,
+        deadline: float,
+        allow_retry: bool,
+    ) -> SchemaT:
+        """Gọi Gemini có ghi nhận sức khỏe Circuit Breaker và micro-retry theo ngân sách thời gian."""
+        loop = asyncio.get_running_loop()
+        if not self._health.acquire_attempt("gemini", model_name):
+            raise RuntimeError(f"Gemini ({model_name}) đang tạm ngưng (Circuit Breaker OPEN).")
+
+        max_attempts = 1 + (self._max_transient_retries if allow_retry else 0)
+        for attempt in range(1, max_attempts + 1):
+            t_call = time.perf_counter()
+            try:
+                result = await self._call_gemini_structured(
+                    system_prompt=system_prompt,
+                    user_prompt=user_prompt,
+                    schema_cls=schema_cls,
+                    model_name=model_name,
+                    thinking_level=thinking_level,
+                )
+                latency_ms = int((time.perf_counter() - t_call) * 1000)
+                self._health.record_success("gemini", model_name, latency_ms=latency_ms)
+                return result
+            except asyncio.CancelledError:
+                self._health.release_probe("gemini", model_name)
+                raise
+            except Exception as exc:
+                latency_ms = int((time.perf_counter() - t_call) * 1000)
+                category, retryable = self._health.record_failure(
+                    "gemini", model_name, exc, latency_ms=latency_ms
+                )
+                remaining = deadline - loop.time()
+                if (
+                    attempt < max_attempts
+                    and retryable
+                    and remaining >= self._min_retry_budget_seconds
+                ):
+                    logger.warning(
+                        "Gemini (%s) lỗi %s (%s); retry lần %d (còn %.2fs).",
+                        model_name,
+                        category,
+                        type(exc).__name__,
+                        attempt,
+                        remaining,
+                    )
+                    if self._retry_backoff_seconds > 0:
+                        await asyncio.sleep(min(self._retry_backoff_seconds, max(0.0, remaining)))
+                    continue
+                raise
+
+        raise RuntimeError(f"Gemini ({model_name}) thất bại.")
+
     async def _call_groq_structured(
         self,
         *,
@@ -299,10 +644,14 @@ class AIService:
         user_prompt: str,
         schema_cls: type[SchemaT],
         allow_secondary: bool = True,
+        deadline: float | None = None,
+        allow_retry: bool = False,
+        active_model_ref: list[str] | None = None,
     ) -> SchemaT:
         """
         Tầng 2: Dự phòng qua Groq Cloud (`qwen/qwen3.8-27b`).
-        Các luồng cho phép model phụ có thể thử GPT-OSS khi Qwen thất bại.
+        Tự động kiểm tra trạng thái sức khỏe từng model, chuyển qua GPT-OSS khi cần
+        và retry lỗi tạm thời nếu còn ngân sách thời gian.
         """
         client = self._get_groq_client()
         if client is None:
@@ -315,38 +664,230 @@ class AIService:
             f"(không bọc markdown): {schema_json}"
         )
 
-        candidate_models = [self._settings.GROQ_FALLBACK_MODEL.strip()]
-        secondary = self._settings.GROQ_SECONDARY_FALLBACK_MODEL.strip()
-        if allow_secondary and secondary and secondary not in candidate_models:
-            candidate_models.append(secondary)
+        eligible = self._eligible_groq_models(allow_secondary=allow_secondary)
+        available_models = [m for m in eligible if self._health.can_attempt("groq", m)]
+        if not available_models:
+            raise RuntimeError("Toàn bộ model Groq đang tạm ngưng (Circuit Breaker OPEN).")
 
+        loop = asyncio.get_running_loop()
         last_exc: Exception | None = None
-        for groq_model in candidate_models:
-            if not groq_model:
+        for idx, groq_model in enumerate(available_models):
+            if not self._health.acquire_attempt("groq", groq_model):
                 continue
-            try:
-                completion = await client.chat.completions.create(
-                    model=groq_model,
-                    messages=[
-                        {"role": "system", "content": strict_system_prompt},
-                        {"role": "user", "content": user_prompt},
-                    ],
-                    response_format={"type": "json_object"},
-                    temperature=0.2,
-                )
-                content = completion.choices[0].message.content
-                if not content:
-                    raise ValueError(f"Groq ({groq_model}) trả về message content rỗng.")
-                return schema_cls.model_validate_json(content)
-            except Exception as exc:
-                last_exc = exc
-                logger.warning(
-                    "Groq model '%s' thất bại (%s).",
-                    groq_model,
-                    type(exc).__name__,
-                )
+            is_last_model = idx == len(available_models) - 1
+            max_attempts = 1 + (
+                self._max_transient_retries if (allow_retry and is_last_model) else 0
+            )
+            for attempt in range(1, max_attempts + 1):
+                t_call = time.perf_counter()
+                if active_model_ref is not None:
+                    active_model_ref[:] = [groq_model]
+                try:
+                    completion = await client.chat.completions.create(
+                        model=groq_model,
+                        messages=[
+                            {"role": "system", "content": strict_system_prompt},
+                            {"role": "user", "content": user_prompt},
+                        ],
+                        response_format={"type": "json_object"},
+                        temperature=0.2,
+                    )
+                    content = completion.choices[0].message.content
+                    if not content:
+                        raise ValueError(f"Groq ({groq_model}) trả về message content rỗng.")
+                    parsed = schema_cls.model_validate_json(content)
+                    latency_ms = int((time.perf_counter() - t_call) * 1000)
+                    self._health.record_success("groq", groq_model, latency_ms=latency_ms)
+                    if active_model_ref is not None:
+                        active_model_ref.clear()
+                    return parsed
+                except asyncio.CancelledError:
+                    if active_model_ref is not None:
+                        active_model_ref.clear()
+                    self._health.release_probe("groq", groq_model)
+                    raise
+                except Exception as exc:
+                    last_exc = exc
+                    if active_model_ref is not None:
+                        active_model_ref.clear()
+                    latency_ms = int((time.perf_counter() - t_call) * 1000)
+                    category, retryable = self._health.record_failure(
+                        "groq", groq_model, exc, latency_ms=latency_ms
+                    )
+                    logger.warning(
+                        "Groq model '%s' thất bại (%s / %s).",
+                        groq_model,
+                        category,
+                        type(exc).__name__,
+                    )
+                    remaining = (deadline - loop.time()) if deadline is not None else 0.0
+                    if (
+                        attempt < max_attempts
+                        and retryable
+                        and remaining >= self._min_retry_budget_seconds
+                    ):
+                        if self._retry_backoff_seconds > 0:
+                            await asyncio.sleep(
+                                min(self._retry_backoff_seconds, max(0.0, remaining))
+                            )
+                        continue
+                    break
 
         raise last_exc or RuntimeError("Không có model Groq khả dụng.")
+
+    async def check_providers_status(
+        self,
+        *,
+        probe_live: bool = False,
+        timeout_seconds: float = 3.0,
+    ) -> dict[str, Any]:
+        """
+        Kiểm tra trạng thái sức khỏe các provider/model trước khi gọi:
+        - `probe_live=False`: đọc tức thì (<1ms) từ Circuit Breaker trong RAM + cấu hình auth.
+        - `probe_live=True`: chủ động gửi ping nhẹ song song (trong `timeout_seconds`) để
+          kiểm tra sống/chết thật của từng model và cập nhật ngay vào Circuit Breaker.
+        """
+        has_gemini = self._get_gemini_client() is not None
+        has_groq = self._get_groq_client() is not None
+
+        gemini_models = list(
+            dict.fromkeys(
+                m.strip()
+                for m in (
+                    self._settings.GEMINI_UF1_MODEL,
+                    self._settings.GEMINI_FLASH_MODEL,
+                    self._settings.GEMINI_BACKUP_MODEL,
+                )
+                if m and m.strip()
+            )
+        )
+        groq_models = list(
+            dict.fromkeys(
+                m.strip()
+                for m in (
+                    self._settings.GROQ_FALLBACK_MODEL,
+                    self._settings.GROQ_SECONDARY_FALLBACK_MODEL,
+                )
+                if m and m.strip()
+            )
+        )
+
+        if probe_live:
+            probe_tasks: list[Awaitable[None]] = []
+
+            async def _probe_gemini(model_name: str) -> None:
+                t_call = time.perf_counter()
+                probe_thinking = (
+                    types.ThinkingLevel.MINIMAL
+                    if "flash-lite" in model_name.lower()
+                    else types.ThinkingLevel.LOW
+                )
+                try:
+                    await asyncio.wait_for(
+                        self._call_gemini_structured(
+                            system_prompt='Trả về đúng JSON {"ok": true}.',
+                            user_prompt="ping",
+                            schema_cls=_ProbePingSchema,
+                            model_name=model_name,
+                            thinking_level=probe_thinking,
+                        ),
+                        timeout=timeout_seconds,
+                    )
+                    self._health.record_success(
+                        "gemini", model_name, latency_ms=int((time.perf_counter() - t_call) * 1000)
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    self._health.record_failure(
+                        "gemini",
+                        model_name,
+                        exc,
+                        latency_ms=int((time.perf_counter() - t_call) * 1000),
+                    )
+
+            async def _probe_groq(model_name: str) -> None:
+                groq_client = self._get_groq_client()
+                if groq_client is None:
+                    return
+                t_call = time.perf_counter()
+                try:
+                    completion = await asyncio.wait_for(
+                        groq_client.chat.completions.create(
+                            model=model_name,
+                            messages=[{"role": "user", "content": 'Return JSON {"ok": true}'}],
+                            response_format={"type": "json_object"},
+                            max_tokens=256,
+                            temperature=0.0,
+                        ),
+                        timeout=timeout_seconds,
+                    )
+                    content = completion.choices[0].message.content
+                    if not content:
+                        raise ValueError(f"Groq ({model_name}) probe trả rỗng.")
+                    _ProbePingSchema.model_validate_json(content)
+                    self._health.record_success(
+                        "groq", model_name, latency_ms=int((time.perf_counter() - t_call) * 1000)
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    self._health.record_failure(
+                        "groq",
+                        model_name,
+                        exc,
+                        latency_ms=int((time.perf_counter() - t_call) * 1000),
+                    )
+
+            if has_gemini:
+                probe_tasks.extend(_probe_gemini(m) for m in gemini_models)
+            if has_groq:
+                probe_tasks.extend(_probe_groq(m) for m in groq_models)
+            if probe_tasks:
+                await asyncio.gather(*probe_tasks, return_exceptions=True)
+
+        snapshots = self._health.snapshot()
+        providers: dict[str, dict[str, Any]] = {}
+        for provider_name, models, configured in (
+            ("gemini", gemini_models, has_gemini),
+            ("groq", groq_models, has_groq),
+        ):
+            for model_name in models:
+                key = f"{provider_name}:{model_name}"
+                snap = snapshots.get(key)
+                if not configured:
+                    providers[key] = {
+                        "provider": provider_name,
+                        "model": model_name,
+                        "configured": False,
+                        "state": "unconfigured",
+                        "healthy": False,
+                        "consecutive_failures": 0,
+                        "cooldown_remaining_s": 0.0,
+                        "last_checked_at": None,
+                        "last_latency_ms": None,
+                        "last_error_type": None,
+                        "last_error_category": None,
+                    }
+                elif snap is not None:
+                    providers[key] = {"configured": True, **snap}
+                else:
+                    providers[key] = {
+                        "provider": provider_name,
+                        "model": model_name,
+                        "configured": True,
+                        "state": "closed",
+                        "healthy": True,
+                        "consecutive_failures": 0,
+                        "cooldown_remaining_s": 0.0,
+                        "last_checked_at": None,
+                        "last_latency_ms": None,
+                        "last_error_type": None,
+                        "last_error_category": None,
+                    }
+
+        return {
+            "checked_at": datetime.now(UTC).isoformat(),
+            "probe_live": probe_live,
+            "any_provider_available": any(v["healthy"] for v in providers.values()),
+            "providers": providers,
+        }
 
     async def _execute_hedged_structured(
         self,
@@ -360,11 +901,12 @@ class AIService:
         """
         UF1 chỉ gọi Flash-Lite và cho phép Qwen khi thiếu Gemini hoặc Gemini lỗi sớm.
         Các luồng còn lại dùng điều phối ưu tiên chất lượng:
-        1. `0.0s`: Chạy `GEMINI_FLASH_MODEL` (`gemini-3.8-flash`). Nếu xong trước `primary_priority_until` -> nhận ngay.
-        2. `warm_backup_at`: Khởi chạy ngầm `GEMINI_BACKUP_MODEL` (`gemini-3.5-flash-lite`) lưu sẵn vào RAM.
-           Vẫn kiên nhẫn đợi `3.8-flash` tới mốc `primary_priority_until`, quá mốc này mới bung bản nháp RAM ra trả.
-        3. `groq_hedge_at` (hoặc nhảy ngay khi Google lỗi nhanh): Gọi chéo hãng sang Groq nếu chưa có bản dự phòng nào xong.
-        4. `hard_timeout`: Ngắt cứng toàn bộ để trả về Tầng 3 (Python Rule-based Fallback).
+        0. Pre-check Circuit Breaker (<0.01ms): bỏ qua model/provider đang OPEN để không chờ vô ích.
+        1. `0.0s`: Chạy Primary. Nếu xong trước `primary_priority_until` -> nhận ngay.
+        2. `warm_backup_at`: Khởi chạy ngầm Warm Backup lưu sẵn vào RAM.
+        3. `groq_hedge_at` (hoặc nhảy ngay khi Google lỗi/OPEN): Gọi chéo hãng sang Groq.
+        4. Budget-aware micro-retry khi nhánh cuối gặp lỗi thoáng qua mà vẫn còn đủ thời gian.
+        5. `hard_timeout`: Ngắt cứng toàn bộ để trả về Tầng 3 (Python Rule-based Fallback).
         """
         loop = asyncio.get_running_loop()
         t0 = loop.time()
@@ -373,53 +915,94 @@ class AIService:
         is_uf1 = flow_name == "UF1"
         groq_hedge_at = profile.groq_hedge_at
 
-        has_gemini = self._get_gemini_client() is not None
-        has_groq = self._get_groq_client() is not None
+        has_gemini_client = self._get_gemini_client() is not None
+        has_groq_client = self._get_groq_client() is not None
 
-        # Trường hợp không có chứng thực Gemini -> gọi thẳng sang Groq dưới trần hard_timeout
-        if not has_gemini:
-            if not has_groq:
-                raise RuntimeError(f"{flow_name}: Không có chứng thực Gemini lẫn Groq.")
+        primary_model = (
+            self._settings.GEMINI_UF1_MODEL if is_uf1 else self._settings.GEMINI_FLASH_MODEL
+        ).strip()
+        backup_model = "" if is_uf1 else self._settings.GEMINI_BACKUP_MODEL.strip()
+
+        primary_available = (
+            has_gemini_client
+            and bool(primary_model)
+            and self._health.can_attempt("gemini", primary_model)
+        )
+        can_use_backup = (
+            has_gemini_client
+            and bool(backup_model and backup_model != primary_model)
+            and self._health.can_attempt("gemini", backup_model)
+        )
+        eligible_groq = self._eligible_groq_models(allow_secondary=not is_uf1)
+        has_groq = has_groq_client and any(
+            self._health.can_attempt("groq", m) for m in eligible_groq
+        )
+
+        # Trường hợp cả Gemini lẫn Groq đều không có chứng thực hoặc đang OPEN toàn bộ -> thoát ngay <1ms
+        if not primary_available and not can_use_backup and not has_groq:
+            raise RuntimeError(
+                f"{flow_name}: Toàn bộ provider AI chưa cấu hình hoặc đang tạm ngưng (Circuit Breaker OPEN)."
+            )
+
+        def _record_groq_timeout(active_model_ref: list[str]) -> None:
+            targets = active_model_ref or [
+                gm for gm in eligible_groq if self._health.can_attempt("groq", gm)
+            ]
+            for gm in targets:
+                self._health.record_failure(
+                    "groq", gm, TimeoutError(f"{flow_name} timeout")
+                )
+
+        # Không có Gemini khả dụng (chưa cấu hình hoặc cả Primary+Backup đều OPEN) -> chạy thẳng Groq ở 0.0s
+        if not primary_available and not can_use_backup:
+            groq_only_active_model: list[str] = []
             groq_only = asyncio.create_task(
                 self._call_groq_structured(
                     system_prompt=system_prompt,
                     user_prompt=user_prompt,
                     schema_cls=schema_cls,
                     allow_secondary=not is_uf1,
+                    deadline=deadline,
+                    allow_retry=True,
+                    active_model_ref=groq_only_active_model,
                 )
             )
             try:
                 await asyncio.wait({groq_only}, timeout=max(0.0, deadline - loop.time()))
                 if groq_only.done() and loop.time() < deadline:
                     return groq_only.result(), "tier_2_groq"
+                if not groq_only.done():
+                    _record_groq_timeout(groq_only_active_model)
                 raise TimeoutError(f"{flow_name} vượt trần thời gian xử lý ({profile.hard_timeout}s).")
             finally:
                 self._cancel_provider_task(groq_only)
-
-        primary_model = (
-            self._settings.GEMINI_UF1_MODEL if is_uf1 else self._settings.GEMINI_FLASH_MODEL
-        ).strip()
-        backup_model = "" if is_uf1 else self._settings.GEMINI_BACKUP_MODEL.strip()
-        can_use_backup = bool(backup_model and backup_model != primary_model)
 
         primary_thinking_level = (
             types.ThinkingLevel.MINIMAL
             if is_uf1 or "flash-lite" in primary_model.lower()
             else types.ThinkingLevel.LOW
         )
-        primary_task: asyncio.Task[SchemaT] = asyncio.create_task(
-            self._call_gemini_structured(
-                system_prompt=system_prompt,
-                user_prompt=user_prompt,
-                schema_cls=schema_cls,
-                model_name=primary_model,
-                thinking_level=primary_thinking_level,
+        primary_task: asyncio.Task[SchemaT] | None = None
+        primary_failed = not primary_available
+        if primary_available:
+            # Chỉ tự retry ngay trên Primary nếu không còn fallback nào khác cho luồng này
+            primary_allow_retry = not can_use_backup and not has_groq
+            primary_task = asyncio.create_task(
+                self._invoke_gemini_with_retry(
+                    system_prompt=system_prompt,
+                    user_prompt=user_prompt,
+                    schema_cls=schema_cls,
+                    model_name=primary_model,
+                    thinking_level=primary_thinking_level,
+                    deadline=deadline,
+                    allow_retry=primary_allow_retry,
+                )
             )
-        )
+
         backup_task: asyncio.Task[SchemaT] | None = None
         groq_task: asyncio.Task[SchemaT] | None = None
+        groq_active_model: list[str] = []
 
-        primary_failed = False
         backup_harvested = False
         groq_harvested = False
         warm_result: tuple[SchemaT, GenerationTier] | None = None
@@ -428,12 +1011,14 @@ class AIService:
             nonlocal backup_task
             if backup_task is None and can_use_backup:
                 backup_task = asyncio.create_task(
-                    self._call_gemini_structured(
+                    self._invoke_gemini_with_retry(
                         system_prompt=system_prompt,
                         user_prompt=user_prompt,
                         schema_cls=schema_cls,
                         model_name=backup_model,
                         thinking_level=types.ThinkingLevel.MINIMAL,
+                        deadline=deadline,
+                        allow_retry=(primary_failed and not has_groq),
                     )
                 )
 
@@ -452,8 +1037,15 @@ class AIService:
                         user_prompt=user_prompt,
                         schema_cls=schema_cls,
                         allow_secondary=not is_uf1,
+                        deadline=deadline,
+                        allow_retry=(primary_failed and (not can_use_backup or backup_harvested)),
+                        active_model_ref=groq_active_model,
                     )
                 )
+
+        # Nếu Primary đang OPEN nhưng Warm Backup sẵn sàng -> kích hoạt Backup ngay tại 0.0s
+        if primary_failed and can_use_backup:
+            _start_backup()
 
         try:
             while True:
@@ -462,12 +1054,22 @@ class AIService:
                 if now >= deadline:
                     if warm_result is not None:
                         return warm_result
+                    if primary_task is not None and not primary_task.done():
+                        self._health.record_failure(
+                            "gemini", primary_model, TimeoutError(f"{flow_name} timeout")
+                        )
+                    if backup_task is not None and not backup_task.done():
+                        self._health.record_failure(
+                            "gemini", backup_model, TimeoutError(f"{flow_name} timeout")
+                        )
+                    if groq_task is not None and not groq_task.done():
+                        _record_groq_timeout(groq_active_model)
                     raise TimeoutError(
                         f"{flow_name} vượt trần thời gian xử lý ({profile.hard_timeout}s)."
                     )
 
-                # 1. Luôn kiểm tra nhánh Primary (gemini-3.6-flash) trước tiên để đảm bảo chất lượng cao nhất
-                if primary_task.done() and not primary_failed:
+                # 1. Luôn kiểm tra nhánh Primary trước tiên để đảm bảo chất lượng cao nhất
+                if primary_task is not None and primary_task.done() and not primary_failed:
                     exc = primary_task.exception()
                     if exc is None:
                         return primary_task.result(), "tier_1_gemini"
@@ -480,7 +1082,7 @@ class AIService:
                     )
                     if warm_result is not None:
                         return warm_result
-                    if can_use_backup:
+                    if can_use_backup and not backup_harvested:
                         _start_backup()
                     else:
                         _start_groq()

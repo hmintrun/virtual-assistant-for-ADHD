@@ -19,6 +19,7 @@ def offline_test_environment(monkeypatch):
     monkeypatch.setattr(settings, "ENVIRONMENT", "testing")
     monkeypatch.setattr(settings, "TESTING", True)
     monkeypatch.setattr(settings, "ENABLE_CALENDAR_SYNC_WORKER", False)
+    monkeypatch.setattr(settings, "CALENDAR_PROVIDER_MODE", "fake")
     monkeypatch.setattr(settings, "VOICE_TTS_PROVIDER", "fake")
     monkeypatch.setattr(settings, "VOICE_STT_PROVIDER", "fake")
     monkeypatch.setenv("DATABASE_URL", "sqlite+aiosqlite:///:memory:")

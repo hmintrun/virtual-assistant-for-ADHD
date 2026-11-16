@@ -1041,12 +1041,35 @@ async def patch_draft(
                 }
             )
             issues, can_plan = await _evaluate_summary_for_user(merged_summary, user_id, db)
-            # Recompute structural errors, but keep AI issues the user has not reviewed.
-            issues.extend(
+            # Recompute structural errors, but keep unreviewed field-specific AI issues.
+            # Generic AI_CLARIFICATION/AI_CONFLICT prompts clear once the user completes all 4 UF1 fields.
+            retained_field_ai_issues = [
                 issue
                 for issue in draft.summary.clarification_issues
-                if issue.code.startswith("AI_") and issue.field_path not in reviewed_fields
+                if issue.code.startswith("AI_")
+                and issue.field_path not in reviewed_fields
+                and not (
+                    (
+                        issue.code == "AI_CLARIFICATION"
+                        and issue.field_path.startswith("clarification_questions[")
+                    )
+                    or (issue.code == "AI_CONFLICT" and issue.field_path == "summary")
+                )
+            ]
+            has_unreviewed_field_blocker = any(
+                issue.blocking for issue in retained_field_ai_issues
             )
+            issues.extend(retained_field_ai_issues)
+            if not (can_plan and not has_unreviewed_field_blocker):
+                issues.extend(
+                    issue
+                    for issue in draft.summary.clarification_issues
+                    if (
+                        issue.code == "AI_CLARIFICATION"
+                        and issue.field_path.startswith("clarification_questions[")
+                    )
+                    or (issue.code == "AI_CONFLICT" and issue.field_path == "summary")
+                )
             can_plan = can_plan and not any(issue.blocking for issue in issues)
             new_summary = merged_summary.model_copy(
                 update={
