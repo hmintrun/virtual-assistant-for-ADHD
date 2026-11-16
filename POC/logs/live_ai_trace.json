@@ -1,0 +1,49 @@
+[
+  {
+    "test_name": "LIVE TEST 1: Direct Google AI Studio Call",
+    "model_requested": "gemini-3.8-flash",
+    "provider": "Google AI Studio",
+    "start_time": "2026-11-09T16:15:54.138185",
+    "end_time": "2026-11-09T16:15:59.763860",
+    "elapsed_seconds": 5.63,
+    "status": "SUCCESS",
+    "generation_tier": "tier_1_gemini",
+    "output_summary": {
+      "steps_count": 4,
+      "reasoning": "Chia nhỏ 12 slide thành các bước tập trung vào cấu trúc và nội dung cốt lõi giúp bạn dễ dàng khởi động mà không bị choáng ngợp.",
+      "first_step": "Tạo khung slide và liệt kê tiêu đề các slide tổng quan kiến trúc"
+    }
+  },
+  {
+    "test_name": "LIVE TEST 2: Real Fallback (Google Error -> Real Groq Call)",
+    "primary_model_attempted": "gemini-3.8-flash (cố tình lỗi key)",
+    "fallback_model_called": "qwen/qwen3.8-27b",
+    "provider": "Groq Cloud LPU",
+    "start_time": "2026-11-09T16:15:59.773808",
+    "end_time": "2026-11-09T16:16:02.194449",
+    "elapsed_seconds": 2.42,
+    "status": "SUCCESS",
+    "generation_tier": "tier_2_groq",
+    "output_summary": {
+      "title": "Viết tiểu luận An toàn thông tin",
+      "scope": "8 trang",
+      "deadline": "2026-11-08 23:59:00+07:00",
+      "summary": "Mình đã ghi nhận việc viết tiểu luận An toàn thông tin 8 trang. Tuy nhiên, hạn chót 'tối Chủ Nhật tuần này' đã qua (hôm qua là Chủ Nhật 08/11). Bạn vui lòng cho mình biết hạn chót mới và các khung giờ rảnh để mình lên kế hoạch nhé."
+    }
+  },
+  {
+    "test_name": "LIVE TEST 3: Pure Python Rule-based Fallback",
+    "primary_model_attempted": "none",
+    "provider": "Pure Python Local Engine",
+    "start_time": "2026-11-09T16:16:02.201225",
+    "end_time": "2026-11-09T16:16:02.201225",
+    "elapsed_seconds": 0.0007,
+    "status": "SUCCESS",
+    "generation_tier": "tier_3_rule_based",
+    "output_summary": {
+      "steps_count": 3,
+      "first_step": "Chuẩn bị tài liệu và lập dàn ý cho: Ôn tập cấu trúc dữ liệu và giải thuật",
+      "micro_task": "Đặt một tài liệu hoặc dụng cụ cần dùng cho 'Ôn tập cấu trúc dữ liệu và giải thuật' trước mặt."
+    }
+  }
+]

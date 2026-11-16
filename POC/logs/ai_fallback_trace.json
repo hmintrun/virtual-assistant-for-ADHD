@@ -1,0 +1,465 @@
+{
+  "project": "ProPlan VA",
+  "test_suite": "AI Fallback POC (mock providers, standard A/B timing)",
+  "exported_at": "2026-11-12T01:33:33.233298+00:00",
+  "total_scenarios": 6,
+  "all_passed": true,
+  "scenarios": [
+    {
+      "scenario_id": "scenario_1_fast_fail",
+      "scenario_name": "Fast-Fail Tức Thì (Google Lỗi Nhanh -> Groq Cứu Hộ)",
+      "description": "Cả hai model Gemini lỗi nhanh. Groq được gọi trước mốc hedge 3.5s.",
+      "start_time": "2026-11-12T01:33:09.278945+00:00",
+      "end_time": "2026-11-12T01:33:09.296364+00:00",
+      "total_duration_s": 0.017766700009815395,
+      "models_trace": [
+        {
+          "model_name": "gemini-3.8-flash",
+          "tier": "tier_1_gemini",
+          "called": true,
+          "not_called_reason": null,
+          "call_started_at": "2026-11-12T01:33:09.295565+00:00",
+          "call_completed_at": "2026-11-12T01:33:09.295565+00:00",
+          "relative_start_s": 0.016535200004000217,
+          "relative_end_s": 0.016549899999517947,
+          "latency_s": 1.4699995517730713e-05,
+          "status": "FAILED",
+          "error_message": "PermissionError: Google Gemini API unavailable (HTTP 403 Forbidden)",
+          "output_summary": null,
+          "chosen_as_final": false
+        },
+        {
+          "model_name": "gemini-3.5-flash-lite",
+          "tier": "tier_1_gemini",
+          "called": true,
+          "not_called_reason": null,
+          "call_started_at": "2026-11-12T01:33:09.295565+00:00",
+          "call_completed_at": "2026-11-12T01:33:09.295565+00:00",
+          "relative_start_s": 0.016712899960111827,
+          "relative_end_s": 0.01671840000199154,
+          "latency_s": 5.500041879713535e-06,
+          "status": "FAILED",
+          "error_message": "PermissionError: Google Gemini API unavailable (HTTP 403 Forbidden)",
+          "output_summary": null,
+          "chosen_as_final": false
+        },
+        {
+          "model_name": "qwen/qwen3.8-27b",
+          "tier": "tier_2_groq",
+          "called": true,
+          "not_called_reason": null,
+          "call_started_at": "2026-11-12T01:33:09.295565+00:00",
+          "call_completed_at": "2026-11-12T01:33:09.295565+00:00",
+          "relative_start_s": 0.01681030000327155,
+          "relative_end_s": 0.016973499965388328,
+          "latency_s": 0.0001631999621167779,
+          "status": "SUCCESS",
+          "error_message": null,
+          "output_summary": {
+            "title": "Tiểu luận Triết học Mác - Lênin",
+            "scope": "10 trang",
+            "is_complete": true
+          },
+          "chosen_as_final": true
+        }
+      ],
+      "decision_timestamp": "2026-11-12T01:33:09.296364+00:00",
+      "decision_relative_s": 0.017766700009815395,
+      "winner_model": "qwen/qwen3.8-27b",
+      "winner_tier": "tier_2_groq",
+      "decision_rationale": "Kỳ vọng chuyển sang Groq ngay sau khi cả hai model Gemini báo lỗi.",
+      "final_output": {
+        "title": "Tiểu luận Triết học Mác - Lênin",
+        "content": "Viết tiểu luận Triết học về chủ nghĩa duy vật biện chứng",
+        "is_complete": true
+      },
+      "passed": true
+    },
+    {
+      "scenario_id": "scenario_2_quality_first",
+      "scenario_name": "Cửa sổ Ưu tiên Chất lượng (Quality-First Priority Window)",
+      "description": "Flash-Lite trong RAM xong sớm (2.9s) nhưng 3.8 Flash hoàn thành lúc 3.4s (nằm trong cửa sổ 4.0s) -> Hệ thống kiên quyết chọn 3.8 Flash",
+      "start_time": "2026-11-12T01:33:09.296883+00:00",
+      "end_time": "2026-11-12T01:33:12.708118+00:00",
+      "total_duration_s": 3.411544199974742,
+      "models_trace": [
+        {
+          "model_name": "gemini-3.5-flash-lite",
+          "tier": "tier_1_gemini (warm_backup)",
+          "called": true,
+          "not_called_reason": null,
+          "call_started_at": "2026-11-12T01:33:11.912767+00:00",
+          "call_completed_at": "2026-11-12T01:33:12.223773+00:00",
+          "relative_start_s": 2.6161301999818534,
+          "relative_end_s": 2.926989399944432,
+          "latency_s": 0.3108591999625787,
+          "status": "SUCCESS",
+          "error_message": null,
+          "output_summary": {
+            "title": "Bản dự phòng nông từ Flash-Lite",
+            "scope": "15 slide"
+          },
+          "chosen_as_final": false
+        },
+        {
+          "model_name": "gemini-3.8-flash",
+          "tier": "tier_1_gemini",
+          "called": true,
+          "not_called_reason": null,
+          "call_started_at": "2026-11-12T01:33:09.297930+00:00",
+          "call_completed_at": "2026-11-12T01:33:12.708118+00:00",
+          "relative_start_s": 0.0011525999871082604,
+          "relative_end_s": 3.4113419999484904,
+          "latency_s": 3.410189399961382,
+          "status": "SUCCESS",
+          "error_message": null,
+          "output_summary": {
+            "title": "Bản chuẩn chất lượng cao từ Gemini 3.8 Flash",
+            "scope": "15 slide PowerPoint chi tiết kèm sơ đồ kiến trúc"
+          },
+          "chosen_as_final": true
+        },
+        {
+          "model_name": "qwen/qwen3.8-27b",
+          "tier": "tier_2_groq",
+          "called": false,
+          "not_called_reason": "Groq không được cấu hình trong kịch bản này",
+          "call_started_at": null,
+          "call_completed_at": null,
+          "relative_start_s": null,
+          "relative_end_s": null,
+          "latency_s": null,
+          "status": "SKIPPED",
+          "error_message": null,
+          "output_summary": null,
+          "chosen_as_final": false
+        }
+      ],
+      "decision_timestamp": "2026-11-12T01:33:12.708118+00:00",
+      "decision_relative_s": 3.411544199974742,
+      "winner_model": "gemini-3.8-flash",
+      "winner_tier": "tier_1_gemini",
+      "decision_rationale": "Gemini 3.8 Flash hoàn tất lúc 3.4s (nằm trong cửa sổ ưu tiên 4.0s); hệ thống kiên nhẫn nhận output chất lượng cao dù 3.5 Lite trong RAM xong sớm hơn",
+      "final_output": {
+        "title": "Bản chuẩn chất lượng cao từ Gemini 3.8 Flash",
+        "scope": "15 slide PowerPoint chi tiết kèm sơ đồ kiến trúc"
+      },
+      "passed": true
+    },
+    {
+      "scenario_id": "scenario_3_tier1_lag_ram_harvest",
+      "scenario_name": "Tier 1 Trả Về Quá Lâu (> 7.5s) -> Bung Bản Nháp RAM Cứu Hộ",
+      "description": "Primary treo; Flash-Lite phản hồi trước khi kết thúc cửa sổ ưu tiên 7.5s.",
+      "start_time": "2026-11-12T01:33:12.708118+00:00",
+      "end_time": "2026-11-12T01:33:20.215843+00:00",
+      "total_duration_s": 7.507686700031627,
+      "models_trace": [
+        {
+          "model_name": "gemini-3.8-flash",
+          "tier": "tier_1_gemini (primary)",
+          "called": true,
+          "not_called_reason": null,
+          "call_started_at": "2026-11-12T01:33:12.709189+00:00",
+          "call_completed_at": "2026-11-12T01:33:20.215843+00:00",
+          "relative_start_s": 0.0012546000070869923,
+          "relative_end_s": 7.5077320000273176,
+          "latency_s": 7.506477400020231,
+          "status": "CANCELLED",
+          "error_message": null,
+          "output_summary": null,
+          "chosen_as_final": false
+        },
+        {
+          "model_name": "gemini-3.5-flash-lite",
+          "tier": "tier_1_gemini (warm_backup)",
+          "called": true,
+          "not_called_reason": null,
+          "call_started_at": "2026-11-12T01:33:15.815717+00:00",
+          "call_completed_at": "2026-11-12T01:33:16.222958+00:00",
+          "relative_start_s": 3.107534200011287,
+          "relative_end_s": 3.514592999999877,
+          "latency_s": 0.4070587999885902,
+          "status": "SUCCESS",
+          "error_message": null,
+          "output_summary": {
+            "steps_count": 2,
+            "reasoning": "Phương án bẻ nhỏ cứu hộ từ Warm Backup Gemini 3.5 Flash-Lite (cứu nguy khi 3.8 Flash bị treo)."
+          },
+          "chosen_as_final": true
+        }
+      ],
+      "decision_timestamp": "2026-11-12T01:33:20.215843+00:00",
+      "decision_relative_s": 7.507686700031627,
+      "winner_model": "gemini-3.5-flash-lite",
+      "winner_tier": "tier_1_gemini",
+      "decision_rationale": "Kỳ vọng chọn Flash-Lite tại mốc 7.5s của Khung B.",
+      "final_output": {
+        "steps_count": 2,
+        "reasoning": "Phương án bẻ nhỏ cứu hộ từ Warm Backup Gemini 3.5 Flash-Lite (cứu nguy khi 3.8 Flash bị treo)."
+      },
+      "passed": true
+    },
+    {
+      "scenario_id": "scenario_4_total_gemini_hang_groq_rescue",
+      "scenario_name": "Toàn Bộ Google Bị Treo -> Groq Cloud LPU Cứu Hộ",
+      "description": "Cả hai model Gemini treo; nhánh Groq trả kết quả trước khi hết cửa sổ ưu tiên.",
+      "start_time": "2026-11-12T01:33:20.215843+00:00",
+      "end_time": "2026-11-12T01:33:24.215864+00:00",
+      "total_duration_s": 3.999827900028322,
+      "models_trace": [
+        {
+          "model_name": "gemini-3.8-flash",
+          "tier": "tier_1_gemini",
+          "called": true,
+          "not_called_reason": null,
+          "call_started_at": "2026-11-12T01:33:20.217027+00:00",
+          "call_completed_at": "2026-11-12T01:33:24.215864+00:00",
+          "relative_start_s": 0.001541100034955889,
+          "relative_end_s": 3.999883799988311,
+          "latency_s": 3.998342699953355,
+          "status": "CANCELLED",
+          "error_message": null,
+          "output_summary": null,
+          "chosen_as_final": false
+        },
+        {
+          "model_name": "gemini-3.5-flash-lite",
+          "tier": "tier_1_gemini",
+          "called": true,
+          "not_called_reason": null,
+          "call_started_at": "2026-11-12T01:33:22.824052+00:00",
+          "call_completed_at": "2026-11-12T01:33:24.215864+00:00",
+          "relative_start_s": 2.607975199993234,
+          "relative_end_s": 3.9999004999990575,
+          "latency_s": 1.3919253000058234,
+          "status": "CANCELLED",
+          "error_message": null,
+          "output_summary": null,
+          "chosen_as_final": false
+        },
+        {
+          "model_name": "qwen/qwen3.8-27b",
+          "tier": "tier_2_groq",
+          "called": true,
+          "not_called_reason": null,
+          "call_started_at": "2026-11-12T01:33:23.716007+00:00",
+          "call_completed_at": "2026-11-12T01:33:23.979480+00:00",
+          "relative_start_s": 3.500023100001272,
+          "relative_end_s": 3.7633286000345834,
+          "latency_s": 0.26330550003331155,
+          "status": "SUCCESS",
+          "error_message": null,
+          "output_summary": {
+            "title": "Đề cương luận văn Thạc sĩ",
+            "scope": "8 trang A4"
+          },
+          "chosen_as_final": true
+        }
+      ],
+      "decision_timestamp": "2026-11-12T01:33:24.215864+00:00",
+      "decision_relative_s": 3.999827900028322,
+      "winner_model": "qwen/qwen3.8-27b",
+      "winner_tier": "tier_2_groq",
+      "decision_rationale": "Kỳ vọng gọi Groq tại 3.5s và chốt kết quả tại 4.0s của Khung A.",
+      "final_output": {
+        "title": "Đề cương luận văn Thạc sĩ",
+        "scope": "8 trang A4"
+      },
+      "passed": true
+    },
+    {
+      "scenario_id": "scenario_5_groq_429",
+      "scenario_name": "Chống Nghẽn Quota (Groq Qwen 429 TPM -> Groq GPT-OSS)",
+      "description": "Khi model chính trên Groq chạm ngưỡng 429 TPM, hệ thống tự động gọi model phụ thay vì báo lỗi",
+      "start_time": "2026-11-12T01:33:24.215864+00:00",
+      "end_time": "2026-11-12T01:33:24.220301+00:00",
+      "total_duration_s": 0.0041655999957583845,
+      "models_trace": [
+        {
+          "model_name": "qwen/qwen3.8-27b",
+          "tier": "tier_2_groq (primary)",
+          "called": true,
+          "not_called_reason": null,
+          "call_started_at": "2026-11-12T01:33:24.218955+00:00",
+          "call_completed_at": "2026-11-12T01:33:24.218955+00:00",
+          "relative_start_s": 0.0033798000076785684,
+          "relative_end_s": 0.0033902000286616385,
+          "latency_s": 1.0400020983070135e-05,
+          "status": "FAILED",
+          "error_message": "RuntimeError: 429 Rate limit reached for qwen (TPM threshold hit)",
+          "output_summary": null,
+          "chosen_as_final": false
+        },
+        {
+          "model_name": "openai/gpt-oss-20b",
+          "tier": "tier_2_groq (secondary)",
+          "called": true,
+          "not_called_reason": null,
+          "call_started_at": "2026-11-12T01:33:24.218955+00:00",
+          "call_completed_at": "2026-11-12T01:33:24.218955+00:00",
+          "relative_start_s": 0.0034767999895848334,
+          "relative_end_s": 0.0034828000352717936,
+          "latency_s": 6.00004568696022e-06,
+          "status": "SUCCESS",
+          "error_message": null,
+          "output_summary": {
+            "empathetic_note": "Lịch làm việc đã được sắp xếp lại nhẹ nhàng..."
+          },
+          "chosen_as_final": true
+        }
+      ],
+      "decision_timestamp": "2026-11-12T01:33:24.220301+00:00",
+      "decision_relative_s": 0.0041655999957583845,
+      "winner_model": "openai/gpt-oss-20b",
+      "winner_tier": "tier_2_groq",
+      "decision_rationale": "qwen/qwen3.8-27b chạm trần HTTP 429; hệ thống tự động fallback sang openai/gpt-oss-20b và nhận output thành công",
+      "final_output": {
+        "empathetic_note": "Lịch làm việc đã được sắp xếp lại nhẹ nhàng cho bạn, đừng tự trách mình nhé.",
+        "encouragement_tip": "Uống một ngụm nước ấm và vươn vai nhé."
+      },
+      "passed": true
+    },
+    {
+      "scenario_id": "scenario_6_python_tier3_and_guardrail",
+      "scenario_name": "Sập Toàn Bộ Cloud -> Thuần Python Bọc Lót & Anti-Hallucination",
+      "description": "Khi Cloud sập, Python tự sinh 3 bước chuẩn; khi LLM ảo giác deadline quá khứ, Python Guardrail can thiệp lật cờ is_complete=False",
+      "start_time": "2026-11-12T01:33:24.220301+00:00",
+      "end_time": "2026-11-12T01:33:33.231712+00:00",
+      "total_duration_s": 9.011341999983415,
+      "models_trace": [
+        {
+          "model_name": "UF1 / gemini-3.8-flash",
+          "tier": "tier_1_gemini",
+          "called": true,
+          "not_called_reason": null,
+          "call_started_at": "2026-11-12T01:33:24.221882+00:00",
+          "call_completed_at": "2026-11-12T01:33:28.716363+00:00",
+          "relative_start_s": 0.0016388999647460878,
+          "relative_end_s": 4.495939999993425,
+          "latency_s": 4.494301100028679,
+          "status": "CANCELLED",
+          "error_message": null,
+          "output_summary": null,
+          "chosen_as_final": false
+        },
+        {
+          "model_name": "UF2 / gemini-3.8-flash",
+          "tier": "tier_1_gemini",
+          "called": true,
+          "not_called_reason": null,
+          "call_started_at": "2026-11-12T01:33:24.221882+00:00",
+          "call_completed_at": "2026-11-12T01:33:33.231207+00:00",
+          "relative_start_s": 0.001663499977439642,
+          "relative_end_s": 9.01075660000788,
+          "latency_s": 9.00909310003044,
+          "status": "CANCELLED",
+          "error_message": null,
+          "output_summary": null,
+          "chosen_as_final": false
+        },
+        {
+          "model_name": "UF1 / gemini-3.5-flash-lite",
+          "tier": "tier_1_gemini",
+          "called": true,
+          "not_called_reason": null,
+          "call_started_at": "2026-11-12T01:33:26.830100+00:00",
+          "call_completed_at": "2026-11-12T01:33:28.716363+00:00",
+          "relative_start_s": 2.6099857999943197,
+          "relative_end_s": 4.495970399992075,
+          "latency_s": 1.8859845999977551,
+          "status": "CANCELLED",
+          "error_message": null,
+          "output_summary": null,
+          "chosen_as_final": false
+        },
+        {
+          "model_name": "UF2 / gemini-3.5-flash-lite",
+          "tier": "tier_1_gemini",
+          "called": true,
+          "not_called_reason": null,
+          "call_started_at": "2026-11-12T01:33:27.329094+00:00",
+          "call_completed_at": "2026-11-12T01:33:33.231207+00:00",
+          "relative_start_s": 3.1089065999840386,
+          "relative_end_s": 9.01078489999054,
+          "latency_s": 5.901878300006501,
+          "status": "CANCELLED",
+          "error_message": null,
+          "output_summary": null,
+          "chosen_as_final": false
+        },
+        {
+          "model_name": "UF1 / qwen/qwen3.8-27b",
+          "tier": "tier_2_groq",
+          "called": true,
+          "not_called_reason": null,
+          "call_started_at": "2026-11-12T01:33:27.721267+00:00",
+          "call_completed_at": "2026-11-12T01:33:28.716363+00:00",
+          "relative_start_s": 3.501046099991072,
+          "relative_end_s": 4.495980899955612,
+          "latency_s": 0.9949347999645397,
+          "status": "CANCELLED",
+          "error_message": null,
+          "output_summary": null,
+          "chosen_as_final": false
+        },
+        {
+          "model_name": "UF2 / qwen/qwen3.8-27b",
+          "tier": "tier_2_groq",
+          "called": true,
+          "not_called_reason": null,
+          "call_started_at": "2026-11-12T01:33:28.622952+00:00",
+          "call_completed_at": "2026-11-12T01:33:33.231207+00:00",
+          "relative_start_s": 4.402745399973355,
+          "relative_end_s": 9.010794900008477,
+          "latency_s": 4.608049500035122,
+          "status": "CANCELLED",
+          "error_message": null,
+          "output_summary": null,
+          "chosen_as_final": false
+        }
+      ],
+      "decision_timestamp": "2026-11-12T01:33:33.231712+00:00",
+      "decision_relative_s": 9.011341999983415,
+      "winner_model": "pure_python_rule_based",
+      "winner_tier": "tier_3_rule_based",
+      "decision_rationale": "Kỳ vọng trả dự phòng tại trần A/B trong khi các provider vẫn đang dọn dẹp.",
+      "final_output": {
+        "uf1_elapsed_s": 4.494441799994092,
+        "uf1_tier": "tier_3_rule_based",
+        "uf2_elapsed_s": 9.009175100014545,
+        "uf2_steps": [
+          {
+            "order_index": 1,
+            "title": "Chuẩn bị tài liệu và lập dàn ý cho: Dọn dẹp phòng làm việc",
+            "expected_output": "Danh sách các ý chính hoặc dụng cụ cần thiết đã sẵn sàng.",
+            "estimated_minutes": 20,
+            "micro_task_prompt": "Đặt một tài liệu hoặc dụng cụ cần dùng cho 'Dọn dẹp phòng làm việc' trước mặt.",
+            "cognitive_load": "light"
+          },
+          {
+            "order_index": 2,
+            "title": "Thực hiện phần trọng tâm của: Dọn dẹp phòng làm việc",
+            "expected_output": "Hoàn thành bản nháp hoặc phần khối lượng chính của công việc.",
+            "estimated_minutes": 20,
+            "micro_task_prompt": "Mở tài liệu hoặc công cụ làm việc của 'Dọn dẹp phòng làm việc'.",
+            "cognitive_load": "medium"
+          },
+          {
+            "order_index": 3,
+            "title": "Rà soát và hoàn thiện kết quả: Dọn dẹp phòng làm việc",
+            "expected_output": "Kết quả đã được kiểm tra lại và sẵn sàng bàn giao/lưu trữ.",
+            "estimated_minutes": 20,
+            "micro_task_prompt": "Đánh dấu một chi tiết cần kiểm tra trong kết quả của 'Dọn dẹp phòng làm việc'.",
+            "cognitive_load": "light"
+          }
+        ],
+        "guardrail_is_complete": false,
+        "guardrail_has_conflict": true,
+        "guardrail_questions": [
+          "Hạn chót bạn nêu đang nằm ở thời điểm đã qua so với hiện tại, bạn xác nhận lại ngày giờ hoàn thành mới giúp mình nhé?"
+        ]
+      },
+      "passed": true
+    }
+  ]
+}
