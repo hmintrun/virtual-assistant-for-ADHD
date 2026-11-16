@@ -1,7 +1,7 @@
 # Thống kê Gộp: Chỉ bỏ 3.8-Flash ở UF1, các UF khác giữ `gemini-3.8-flash`
 
 - **Thời điểm chạy bổ sung 3.8-Flash:** `2026-11-16T11:43:55.215966+07:00` $\rightarrow$ `2026-11-16T11:46:27.676141+07:00`
-- **Nguồn gộp UF1 & Tier 2/Backup:** `docs/backend/qa_results/all_ufs_live_20261116.json`
+- **Nguồn gộp UF1 & Tier 2/Backup:** `POC/logs/all_ufs_live_20261116.json`
 - **Chính sách kiểm chứng:** UF1 = `gemini-3.5-flash-lite` (`MINIMAL`) + Qwen; UF2/UF6 = `gemini-3.8-flash` (`LOW`) + Warm Backup `gemini-3.5-flash-lite` + Groq (`qwen/qwen3.8-27b` / `openai/gpt-oss-20b`).
 - **Mốc Khung A (UF2-Adjust / UF6):** Warm Backup `1.5s` | Priority `3.0s` | Groq Hedge `3.5s` | Hard `4.5s`.
 - **Mốc Khung B (UF2-Decompose):** Warm Backup `2.0s` | Priority `4.5s` | Groq Hedge `5.0s` | Hard `9.0s`.

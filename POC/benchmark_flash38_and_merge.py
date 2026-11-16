@@ -20,14 +20,16 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, cast
 
-ROOT_DIR = Path(__file__).resolve().parents[2]
+ROOT_DIR = Path(__file__).resolve().parent.parent
 BACKEND_DIR = ROOT_DIR / "backend"
 SCRIPTS_DIR = Path(__file__).resolve().parent
 for p in (str(BACKEND_DIR), str(SCRIPTS_DIR)):
     if p not in sys.path:
         sys.path.insert(0, p)
 
-from benchmark_all_ufs_live import (  # noqa: E402
+from app.core.config import settings
+from app.services.ai_service import AIService, ExecutionTimingProfile
+from benchmark_all_ufs_live import (
     DEFAULT_SLA_SECONDS,
     REFERENCE_NOW,
     UNBOUNDED_CEILING_SECONDS,
@@ -39,14 +41,11 @@ from benchmark_all_ufs_live import (  # noqa: E402
     _summarize_group,
     error_info,
 )
-from google.genai import types  # noqa: E402
-from pydantic import BaseModel  # noqa: E402
+from google.genai import types
+from pydantic import BaseModel
 
-from app.core.config import settings  # noqa: E402
-from app.services.ai_service import AIService, ExecutionTimingProfile  # noqa: E402
-
-BASE_JSON = ROOT_DIR / "docs/backend/qa_results/all_ufs_live_20261116.json"
-DEFAULT_MERGED_JSON = ROOT_DIR / "docs/backend/qa_results/all_ufs_live_flash38_merged_20261116.json"
+BASE_JSON = ROOT_DIR / "POC/logs/all_ufs_live_20261116.json"
+DEFAULT_MERGED_JSON = ROOT_DIR / "POC/logs/all_ufs_live_flash38_merged_20261116.json"
 FLASH38_MODEL = "gemini-3.8-flash"
 
 
@@ -332,7 +331,7 @@ def write_merged_outputs(
         "# Thống kê Gộp: Chỉ bỏ 3.8-Flash ở UF1, các UF khác giữ `gemini-3.8-flash`",
         "",
         f"- **Thời điểm chạy bổ sung 3.8-Flash:** `{started_at}` $\\rightarrow$ `{merged_report['finished_at']}`",
-        "- **Nguồn gộp UF1 & Tier 2/Backup:** `docs/backend/qa_results/all_ufs_live_20261116.json`",
+        "- **Nguồn gộp UF1 & Tier 2/Backup:** `POC/logs/all_ufs_live_20261116.json`",
         f"- **Chính sách kiểm chứng:** UF1 = `{settings.GEMINI_UF1_MODEL}` (`MINIMAL`) + Qwen; UF2/UF6 = `{FLASH38_MODEL}` (`LOW`) + Warm Backup `{settings.GEMINI_BACKUP_MODEL}` + Groq (`{settings.GROQ_FALLBACK_MODEL}` / `{settings.GROQ_SECONDARY_FALLBACK_MODEL}`).",
         f"- **Mốc Khung A (UF2-Adjust / UF6):** Warm Backup `{settings.AI_WARM_BACKUP_DELAY_SECONDS}s` | Priority `{settings.AI_PRIMARY_PRIORITY_SECONDS}s` | Groq Hedge `{settings.AI_GROQ_HEDGE_DELAY_SECONDS}s` | Hard `{settings.AI_TIMEOUT_SECONDS}s`.",
         f"- **Mốc Khung B (UF2-Decompose):** Warm Backup `{settings.AI_UF2_WARM_BACKUP_DELAY_SECONDS}s` | Priority `{settings.AI_UF2_PRIMARY_PRIORITY_SECONDS}s` | Groq Hedge `{settings.AI_UF2_GROQ_HEDGE_DELAY_SECONDS}s` | Hard `{settings.AI_UF2_TIMEOUT_SECONDS}s`.",

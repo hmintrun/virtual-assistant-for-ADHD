@@ -3,8 +3,8 @@
 Chạy thủ công với API thật (Gemini & Groq), không thuộc unit test/CI.
 Không ghi DB hoặc Google Calendar.
 
-Ví dụ chạy từ thư mục gốc hoặc backend:
-  backend/.venv/Scripts/python.exe backend/scripts/benchmark_all_ufs_live.py
+Ví dụ chạy từ thư mục gốc hoặc POC:
+  backend/.venv/Scripts/python.exe POC/benchmark_all_ufs_live.py
 """
 
 from __future__ import annotations
@@ -25,33 +25,32 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal, cast
 
-ROOT_DIR = Path(__file__).resolve().parents[2]
+ROOT_DIR = Path(__file__).resolve().parent.parent
 BACKEND_DIR = ROOT_DIR / "backend"
 if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
-from google.genai import types  # noqa: E402
-from pydantic import BaseModel  # noqa: E402
-
-from app.core.config import settings  # noqa: E402
-from app.schemas.availability import DraftAvailability, WeeklyRule  # noqa: E402
-from app.schemas.common import TimeConstraint  # noqa: E402
-from app.schemas.task import (  # noqa: E402
+from app.core.config import settings
+from app.schemas.availability import DraftAvailability, WeeklyRule
+from app.schemas.common import TimeConstraint
+from app.schemas.task import (
     ExtractedFreeWindowSchema,
     ExtractedTimeConstraint,
     LLMTaskExtractionPayload,
 )
-from app.services.ai_service import AIService, ExecutionTimingProfile  # noqa: E402
-from app.services.voice_service import (  # noqa: E402
+from app.services.ai_service import AIService, ExecutionTimingProfile
+from app.services.voice_service import (
     EdgeTtsProvider,
     GeminiSttProvider,
     GroqWhisperSttProvider,
     TtsService,
     VoiceService,
 )
+from google.genai import types
+from pydantic import BaseModel
 
 REFERENCE_NOW = datetime.fromisoformat("2026-11-16T11:00:00+07:00")
-DEFAULT_OUTPUT_JSON = ROOT_DIR / "docs/backend/qa_results/all_ufs_live_20261116.json"
+DEFAULT_OUTPUT_JSON = ROOT_DIR / "POC/logs/all_ufs_live_20261116.json"
 DEFAULT_SLA_SECONDS = 2.5
 UNBOUNDED_CEILING_SECONDS = 35.0
 
