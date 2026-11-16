@@ -1,0 +1,45 @@
+name: Backend CI
+
+on:
+  push:
+    paths:
+      - "backend/**"
+      - ".github/workflows/backend-ci.yml"
+  pull_request:
+    paths:
+      - "backend/**"
+      - ".github/workflows/backend-ci.yml"
+
+jobs:
+  backend-checks:
+    name: Ruff, Ty & Pytest (Python 3.12)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    env:
+      CALENDAR_PROVIDER_MODE: fake
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: "backend/uv.lock"
+
+      - name: Set up Python 3.12
+        run: uv python install 3.12
+
+      - name: Install backend dependencies
+        run: uv sync --locked
+
+      - name: Run Ruff linter
+        run: uv run ruff check app tests
+
+      - name: Run Ty type checker
+        run: uv run ty check app
+
+      - name: Run Pytest suite
+        run: uv run pytest -q

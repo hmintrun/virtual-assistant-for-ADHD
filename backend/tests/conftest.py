@@ -19,9 +19,17 @@ def offline_test_environment(monkeypatch):
     monkeypatch.setattr(settings, "ENVIRONMENT", "testing")
     monkeypatch.setattr(settings, "TESTING", True)
     monkeypatch.setattr(settings, "ENABLE_CALENDAR_SYNC_WORKER", False)
+    monkeypatch.setattr(settings, "CALENDAR_PROVIDER_MODE", "fake")
+    monkeypatch.setattr(settings, "VOICE_TTS_PROVIDER", "fake")
+    monkeypatch.setattr(settings, "VOICE_STT_PROVIDER", "fake")
     monkeypatch.setenv("DATABASE_URL", "sqlite+aiosqlite:///:memory:")
     for name in ("GEMINI_API_KEY", "GROQ_API_KEY", "GOOGLE_CREDENTIALS_PATH"):
         monkeypatch.setenv(name, "")
+
+    from app.services.voice_service import get_tts_service, get_voice_service
+
+    get_tts_service.cache_clear()
+    get_voice_service.cache_clear()
 
     original_connect = socket.socket.connect
     original_create_connection = socket.create_connection
@@ -42,6 +50,11 @@ def offline_test_environment(monkeypatch):
 
     monkeypatch.setattr(socket.socket, "connect", blocked_connect)
     monkeypatch.setattr(socket, "create_connection", blocked_create_connection)
+    try:
+        yield
+    finally:
+        get_tts_service.cache_clear()
+        get_voice_service.cache_clear()
 
 
 @pytest.fixture

@@ -13,6 +13,7 @@ from app.core.errors import AppError
 from app.models.calendar import CalendarEventLink, PlanningContext
 from app.models.execution import ActualCorrection, CheckIn, RunEvent, SessionRun
 from app.models.planning import ScheduleVersion as ScheduleVersionRow
+from app.models.schedule_proposal import RescheduleProposal
 from app.models.session import Session as SessionRow
 from app.models.settings import Availability as AvailabilityRow
 from app.models.step import Step as StepRow
@@ -81,6 +82,10 @@ def _parse_iso_datetime(value: Any) -> datetime | None:
     return None
 
 
+def _current_utc_now(now: datetime | None = None) -> datetime:
+    return (now or datetime.now(UTC)).astimezone(UTC)
+
+
 def _require_replan(message: str) -> AppError:
     return AppError(
         status_code=409,
@@ -125,7 +130,8 @@ async def _resolve_settings_snapshot(
     raw = run.settings_snapshot or {}
     if isinstance(raw, dict) and "effective_revision" in raw and isinstance(raw.get("session"), dict):
         try:
-            return SettingsSnapshot.model_validate(raw)
+            clean_raw = {k: v for k, v in raw.items() if not k.startswith("_")}
+            return SettingsSnapshot.model_validate(clean_raw)
         except Exception:
             pass
 
@@ -208,6 +214,7 @@ async def _run_to_schema(
     else:
         resolved_checkin = None
 
+    session_snap = resolved_snapshot.session if resolved_snapshot is not None else None
     return SessionRunData(
         run_id=str(run.id),
         session_id=str(run.session_id),
@@ -227,6 +234,11 @@ async def _run_to_schema(
         settings_snapshot=resolved_snapshot,
         check_in=resolved_checkin,
         dnd_release_at=run.dnd_release_at,
+        total_planned_seconds=session_snap.duration_seconds if session_snap is not None else None,
+        segments=list(session_snap.segments) if session_snap is not None else [],
+        continuation_of_run_id=(run.settings_snapshot or {}).get("_continuation_of_run_id")
+        if isinstance(run.settings_snapshot, dict)
+        else None,
     )
 
 
@@ -244,7 +256,7 @@ async def reconcile_expired_checkins(
     - Khi được gọi từ luồng đọc (commit_if_read=True): thực hiện lock_owner + CAS + await db.commit().
     """
     user_uuid = command_service.owner_uuid(user_id)
-    ref_now = (now or datetime.now(UTC)).astimezone(UTC)
+    ref_now = _current_utc_now(now)
 
     expired_checkin_ids = list(
         await db.scalars(
@@ -262,33 +274,32 @@ async def reconcile_expired_checkins(
     )
 
     overdue_session_ids: list[UUID] = []
-    if now is not None:
-        waiting_sessions = list(
+    waiting_sessions = list(
+        await db.scalars(
+            select(SessionRow).where(
+                SessionRow.user_id == user_uuid,
+                SessionRow.status == "scheduled",
+                SessionRow.start_state == "waiting",
+            )
+        )
+    )
+    if waiting_sessions:
+        started_session_ids = set(
             await db.scalars(
-                select(SessionRow).where(
-                    SessionRow.user_id == user_uuid,
-                    SessionRow.status == "scheduled",
-                    SessionRow.start_state == "waiting",
+                select(SessionRun.session_id).where(
+                    SessionRun.user_id == user_uuid,
+                    SessionRun.session_id.in_([s.id for s in waiting_sessions]),
                 )
             )
         )
-        if waiting_sessions:
-            started_session_ids = set(
-                await db.scalars(
-                    select(SessionRun.session_id).where(
-                        SessionRun.user_id == user_uuid,
-                        SessionRun.session_id.in_([s.id for s in waiting_sessions]),
-                    )
-                )
+        for s in waiting_sessions:
+            if s.id in started_session_ids:
+                continue
+            due_at = s.start_decision_due_at or (
+                s.scheduled_start + timedelta(seconds=START_GRACE_SECONDS)
             )
-            for s in waiting_sessions:
-                if s.id in started_session_ids:
-                    continue
-                due_at = s.start_decision_due_at or (
-                    s.scheduled_start + timedelta(seconds=START_GRACE_SECONDS)
-                )
-                if due_at.astimezone(UTC) <= ref_now:
-                    overdue_session_ids.append(s.id)
+            if due_at.astimezone(UTC) <= ref_now:
+                overdue_session_ids.append(s.id)
 
     if not expired_checkin_ids and not overdue_session_ids:
         return False
@@ -532,7 +543,64 @@ async def _validate_start_feasibility(
         for r in other_runs:
             ended_run_by_session[r.session_id] = r
 
-        gap = timedelta(seconds=MIN_INTER_SESSION_GAP_SECONDS)
+        gap_override_by_other_id: dict[UUID, int] = {}
+        approved_proposals = list(
+            await db.scalars(
+                select(RescheduleProposal)
+                .where(
+                    RescheduleProposal.user_id == user_uuid,
+                    RescheduleProposal.status == "approved",
+                )
+                .order_by(RescheduleProposal.updated_at.desc())
+            )
+        )
+        sess_sched_start = session.scheduled_start.astimezone(UTC)
+        for prop in approved_proposals:
+            meta = (prop.proposed_changes or {}).get("_meta") or {}
+            if meta.get("continuation_request") is None:
+                continue
+            matched_refs: set[str] = set()
+            for add_item in (prop.proposed_changes or {}).get("sessions_to_add") or []:
+                if add_item.get("action") != "create_continuation_session":
+                    continue
+                after_obj = add_item.get("after") or {}
+                item_step_id = add_item.get("step_id") or after_obj.get("step_id")
+                if item_step_id != str(session.step_id):
+                    continue
+                if after_obj.get("work_seconds") != session.work_seconds:
+                    continue
+                raw_start = after_obj.get("start")
+                if not raw_start:
+                    continue
+                try:
+                    item_start = datetime.fromisoformat(str(raw_start)).astimezone(UTC)
+                except ValueError:
+                    continue
+                if abs((item_start - sess_sched_start).total_seconds()) < 1.0:
+                    ref = add_item.get("temp_session_id") or add_item.get("session_ref")
+                    if ref:
+                        matched_refs.add(str(ref))
+            if not matched_refs:
+                continue
+            for gx in meta.get("gap_exceptions") or []:
+                from_ref = str(gx.get("from_session_ref") or "")
+                to_ref = str(gx.get("to_session_ref") or "")
+                applied_gap = int(gx.get("applied_gap_seconds", MIN_INTER_SESSION_GAP_SECONDS))
+                other_ref: str | None = None
+                if to_ref in matched_refs and from_ref and not from_ref.startswith("temp_"):
+                    other_ref = from_ref
+                elif from_ref in matched_refs and to_ref and not to_ref.startswith("temp_"):
+                    other_ref = to_ref
+                if other_ref is not None:
+                    try:
+                        other_uuid = UUID(other_ref)
+                    except ValueError:
+                        continue
+                    prev_gap = gap_override_by_other_id.get(other_uuid)
+                    if prev_gap is None or applied_gap < prev_gap:
+                        gap_override_by_other_id[other_uuid] = max(0, applied_gap)
+            break
+
         for other in other_sessions:
             ended_run = ended_run_by_session.get(other.id)
             if ended_run is not None and ended_run.ended_at is not None:
@@ -542,7 +610,10 @@ async def _validate_start_feasibility(
                 other_start = other.scheduled_start.astimezone(UTC)
                 other_end = other.scheduled_end.astimezone(UTC)
 
-            if not (req_end + gap <= other_start or other_end + gap <= req_start):
+            required_gap = timedelta(
+                seconds=gap_override_by_other_id.get(other.id, MIN_INTER_SESSION_GAP_SECONDS)
+            )
+            if not (req_end + required_gap <= other_start or other_end + required_gap <= req_start):
                 raise _require_replan(
                     "Thời điểm bắt đầu mới vi phạm khoảng cách tối thiểu 15 phút hoặc chồng lấn với phiên khác. Cần xếp lại lịch."
                 )
@@ -615,6 +686,13 @@ async def start_session_run(
             code="RESOURCE_NOT_FOUND",
             message="Không tìm thấy tài nguyên trong phạm vi bạn được phép truy cập.",
             next_action="reload",
+        )
+
+    # 1b. Kiểm tra cửa sổ bắt đầu: chặn bắt đầu quá sớm ngoài Grace Window (sớm hơn 15 phút)
+    early_bound = session.scheduled_start.astimezone(UTC) - timedelta(seconds=START_GRACE_SECONDS)
+    if req_start < early_bound:
+        raise _require_replan(
+            "Thời điểm bắt đầu quá sớm so với lịch hẹn (vượt quá 15 phút). Cần xếp lại lịch."
         )
 
     # 2. Kiểm tra expected_schedule_revision khớp với ScheduleVersion hiện hành hoặc session.schedule_revision
@@ -1090,17 +1168,12 @@ async def end_session_run(
     run.dnd_release_at = timeout_at
     run.updated_at = datetime.now(UTC)
 
-    # Đối soát trường hợp đồng bộ offline muộn (khi caller truyền now >= timeout_at
-    # hoặc ended_at thuộc cửa sổ gần với wall-clock hiện tại nhưng đã trôi qua >= 300s)
-    initial_response_state = "open"
-    timeout_utc = timeout_at.astimezone(UTC)
-    if now is not None:
-        if now.astimezone(UTC) >= timeout_utc:
-            initial_response_state = "no_respond"
-    else:
-        wall_diff = (datetime.now(UTC) - timeout_utc).total_seconds()
-        if 0 <= wall_diff <= 3600:
-            initial_response_state = "no_respond"
+    # Đối soát trường hợp đồng bộ offline muộn: tính trạng thái timeout (ended_at + 300s)
+    # nhất quán theo clock nội bộ/now, không giới hạn cửa sổ 1 giờ.
+    ref_now = _current_utc_now(now)
+    initial_response_state = (
+        "no_respond" if ref_now >= timeout_at.astimezone(UTC) else "open"
+    )
 
     checkin = CheckIn(
         user_id=user_uuid,

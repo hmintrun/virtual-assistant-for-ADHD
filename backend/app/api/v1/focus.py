@@ -1,5 +1,6 @@
 """Router UF3: wire contract và điểm nối run_service/device_service của W03."""
 
+from datetime import UTC, datetime, timedelta
 from typing import Annotated
 
 from fastapi import APIRouter, Path, Query, Request
@@ -8,7 +9,7 @@ from pydantic import AwareDatetime
 from app.api.deps import CurrentUserDep, DbSessionDep
 from app.api.v1.service_dispatch import IdempotencyKey, service_handler, success
 from app.core.errors import AppError
-from app.schemas.common import SuccessEnvelope
+from app.schemas.common import ErrorEnvelope, SuccessEnvelope
 from app.schemas.execution import (
     ActualCorrectionData,
     ActualCorrectionRequest,
@@ -23,6 +24,7 @@ from app.schemas.execution import (
     SessionRunData,
     SessionStartRequest,
 )
+from app.schemas.reschedule import UpcomingScheduleContextData
 
 router = APIRouter(tags=["Focus & Devices - UF3"])
 
@@ -67,6 +69,41 @@ async def get_run_detail(
 ) -> SuccessEnvelope[SessionRunData]:
     data = await service_handler("run_service", "get_run_detail")(
         db=db, user_id=current_user.user_id, run_id=run_id
+    )
+    return success(request, data)
+
+
+@router.get(
+    "/runs/{run_id}/upcoming-schedule-context",
+    status_code=200,
+    response_model=SuccessEnvelope[UpcomingScheduleContextData],
+    responses={
+        401: {"model": ErrorEnvelope, "description": "Chưa đăng nhập hoặc thiếu Bearer Token"},
+        404: {"model": ErrorEnvelope, "description": "Không tìm thấy phiên thực hiện đang chạy"},
+        409: {"model": ErrorEnvelope, "description": "Trạng thái Run hoặc nguồn lịch chưa sẵn sàng"},
+        422: {"model": ErrorEnvelope, "description": "Tham số truy vấn from/to/cursor/limit không hợp lệ"},
+        503: {"model": ErrorEnvelope, "description": "Dịch vụ lấy ngữ cảnh lịch chưa sẵn sàng"},
+    },
+    summary="Xem ngữ cảnh lịch sắp tới phía sau Run (Dòng 64)",
+)
+async def get_upcoming_schedule_context(
+    request: Request,
+    run_id: Annotated[str, Path(min_length=1)],
+    current_user: CurrentUserDep,
+    db: DbSessionDep,
+    from_time: Annotated[AwareDatetime | None, Query(alias="from")] = None,
+    to_time: Annotated[AwareDatetime | None, Query(alias="to")] = None,
+    cursor: Annotated[str | None, Query()] = None,
+    limit: Annotated[int, Query(ge=1, le=100)] = 50,
+) -> SuccessEnvelope[UpcomingScheduleContextData]:
+    data = await service_handler("reschedule_service", "get_upcoming_schedule_context")(
+        db=db,
+        user_id=current_user.user_id,
+        run_id=run_id,
+        from_time=from_time,
+        to_time=to_time,
+        cursor=cursor,
+        limit=limit,
     )
     return success(request, data)
 
@@ -161,11 +198,14 @@ async def get_reminders(
     current_user: CurrentUserDep,
     db: DbSessionDep,
     device_id: Annotated[str, Query(min_length=1)],
-    from_time: Annotated[AwareDatetime, Query(alias="from")],
-    to_time: Annotated[AwareDatetime, Query(alias="to")],
+    from_time: Annotated[AwareDatetime | None, Query(alias="from")] = None,
+    to_time: Annotated[AwareDatetime | None, Query(alias="to")] = None,
     schedule_revision: Annotated[int | None, Query(ge=0)] = None,
 ) -> SuccessEnvelope[ReminderListResult]:
-    if from_time >= to_time:
+    now_utc = datetime.now(UTC)
+    effective_from = from_time or now_utc
+    effective_to = to_time or (effective_from + timedelta(hours=24))
+    if effective_from >= effective_to:
         raise AppError(
             status_code=422,
             code="VALIDATION_ERROR",
@@ -176,8 +216,8 @@ async def get_reminders(
         db=db,
         user_id=current_user.user_id,
         device_id=device_id,
-        from_time=from_time,
-        to_time=to_time,
+        from_time=effective_from,
+        to_time=effective_to,
         schedule_revision=schedule_revision,
     )
     return success(request, data)

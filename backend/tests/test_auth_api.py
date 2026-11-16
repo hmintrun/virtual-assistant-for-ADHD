@@ -250,7 +250,9 @@ async def test_calendar_callback_uses_state_without_bearer(auth_api, monkeypatch
     for path in ("/api/v1/calendar/oauth/callback", "/api/v1/calendar/oauth2callback"):
         response = await auth_api[0].get(path, params={"code": "code", "state": "invalid"})
         assert response.status_code == 401
-        assert response.json()["detail"] == "Invalid state"
+        err = response.json()["error"]
+        assert err["code"] == "CALENDAR_AUTH_REQUIRED"
+        assert err["message"] == "Invalid state"
     assert len(calls) == 2
     assert all(call["user_id"] is None for call in calls)
 

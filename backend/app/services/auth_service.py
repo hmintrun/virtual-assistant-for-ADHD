@@ -10,13 +10,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.core.errors import AppError
 from app.core.security import (
+    decode_app_refresh_token,
     issue_app_access_token,
     unauthenticated,
     validate_app_signing_configuration,
     validate_auth_configuration,
 )
 from app.models.user import User, UserPreference
-from app.schemas.auth import GoogleLoginData, VerifiedGoogleIdentity
+from app.schemas.auth import GoogleLoginData, TokenBundle, VerifiedGoogleIdentity
 from app.schemas.user import CurrentUser
 from app.services.google_identity_verifier import verify_google_identity
 
@@ -126,3 +127,20 @@ async def login_with_google(
     profile = await load_current_user(db, user_id)
     bundle = issue_app_access_token(user_id)
     return GoogleLoginData(**bundle.model_dump(), user=profile)
+
+
+async def refresh_app_tokens(db: AsyncSession, refresh_token: str) -> TokenBundle:
+    try:
+        validate_auth_configuration()
+        validate_app_signing_configuration()
+    except ValueError:
+        raise AppError(
+            status_code=503,
+            code="AUTH_PROVIDER_UNAVAILABLE",
+            message="Chưa cấu hình đăng nhập ứng dụng.",
+            next_action="retry_login",
+            retryable=True,
+        ) from None
+    claims = decode_app_refresh_token(refresh_token)
+    await load_current_user(db, claims.user_id)
+    return issue_app_access_token(claims.user_id)

@@ -1,12 +1,12 @@
 # Xử lý băm mật khẩu, mã hóa và xác thực JWT Token
 from datetime import UTC, datetime
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from jose import JWTError, jwt
 
 from app.core.config import Settings, settings
 from app.core.errors import AppError
-from app.schemas.auth import AppAccessClaims, TokenBundle
+from app.schemas.auth import AppAccessClaims, AppRefreshClaims, TokenBundle
 from app.schemas.user import CurrentUser
 
 # Hai tài khoản thử nghiệm chuẩn (User A và User B) phục vụ dev/test trước khi ghép Google Sign-In
@@ -81,6 +81,23 @@ def unauthenticated() -> AppError:
     )
 
 
+def issue_app_refresh_token(user_id: UUID | str) -> tuple[str, int]:
+    validate_auth_configuration()
+    validate_app_signing_configuration()
+    now = int(datetime.now(UTC).timestamp())
+    ttl = settings.REFRESH_TOKEN_TTL_SECONDS
+    claims = {
+        "sub": str(UUID(str(user_id))),
+        "iat": now,
+        "exp": now + ttl,
+        "iss": settings.JWT_ISSUER,
+        "aud": settings.JWT_AUDIENCE,
+        "token_type": "refresh",
+        "jti": str(uuid4()),
+    }
+    return jwt.encode(claims, settings.JWT_SECRET_KEY, algorithm="HS256"), ttl
+
+
 def issue_app_access_token(user_id: UUID | str) -> TokenBundle:
 
     validate_auth_configuration()
@@ -94,43 +111,63 @@ def issue_app_access_token(user_id: UUID | str) -> TokenBundle:
         "aud": settings.JWT_AUDIENCE,
         "token_type": "access",
     }
+    refresh_token, refresh_expires_in = issue_app_refresh_token(user_id)
     return TokenBundle(
         access_token=jwt.encode(claims, settings.JWT_SECRET_KEY, algorithm="HS256"),
         expires_in=settings.ACCESS_TOKEN_TTL_SECONDS,
+        refresh_token=refresh_token,
+        refresh_expires_in=refresh_expires_in,
     )
+
+
+def _decode_and_validate_jwt_claims(token: str, *, expected_token_type: str) -> dict:
+    validate_auth_configuration()
+    validate_app_signing_configuration()
+    claims = jwt.decode(
+        token,
+        settings.JWT_SECRET_KEY,
+        algorithms=["HS256"],
+        issuer=settings.JWT_ISSUER,
+        audience=settings.JWT_AUDIENCE,
+        options={
+            "require_sub": True,
+            "require_exp": True,
+            "require_iat": True,
+            "require_iss": True,
+            "require_aud": True,
+            "leeway": settings.AUTH_CLOCK_SKEW_SECONDS,
+        },
+    )
+    now = int(datetime.now(UTC).timestamp())
+    if (
+        type(claims["exp"]) is not int
+        or type(claims["iat"]) is not int
+        or claims["token_type"] != expected_token_type
+        or claims["aud"] != settings.JWT_AUDIENCE
+        or claims["iat"] > now + settings.AUTH_CLOCK_SKEW_SECONDS
+        or claims["exp"] <= now - settings.AUTH_CLOCK_SKEW_SECONDS
+        or claims["exp"] <= claims["iat"]
+    ):
+        raise ValueError(f"invalid {expected_token_type} claims")
+    return claims
 
 
 def decode_app_access_token(token: str) -> AppAccessClaims:
 
     try:
-        validate_auth_configuration()
-        validate_app_signing_configuration()
-        claims = jwt.decode(
-            token,
-            settings.JWT_SECRET_KEY,
-            algorithms=["HS256"],
-            issuer=settings.JWT_ISSUER,
-            audience=settings.JWT_AUDIENCE,
-            options={
-                "require_sub": True,
-                "require_exp": True,
-                "require_iat": True,
-                "require_iss": True,
-                "require_aud": True,
-                "leeway": settings.AUTH_CLOCK_SKEW_SECONDS,
-            },
-        )
-        now = int(datetime.now(UTC).timestamp())
-        if (
-            type(claims["exp"]) is not int
-            or type(claims["iat"]) is not int
-            or claims["token_type"] != "access"
-            or claims["aud"] != settings.JWT_AUDIENCE
-            or claims["iat"] > now + settings.AUTH_CLOCK_SKEW_SECONDS
-            or claims["exp"] <= now - settings.AUTH_CLOCK_SKEW_SECONDS
-            or claims["exp"] <= claims["iat"]
-        ):
-            raise ValueError("invalid access claims")
+        claims = _decode_and_validate_jwt_claims(token, expected_token_type="access")
         return AppAccessClaims(user_id=UUID(claims["sub"]))
+    except (JWTError, ValueError, TypeError, KeyError):
+        raise unauthenticated() from None
+
+
+def decode_app_refresh_token(token: str) -> AppRefreshClaims:
+
+    try:
+        claims = _decode_and_validate_jwt_claims(token, expected_token_type="refresh")
+        jti = claims.get("jti")
+        if not isinstance(jti, str) or not jti.strip():
+            raise ValueError("missing refresh jti")
+        return AppRefreshClaims(user_id=UUID(claims["sub"]), jti=jti)
     except (JWTError, ValueError, TypeError, KeyError):
         raise unauthenticated() from None

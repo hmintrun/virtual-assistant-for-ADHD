@@ -1584,6 +1584,153 @@ class TestUF1UF2PDFGaps(unittest.TestCase):
 
         asyncio.run(run())
 
-    @unittest.skip("Chưa có API chuyển chặng; theo dõi trong báo cáo, không kiểm bằng tên hàm")
     def test_TC_UF2_20_rolling_horizon_continuation(self):
-        pass
+        """I03 / K12: Chuyển chặng Rolling Horizon qua UF6 expand_next_horizon và duyệt thành công."""
+        from app.schemas.reschedule import (
+            ApproveProposalRequest,
+            CreateProposalRequest,
+            ProposalSourceRevisions,
+        )
+        from app.services import reschedule_service
+
+        async def run():
+            engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+            try:
+                async with engine.begin() as conn:
+                    await conn.run_sync(Base.metadata.create_all)
+                factory = async_sessionmaker(engine, expire_on_commit=False)
+                now = datetime.now(UTC).replace(
+                    hour=8, minute=0, second=0, microsecond=0
+                ) + timedelta(days=1)
+                availability = DraftAvailability(
+                    timezone="UTC",
+                    weekly_rules=[
+                        WeeklyRule(weekday=w, start_local="08:00", end_local="20:00")
+                        for w in range(1, 8)
+                    ],
+                )
+                async with factory() as db:
+                    await draft_service.ensure_dev_seed_in_db(db)
+                    draft = await draft_service.create_draft(
+                        user_id="user_a",
+                        idempotency_key="rh-create-1",
+                        payload=CreateDraftRequest(
+                            client_draft_id="rh-client-1",
+                            input_source="text",
+                            raw_input="Khóa luận tốt nghiệp dài hạn",
+                            summary=SummaryInput(
+                                title="Khóa luận tốt nghiệp",
+                                description="Viết khóa luận 4 chương",
+                                scope="4 chương",
+                                time_constraint=TimeConstraint(
+                                    kind="deadline",
+                                    start_at=now,
+                                    deadline_at=now + timedelta(days=30),
+                                    input_timezone="UTC",
+                                ),
+                                availability=availability,
+                            ),
+                        ),
+                        db=db,
+                    )
+                async with factory() as db:
+                    await draft_service.confirm_draft_summary(
+                        user_id="user_a",
+                        draft_id=draft.draft_id,
+                        idempotency_key="rh-confirm-1",
+                        payload=ConfirmSummaryRequest(
+                            expected_summary_revision=draft.summary_revision
+                        ),
+                        db=db,
+                    )
+                async with factory() as db:
+                    cand = await plan_service.create_candidate(
+                        user_id="user_a",
+                        draft_id=draft.draft_id,
+                        idempotency_key="rh-cand-1",
+                        payload=GenerateCandidateRequest(
+                            source_summary_revision=draft.summary_revision,
+                            source_planning_input_revision=draft.planning_input_revision,
+                            manual_steps=[
+                                ManualStepInput(
+                                    order_index=0,
+                                    title="Chương 1: Cơ sở lý thuyết",
+                                    expected_output="Bản thảo Chương 1",
+                                    estimated_base_seconds=1250,
+                                )
+                            ],
+                            unexpanded_scope="Chương 2: Thiết kế hệ thống\nChương 3: Thực nghiệm và đánh giá",
+                        ),
+                        db=db,
+                    )
+                    self.assertEqual(cand.decomposition_state, "partial")
+                async with factory() as db:
+                    confirmed = await plan_service.confirm_candidate(
+                        user_id="user_a",
+                        candidate_id=cand.candidate_id,
+                        idempotency_key="rh-confirm-cand-1",
+                        payload=ConfirmCandidateRequest(
+                            expected_review_revision=cand.review_revision,
+                            expected_summary_revision=cand.source_summary_revision,
+                            expected_planning_input_revision=cand.source_planning_input_revision,
+                            expected_source_revisions=cand.source_revisions,
+                        ),
+                        db=db,
+                    )
+                    task = confirmed.task
+                    self.assertEqual(task.decomposition_state, "partial")
+                    self.assertIsNotNone(task.unexpanded_scope)
+
+                async with factory() as db:
+                    owner = draft_service.resolve_user_uuid("user_a")
+                    revs, _ = await reschedule_service._compute_db_source_revisions(
+                        db, owner, target_task_id=task.task_id
+                    )
+                    sched_rev = await reschedule_service._get_current_schedule_revision(db, owner)
+                    proposal = await reschedule_service.create_proposal(
+                        db,
+                        user_id="user_a",
+                        idempotency_key="rh-prop-create-1",
+                        payload=CreateProposalRequest(
+                            trigger_reason="expand_next_horizon",
+                            target_task_id=task.task_id,
+                            allowed_task_ids=[task.task_id],
+                            expected_base_schedule_revision=sched_rev,
+                            expected_source_revisions=ProposalSourceRevisions.model_validate(
+                                revs.model_dump()
+                            ),
+                        ),
+                        now=now + timedelta(days=1),
+                    )
+                    self.assertEqual(proposal.status, "pending")
+                    self.assertEqual(len(proposal.proposed_changes.steps_to_add), 2)
+                    self.assertGreaterEqual(len(proposal.proposed_changes.sessions_to_add), 2)
+                    self.assertIsNotNone(proposal.proposed_changes.next_horizon_from)
+                    self.assertIsNotNone(proposal.proposed_changes.next_horizon_to)
+
+                async with factory() as db:
+                    approved = await reschedule_service.approve_proposal(
+                        db,
+                        user_id="user_a",
+                        proposal_id=proposal.proposal_id,
+                        idempotency_key="rh-prop-approve-1",
+                        payload=ApproveProposalRequest(
+                            expected_proposal_revision=proposal.proposal_revision,
+                            expected_base_schedule_revision=proposal.base_schedule_revision,
+                            expected_source_revisions=proposal.source_revisions,
+                        ),
+                        now=now + timedelta(days=1, minutes=1),
+                    )
+                    self.assertEqual(approved.status, "approved")
+
+                async with factory() as db:
+                    updated_task = await plan_service.get_task_by_id(
+                        user_id="user_a", task_id=task.task_id, db=db
+                    )
+                    self.assertEqual(updated_task.decomposition_state, "complete")
+                    self.assertIsNone(updated_task.unexpanded_scope)
+                    self.assertEqual(len(updated_task.steps), 3)
+            finally:
+                await engine.dispose()
+
+        asyncio.run(run())

@@ -13,14 +13,14 @@ from __future__ import annotations
 import logging
 import zoneinfo
 from dataclasses import dataclass
-from datetime import UTC, date, datetime, time, timezone
+from datetime import UTC, date, datetime, time
 from typing import Any
 from uuid import UUID
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.calendar import CalendarConnection, CalendarEventLink
+from app.models.calendar import CalendarEventLink
 from app.models.session import Session
 from app.models.step import Step
 from app.schemas.calendar import (
@@ -169,6 +169,14 @@ def merge_busy_intervals(intervals: list[BusyInterval]) -> list[BusyInterval]:
 
 
 @dataclass(frozen=True)
+class _SessionWindow:
+    id: UUID
+    scheduled_start: datetime
+    scheduled_end: datetime
+    step_id: UUID | None
+
+
+@dataclass(frozen=True)
 class CalendarIngestionResult:
     """Kết quả thu nạp dữ liệu từ các nguồn Calendar."""
 
@@ -245,15 +253,21 @@ async def ingest_calendar_sources(
         )
     )
     active_links = (await db.execute(stmt)).all()
-    event_to_session: dict[tuple[str, str], Session] = {}
-    session_id_to_session: dict[str, Session] = {}
+    event_to_session: dict[tuple[str, str], _SessionWindow] = {}
+    session_id_to_session: dict[str, _SessionWindow] = {}
     session_id_to_task_id: dict[str, str] = {}
     for link, sess, task_id in active_links:
+        win = _SessionWindow(
+            id=sess.id,
+            scheduled_start=sess.scheduled_start,
+            scheduled_end=sess.scheduled_end,
+            step_id=sess.step_id,
+        )
         if link.google_calendar_id and link.google_event_id:
-            event_to_session[(link.google_calendar_id, link.google_event_id)] = sess
-        session_id_to_session[str(sess.id)] = sess
+            event_to_session[(link.google_calendar_id, link.google_event_id)] = win
+        session_id_to_session[str(win.id)] = win
         if task_id:
-            session_id_to_task_id[str(sess.id)] = str(task_id)
+            session_id_to_task_id[str(win.id)] = str(task_id)
 
     # 3. Duyệt qua từng nguồn Calendar được chọn
     for src in selected_sources:
@@ -306,9 +320,15 @@ async def ingest_calendar_sources(
                             sess_uuid = UUID(proactive_session_id)
                             direct_sess = await db.get(Session, sess_uuid)
                             if direct_sess and direct_sess.user_id == uid:
-                                session_id_to_session[proactive_session_id] = direct_sess
-                                matched_session = direct_sess
-                                step = await db.get(Step, direct_sess.step_id)
+                                win = _SessionWindow(
+                                    id=direct_sess.id,
+                                    scheduled_start=direct_sess.scheduled_start,
+                                    scheduled_end=direct_sess.scheduled_end,
+                                    step_id=direct_sess.step_id,
+                                )
+                                session_id_to_session[proactive_session_id] = win
+                                matched_session = win
+                                step = await db.get(Step, win.step_id)
                                 if step and step.task_id:
                                     session_id_to_task_id[proactive_session_id] = str(step.task_id)
                         except Exception:

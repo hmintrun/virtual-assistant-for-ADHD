@@ -4,7 +4,7 @@ import copy
 import json
 import subprocess
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 
@@ -185,7 +185,6 @@ def test_naive_timestamps_are_rejected(client, name, field):
 @pytest.mark.parametrize(
     "query",
     [
-        {"device_id": "device_1"},
         {
             "device_id": "device_1",
             "from": "2026-11-07T10:00:00+07:00",
@@ -198,6 +197,22 @@ def test_reminder_window_is_validated(client, query):
     response = client.get("/api/v1/reminders", params=query)
     assert response.status_code == 422
     assert response.json()["error"]["code"] == "VALIDATION_ERROR"
+
+
+def test_reminder_default_window_is_24h(client, monkeypatch):
+    captured = {}
+
+    async def list_reminders(*, db, user_id, device_id, from_time, to_time, schedule_revision):
+        captured["from_time"] = from_time
+        captured["to_time"] = to_time
+        return {"items": [], "next_cursor": None}
+
+    module = ModuleType("app.services.device_service")
+    module.__dict__["list_reminders"] = list_reminders
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+    response = client.get("/api/v1/reminders", params={"device_id": "device_1"})
+    assert response.status_code == 200
+    assert captured["to_time"] - captured["from_time"] == timedelta(hours=24)
 
 
 def test_pagination_cursor_is_forwarded(client, monkeypatch):

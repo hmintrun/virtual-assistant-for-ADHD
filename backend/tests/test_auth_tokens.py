@@ -9,6 +9,7 @@ from app.core.config import Settings, settings
 from app.core.errors import AppError
 from app.core.security import (
     decode_app_access_token,
+    decode_app_refresh_token,
     issue_app_access_token,
     validate_auth_configuration,
 )
@@ -30,8 +31,22 @@ def test_round_trip(auth_config):
     uid = uuid4()
     bundle = issue_app_access_token(uid)
     assert bundle.expires_in == 3600
+    assert bundle.refresh_expires_in == settings.REFRESH_TOKEN_TTL_SECONDS
+    assert bundle.refresh_token is not None
     assert decode_app_access_token(bundle.access_token).user_id == uid
+    refresh_claims = decode_app_refresh_token(bundle.refresh_token)
+    assert refresh_claims.user_id == uid
+    assert refresh_claims.jti
     assert "access_token" not in repr(bundle)
+    assert "refresh_token" not in repr(bundle)
+
+    # Access token must not pass as refresh token, and refresh token must not pass as access token.
+    with pytest.raises(AppError) as access_err:
+        decode_app_access_token(bundle.refresh_token)
+    assert access_err.value.status_code == 401
+    with pytest.raises(AppError) as refresh_err:
+        decode_app_refresh_token(bundle.access_token)
+    assert refresh_err.value.status_code == 401
 
 
 @pytest.mark.parametrize("field", ["sub", "exp", "iat", "iss", "aud", "token_type"])
