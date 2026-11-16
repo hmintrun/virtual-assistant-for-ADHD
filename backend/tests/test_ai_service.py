@@ -1304,6 +1304,303 @@ class TestAIService(unittest.TestCase):
                 app.dependency_overrides.clear()
                 asyncio.run(engine.dispose())
 
+    def test_circuit_breaker_opens_on_auth_error_skips_slow_wait_and_recovers(self) -> None:
+        """Khi Gemini lỗi auth (403/PermissionError), cầu dao mở ngay để request sau nhảy thẳng Groq <0.05s và hồi phục sau cooldown."""
+        cfg = Settings(
+            _env_file=None,
+            GEMINI_API_KEY="AIzaSyTestKey",
+            GROQ_API_KEY="gsk_TestKey",
+            GOOGLE_CREDENTIALS_PATH="",
+            AI_UF1_TIMEOUT_SECONDS=4.5,
+        )
+        service = AIService(
+            app_settings=cfg,
+            auth_cooldown_seconds=0.06,
+            cooldown_seconds=0.06,
+        )
+        gemini_calls = 0
+
+        async def _gemini_auth_then_ok(**_: Any) -> LLMTaskExtractionPayload:
+            nonlocal gemini_calls
+            gemini_calls += 1
+            if gemini_calls == 1:
+                raise PermissionError("403 Forbidden: API key not valid")
+            return LLMTaskExtractionPayload(
+                title="Báo cáo phục hồi từ Gemini",
+                content="Viết báo cáo môn học",
+                scope="3 trang",
+                free_time_slots=[],
+                deadline=None,
+                is_complete=False,
+                summary="Gemini vừa phục hồi sau cooldown.",
+                clarification_questions=["Bạn rảnh giờ nào và hạn chót khi nào?"],
+            )
+
+        async def _groq_ok(**_: Any) -> LLMTaskExtractionPayload:
+            return LLMTaskExtractionPayload(
+                title="Cứu hộ nhanh từ Groq",
+                content="Viết báo cáo môn học",
+                scope="3 trang",
+                free_time_slots=[],
+                deadline=None,
+                is_complete=False,
+                summary="Groq tiếp nhận ngay khi Gemini mở cầu dao.",
+                clarification_questions=["Bạn rảnh giờ nào và hạn chót khi nào?"],
+            )
+
+        with (
+            patch.object(service, "_get_gemini_client", return_value=object()),
+            patch.object(service, "_get_groq_client", return_value=object()),
+            patch.object(service, "_call_gemini_structured", side_effect=_gemini_auth_then_ok),
+            patch.object(service, "_call_groq_structured", side_effect=_groq_ok) as groq_mock,
+        ):
+            # Lượt 1: Gemini 403 -> mở cầu dao ngay + chuyển sang Groq
+            r1 = asyncio.run(service.extract_task_intent("Viết báo cáo 3 trang"))
+            self.assertEqual(r1.generation_tier, "tier_2_groq")
+            self.assertEqual(gemini_calls, 1)
+
+            status_mid = asyncio.run(service.check_providers_status(probe_live=False))
+            self.assertEqual(status_mid["providers"]["gemini:gemini-3.5-flash-lite"]["state"], "open")
+            self.assertFalse(status_mid["providers"]["gemini:gemini-3.5-flash-lite"]["healthy"])
+
+            # Lượt 2 (trong thời gian cooldown): không gọi lại Gemini mà nhảy thẳng Groq ngay
+            t0 = asyncio.run(self._measure_extract(service, "Viết báo cáo 3 trang"))
+            self.assertEqual(t0[0].generation_tier, "tier_2_groq")
+            self.assertEqual(gemini_calls, 1)
+            self.assertLess(t0[1], 0.1)
+            self.assertEqual(groq_mock.await_count, 2)
+
+            # Đợi qua auth_cooldown_seconds=0.06s -> trạng thái chuyển half_open và tự phục hồi về closed
+            async def _wait_and_recover() -> TaskExtractionResult:
+                await asyncio.sleep(0.08)
+                return await service.extract_task_intent("Viết báo cáo 3 trang")
+
+            r3 = asyncio.run(_wait_and_recover())
+            self.assertEqual(r3.generation_tier, "tier_1_gemini")
+            self.assertEqual(gemini_calls, 2)
+            status_after = asyncio.run(service.check_providers_status(probe_live=False))
+            self.assertEqual(status_after["providers"]["gemini:gemini-3.5-flash-lite"]["state"], "closed")
+            self.assertTrue(status_after["providers"]["gemini:gemini-3.5-flash-lite"]["healthy"])
+
+    @staticmethod
+    async def _measure_extract(service: AIService, text: str) -> tuple[TaskExtractionResult, float]:
+        t_start = asyncio.get_running_loop().time()
+        res = await service.extract_task_intent(text)
+        return res, asyncio.get_running_loop().time() - t_start
+
+    def test_circuit_breaker_all_providers_open_returns_tier3_immediately(self) -> None:
+        """Khi toàn bộ provider đều đang OPEN, hệ thống trả về Tier 3 ngay (<0.05s) thay vì treo chờ timeout."""
+        cfg = Settings(
+            _env_file=None,
+            GEMINI_API_KEY="AIzaSyTestKey",
+            GROQ_API_KEY="gsk_TestKey",
+            GOOGLE_CREDENTIALS_PATH="",
+            AI_UF1_TIMEOUT_SECONDS=4.5,
+        )
+        service = AIService(app_settings=cfg, failure_threshold=2, cooldown_seconds=10.0)
+        # Ghi nhận cả Gemini lẫn Groq đều đạt ngưỡng lỗi liên tiếp
+        for _ in range(2):
+            service.health.record_failure("gemini", cfg.GEMINI_UF1_MODEL, ConnectionError("down"))
+            service.health.record_failure("groq", cfg.GROQ_FALLBACK_MODEL, TimeoutError("stalled"))
+
+        with (
+            patch.object(service, "_get_gemini_client", return_value=object()),
+            patch.object(service, "_get_groq_client", return_value=object()),
+            patch.object(service, "_call_gemini_structured") as gemini_mock,
+            patch.object(service, "_call_groq_structured") as groq_mock,
+        ):
+            res, elapsed = asyncio.run(self._measure_extract(service, "Làm báo cáo cuối kỳ"))
+
+        self.assertEqual(res.generation_tier, "tier_3_rule_based")
+        self.assertLess(elapsed, 0.1)
+        gemini_mock.assert_not_awaited()
+        groq_mock.assert_not_awaited()
+
+    def test_check_providers_status_live_probe_updates_health(self) -> None:
+        """check_providers_status(probe_live=True) kiểm tra song song Gemini + Groq và cập nhật Circuit Breaker."""
+        cfg = Settings(
+            _env_file=None,
+            GEMINI_API_KEY="AIzaSyTestKey",
+            GROQ_API_KEY="gsk_TestKey",
+            GOOGLE_CREDENTIALS_PATH="",
+            GEMINI_FLASH_MODEL="gemini-3.5-flash-lite",
+            GEMINI_BACKUP_MODEL="gemini-3.5-flash-lite",
+            GEMINI_UF1_MODEL="gemini-3.5-flash-lite",
+            GROQ_FALLBACK_MODEL="qwen/qwen3.8-27b",
+            GROQ_SECONDARY_FALLBACK_MODEL="openai/gpt-oss-20b",
+        )
+        service = AIService(app_settings=cfg, auth_cooldown_seconds=30.0)
+
+        class _OkMsg:
+            content = '{"ok": true}'
+
+        class _OkChoice:
+            message = _OkMsg()
+
+        class _OkComp:
+            choices = [_OkChoice()]
+
+        class _FakeCompletions:
+            async def create(self, *, model: str, **_: Any) -> _OkComp:
+                if model == "qwen/qwen3.8-27b":
+                    return _OkComp()
+                raise RuntimeError("503 Service Unavailable")
+
+        class _FakeChat:
+            completions = _FakeCompletions()
+
+        class _FakeGroq:
+            chat = _FakeChat()
+
+        async def _gemini_probe_fail(**_: Any) -> None:
+            raise PermissionError("403 Forbidden")
+
+        with (
+            patch.object(service, "_get_gemini_client", return_value=object()),
+            patch.object(service, "_get_groq_client", return_value=_FakeGroq()),
+            patch.object(service, "_call_gemini_structured", side_effect=_gemini_probe_fail),
+        ):
+            report = asyncio.run(service.check_providers_status(probe_live=True, timeout_seconds=1.0))
+
+        self.assertTrue(report["probe_live"])
+        self.assertTrue(report["any_provider_available"])
+        self.assertFalse(report["providers"]["gemini:gemini-3.5-flash-lite"]["healthy"])
+        self.assertEqual(report["providers"]["gemini:gemini-3.5-flash-lite"]["state"], "open")
+        self.assertTrue(report["providers"]["groq:qwen/qwen3.8-27b"]["healthy"])
+        self.assertEqual(report["providers"]["groq:qwen/qwen3.8-27b"]["state"], "closed")
+        self.assertEqual(report["providers"]["groq:openai/gpt-oss-20b"]["consecutive_failures"], 1)
+
+    def test_budget_aware_transient_retry_recovers_gemini_and_groq(self) -> None:
+        """Lỗi tạm thời (ConnectionError / JSON hỏng) được retry nhanh khi còn ngân sách; lỗi hết ngân sách không retry."""
+        # Case 1: Gemini là nhánh duy nhất -> lỗi ConnectionError lần 1, retry thành công lần 2
+        cfg_gemini_only = Settings(
+            _env_file=None,
+            GEMINI_API_KEY="AIzaSyTestKey",
+            GROQ_API_KEY="",
+            GOOGLE_CREDENTIALS_PATH="",
+            AI_UF1_TIMEOUT_SECONDS=4.0,
+        )
+        svc_gemini = AIService(
+            app_settings=cfg_gemini_only,
+            max_transient_retries=1,
+            min_retry_budget_seconds=1.0,
+            retry_backoff_seconds=0.01,
+        )
+        attempts = 0
+
+        async def _flaky_gemini(**_: Any) -> LLMTaskExtractionPayload:
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise ConnectionError("Transient network reset")
+            return LLMTaskExtractionPayload(
+                title="Khôi phục sau retry",
+                content="Làm slide đồ án",
+                scope="10 slide",
+                free_time_slots=[],
+                deadline=None,
+                is_complete=False,
+                summary="Retry thành công ở lần 2.",
+                clarification_questions=["Bạn rảnh giờ nào và hạn chót khi nào?"],
+            )
+
+        with (
+            patch.object(svc_gemini, "_get_gemini_client", return_value=object()),
+            patch.object(svc_gemini, "_call_gemini_structured", side_effect=_flaky_gemini),
+        ):
+            res_g = asyncio.run(svc_gemini.extract_task_intent("Làm slide đồ án 10 slide"))
+
+        self.assertEqual(attempts, 2)
+        self.assertEqual(res_g.generation_tier, "tier_1_gemini")
+        self.assertEqual(res_g.title, "Khôi phục sau retry")
+
+        # Case 2: Groq là nhánh duy nhất (UF1 không có Gemini) -> lỗi ValueError (JSON rỗng) lần 1, retry lần 2 thành công
+        cfg_groq_only = Settings(
+            _env_file=None,
+            GEMINI_API_KEY="",
+            GROQ_API_KEY="gsk_TestKey",
+            GOOGLE_CREDENTIALS_PATH="",
+            AI_UF1_TIMEOUT_SECONDS=4.0,
+        )
+        svc_groq = AIService(
+            app_settings=cfg_groq_only,
+            max_transient_retries=1,
+            min_retry_budget_seconds=1.0,
+            retry_backoff_seconds=0.01,
+        )
+        groq_attempts = 0
+
+        class _OkMsg:
+            content = json.dumps(
+                {
+                    "title": "Groq retry thành công",
+                    "content": "Làm bài tập",
+                    "scope": "5 câu",
+                    "free_time_slots": [],
+                    "deadline": None,
+                    "is_complete": False,
+                    "summary": "Thành công sau micro-retry.",
+                    "clarification_questions": ["Bạn rảnh khi nào?"],
+                },
+                ensure_ascii=False,
+            )
+
+        class _OkChoice:
+            message = _OkMsg()
+
+        class _OkComp:
+            choices = [_OkChoice()]
+
+        class _FlakyGroqCompletions:
+            async def create(self, **_: Any) -> _OkComp:
+                nonlocal groq_attempts
+                groq_attempts += 1
+                if groq_attempts == 1:
+                    raise ConnectionError("Temporary socket hangup")
+                return _OkComp()
+
+        class _FlakyGroqChat:
+            completions = _FlakyGroqCompletions()
+
+        class _FlakyGroqClient:
+            chat = _FlakyGroqChat()
+
+        with patch.object(svc_groq, "_get_groq_client", return_value=_FlakyGroqClient()):
+            res_q = asyncio.run(svc_groq.extract_task_intent("Làm bài tập 5 câu"))
+
+        self.assertEqual(groq_attempts, 2)
+        self.assertEqual(res_q.generation_tier, "tier_2_groq")
+        self.assertEqual(res_q.title, "Groq retry thành công")
+
+        # Case 3: Ngân sách còn lại quá ít (< min_retry_budget_seconds) -> KHÔNG retry
+        svc_tight = AIService(
+            app_settings=Settings(
+                _env_file=None,
+                GEMINI_API_KEY="AIzaSyTestKey",
+                GROQ_API_KEY="",
+                GOOGLE_CREDENTIALS_PATH="",
+                AI_UF1_TIMEOUT_SECONDS=0.5,
+            ),
+            max_transient_retries=1,
+            min_retry_budget_seconds=1.2,
+            retry_backoff_seconds=0.01,
+        )
+        tight_attempts = 0
+
+        async def _tight_fail(**_: Any) -> LLMTaskExtractionPayload:
+            nonlocal tight_attempts
+            tight_attempts += 1
+            raise ConnectionError("Socket drop")
+
+        with (
+            patch.object(svc_tight, "_get_gemini_client", return_value=object()),
+            patch.object(svc_tight, "_call_gemini_structured", side_effect=_tight_fail),
+        ):
+            res_tight = asyncio.run(svc_tight.extract_task_intent("Làm bài tập"))
+
+        self.assertEqual(tight_attempts, 1)
+        self.assertEqual(res_tight.generation_tier, "tier_3_rule_based")
+
 
 if __name__ == "__main__":
     unittest.main()
