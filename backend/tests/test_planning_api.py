@@ -1087,7 +1087,7 @@ async def test_patch_draft_clears_generic_ai_clarification_after_manual_completi
 ):
     """Nếu R1 sinh AI_CLARIFICATION (clarification_questions[0]) rồi R2 fallback Tier 3, PATCH điền đủ 4 trường phải cho confirm."""
     client, _ = api
-    future_deadline = (datetime.now(UTC) + timedelta(days=5)).replace(microsecond=0)
+    future_deadline = (datetime.now(UTC) + timedelta(days=8)).replace(microsecond=0)
     created = await post(
         client,
         "/drafts",
