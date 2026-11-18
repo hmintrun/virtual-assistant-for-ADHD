@@ -7,7 +7,7 @@ from uuid import UUID
 from sqlalchemy import JSON, CheckConstraint, ForeignKey, String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from app.models.base import Base, RecordMixin, UTCDateTime
+from app.models.base import Base, OwnedMixin, RecordMixin, UTCDateTime
 
 if TYPE_CHECKING:
     from app.models.task import Task
@@ -72,3 +72,20 @@ class UserPreference(RecordMixin, Base):
     user: Mapped[User] = relationship(
         back_populates="preferences", lazy="raise", foreign_keys=[user_id]
     )
+
+
+class RefreshToken(OwnedMixin, RecordMixin, Base):
+    """Lưu vết jti refresh token phục vụ rotation, chặn reuse và /auth/logout (BE-03)."""
+
+    __tablename__ = "refresh_tokens"
+    __table_args__ = (
+        CheckConstraint("length(jti) >= 1", name="jti_nonempty"),
+        CheckConstraint("expires_at > issued_at", name="expiry_after_issue"),
+    )
+    jti: Mapped[str] = mapped_column(String(128), unique=True)
+    family_id: Mapped[UUID] = mapped_column(index=True)
+    issued_at: Mapped[datetime] = mapped_column(UTCDateTime())
+    expires_at: Mapped[datetime] = mapped_column(UTCDateTime())
+    revoked_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    revoked_reason: Mapped[str | None] = mapped_column(String(32))
+    replaced_by_jti: Mapped[str | None] = mapped_column(String(128))
