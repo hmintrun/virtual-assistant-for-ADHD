@@ -1,0 +1,226 @@
+===============================================================================================
+PROPLAN VA — AI MULTI-TIER FALLBACK DETAILED EXECUTION TRACE LOG (PRODUCTION SCALE)
+Thời điểm xuất log: 2026-11-12 01:33:33 UTC
+Tổng số kịch bản: 6 | Kết quả: 100% ĐẠT
+===============================================================================================
+
+-----------------------------------------------------------------------------------------------
+KỊCH BẢN #1: Fast-Fail Tức Thì (Google Lỗi Nhanh -> Groq Cứu Hộ) (ID: scenario_1_fast_fail)
+Mô tả: Cả hai model Gemini lỗi nhanh. Groq được gọi trước mốc hedge 3.5s.
+Bắt đầu: 2026-11-12T01:33:09.278945+00:00 | Kết thúc: 2026-11-12T01:33:09.296364+00:00 | Tổng thời gian chạy: 0.018 giây
+-----------------------------------------------------------------------------------------------
+DANH SÁCH CÁC MODEL VÀ TRẠNG THÁI GỌI:
+  * Model: gemini-3.8-flash               | Tầng: tier_1_gemini            | [ĐÃ GỌI]
+      - Bắt đầu gọi  : 2026-11-12T01:33:09.295565+00:00 (t = +0.017s)
+      - Trả về lúc   : 2026-11-12T01:33:09.295565+00:00 (t = +0.017s)
+      - Thời gian đợi: 0.000 giây
+      - Trạng thái   : FAILED
+      - Chi tiết lỗi : PermissionError: Google Gemini API unavailable (HTTP 403 Forbidden)
+      - Quyết định   : Không chọn làm output cuối
+
+  * Model: gemini-3.5-flash-lite          | Tầng: tier_1_gemini            | [ĐÃ GỌI]
+      - Bắt đầu gọi  : 2026-11-12T01:33:09.295565+00:00 (t = +0.017s)
+      - Trả về lúc   : 2026-11-12T01:33:09.295565+00:00 (t = +0.017s)
+      - Thời gian đợi: 0.000 giây
+      - Trạng thái   : FAILED
+      - Chi tiết lỗi : PermissionError: Google Gemini API unavailable (HTTP 403 Forbidden)
+      - Quyết định   : Không chọn làm output cuối
+
+  * Model: qwen/qwen3.8-27b               | Tầng: tier_2_groq              | [ĐÃ GỌI]
+      - Bắt đầu gọi  : 2026-11-12T01:33:09.295565+00:00 (t = +0.017s)
+      - Trả về lúc   : 2026-11-12T01:33:09.295565+00:00 (t = +0.017s)
+      - Thời gian đợi: 0.000 giây
+      - Trạng thái   : SUCCESS
+      - Dữ liệu ra   : {"title": "Tiểu luận Triết học Mác - Lênin", "scope": "10 trang", "is_complete": true}
+      - Quyết định   : >>> ĐƯỢC CHỌN LÀM OUTPUT CUỐI CÙNG <<<
+
+MỐC QUYẾT ĐỊNH ĐẦU RA CUỐI CÙNG (DECISION MILESTONE):
+  • Thời điểm chốt  : 2026-11-12T01:33:09.296364+00:00 (ở mốc t = +0.018 giây)
+  • Model chiến thắng: qwen/qwen3.8-27b (tier_2_groq)
+  • Căn cứ lựa chọn : Kỳ vọng chuyển sang Groq ngay sau khi cả hai model Gemini báo lỗi.
+  • Dữ liệu cuối    : {"title": "Tiểu luận Triết học Mác - Lênin", "content": "Viết tiểu luận Triết học về chủ nghĩa duy vật biện chứng", "is_complete": true}
+  • Đánh giá nghiệm thu: ĐẠT (PASSED)
+
+-----------------------------------------------------------------------------------------------
+KỊCH BẢN #2: Cửa sổ Ưu tiên Chất lượng (Quality-First Priority Window) (ID: scenario_2_quality_first)
+Mô tả: Flash-Lite trong RAM xong sớm (2.9s) nhưng 3.8 Flash hoàn thành lúc 3.4s (nằm trong cửa sổ 4.0s) -> Hệ thống kiên quyết chọn 3.8 Flash
+Bắt đầu: 2026-11-12T01:33:09.296883+00:00 | Kết thúc: 2026-11-12T01:33:12.708118+00:00 | Tổng thời gian chạy: 3.412 giây
+-----------------------------------------------------------------------------------------------
+DANH SÁCH CÁC MODEL VÀ TRẠNG THÁI GỌI:
+  * Model: gemini-3.5-flash-lite          | Tầng: tier_1_gemini (warm_backup) | [ĐÃ GỌI]
+      - Bắt đầu gọi  : 2026-11-12T01:33:11.912767+00:00 (t = +2.616s)
+      - Trả về lúc   : 2026-11-12T01:33:12.223773+00:00 (t = +2.927s)
+      - Thời gian đợi: 0.311 giây
+      - Trạng thái   : SUCCESS
+      - Dữ liệu ra   : {"title": "Bản dự phòng nông từ Flash-Lite", "scope": "15 slide"}
+      - Quyết định   : Không chọn làm output cuối
+
+  * Model: gemini-3.8-flash               | Tầng: tier_1_gemini            | [ĐÃ GỌI]
+      - Bắt đầu gọi  : 2026-11-12T01:33:09.297930+00:00 (t = +0.001s)
+      - Trả về lúc   : 2026-11-12T01:33:12.708118+00:00 (t = +3.411s)
+      - Thời gian đợi: 3.410 giây
+      - Trạng thái   : SUCCESS
+      - Dữ liệu ra   : {"title": "Bản chuẩn chất lượng cao từ Gemini 3.8 Flash", "scope": "15 slide PowerPoint chi tiết kèm sơ đồ kiến trúc"}
+      - Quyết định   : >>> ĐƯỢC CHỌN LÀM OUTPUT CUỐI CÙNG <<<
+
+  * Model: qwen/qwen3.8-27b               | Tầng: tier_2_groq              | [KHÔNG GỌI]
+      - Lý do bỏ qua : Groq không được cấu hình trong kịch bản này
+      - Quyết định   : Không chọn làm output cuối
+
+MỐC QUYẾT ĐỊNH ĐẦU RA CUỐI CÙNG (DECISION MILESTONE):
+  • Thời điểm chốt  : 2026-11-12T01:33:12.708118+00:00 (ở mốc t = +3.412 giây)
+  • Model chiến thắng: gemini-3.8-flash (tier_1_gemini)
+  • Căn cứ lựa chọn : Gemini 3.8 Flash hoàn tất lúc 3.4s (nằm trong cửa sổ ưu tiên 4.0s); hệ thống kiên nhẫn nhận output chất lượng cao dù 3.5 Lite trong RAM xong sớm hơn
+  • Dữ liệu cuối    : {"title": "Bản chuẩn chất lượng cao từ Gemini 3.8 Flash", "scope": "15 slide PowerPoint chi tiết kèm sơ đồ kiến trúc"}
+  • Đánh giá nghiệm thu: ĐẠT (PASSED)
+
+-----------------------------------------------------------------------------------------------
+KỊCH BẢN #3: Tier 1 Trả Về Quá Lâu (> 7.5s) -> Bung Bản Nháp RAM Cứu Hộ (ID: scenario_3_tier1_lag_ram_harvest)
+Mô tả: Primary treo; Flash-Lite phản hồi trước khi kết thúc cửa sổ ưu tiên 7.5s.
+Bắt đầu: 2026-11-12T01:33:12.708118+00:00 | Kết thúc: 2026-11-12T01:33:20.215843+00:00 | Tổng thời gian chạy: 7.508 giây
+-----------------------------------------------------------------------------------------------
+DANH SÁCH CÁC MODEL VÀ TRẠNG THÁI GỌI:
+  * Model: gemini-3.8-flash               | Tầng: tier_1_gemini (primary)  | [ĐÃ GỌI]
+      - Bắt đầu gọi  : 2026-11-12T01:33:12.709189+00:00 (t = +0.001s)
+      - Trả về lúc   : 2026-11-12T01:33:20.215843+00:00 (t = +7.508s)
+      - Thời gian đợi: 7.506 giây
+      - Trạng thái   : CANCELLED
+      - Quyết định   : Không chọn làm output cuối
+
+  * Model: gemini-3.5-flash-lite          | Tầng: tier_1_gemini (warm_backup) | [ĐÃ GỌI]
+      - Bắt đầu gọi  : 2026-11-12T01:33:15.815717+00:00 (t = +3.108s)
+      - Trả về lúc   : 2026-11-12T01:33:16.222958+00:00 (t = +3.515s)
+      - Thời gian đợi: 0.407 giây
+      - Trạng thái   : SUCCESS
+      - Dữ liệu ra   : {"steps_count": 2, "reasoning": "Phương án bẻ nhỏ cứu hộ từ Warm Backup Gemini 3.5 Flash-Lite (cứu nguy khi 3.8 Flash bị treo)."}
+      - Quyết định   : >>> ĐƯỢC CHỌN LÀM OUTPUT CUỐI CÙNG <<<
+
+MỐC QUYẾT ĐỊNH ĐẦU RA CUỐI CÙNG (DECISION MILESTONE):
+  • Thời điểm chốt  : 2026-11-12T01:33:20.215843+00:00 (ở mốc t = +7.508 giây)
+  • Model chiến thắng: gemini-3.5-flash-lite (tier_1_gemini)
+  • Căn cứ lựa chọn : Kỳ vọng chọn Flash-Lite tại mốc 7.5s của Khung B.
+  • Dữ liệu cuối    : {"steps_count": 2, "reasoning": "Phương án bẻ nhỏ cứu hộ từ Warm Backup Gemini 3.5 Flash-Lite (cứu nguy khi 3.8 Flash bị treo)."}
+  • Đánh giá nghiệm thu: ĐẠT (PASSED)
+
+-----------------------------------------------------------------------------------------------
+KỊCH BẢN #4: Toàn Bộ Google Bị Treo -> Groq Cloud LPU Cứu Hộ (ID: scenario_4_total_gemini_hang_groq_rescue)
+Mô tả: Cả hai model Gemini treo; nhánh Groq trả kết quả trước khi hết cửa sổ ưu tiên.
+Bắt đầu: 2026-11-12T01:33:20.215843+00:00 | Kết thúc: 2026-11-12T01:33:24.215864+00:00 | Tổng thời gian chạy: 4.000 giây
+-----------------------------------------------------------------------------------------------
+DANH SÁCH CÁC MODEL VÀ TRẠNG THÁI GỌI:
+  * Model: gemini-3.8-flash               | Tầng: tier_1_gemini            | [ĐÃ GỌI]
+      - Bắt đầu gọi  : 2026-11-12T01:33:20.217027+00:00 (t = +0.002s)
+      - Trả về lúc   : 2026-11-12T01:33:24.215864+00:00 (t = +4.000s)
+      - Thời gian đợi: 3.998 giây
+      - Trạng thái   : CANCELLED
+      - Quyết định   : Không chọn làm output cuối
+
+  * Model: gemini-3.5-flash-lite          | Tầng: tier_1_gemini            | [ĐÃ GỌI]
+      - Bắt đầu gọi  : 2026-11-12T01:33:22.824052+00:00 (t = +2.608s)
+      - Trả về lúc   : 2026-11-12T01:33:24.215864+00:00 (t = +4.000s)
+      - Thời gian đợi: 1.392 giây
+      - Trạng thái   : CANCELLED
+      - Quyết định   : Không chọn làm output cuối
+
+  * Model: qwen/qwen3.8-27b               | Tầng: tier_2_groq              | [ĐÃ GỌI]
+      - Bắt đầu gọi  : 2026-11-12T01:33:23.716007+00:00 (t = +3.500s)
+      - Trả về lúc   : 2026-11-12T01:33:23.979480+00:00 (t = +3.763s)
+      - Thời gian đợi: 0.263 giây
+      - Trạng thái   : SUCCESS
+      - Dữ liệu ra   : {"title": "Đề cương luận văn Thạc sĩ", "scope": "8 trang A4"}
+      - Quyết định   : >>> ĐƯỢC CHỌN LÀM OUTPUT CUỐI CÙNG <<<
+
+MỐC QUYẾT ĐỊNH ĐẦU RA CUỐI CÙNG (DECISION MILESTONE):
+  • Thời điểm chốt  : 2026-11-12T01:33:24.215864+00:00 (ở mốc t = +4.000 giây)
+  • Model chiến thắng: qwen/qwen3.8-27b (tier_2_groq)
+  • Căn cứ lựa chọn : Kỳ vọng gọi Groq tại 3.5s và chốt kết quả tại 4.0s của Khung A.
+  • Dữ liệu cuối    : {"title": "Đề cương luận văn Thạc sĩ", "scope": "8 trang A4"}
+  • Đánh giá nghiệm thu: ĐẠT (PASSED)
+
+-----------------------------------------------------------------------------------------------
+KỊCH BẢN #5: Chống Nghẽn Quota (Groq Qwen 429 TPM -> Groq GPT-OSS) (ID: scenario_5_groq_429)
+Mô tả: Khi model chính trên Groq chạm ngưỡng 429 TPM, hệ thống tự động gọi model phụ thay vì báo lỗi
+Bắt đầu: 2026-11-12T01:33:24.215864+00:00 | Kết thúc: 2026-11-12T01:33:24.220301+00:00 | Tổng thời gian chạy: 0.004 giây
+-----------------------------------------------------------------------------------------------
+DANH SÁCH CÁC MODEL VÀ TRẠNG THÁI GỌI:
+  * Model: qwen/qwen3.8-27b               | Tầng: tier_2_groq (primary)    | [ĐÃ GỌI]
+      - Bắt đầu gọi  : 2026-11-12T01:33:24.218955+00:00 (t = +0.003s)
+      - Trả về lúc   : 2026-11-12T01:33:24.218955+00:00 (t = +0.003s)
+      - Thời gian đợi: 0.000 giây
+      - Trạng thái   : FAILED
+      - Chi tiết lỗi : RuntimeError: 429 Rate limit reached for qwen (TPM threshold hit)
+      - Quyết định   : Không chọn làm output cuối
+
+  * Model: openai/gpt-oss-20b             | Tầng: tier_2_groq (secondary)  | [ĐÃ GỌI]
+      - Bắt đầu gọi  : 2026-11-12T01:33:24.218955+00:00 (t = +0.003s)
+      - Trả về lúc   : 2026-11-12T01:33:24.218955+00:00 (t = +0.003s)
+      - Thời gian đợi: 0.000 giây
+      - Trạng thái   : SUCCESS
+      - Dữ liệu ra   : {"empathetic_note": "Lịch làm việc đã được sắp xếp lại nhẹ nhàng..."}
+      - Quyết định   : >>> ĐƯỢC CHỌN LÀM OUTPUT CUỐI CÙNG <<<
+
+MỐC QUYẾT ĐỊNH ĐẦU RA CUỐI CÙNG (DECISION MILESTONE):
+  • Thời điểm chốt  : 2026-11-12T01:33:24.220301+00:00 (ở mốc t = +0.004 giây)
+  • Model chiến thắng: openai/gpt-oss-20b (tier_2_groq)
+  • Căn cứ lựa chọn : qwen/qwen3.8-27b chạm trần HTTP 429; hệ thống tự động fallback sang openai/gpt-oss-20b và nhận output thành công
+  • Dữ liệu cuối    : {"empathetic_note": "Lịch làm việc đã được sắp xếp lại nhẹ nhàng cho bạn, đừng tự trách mình nhé.", "encouragement_tip": "Uống một ngụm nước ấm và vươn vai nhé."}
+  • Đánh giá nghiệm thu: ĐẠT (PASSED)
+
+-----------------------------------------------------------------------------------------------
+KỊCH BẢN #6: Sập Toàn Bộ Cloud -> Thuần Python Bọc Lót & Anti-Hallucination (ID: scenario_6_python_tier3_and_guardrail)
+Mô tả: Khi Cloud sập, Python tự sinh 3 bước chuẩn; khi LLM ảo giác deadline quá khứ, Python Guardrail can thiệp lật cờ is_complete=False
+Bắt đầu: 2026-11-12T01:33:24.220301+00:00 | Kết thúc: 2026-11-12T01:33:33.231712+00:00 | Tổng thời gian chạy: 9.011 giây
+-----------------------------------------------------------------------------------------------
+DANH SÁCH CÁC MODEL VÀ TRẠNG THÁI GỌI:
+  * Model: UF1 / gemini-3.8-flash         | Tầng: tier_1_gemini            | [ĐÃ GỌI]
+      - Bắt đầu gọi  : 2026-11-12T01:33:24.221882+00:00 (t = +0.002s)
+      - Trả về lúc   : 2026-11-12T01:33:28.716363+00:00 (t = +4.496s)
+      - Thời gian đợi: 4.494 giây
+      - Trạng thái   : CANCELLED
+      - Quyết định   : Không chọn làm output cuối
+
+  * Model: UF2 / gemini-3.8-flash         | Tầng: tier_1_gemini            | [ĐÃ GỌI]
+      - Bắt đầu gọi  : 2026-11-12T01:33:24.221882+00:00 (t = +0.002s)
+      - Trả về lúc   : 2026-11-12T01:33:33.231207+00:00 (t = +9.011s)
+      - Thời gian đợi: 9.009 giây
+      - Trạng thái   : CANCELLED
+      - Quyết định   : Không chọn làm output cuối
+
+  * Model: UF1 / gemini-3.5-flash-lite    | Tầng: tier_1_gemini            | [ĐÃ GỌI]
+      - Bắt đầu gọi  : 2026-11-12T01:33:26.830100+00:00 (t = +2.610s)
+      - Trả về lúc   : 2026-11-12T01:33:28.716363+00:00 (t = +4.496s)
+      - Thời gian đợi: 1.886 giây
+      - Trạng thái   : CANCELLED
+      - Quyết định   : Không chọn làm output cuối
+
+  * Model: UF2 / gemini-3.5-flash-lite    | Tầng: tier_1_gemini            | [ĐÃ GỌI]
+      - Bắt đầu gọi  : 2026-11-12T01:33:27.329094+00:00 (t = +3.109s)
+      - Trả về lúc   : 2026-11-12T01:33:33.231207+00:00 (t = +9.011s)
+      - Thời gian đợi: 5.902 giây
+      - Trạng thái   : CANCELLED
+      - Quyết định   : Không chọn làm output cuối
+
+  * Model: UF1 / qwen/qwen3.8-27b         | Tầng: tier_2_groq              | [ĐÃ GỌI]
+      - Bắt đầu gọi  : 2026-11-12T01:33:27.721267+00:00 (t = +3.501s)
+      - Trả về lúc   : 2026-11-12T01:33:28.716363+00:00 (t = +4.496s)
+      - Thời gian đợi: 0.995 giây
+      - Trạng thái   : CANCELLED
+      - Quyết định   : Không chọn làm output cuối
+
+  * Model: UF2 / qwen/qwen3.8-27b         | Tầng: tier_2_groq              | [ĐÃ GỌI]
+      - Bắt đầu gọi  : 2026-11-12T01:33:28.622952+00:00 (t = +4.403s)
+      - Trả về lúc   : 2026-11-12T01:33:33.231207+00:00 (t = +9.011s)
+      - Thời gian đợi: 4.608 giây
+      - Trạng thái   : CANCELLED
+      - Quyết định   : Không chọn làm output cuối
+
+MỐC QUYẾT ĐỊNH ĐẦU RA CUỐI CÙNG (DECISION MILESTONE):
+  • Thời điểm chốt  : 2026-11-12T01:33:33.231712+00:00 (ở mốc t = +9.011 giây)
+  • Model chiến thắng: pure_python_rule_based (tier_3_rule_based)
+  • Căn cứ lựa chọn : Kỳ vọng trả dự phòng tại trần A/B trong khi các provider vẫn đang dọn dẹp.
+  • Dữ liệu cuối    : {"uf1_elapsed_s": 4.494441799994092, "uf1_tier": "tier_3_rule_based", "uf2_elapsed_s": 9.009175100014545, "uf2_steps": [{"order_index": 1, "title": "Chuẩn bị tài liệu và lập dàn ý cho: Dọn dẹp phòng làm việc", "expected_output": "Danh sách các ý chính hoặc dụng cụ cần thiết đã sẵn sàng.", "estimated_minutes": 20, "micro_task_prompt": "Đặt một tài liệu hoặc dụng cụ cần dùng cho 'Dọn dẹp phòng làm việc' trước mặt.", "cognitive_load": "light"}, {"order_index": 2, "title": "Thực hiện phần trọng tâm của: Dọn dẹp phòng làm việc", "expected_output": "Hoàn thành bản nháp hoặc phần khối lượng chính của công việc.", "estimated_minutes": 20, "micro_task_prompt": "Mở tài liệu hoặc công cụ làm việc của 'Dọn dẹp phòng làm việc'.", "cognitive_load": "medium"}, {"order_index": 3, "title": "Rà soát và hoàn thiện kết quả: Dọn dẹp phòng làm việc", "expected_output": "Kết quả đã được kiểm tra lại và sẵn sàng bàn giao/lưu trữ.", "estimated_minutes": 20, "micro_task_prompt": "Đánh dấu một chi tiết cần kiểm tra trong kết quả của 'Dọn dẹp phòng làm việc'.", "cognitive_load": "light"}], "guardrail_is_complete": false, "guardrail_has_conflict": true, "guardrail_questions": ["Hạn chót bạn nêu đang nằm ở thời điểm đã qua so với hiện tại, bạn xác nhận lại ngày giờ hoàn thành mới giúp mình nhé?"]}
+  • Đánh giá nghiệm thu: ĐẠT (PASSED)
+
+===============================================================================================
+KẾT THÚC BẢNG TRACE LOG
+===============================================================================================
