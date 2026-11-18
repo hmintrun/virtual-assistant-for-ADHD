@@ -11,8 +11,10 @@ import '../models/focus_session_model.dart';
 import '../models/outbox_record.dart';
 import '../models/task_model.dart';
 import '../models/planning_models.dart';
+import '../repositories/local_database_manager.dart';
 import '../repositories/local_outbox_repository.dart';
 import '../repositories/local_run_repository.dart';
+import '../repositories/local_schedule_repository.dart';
 import '../services/audio_recorder_service.dart';
 import '../services/alarm_service.dart';
 import '../services/clock_sync_service.dart';
@@ -21,6 +23,23 @@ import '../services/focus_native_controller.dart';
 import '../services/outbox_replay_worker.dart';
 import '../services/timer_service.dart';
 import '../services/voice_service.dart';
+
+/// Interface cho phép kiểm tra và khôi phục trạng thái native khi mở lại app.
+abstract class NativeRecoveryChecker {
+  Future<FocusRecovery?> recoverOnAppStart();
+
+  factory NativeRecoveryChecker.fromCallback(
+    Future<FocusRecovery?> Function() callback,
+  ) = _CallbackNativeRecoveryChecker;
+}
+
+class _CallbackNativeRecoveryChecker implements NativeRecoveryChecker {
+  const _CallbackNativeRecoveryChecker(this._callback);
+  final Future<FocusRecovery?> Function() _callback;
+
+  @override
+  Future<FocusRecovery?> recoverOnAppStart() => _callback();
+}
 
 enum FocusStage {
   reminder,
@@ -153,8 +172,10 @@ class FocusProvider extends ChangeNotifier {
     Clock? clock,
     FlutterSecureStorage? storage,
     LocalOutboxRepository? outboxRepository,
+    LocalScheduleRepository? scheduleRepository,
     OutboxReplayWorker? outboxWorker,
     ClockSyncService? clockSync,
+    NativeRecoveryChecker? nativeRecoveryChecker,
   })  : _clock = clock ?? const SystemClock(),
         timer = timer ?? FocusTimerService(clock: clock),
         microTaskTimer = microTaskTimer ?? FocusTimerService(clock: clock),
@@ -166,8 +187,10 @@ class FocusProvider extends ChangeNotifier {
                 ? SecureStorageRunRepository(storage: storage)
                 : SecureStorageRunRepository()),
         _outboxRepository = outboxRepository,
+        _scheduleRepository = scheduleRepository,
         _outboxWorker = outboxWorker,
-        _clockSync = clockSync {
+        _clockSync = clockSync,
+        _nativeRecoveryChecker = nativeRecoveryChecker {
     this.timer.onElapsed = _onSegmentElapsed;
     this.timer.addListener(_onTimerChanged);
     this.microTaskTimer.onElapsed = _onMicroTaskElapsed;
@@ -188,6 +211,32 @@ class FocusProvider extends ChangeNotifier {
     this.recorder.onAutoStopFailed = _recordingFailedCallback;
   }
 
+  /// Factory DI khởi tạo FocusProvider kết nối đầy đủ các thành phần ngoại tuyến và SQLite.
+  static Future<FocusProvider> createOfflineAware({
+    required String ownerId,
+    required ApiClient apiClient,
+    NativeRecoveryChecker? nativeRecoveryChecker,
+  }) async {
+    final dbManager = LocalDatabaseManager.instance;
+    final db = await dbManager.openUserDatabase(ownerId);
+    final outboxRepo = SqliteOutboxRepository(db: db);
+    final scheduleRepo = SqliteScheduleRepository(db: db);
+    final clockSync = ClockSyncService.instance;
+    final worker = OutboxReplayWorker(
+      repository: outboxRepo,
+      apiClient: apiClient,
+    );
+
+    return FocusProvider(
+      api: apiClient,
+      outboxRepository: outboxRepo,
+      scheduleRepository: scheduleRepo,
+      outboxWorker: worker,
+      clockSync: clockSync,
+      nativeRecoveryChecker: nativeRecoveryChecker,
+    );
+  }
+
   late final void Function(ThoughtRecording) _recordingStopped;
   late final void Function(RecorderException) _recordingFailedCallback;
   final Clock _clock;
@@ -198,13 +247,28 @@ class FocusProvider extends ChangeNotifier {
   final ApiClient _api;
   final LocalRunRepository _repository;
   final LocalOutboxRepository? _outboxRepository;
+  final LocalScheduleRepository? _scheduleRepository;
   final OutboxReplayWorker? _outboxWorker;
   final ClockSyncService? _clockSync;
+  final NativeRecoveryChecker? _nativeRecoveryChecker;
   final List<ThoughtRecord> _thoughts = [];
 
   LocalOutboxRepository? get outboxRepository => _outboxRepository;
+  LocalScheduleRepository? get scheduleRepository => _scheduleRepository;
   OutboxReplayWorker? get outboxWorker => _outboxWorker;
   ClockSyncService? get clockSync => _clockSync;
+  NativeRecoveryChecker? get nativeRecoveryChecker => _nativeRecoveryChecker;
+
+  bool _awaitingCheckIn = false;
+  bool _checkInExpired = false;
+
+  bool get awaitingCheckIn => _awaitingCheckIn;
+  bool get checkInExpired => _checkInExpired;
+
+  void clearCheckInExpiredBanner() {
+    _checkInExpired = false;
+    _notify();
+  }
 
   FocusSessionInfo? _session;
   DateTime? _runEndsAt;
@@ -449,11 +513,26 @@ class FocusProvider extends ChangeNotifier {
     if (_outboxWorker != null) {
       unawaited(_outboxWorker.triggerReplay());
     }
-    final nativeRecovery = _usesNativeFocus
-        ? await FocusNativeController.instance.recoverOnAppStart()
-        : null;
+    final nativeRecovery = _nativeRecoveryChecker != null
+        ? await _nativeRecoveryChecker.recoverOnAppStart()
+        : (_usesNativeFocus
+            ? await FocusNativeController.instance.recoverOnAppStart()
+            : null);
     final json = await _repository.loadActiveRun();
     if (json == null) {
+      if (nativeRecovery?.state == FocusRecoveryState.checkInExpired) {
+        _stage = FocusStage.ended;
+        _checkInExpired = true;
+        _awaitingCheckIn = false;
+        _notify();
+        return;
+      } else if (nativeRecovery?.state == FocusRecoveryState.awaitingCheckIn) {
+        _stage = FocusStage.ended;
+        _awaitingCheckIn = true;
+        _checkInExpired = false;
+        _notify();
+        return;
+      }
       if (_thoughts.any((thought) => thought.isPendingSync)) {
         _ensureOfflineProbe();
       }
@@ -474,13 +553,30 @@ class FocusProvider extends ChangeNotifier {
         _skipSendTimer = Timer(Duration.zero, retryCheckInResponse);
       }
       _actualWorkSeconds = json['actual_work_seconds'] as int? ?? 0;
+      final nowUtc = _clockSync?.nowAdjusted() ?? _clock.now().toUtc();
+
       if (json['stage'] == FocusStage.ended.name) {
         _stage = FocusStage.ended;
-        _watchCheckInDeadline();
-        if (needsEndSync || hasPendingCheckInResponse) _startOfflineProbe();
+        final runEndsAt = DateTime.tryParse(json['run_ends_at'] as String? ?? '');
+        final isNativeExpired = nativeRecovery?.state == FocusRecoveryState.checkInExpired;
+        final secondsSinceEnd = runEndsAt != null
+            ? nowUtc.difference(runEndsAt.toUtc()).inSeconds
+            : null;
+        if (isNativeExpired || (secondsSinceEnd != null && secondsSinceEnd >= 300)) {
+          _checkInExpired = true;
+          _awaitingCheckIn = false;
+          await _repository.clearActiveRun();
+          _enqueueExpiredNoResponseOutbox();
+          await _restoreFocusMode();
+        } else {
+          _awaitingCheckIn = hasOpenCheckIn;
+          _watchCheckInDeadline();
+          if (needsEndSync || hasPendingCheckInResponse) _startOfflineProbe();
+        }
         _notify();
         return;
       }
+
       _segments = (json['segments'] as List<dynamic>? ?? const [])
           .whereType<Map<String, dynamic>>()
           .map(SessionSegmentModel.fromJson)
@@ -505,35 +601,51 @@ class FocusProvider extends ChangeNotifier {
             .fold<int>(0, (total, segment) => total + segment.durationSeconds);
         _runEndsAt = deadline.add(Duration(seconds: secondsAfterCurrent));
       }
+
+      final runEndUtc = _runEndsAt?.toUtc();
+      final isNativeExpired = nativeRecovery?.state == FocusRecoveryState.checkInExpired;
+      final isNativeAwaiting = nativeRecovery?.state == FocusRecoveryState.awaitingCheckIn;
+
+      final bool hasRunEnded = (runEndUtc != null && !nowUtc.isBefore(runEndUtc)) ||
+          isNativeExpired ||
+          isNativeAwaiting;
+
+      if (hasRunEnded) {
+        final secondsSinceEnd = runEndUtc != null
+            ? nowUtc.difference(runEndUtc).inSeconds
+            : (isNativeExpired ? 301 : 0);
+
+        final bool isExpired = secondsSinceEnd >= 300 || isNativeExpired;
+
+        if (isExpired) {
+          // HẾT HẠN 5 PHÚT -> Dọn dẹp phiên, tắt DND & Wakelock, không vào Check-in
+          _stage = FocusStage.ended;
+          _checkInExpired = true;
+          _awaitingCheckIn = false;
+          _dndApplied = false;
+          await _repository.clearActiveRun();
+          _enqueueExpiredNoResponseOutbox();
+          await _restoreFocusMode();
+          _notify();
+          return;
+        } else {
+          // TRONG CỬA SỔ 5 PHÚT (< 300s) -> Vào Check-in UF5
+          _actualWorkSeconds = _segments
+              .where((segment) => segment.kind == 'work')
+              .fold(0, (total, segment) => total + segment.durationSeconds);
+          _segmentIndex = _segments.length;
+          _stage = FocusStage.ended;
+          _awaitingCheckIn = true;
+          _checkInExpired = false;
+          await _finishLocalRun(awaitCheckIn: true);
+          _notify();
+          return;
+        }
+      }
+
       if (deadline != null && duration > 0) {
         final remainingMs = deadline.difference(_clock.now()).inMilliseconds;
         if (remainingMs <= 0) {
-          final runEndedWhileClosed = _serverRun != null &&
-              _runEndsAt != null &&
-              !_clock.now().isBefore(_runEndsAt!);
-          if (runEndedWhileClosed) {
-            _actualWorkSeconds = _segments
-                .where((segment) => segment.kind == 'work')
-                .fold(0, (total, segment) => total + segment.durationSeconds);
-            _segmentIndex = _segments.length;
-            await _finishLocalRun(awaitCheckIn: true);
-            return;
-          }
-          if (nativeRecovery?.state == FocusRecoveryState.checkInExpired) {
-            _stage = FocusStage.ended;
-            _dndApplied = false;
-            await _repository.clearActiveRun();
-            _notify();
-            return;
-          }
-          if (nativeRecovery?.state == FocusRecoveryState.awaitingCheckIn) {
-            if (currentSegment?.kind == 'work') {
-              _actualWorkSeconds += duration;
-            }
-            _stage = FocusStage.ended;
-            _notify();
-            return;
-          }
           // Segment có thể đã hết khi app đóng nhưng còn segment kế tiếp.
           // Khôi phục theo deadline tuyệt đối để timer tự chuyển tiếp.
           _stage = FocusStage.recovery;
@@ -551,6 +663,32 @@ class FocusProvider extends ChangeNotifier {
     }
   }
 
+  void _enqueueExpiredNoResponseOutbox() {
+    final run = _serverRun;
+    final repo = _outboxRepository;
+    if (run == null || repo == null) return;
+    final runId = run['run_id'] as String?;
+    if (runId == null) return;
+
+    final nowUtc = _clockSync?.nowAdjusted() ?? _clock.now().toUtc();
+    final record = OutboxRecord(
+      clientEventId: OutboxRecord.generateId('exp'),
+      eventType: OutboxEventType.checkinResponse,
+      targetResourceId: runId,
+      endpoint: '/runs/$runId/check-ins/response',
+      httpMethod: 'POST',
+      payload: {
+        'run_id': runId,
+        'session_outcome': 'no_response',
+        'responded_at': nowUtc.toIso8601String(),
+        'actual_duration_min': (_actualWorkSeconds / 60).round(),
+      },
+      occurredAt: nowUtc,
+      holdUntil: nowUtc,
+    );
+    unawaited(repo.enqueueOutboxRecord(record));
+  }
+
   Future<void> startSession(FocusSessionInfo session) async {
     if (isActiveRun || hasUnfinishedServerRun || _runCommandBusy) return;
     microTaskTimer.stop();
@@ -558,6 +696,8 @@ class FocusProvider extends ChangeNotifier {
     _serverRun = null;
     _startRequest = null;
     _runError = null;
+    _awaitingCheckIn = false;
+    _checkInExpired = false;
     _session = session;
     _runEndsAt = null;
     _segments = session.effectiveSegments
@@ -641,6 +781,15 @@ class FocusProvider extends ChangeNotifier {
         if (error.statusCode != null) {
           _startRequest = null;
           rethrow;
+        }
+        // Lỗi kết nối ngoại tuyến: Khóa chính sách offline_start_supported = false
+        // Kiểm tra xem đã có receipt server_run từ trước hay chưa
+        if (_serverRun == null) {
+          _isOffline = true;
+          throw const ApiException(
+            'Cần có kết nối mạng để bắt đầu phiên tập trung.',
+            code: 'OFFLINE_START_NOT_SUPPORTED',
+          );
         }
         _isOffline = true;
         _runError =
@@ -927,6 +1076,7 @@ class FocusProvider extends ChangeNotifier {
         });
         _checkInDeadline?.cancel();
         _pendingResponse = null;
+        _awaitingCheckIn = false;
         await _repository.clearActiveRun();
       } else {
         final response = await _api.putData(
@@ -938,6 +1088,7 @@ class FocusProvider extends ChangeNotifier {
         _serverRun = {..._serverRun!, 'check_in': response};
         _checkInDeadline?.cancel();
         _pendingResponse = null;
+        _awaitingCheckIn = false;
         await _repository.clearActiveRun();
       }
     } on ApiException catch (error) {
