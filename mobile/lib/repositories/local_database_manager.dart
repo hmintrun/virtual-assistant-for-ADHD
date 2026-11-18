@@ -61,9 +61,7 @@ class LocalDatabaseManager {
 
     try {
       if (_db != null && _db!.isOpen) {
-        if (_db!.isOpen) {
-          await _db!.close();
-        }
+        await _db!.close();
         _db = null;
         _currentOwnerId = null;
       }
@@ -108,11 +106,20 @@ class LocalDatabaseManager {
         break;
       }
     }
-    if (_db != null && _db!.isOpen) {
-      await _db!.close();
+    final closeCompleter = Completer<Database>();
+    _openCompleter = closeCompleter;
+    try {
+      if (_db != null && _db!.isOpen) {
+        await _db!.close();
+      }
+      _db = null;
+      _currentOwnerId = null;
+    } finally {
+      _openCompleter = null;
+      if (!closeCompleter.isCompleted) {
+        closeCompleter.completeError(StateError('Database closed'));
+      }
     }
-    _db = null;
-    _currentOwnerId = null;
   }
 
   /// Xóa tệp cơ sở dữ liệu của một người dùng (dùng cho Reset hoặc Testing).

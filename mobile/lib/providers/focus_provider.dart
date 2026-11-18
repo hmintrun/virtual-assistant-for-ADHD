@@ -565,11 +565,12 @@ class FocusProvider extends ChangeNotifier {
         if (isNativeExpired || (secondsSinceEnd != null && secondsSinceEnd >= 300)) {
           _checkInExpired = true;
           _awaitingCheckIn = false;
-          await _repository.clearActiveRun();
           _enqueueExpiredNoResponseOutbox();
+          await _repository.clearActiveRun();
           await _restoreFocusMode();
         } else {
-          _awaitingCheckIn = hasOpenCheckIn;
+          _awaitingCheckIn = _pendingResponse == null && (_checkIn == null || canAnswerCheckIn);
+          _checkInExpired = false;
           _watchCheckInDeadline();
           if (needsEndSync || hasPendingCheckInResponse) _startOfflineProbe();
         }
@@ -671,18 +672,34 @@ class FocusProvider extends ChangeNotifier {
     if (runId == null) return;
 
     final nowUtc = _clockSync?.nowAdjusted() ?? _clock.now().toUtc();
+    final clientEventId = (_pendingEnd?['event_id'] as String?) ??
+        ApiClient.newIdempotencyKey('end');
+    final endedAt = _pendingEnd?['ended_at'] as String? ??
+        (_runEndsAt?.toUtc() ?? nowUtc).toIso8601String();
+    final totalWork = _actualWorkSeconds > 0
+        ? _actualWorkSeconds
+        : _segments
+            .where((segment) => segment.kind == 'work')
+            .fold<int>(0, (total, segment) => total + segment.durationSeconds);
+
+    final payload = _pendingEnd ??
+        {
+          'device_id': run['device_id'] ?? 'device_offline',
+          'expected_run_revision': run['run_revision'] ?? 1,
+          'event_id': clientEventId,
+          'ended_at': endedAt,
+          'end_reason': 'timer_elapsed',
+          'work_elapsed_seconds': totalWork,
+          'rest_elapsed_seconds': 0,
+        };
+
     final record = OutboxRecord(
-      clientEventId: OutboxRecord.generateId('exp'),
-      eventType: OutboxEventType.checkinResponse,
+      clientEventId: clientEventId,
+      eventType: OutboxEventType.runEventBatch,
       targetResourceId: runId,
-      endpoint: '/runs/$runId/check-ins/response',
+      endpoint: '/runs/$runId/end',
       httpMethod: 'POST',
-      payload: {
-        'run_id': runId,
-        'session_outcome': 'no_response',
-        'responded_at': nowUtc.toIso8601String(),
-        'actual_duration_min': (_actualWorkSeconds / 60).round(),
-      },
+      payload: payload,
       occurredAt: nowUtc,
       holdUntil: nowUtc,
     );

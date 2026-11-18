@@ -150,15 +150,19 @@ class OutboxReplayWorker {
             );
             conflictIds.add(record.clientEventId);
             // 409 là xung đột logic (revision conflict), không làm nghẽn bản ghi tiếp theo
-          } else if (statusCode != null && statusCode >= 400 && statusCode < 500 && statusCode != 429) {
+          } else if (statusCode != null &&
+              statusCode >= 400 &&
+              statusCode < 500 &&
+              statusCode != 408 &&
+              statusCode != 429) {
             // Lỗi client terminal (400, 403, 404, 405, 422...): payload sai contract, không thể thử lại
             await _repository.markFailedTerminal(
               record.clientEventId,
               'HTTP $statusCode: $errorMessage',
             );
             terminalFailedIds.add(record.clientEventId);
-          } else if (isConnectionError || statusCode == null) {
-            // Lỗi mất mạng ngoại tuyến hoặc timeout:
+          } else if (isConnectionError || statusCode == null || statusCode == 408) {
+            // Lỗi mất mạng ngoại tuyến hoặc timeout (kể cả HTTP 408):
             // Tuân thủ Zero Data Loss: KHÔNG bao giờ dead-letter dữ liệu của người dùng khi offline.
             final delaySec = min(60, (pow(2, min(record.retryCount, 4)) * 2).toInt());
             await _repository.scheduleRetry(
@@ -206,13 +210,17 @@ class OutboxReplayWorker {
               reason: 'HTTP 409: $errorMessage',
             );
             conflictIds.add(record.clientEventId);
-          } else if (statusCode != null && statusCode >= 400 && statusCode < 500 && statusCode != 429) {
+          } else if (statusCode != null &&
+              statusCode >= 400 &&
+              statusCode < 500 &&
+              statusCode != 408 &&
+              statusCode != 429) {
             await _repository.markFailedTerminal(
               record.clientEventId,
               'HTTP $statusCode: $errorMessage',
             );
             terminalFailedIds.add(record.clientEventId);
-          } else if (statusCode == null) {
+          } else if (statusCode == null || statusCode == 408) {
             final delaySec = min(60, (pow(2, min(record.retryCount, 4)) * 2).toInt());
             await _repository.scheduleRetry(
               record.clientEventId,
