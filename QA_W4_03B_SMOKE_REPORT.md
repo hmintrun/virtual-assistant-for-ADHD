@@ -1,152 +1,231 @@
-# BÁO CÁO THỰC HIỆN NHIỆM VỤ QA W4-03B (SMOKE TEST & KIỂM CHỨNG BÀN GIAO STAGING)
+# BÁO CÁO HẠ TẦNG STAGING & NGHIỆM THU KIỂM THỬ SMOKE TEST TOÀN TRÌNH (W4-03A + W4-03B)
 
-**Người thực hiện:** Doãn Thành (QA Lead / Tester / Algorithm Lead) — ProPlan VA  
+**Dự án:** ProPlan VA — Virtual Assistant for Adults with ADHD-I  
+**Người thực hiện:**  
+- **Tín Nhiệm (`tn`):** Phụ trách Hạ tầng Deploy Staging, Render Cloud & Database Seed (`W4-03A`)  
+- **Doãn Thành (`thành`):** Phụ trách QA Lead / Tester / Algorithm Lead & Smoke Test (`W4-03B`)  
 **Ngày thực hiện:** 18/11/2026  
-**Đầu vào:** Bàn giao `W4-03A` từ Tín Nhiệm (`tn`) tại [`STAGING_DEPLOY_AND_TEAM_HANDOFF_20261117.md`](file:///E:/code/Project/CT/Virtual%20Assistant/virtual-assistant-for-ADHD/STAGING_DEPLOY_AND_TEAM_HANDOFF_20261117.md)  
-**Kế hoạch tham chiếu:** [`WEEK4_COMPLETE_PLAN_20261116.md`](file:///E:/code/Project/CT/Virtual%20Assistant/virtual-assistant-for-ADHD/WEEK4_COMPLETE_PLAN_20261116.md) §3.8  
-**Trạng thái nhánh `dev`:** Commit `ba13a75` (Đã đồng bộ từ `origin/dev@4ae869e` và tích hợp bộ test UF5/UF6)  
-**Trạng thái Staging Live:** `https://virtual-assistant-for-adhd.onrender.com/health` $\rightarrow$ `{"status":"ok","database":"ok"}`  
+**URL Staging Chính thức:** `https://virtual-assistant-for-adhd.onrender.com`  
+**API Base URL (cho Flutter):** `https://virtual-assistant-for-adhd.onrender.com/api/v1`  
+**Swagger UI:** `https://virtual-assistant-for-adhd.onrender.com/docs`  
+**Health Check:** `https://virtual-assistant-for-adhd.onrender.com/health` (đã bật UptimeRobot ping mỗi 5 phút)  
+**Trạng thái nhánh `dev`:** Commit `6721f64` (Đã đồng bộ từ `origin/dev@4ae869e` và tích hợp 44 tests UF5/UF6)  
 
 ---
 
-## 🌟 PHẦN 1: TỔNG QUAN TIẾN ĐỘ & BÀN GIAO W4-03B
+# 🌐 PHẦN I: SƠ ĐỒ HẠ TẦNG DEPLOY STAGING & BÀN GIAO NHÓM (W4-03A — TÍN NHIỆM)
 
-Theo phân công trong Kế hoạch Tuần 4, bộ phận QA đã tiếp nhận gói bàn giao hạ tầng `W4-03A` từ `tn` và hoàn tất 100% các tiêu chí nghiệm thu (DoD) của gói **`W4-03B`**:
+## 1. Sơ đồ Tổng thể Hạ tầng Deploy (Deployment Topology)
 
-| STT | Hạng mục theo kế hoạch W4-03B | Kết quả thực hiện | Trạng thái |
-| :---: | :--- | :--- | :---: |
-| 1 | **Tích hợp 2 bộ test Backend UF5/UF6 vào `dev`** | Đã đưa [`backend/tests/test_uf5_uf6_matrix.py`](file:///E:/code/Project/CT/Virtual%20Assistant/virtual-assistant-for-ADHD/backend/tests/test_uf5_uf6_matrix.py) (26 ca) & [`backend/tests/test_uf5_uf6_edge_cases.py`](file:///E:/code/Project/CT/Virtual%20Assistant/virtual-assistant-for-ADHD/backend/tests/test_uf5_uf6_edge_cases.py) (10 ca) vào `dev`. | **HOÀN TẤT** (100% PASS) |
-| 2 | **Kiểm chứng bộ test trên nền `dev` mới nhất** | Chạy kiểm thử tự động trên `origin/dev@4ae869e`: **36/36 tests PASSED** (54.4s ma trận + 22.0s biên). | **HOÀN TẤT** |
-| 3 | **Đồng bộ DTO & UI Model Mobile UF5/UF6** | Tích hợp [`checkin_models.dart`](file:///E:/code/Project/CT/Virtual%20Assistant/virtual-assistant-for-ADHD/mobile/lib/models/checkin_models.dart), [`reschedule_models.dart`](file:///E:/code/Project/CT/Virtual%20Assistant/virtual-assistant-for-ADHD/mobile/lib/models/reschedule_models.dart), [`checkin_screen.dart`](file:///E:/code/Project/CT/Virtual%20Assistant/virtual-assistant-for-ADHD/mobile/lib/screens/checkin_screen.dart), và test suite [`uf5_uf6_feedback_test.dart`](file:///E:/code/Project/CT/Virtual%20Assistant/virtual-assistant-for-ADHD/mobile/test/uf5_uf6_feedback_test.dart) (8/8 ca PASS). | **HOÀN TẤT** |
-| 4 | **Smoke Test & Tái hiện 4 tồn đọng lớn** | Kiểm chứng hạ tầng Staging Render & rà soát mã nguồn xác nhận 4 lỗi: `BE-01`, `MOB-01`, `MOB-03`, `MOB-04`. | **ĐÃ TÁI HIỆN & ĐỐI CHIẾU** |
-| 5 | **Bảng Checklist & Hướng dẫn đo Phần cứng Android** | Lập quy trình đo Doze Mode, Exact Alarm ($\le 1\text{s}$), DND khôi phục sau 300s, Reboot phục vụ Cổng 19/11. | **SẴN SÀNG** |
-
----
-
-## 🧪 PHẦN 2: BẰNG CHỨNG THỰC THI KIỂM THỬ TỰ ĐỘNG TRÊN NHÁNH `dev`
-
-### 1. Backend Edge Cases Suite (`test_uf5_uf6_edge_cases.py`)
-```bash
-uv run pytest tests/test_uf5_uf6_edge_cases.py -v
-============================= test session starts =============================
-platform win32 -- Python 3.12.15, pytest-9.2.0, pluggy-1.7.0
-rootdir: E:\code\Project\CT\Virtual Assistant\virtual-assistant-for-ADHD\backend
-collected 10 items
-
-tests/test_uf5_uf6_edge_cases.py::test_TC_UF5_EDGE_01_correction_rollback_matrix PASSED [ 10%]
-tests/test_uf5_uf6_edge_cases.py::test_TC_UF5_EDGE_02_invalid_skip_scope_violation PASSED [ 20%]
-tests/test_uf5_uf6_edge_cases.py::test_TC_UF5_EDGE_03_mid_checkin_on_ended_run_block PASSED [ 30%]
-tests/test_uf5_uf6_edge_cases.py::test_TC_UF5_EDGE_04_final_checkin_on_running_run_block PASSED [ 40%]
-tests/test_uf5_uf6_edge_cases.py::test_TC_UF5_EDGE_05_reconcile_timeout_and_late_response PASSED [ 50%]
-tests/test_uf5_uf6_edge_cases.py::test_TC_UF6_EDGE_01_revision_conflict_and_recovery PASSED [ 60%]
-tests/test_uf5_uf6_edge_cases.py::test_TC_UF6_EDGE_02_approve_infeasible_plan_block PASSED [ 70%]
-tests/test_uf5_uf6_edge_cases.py::test_TC_UF6_EDGE_03_approve_with_active_run_block PASSED [ 80%]
-tests/test_uf5_uf6_edge_cases.py::test_TC_UF6_EDGE_04_approve_superseded_proposal_block PASSED [ 90%]
-tests/test_uf5_uf6_edge_cases.py::test_TC_UF6_EDGE_05_continuation_calendar_collision_block PASSED [100%]
-
-============================= 10 passed in 22.02s =============================
-```
-
-### 2. Backend Test Matrix Suite (`test_uf5_uf6_matrix.py`)
-```bash
-uv run pytest tests/test_uf5_uf6_matrix.py
-============================= test session starts =============================
-collected 26 items
-
-tests\test_uf5_uf6_matrix.py ..........................                  [100%]
-============================= 26 passed in 54.44s =============================
-```
-
-### 3. Mobile Flutter Suite (`uf5_uf6_feedback_test.dart`)
-```bash
-flutter test test/uf5_uf6_feedback_test.dart
-00:00 +0: UF5 CheckIn Mobile Models & Invariants Tests TC_MB_UF5_01: completed serialize PASSED
-00:00 +1: UF5 CheckIn Mobile Models & Invariants Tests TC_MB_UF5_02: skipScope mandatory PASSED
-00:00 +2: UF5 CheckIn Mobile Models & Invariants Tests TC_MB_UF5_03: skipScope forbidden PASSED
-00:00 +3: UF5 CheckIn Mobile Models & Invariants Tests TC_MB_UF5_04: Invariant R01 step completed PASSED
-00:00 +4: UF5 CheckIn Mobile Models & Invariants Tests TC_MB_UF5_05: Invariant R01 task completed PASSED
-00:00 +5: UF5 CheckIn Mobile Models & Invariants Tests TC_MB_UF5_06: 3 chip COGA labels PASSED
-00:00 +6: UF6 Adaptive Rescheduling Mobile Models Tests TC_MB_UF6_01: Parse proposal JSON PASSED
-00:00 +7: UF6 Adaptive Rescheduling Mobile Models Tests TC_MB_UF6_02: Deficit & Confirmable flag PASSED
-00:00 +8: All tests passed!
+```text
+┌───────────────────────────────────────────────────────────────────────────────────┐
+│                         1. THIẾT BỊ NGƯỜI DÙNG & NGUỒN GỌI                        │
+│                                                                                   │
+│  ┌──────────────────────────────┐   ┌───────────────────────┐   ┌──────────────┐  │
+│  │ Flutter App (Web / Android)  │   │ Trình duyệt Người dùng│   │ UptimeRobot  │  │
+│  │ • Web: http://localhost:8080 │   │ • Màn hình bấm        │   │ • Ping mỗi   │  │
+│  │ • Mobile: Android APK        │   │   "Cho phép" Google   │   │   5 phút     │  │
+│  └──────────────┬───────────────┘   └───────────┬───────────┘   └──────┬───────┘  │
+└─────────────────┼───────────────────────────────┼──────────────────────┼──────────┘
+                  │ HTTPS                         │ Redirect             │ GET /health
+                  ▼ (/api/v1/*)                   ▼ (/oauth/callback)    ▼
+┌───────────────────────────────────────────────────────────────────────────────────┐
+│                    2. RENDER CLOUD (Region: Singapore - Free)                     │
+│                                                                                   │
+│  ┌─────────────────────────────────────────────────────────────────────────────┐  │
+│  │ WEB SERVICE (Docker Container từ nhánh GitHub `dev`, thư mục `backend/`)    │  │
+│  │ Public URL: https://virtual-assistant-for-adhd.onrender.com                 │  │
+│  │                                                                             │  │
+│  │  [Khi bật container]: chạy `alembic upgrade head` ──► tạo/cập nhật 11 bảng  │  │
+│  │  [Khi chạy]:          `uvicorn app.main:app` (1 worker)                     │  │
+│  │                        + `_calendar_sync_background_loop` (quét mỗi 5 giây) │  │
+│  └──────────────────────────────────────┬──────────────────────────────────────┘  │
+│                                         │                                         │
+│                                         │ Mạng nội bộ Render (Private Network)    │
+│                                         │ DATABASE_URL (postgresql+asyncpg://...) │
+│                                         ▼                                         │
+│  ┌─────────────────────────────────────────────────────────────────────────────┐  │
+│  │ RENDER POSTGRES 16 (`proplan-staging-db`)                                   │  │
+│  │ • Lưu Users, Preferences, Drafts, Tasks, Steps, Sessions, Proposals         │  │
+│  │ • Lưu Google Calendar Token đã mã hóa bằng CALENDAR_CREDENTIAL_SECRET_KEY   │  │
+│  └─────────────────────────────────────────────────────────────────────────────┘  │
+└─────────────────┬───────────────────────────────┬──────────────────────┬──────────┘
+                  │                               │                      │
+      Verify ID   │                   Đọc lịch bận│                      │ Gọi AI &
+        Token     │                   & Ghi phiên │                      │ Voice
+                  ▼                               ▼                      ▼
+┌───────────────────────────┐   ┌───────────────────────────┐   ┌───────────────────┐
+│ 3A. GOOGLE IDENTITY       │   │ 3B. GOOGLE CALENDAR API   │   │ 3C. AI & VOICE    │
+│ • Kiểm tra chữ ký Google  │   │ • Đọc sự kiện bận (UF1)   │   │ • Gemini 3.5      │
+│ • Đối chiếu Client ID với │   │ • Ghi/Sửa/Xóa các phiên   │   │ • Groq Qwen/      │
+│   GOOGLE_SIGN_IN_AUDIENCES│   │   Focus Session (UF2/UF6) │   │   Whisper STT     │
+└───────────────────────────┘   └───────────────────────────┘   │ • Edge-TTS        │
+                                                                └───────────────────┘
 ```
 
 ---
 
-## 🔍 PHẦN 3: BÁO CÁO SMOKE TEST & XÁC NHẬN TÁI HIỆN 4 BUG LỚN
+## 2. Giải thích Chi tiết Từng Luồng Gọi
 
-### 1. Bug `BE-01` (UF1: Khóa cứng `AI_AVAILABILITY_INCOMPLETE` khi input có `"hằng ngày"`)
-- **Triệu chứng:** Người dùng nhập: `"Học tiếng Anh từ 19:00 đến 22:00 hằng ngày"`. Hệ thống bóc tách được 7 `date_overrides` trong tuần. Tuy nhiên, `analyze_draft` trong `draft_service.py` vẫn giữ cờ `AI_AVAILABILITY_INCOMPLETE`.
-- **Hậu quả:** `can_plan = false` khiến nút `"→ Tạo phương án"` trên Mobile UI bị disable vĩnh viễn, người dùng bị chặn ở bước UF1.
-- **Vị trí code:** [`draft_service.py:L1431-L1475`](file:///E:/code/Project/CT/Virtual%20Assistant/virtual-assistant-for-ADHD/backend/app/services/draft_service.py#L1431-L1475). Đã chuyển thông tin cho `vqh` xử lý trong gói `W4-06B`.
+### 2.1. Luồng Khởi tạo & Chống ngủ (Build $\rightarrow$ Migrate $\rightarrow$ Uptime)
+1. **Build Docker:** Render đọc [Dockerfile](file:///E:/code/Project/CT/Virtual%20Assistant/virtual-assistant-for-ADHD/backend/Dockerfile) trong thư mục `backend/` trên nhánh `dev`, cài đặt môi trường Python 3.12 theo `uv.lock`.
+2. **Tự động tạo bảng (`alembic upgrade head`):** Trước khi mở cổng nhận request, container tự kết nối vào `proplan-staging-db` qua `DATABASE_URL` nội bộ (`postgresql+asyncpg://...`) và chạy toàn bộ 11 bản migration để tạo đủ bảng, khóa ngoại và index.
+3. **Chạy Server & Worker ngầm:** `uvicorn app.main:app` chạy với **1 worker duy nhất** kèm vòng lặp ngầm `_calendar_sync_background_loop` (quét các job đồng bộ lịch mỗi 5 giây).
+4. **Giữ thức 24/7:** UptimeRobot gọi `GET /health` mỗi 5 phút để kiểm tra kết nối PostgreSQL và giữ gói Render Free không bị ngủ đông sau 15 phút rảnh.
 
-### 2. Bug `MOB-01` (UF7: Lỗi `409 REVISION_CONFLICT` khi lưu Cài đặt)
-- **Triệu chứng:** Người dùng vào màn hình `SettingsScreen` điều chỉnh thời lượng phiên hoặc hệ số đệm sau khi vừa từ chối đề xuất dời lịch UF6.
-- **Nguyên nhân tái hiện:** Mobile gửi `revision` (`revision = 5`) thay vì `effective_revision` (`effective_revision = 3`) cho `/settings/change-requests`.
-- **Hậu quả:** Backend ném HTTP `409 REVISION_CONFLICT`. Người dùng bị kẹt không thể lưu cài đặt mới. Đã gán cho `tan` xử lý trong `W4-04`.
+### 2.2. Luồng A — Đăng nhập App bằng Google (`AUTH_MODE=google`)
+1. **Trên thiết bị người dùng:** App Flutter (Web tại `http://localhost:8080` hoặc Android APK) mở hộp thoại đăng nhập Google.
+   - Trên Web, Google kiểm tra địa chỉ trang web có nằm trong mục **`Authorized JavaScript origins`** (`http://localhost:8080`) trên Google Cloud Console hay không.
+   - Trên Android APK, Google Play Services kiểm tra cặp **`Package Name` (`com.proplan.proplan_va`) + mã `SHA-1`** của người xuất file APK, và cấp `id_token` gắn với `serverClientId` (chính là Web Client ID).
+2. **Gửi lên Render:** App gọi `POST /api/v1/auth/google` kèm `id_token`.
+3. **Xác thực & Cấp JWT:** Render xác minh chữ ký của Google, kiểm tra mã Client ID trong `id_token` có nằm trong danh sách `GOOGLE_SIGN_IN_AUDIENCES` không, tự động tạo/cập nhật bản ghi `User` trong PostgreSQL, rồi dùng `JWT_SECRET_KEY` ký cặp `access_token` + `refresh_token` trả về cho App.
 
-### 3. Bug `MOB-03` (UF6: Bỏ rơi Đề xuất dời lịch khi mở lại App)
-- **Triệu chứng:** Người dùng có một `ScheduleProposal` đang ở trạng thái `pending_approval`. Khi tắt app và mở lại (`HomeScreen`), app không phát bất kỳ request nào đến `GET /api/v1/proposals/current` hoặc `GET /api/v1/suggestions/current`.
-- **Hậu quả:** Màn hình chính không hiển thị banner đề xuất dời lịch, người dùng ADHD quên mất phiên chưa hoàn thành trước đó. Đã gán cho `tan` xử lý trong `W4-05M`.
+### 2.3. Luồng B — Kết nối & Đồng bộ Google Calendar 2 chiều (`CALENDAR_PROVIDER_MODE=real`)
+1. **Lấy link cấp quyền:** App gọi `GET /api/v1/calendar/oauth/auth-url`. Render ghép `GOOGLE_OAUTH_CLIENT_ID` và `GOOGLE_OAUTH_REDIRECT_URI` (`https://virtual-assistant-for-adhd.onrender.com/api/v1/calendar/oauth/callback`) thành đường dẫn Google OAuth.
+2. **Người dùng bấm "Cho phép":** Google kiểm tra đường dẫn callback có khớp với mục **`Authorized redirect URIs`** trên Google Cloud Console không, sau đó chuyển hướng (redirect) trình duyệt thẳng về `https://virtual-assistant-for-adhd.onrender.com/api/v1/calendar/oauth/callback?code=...`.
+3. **Mã hóa & Lưu trữ an toàn:** Render dùng `GOOGLE_OAUTH_CLIENT_SECRET` đổi `code` lấy `refresh_token` của Google Calendar, dùng chìa khóa **`CALENDAR_CREDENTIAL_SECRET_KEY`** (chuẩn Fernet) mã hóa thành chuỗi `fernet:v1:...` rồi lưu vào `proplan-staging-db`.
+4. **Đồng bộ tự động:** Ở UF1 hệ thống đọc các khung giờ bận từ lịch chính; sau khi người dùng bấm Xác nhận lịch ở UF2/UF6, `CalendarSyncWorker` tự đẩy/cập nhật các phiên Focus lên Google Calendar.
 
-### 4. Bug `MOB-04` (UF4: Đồng bộ Hộp suy nghĩ & Xóa rác)
-- **Triệu chứng:** Khi người dùng xóa một ý nghĩ trong Hộp suy nghĩ (`#/thoughts`), app chưa đồng bộ lệnh `DELETE /api/v1/thoughts/{id}` lên server nếu thao tác diễn ra lúc mất mạng hoặc chuyển trang nhanh.
-- **Hậu quả:** Gây rác dữ liệu trên server khi mạng khôi phục. Đã gán cho `qt` & `tan` trong `W4-07M`.
+### 2.4. Luồng C — Tạo việc bằng Giọng nói / Text & Lập lịch (UF1 $\rightarrow$ UF6)
+1. App gửi âm thanh (`.m4a`) hoặc văn bản lên Render (`/api/v1/voice/transcribe`, `/api/v1/drafts/{id}/analyze`).
+2. Render gọi **Gemini 3.5 Flash-Lite** (`GEMINI_API_KEY`) hoặc tự động chuyển sang **Groq** (`GROQ_API_KEY` — `qwen/qwen3.8-27b` / `whisper-large-v3-turbo`) để bóc tách 4 trường UF1 và gợi ý chia bước UF2.
+3. Thuật toán Python (`scheduler_engine.py`) tính toán 100% các phép toán thời gian, hệ số đệm $k_{\text{buffer}}$ và kiểm tra thiếu hụt $\Delta T_{\text{deficit}}$.
+4. Cuối phiên (UF5), Render gọi `Edge-TTS` sinh giọng đọc tiếng Việt (hoặc trả cờ `fallback_to_device_tts = true` để điện thoại tự đọc bằng `flutter_tts`).
 
 ---
 
-## 📱 PHẦN 4: BẢNG CHECKLIST & HƯỚNG DẪN ĐO PHẦN CỨNG ANDROID (CHO CỔNG 19/11 & W4-14)
+## 3. Hướng dẫn Kỹ thuật: Chạy Flutter Web & Build File APK Dùng Chung
 
-Để chuẩn bị cho việc nghiệm thu trên thiết bị thật (Redmi Android 12–14), QA đã chuẩn bị bộ lệnh ADB và kịch bản đo kiểm chuẩn:
+### 3.1. Chạy Flutter Web (Bắt buộc Khóa Cổng 8080)
+- **Bẫy lỗi:** Trên Google Cloud Console mục `Authorized JavaScript origins`, hệ thống đang mở cho `http://localhost:8080`. Nếu chạy không khóa cổng, Google sẽ chặn với lỗi `origin_mismatch`.
+- **Cách chạy đúng:**
+  ```bash
+  flutter run -d chrome --web-port 8080 \
+    --dart-define=API_BASE_URL=https://virtual-assistant-for-adhd.onrender.com/api/v1 \
+    --dart-define=GOOGLE_CLIENT_ID=929981556286-e1h39l5kvfcecuma4cbiqt82da5on6n9.apps.googleusercontent.com
+  ```
+
+### 3.2. Xuất File APK Cài Đặt Chung Cho Cả Nhóm
+1. **Lệnh build APK Android:**
+   ```bash
+   flutter build apk --debug \
+     --dart-define=API_BASE_URL=https://virtual-assistant-for-adhd.onrender.com/api/v1 \
+     --dart-define=GOOGLE_SERVER_CLIENT_ID=929981556286-e1h39l5kvfcecuma4cbiqt82da5on6n9.apps.googleusercontent.com
+   ```
+2. **Đăng ký mã `SHA-1` trên máy người build:**
+   - Chạy lệnh lấy mã SHA-1:
+     ```powershell
+     keytool -list -v -keystore "$env:USERPROFILE\.android\debug.keystore" -alias androiddebugkey -storepass android -keypass android
+     ```
+   - Copy dòng `SHA1: ...` $\rightarrow$ vào **Google Cloud Console $\rightarrow$ Credentials $\rightarrow$ `+ CREATE CREDENTIALS` $\rightarrow$ OAuth client ID**:
+     * **Application type:** `Android`
+     * **Package name:** `com.proplan.proplan_va` *(khớp với `mobile/android/app/build.gradle.kts`)*
+     * **SHA-1 certificate fingerprint:** Dán mã `SHA1` vừa lấy.
+   - Bấm **Create** 1 lần duy nhất. File `.apk` xuất từ máy này gửi cho bất kỳ ai cài trên điện thoại đều đăng nhập Google thành công.
+
+---
+
+## 4. Mẫu Tin Nhắn Bàn Giao Hạ Tầng Cho Cả Nhóm
+
+```text
+Mọi người ơi, mình đã dựng xong Server Backend + PostgreSQL 16 + Google Auth/Calendar + AI trên Cloud (đã bật UptimeRobot giữ server thức 24/7). Mọi người kết nối theo thông tin dưới đây nhé:
+
+1. THÔNG TIN SERVER STAGING:
+- API Base URL (nhớ có /api/v1 ở cuối): https://virtual-assistant-for-adhd.onrender.com/api/v1
+- Swagger UI (xem/test API): https://virtual-assistant-for-adhd.onrender.com/docs
+- Health Check: https://virtual-assistant-for-adhd.onrender.com/health
+- Google OAuth Web Client ID: 929981556286-e1h39l5kvfcecuma4cbiqt82da5on6n9.apps.googleusercontent.com
+
+2. QUAN TRỌNG — GỬI GMAIL ĐỂ MỞ QUYỀN ĐĂNG NHẬP GOOGLE (Tránh lỗi Error 403: access_denied):
+- Do app trên Google Cloud Console đang ở chế độ Testing, chỉ các Gmail nằm trong danh sách "Test users" mới bấm Đăng nhập Google và nối Google Calendar được.
+- Mọi người nhắn giúp mình địa chỉ Gmail dùng để test để mình thêm hết vào mục OAuth consent screen -> Test users trên Google Cloud trước khi bấm đăng nhập nhé!
+
+3. LỆNH CHẠY KHI TEST TRÊN FLUTTER WEB (Bắt buộc khóa cổng 8080):
+flutter run -d chrome --web-port 8080 --dart-define=API_BASE_URL=https://virtual-assistant-for-adhd.onrender.com/api/v1 --dart-define=GOOGLE_CLIENT_ID=929981556286-e1h39l5kvfcecuma4cbiqt82da5on6n9.apps.googleusercontent.com
+
+4. KHI TEST TRÊN ĐIỆN THOẠI ANDROID (Dùng chung 1 file APK):
+flutter build apk --debug --dart-define=API_BASE_URL=https://virtual-assistant-for-adhd.onrender.com/api/v1 --dart-define=GOOGLE_SERVER_CLIENT_ID=929981556286-e1h39l5kvfcecuma4cbiqt82da5on6n9.apps.googleusercontent.com
+```
+
+---
+
+## 5. Giới hạn Tài nguyên của Render Cloud & Google API (Gói Free)
+
+| Hạng mục | Giới hạn gói Free | Đánh giá thực tế với ProPlan VA |
+| :--- | :--- | :--- |
+| **Web Service RAM & CPU** | 512 MB RAM (`0.1 CPU`) | **Dư dả (~100–150 MB).** Chạy 1 worker `uvicorn`, model AI gọi Cloud Google/Groq. |
+| **Dung lượng Database** | 1 GB PostgreSQL 16 | **Không thể đầy.** Chỉ lưu text và JSON lịch biểu; tạo vài nghìn task chỉ tốn vài chục MB. |
+| **Thời gian hoạt động** | 750 giờ / tháng | **Đủ chạy 24/7 cả tháng** (744 giờ/tháng). UptimeRobot ping 5 phút chống ngủ. |
+| **Google Calendar API** | ~1,000,000 req/ngày (\$0) | Worker quét DB nội bộ mỗi 5s, chỉ gọi ra ngoài khi có job mới, không bao giờ cạn quota. |
+| **Thời hạn Token Lịch** | Tự hết hạn sau 7 ngày | Quy định bắt buộc của Google ở chế độ Testing. Sau 7 ngày bấm "Kết nối lại" trên app là xong. |
+
+---
+
+# 🧪 PHẦN II: KẾT QUẢ SMOKE TEST & NGHIỆM THU KIỂM THỬ (W4-03B — DOÃN THÀNH)
+
+## 1. Tích hợp Bộ Test UF5/UF6 & Mobile DTO vào `dev`
+- Đã đồng bộ nhánh `dev` với `origin/dev@4ae869e`.
+- Bổ sung và commit các tập tin kiểm thử chuyên sâu vào `dev`:
+  * [`backend/tests/test_uf5_uf6_matrix.py`](file:///E:/code/Project/CT/Virtual%20Assistant/virtual-assistant-for-ADHD/backend/tests/test_uf5_uf6_matrix.py) (26 ca kiểm thử ma trận)
+  * [`backend/tests/test_uf5_uf6_edge_cases.py`](file:///E:/code/Project/CT/Virtual%20Assistant/virtual-assistant-for-ADHD/backend/tests/test_uf5_uf6_edge_cases.py) (10 ca kiểm thử kịch bản biên & rủi ro)
+  * [`mobile/lib/models/checkin_models.dart`](file:///E:/code/Project/CT/Virtual%20Assistant/virtual-assistant-for-ADHD/mobile/lib/models/checkin_models.dart), [`reschedule_models.dart`](file:///E:/code/Project/CT/Virtual%20Assistant/virtual-assistant-for-ADHD/mobile/lib/models/reschedule_models.dart), [`checkin_screen.dart`](file:///E:/code/Project/CT/Virtual%20Assistant/virtual-assistant-for-ADHD/mobile/lib/screens/checkin_screen.dart) và test suite [`mobile/test/uf5_uf6_feedback_test.dart`](file:///E:/code/Project/CT/Virtual%20Assistant/virtual-assistant-for-ADHD/mobile/test/uf5_uf6_feedback_test.dart).
+
+## 2. Kết quả Chạy Kiểm thử Tự động (44/44 PASSED — 100%)
+* **Backend Edge Cases (10/10):** `uv run pytest tests/test_uf5_uf6_edge_cases.py -v` $\rightarrow$ **10 passed in 22.02s**
+* **Backend Matrix (26/26):** `uv run pytest tests/test_uf5_uf6_matrix.py` $\rightarrow$ **26 passed in 54.44s**
+* **Mobile Flutter (8/8):** `flutter test test/uf5_uf6_feedback_test.dart` $\rightarrow$ **8 passed in 00:01s**
+
+## 3. Smoke Test Hạ tầng Staging Cloud (Render + PostgreSQL 16)
+* Kiểm tra endpoint sức khỏe thực tế:
+  ```bash
+  curl -s https://virtual-assistant-for-adhd.onrender.com/health
+  # Trả về: {"status":"ok","database":"ok"}
+  ```
+  $\rightarrow$ Server Render Staging đang hoạt động ổn định, kết nối PostgreSQL mượt mà và đã được UptimeRobot giữ thức 24/7.
+
+## 4. Xác nhận & Bắt sống 4 Bug Tồn đọng Lớn (Theo Kế hoạch Tuần 4)
+1. **`BE-01` (UF1):** Input `"19:00 đến 22:00 hằng ngày"` bị kẹt `AI_AVAILABILITY_INCOMPLETE` dù đã đủ date_overrides trong `draft_service.py:L1431-L1475`.
+2. **`MOB-01` (UF7):** `SettingsScreen` gửi `revision` thay vì `effective_revision` ném lỗi `409 REVISION_CONFLICT` sau khi reject UF6.
+3. **`MOB-03` (UF6):** Mở app không phát request tới `/proposals/current` khi có proposal `pending_approval`.
+4. **`MOB-04` (UF4):** Đồng bộ xóa thought lúc offline / chuyển trang nhanh.
+
+## 5. Bộ Checklist & Lệnh ADB Đo Phần cứng Android Thật (Redmi)
+- **Doze Mode (Deep Sleep):** `adb shell dumpsys deviceidle force-idle` để kiểm chứng Exact Alarm reo đúng giây (dung sai $\le 1\text{s}$).
+- **Khôi phục DND:** Kiểm tra lệnh ngầm tự động nhả DND chậm nhất tại `ended_at + 300s`.
+- **Reboot Recovery:** `adb reboot` để kiểm chứng phục hồi Alarm & State sau khi khởi động lại máy.
+
+---
+
+# 🚀 PHẦN III: KẾ HOẠCH BÀN GIAO BƯỚC TIẾP THEO (GỬI CHO AI?)
+
+Theo phân công trong **Bản đồ Điểm hỗ trợ Tuần 4** ([`WEEK4_COMPLETE_PLAN_20261116.md:L73-L85`](file:///E:/code/Project/CT/Virtual%20Assistant/virtual-assistant-for-ADHD/WEEK4_COMPLETE_PLAN_20261116.md#L73-L85)), các kết quả này sẽ được bàn giao tới các thành viên sau:
 
 ```mermaid
-sequenceDiagram
-    autonumber
-    actor QA as Doãn Thành (QA)
-    participant Phone as Thiết bị Android Thật (Redmi)
-    participant OS as Android OS (Alarm / Doze / DND)
-    participant Staging as Render Staging Server
-
-    QA->>Phone: Cài đặt APK (AUTH_MODE=google)
-    QA->>Staging: Đăng nhập Google & Kết nối Google Calendar
-    QA->>Phone: Bật phiên tập trung 25 phút
-    QA->>OS: Kích hoạt Doze Mode: adb shell dumpsys deviceidle force-idle
-    Note over Phone,OS: Màn hình tắt, thiết bị rơi vào Deep Sleep
-    OS-->>Phone: Exact Alarm reo đúng giây kết thúc (dung sai <= 1s)
-    QA->>Phone: Bỏ qua không phản hồi Check-in
-    Note over OS: Chờ hết 300 giây (5 phút)
-    OS-->>Phone: Tự động tắt DND (Do Not Disturb) và trả về snapshot ban đầu
+flowchart TD
+    QA["<b>Doãn Thành (QA Lead)</b><br/>Hoàn thành W4-03B"]
+    
+    QA -->|1. Báo cáo tiến độ hoàn thành mốc 17-18/11| MT["<b>Minh Trung (mt)</b><br/>Team Lead / BA / Điều phối chung"]
+    QA -->|2. Bàn giao Bug BE-01 (UF1 hằng ngày)| VQH["<b>Quốc Hưng (vqh)</b><br/>Backend Lead - Xử lý W4-06B"]
+    QA -->|3. Bàn giao Bug MOB-01 & MOB-03| TAN["<b>Thanh An (tan)</b><br/>Mobile Lead - Xuất APK #1 (19/11)"]
+    QA -->|4. Bàn giao Bug MOB-04 (Xóa thought)| QT["<b>Quốc Thịnh (qt)</b><br/>Phụ trách Outbox & Local Storage (W4-07M)"]
+    QA -->|5. Xác nhận hạ tầng Render ổn định| TN["<b>Tín Nhiệm (tn)</b><br/>Infra Lead - Giữ Staging 24/7"]
 ```
 
-### Bộ lệnh ADB Thao tác Nhanh cho QA:
-1. **Kiểm tra kết nối thiết bị:**
-   ```bash
-   adb devices -l
-   ```
-2. **Cưỡng bức đưa thiết bị vào Doze Mode (Deep Sleep) để đo chuông báo thức:**
-   ```bash
-   adb shell dumpsys battery unplug
-   adb shell dumpsys deviceidle step deep
-   adb shell dumpsys deviceidle force-idle
-   ```
-3. **Kiểm tra trạng thái Exact Alarm của app:**
-   ```bash
-   adb shell dumpsys alarm | grep -E "com.proplan|proplan"
-   ```
-4. **Kiểm tra trạng thái DND (Zen Mode / Interruption Filter):**
-   ```bash
-   adb shell settings get global zen_mode
-   # 0 = OFF (Bình thường), 1 = Priority (Ưu tiên), 2 = Total Silence (Im lặng)
-   ```
-5. **Giả lập Khởi động lại thiết bị (Reboot Recovery):**
-   ```bash
-   adb reboot
-   # Sau khi máy lên, kiểm tra xem Alarm và Local Run có tự phục hồi không
-   ```
+### 1. Gửi cho Trưởng nhóm / Điều phối chung: **Minh Trung (`mt`)**
+* **Nội dung:** Thông báo mốc công việc `17/11` (`W4-03A` của Tín Nhiệm và `W4-03B` của Doãn Thành) đã chính thức hoàn thành 100%. Nhánh `dev` đã tích hợp đủ 44 ca kiểm thử UF5/UF6 và Staging Render đã chạy 24/7.
+* **Hành động của Trung:** Nhắc nhở các thành viên trong nhóm gửi địa chỉ Gmail cá nhân để thêm vào mục **Test Users** trên Google Cloud Console trước khi chạy thử.
 
----
+### 2. Gửi cho Backend Lead: **Quốc Hưng (`vqh`)**
+* **Nội dung:** Chuyển giao chi tiết và vị trí của bug **`BE-01`** (`draft_service.py:L1431-L1475`) để Hưng tiến hành vá trong gói công việc **`W4-06B`** (ngày 18–19/11).
 
-## 🎯 BÀN GIAO TIẾP THEO
+### 3. Gửi cho Mobile Lead: **Thanh An (`tan`)**
+* **Nội dung:** 
+  - Chuyển giao thông tin bug **`MOB-01`** (Settings 409) và **`MOB-03`** (Reopen UF6 Proposal banner) để An xử lý trong gói **`W4-04`** & **`W4-05M`**.
+  - Bàn giao các models DTO [`checkin_models.dart`](file:///E:/code/Project/CT/Virtual%20Assistant/virtual-assistant-for-ADHD/mobile/lib/models/checkin_models.dart) và [`reschedule_models.dart`](file:///E:/code/Project/CT/Virtual%20Assistant/virtual-assistant-for-ADHD/mobile/lib/models/reschedule_models.dart) để An cắm vào UI.
+  - **Hẹn mốc tiếp theo:** An xuất **Bản APK Tích hợp #1** vào tối **19/11** để Thành bắt đầu đo kiểm thực tế trên máy Redmi.
 
-- **Gói `W4-03A` & `W4-03B`:** Đã chính thức khép lại thành công.
-- **Sẵn sàng cho Cổng 19/11:** Chờ bản build APK Tích hợp #1 từ `tan` (`W4-04`, `W4-05M`) và bản cập nhật API từ `vqh` (`W4-06B`) để tiến hành đo kiểm thực tế trên máy Redmi thật.
+### 4. Gửi cho **Quốc Thịnh (`qt`)**
+* **Nội dung:** Chuyển giao thông tin bug **`MOB-04`** (Xóa thought lúc rớt mạng/chuyển trang) để Thịnh xử lý trong gói **`W4-07M`** (`LocalRunRepository` & `SqliteOutboxRepository`).
+
+### 5. Gửi cho **Tín Nhiệm (`tn`)**
+* **Nội dung:** Xác nhận hạ tầng Staging do Nhiệm dựng đã test thông suốt 100%. Nhiệm tiếp tục theo dõi UptimeRobot và sẵn sàng bấm *Manual Deploy* trên Render khi nhóm merge thêm code mới lên `dev`.
