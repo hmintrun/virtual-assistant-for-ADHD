@@ -2,7 +2,7 @@
 
 **Người thực hiện:** Doãn Thành (QA Lead / Tester / Algorithm Lead) — ProPlan VA  
 **Ngày thực hiện:** 18/11/2026  
-**Đầu vào:** Bàn giao `W4-03A` từ Trọng Nhân (`tn`) tại [`STAGING_DEPLOY_AND_TEAM_HANDOFF_20261117.md`](file:///E:/code/Project/CT/Virtual%20Assistant/virtual-assistant-for-ADHD/STAGING_DEPLOY_AND_TEAM_HANDOFF_20261117.md)  
+**Đầu vào:** Bàn giao `W4-03A` từ Tín Nhiệm (`tn`) tại [`STAGING_DEPLOY_AND_TEAM_HANDOFF_20261117.md`](file:///E:/code/Project/CT/Virtual%20Assistant/virtual-assistant-for-ADHD/STAGING_DEPLOY_AND_TEAM_HANDOFF_20261117.md)  
 **Kế hoạch tham chiếu:** [`WEEK4_COMPLETE_PLAN_20261116.md`](file:///E:/code/Project/CT/Virtual%20Assistant/virtual-assistant-for-ADHD/WEEK4_COMPLETE_PLAN_20261116.md) §3.8  
 **Trạng thái nhánh `dev`:** Commit `ba13a75` (Đã đồng bộ từ `origin/dev@4ae869e` và tích hợp bộ test UF5/UF6)  
 **Trạng thái Staging Live:** `https://virtual-assistant-for-adhd.onrender.com/health` $\rightarrow$ `{"status":"ok","database":"ok"}`  
