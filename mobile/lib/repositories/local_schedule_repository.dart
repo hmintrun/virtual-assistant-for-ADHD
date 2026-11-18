@@ -180,12 +180,14 @@ abstract class LocalScheduleRepository {
 
 /// Triển khai LocalScheduleRepository trên SQLite.
 class SqliteScheduleRepository extends LocalScheduleRepository {
-  SqliteScheduleRepository({LocalDatabaseManager? dbManager})
-      : _dbManager = dbManager ?? LocalDatabaseManager.instance;
+  SqliteScheduleRepository({LocalDatabaseManager? dbManager, Database? db})
+      : _dbManager = dbManager ?? LocalDatabaseManager.instance,
+        _explicitDb = db;
 
   final LocalDatabaseManager _dbManager;
+  final Database? _explicitDb;
 
-  Future<Database> _getDb() => _dbManager.getDatabase();
+  Future<Database> _getDb() async => _explicitDb ?? await _dbManager.getDatabase();
 
   @override
   Future<void> cacheScheduleItems(

@@ -46,7 +46,11 @@ class LocalDatabaseManager {
     }
 
     while (_openCompleter != null) {
-      await _openCompleter!.future;
+      try {
+        await _openCompleter!.future;
+      } catch (_) {
+        break;
+      }
       if (_db != null && _db!.isOpen && _currentOwnerId == ownerId) {
         return _db!;
       }
@@ -57,7 +61,11 @@ class LocalDatabaseManager {
 
     try {
       if (_db != null && _db!.isOpen) {
-        await closeCurrentDatabase();
+        if (_db!.isOpen) {
+          await _db!.close();
+        }
+        _db = null;
+        _currentOwnerId = null;
       }
 
       final dbPath = await _resolveDatabasePath(ownerId);
@@ -93,6 +101,13 @@ class LocalDatabaseManager {
 
   /// Đóng kết nối cơ sở dữ liệu hiện tại khi chuyển tài khoản hoặc đăng xuất.
   Future<void> closeCurrentDatabase() async {
+    while (_openCompleter != null) {
+      try {
+        await _openCompleter!.future;
+      } catch (_) {
+        break;
+      }
+    }
     if (_db != null && _db!.isOpen) {
       await _db!.close();
     }
