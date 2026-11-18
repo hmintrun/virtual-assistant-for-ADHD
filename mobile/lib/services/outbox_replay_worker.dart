@@ -101,9 +101,10 @@ class OutboxReplayWorker {
     final transientFailedIds = <String>[];
 
     try {
+      final nowUtc = (asOf ?? DateTime.now()).toUtc();
       final batch = await _repository.fetchPendingBatch(
         limit: batchLimit,
-        asOf: asOf ?? DateTime.now(),
+        asOf: nowUtc,
       );
 
       if (batch.isEmpty) {
@@ -164,6 +165,7 @@ class OutboxReplayWorker {
               record.clientEventId,
               nextRetrySeconds: delaySec,
               error: 'Network unreachable: $errorMessage',
+              asOf: nowUtc,
             );
             transientFailedIds.add(record.clientEventId);
             break; // Mất mạng, tạm ngắt đợt replay hiện tại để chờ kết nối
@@ -177,11 +179,64 @@ class OutboxReplayWorker {
               );
               terminalFailedIds.add(record.clientEventId);
             } else {
-              final delaySec = min(60, (pow(2, record.retryCount) * 2).toInt());
+              final delaySec = min(60, (pow(2, min(record.retryCount, 4)) * 2).toInt());
               await _repository.scheduleRetry(
                 record.clientEventId,
                 nextRetrySeconds: delaySec,
                 error: 'HTTP $statusCode: $errorMessage',
+                asOf: nowUtc,
+              );
+              transientFailedIds.add(record.clientEventId);
+            }
+            break;
+          }
+        } on ApiException catch (apiError) {
+          final statusCode = apiError.statusCode;
+          final errorMessage = apiError.message;
+          if (statusCode == 401) {
+            _isPausedAuth = true;
+            final renewed = await session?.renew?.call() ?? false;
+            if (!renewed) {
+              session?.onUnauthorized?.call();
+            }
+            break;
+          } else if (statusCode == 409) {
+            await _repository.markConflict(
+              record.clientEventId,
+              reason: 'HTTP 409: $errorMessage',
+            );
+            conflictIds.add(record.clientEventId);
+          } else if (statusCode != null && statusCode >= 400 && statusCode < 500 && statusCode != 429) {
+            await _repository.markFailedTerminal(
+              record.clientEventId,
+              'HTTP $statusCode: $errorMessage',
+            );
+            terminalFailedIds.add(record.clientEventId);
+          } else if (statusCode == null) {
+            final delaySec = min(60, (pow(2, min(record.retryCount, 4)) * 2).toInt());
+            await _repository.scheduleRetry(
+              record.clientEventId,
+              nextRetrySeconds: delaySec,
+              error: 'Network unreachable: $errorMessage',
+              asOf: nowUtc,
+            );
+            transientFailedIds.add(record.clientEventId);
+            break;
+          } else {
+            final nextRetry = record.retryCount + 1;
+            if (nextRetry >= 5) {
+              await _repository.markFailedTerminal(
+                record.clientEventId,
+                'Exceeded max server retries (5): HTTP $statusCode $errorMessage',
+              );
+              terminalFailedIds.add(record.clientEventId);
+            } else {
+              final delaySec = min(60, (pow(2, min(record.retryCount, 4)) * 2).toInt());
+              await _repository.scheduleRetry(
+                record.clientEventId,
+                nextRetrySeconds: delaySec,
+                error: 'HTTP $statusCode: $errorMessage',
+                asOf: nowUtc,
               );
               transientFailedIds.add(record.clientEventId);
             }
@@ -210,6 +265,37 @@ class OutboxReplayWorker {
     } finally {
       _isReplaying = false;
     }
+  }
+
+  /// Xả toàn bộ hàng đợi outbox cho đến khi hết bản ghi chờ hoặc gặp lỗi tạm ngắt.
+  Future<ReplayReport> flushOutbox({int maxBatches = 10, int batchLimit = 20, DateTime? asOf}) async {
+    var totalProcessed = 0;
+    final allSynced = <String>[];
+    final allConflicts = <String>[];
+    final allTerminal = <String>[];
+    final allTransient = <String>[];
+
+    for (var i = 0; i < maxBatches; i++) {
+      final report = await triggerReplay(batchLimit: batchLimit, asOf: asOf);
+      totalProcessed += report.totalProcessed;
+      allSynced.addAll(report.syncedIds);
+      allConflicts.addAll(report.conflictIds);
+      allTerminal.addAll(report.terminalFailedIds);
+      allTransient.addAll(report.transientFailedIds);
+
+      if (report.totalProcessed == 0 || report.isPausedAuth || report.transientFailedIds.isNotEmpty) {
+        break;
+      }
+    }
+
+    return ReplayReport(
+      totalProcessed: totalProcessed,
+      syncedIds: allSynced,
+      conflictIds: allConflicts,
+      terminalFailedIds: allTerminal,
+      transientFailedIds: allTransient,
+      isPausedAuth: _isPausedAuth,
+    );
   }
 
   Future<Response<dynamic>> _sendRecord(OutboxRecord record) {

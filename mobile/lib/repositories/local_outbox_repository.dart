@@ -44,12 +44,14 @@ abstract class LocalOutboxRepository {
 
 /// Triển khai LocalOutboxRepository lưu trữ bền vững trên SQLite theo từng tài khoản.
 class SqliteOutboxRepository extends LocalOutboxRepository {
-  SqliteOutboxRepository({LocalDatabaseManager? dbManager})
-      : _dbManager = dbManager ?? LocalDatabaseManager.instance;
+  SqliteOutboxRepository({LocalDatabaseManager? dbManager, Database? db})
+      : _dbManager = dbManager ?? LocalDatabaseManager.instance,
+        _explicitDb = db;
 
   final LocalDatabaseManager _dbManager;
+  final Database? _explicitDb;
 
-  Future<Database> _getDb() => _dbManager.getDatabase();
+  Future<Database> _getDb() async => _explicitDb ?? await _dbManager.getDatabase();
 
   @override
   Future<String> enqueueOutboxRecord(
@@ -58,10 +60,13 @@ class SqliteOutboxRepository extends LocalOutboxRepository {
   }) async {
     final db = await _getDb();
     final effectiveHoldUntil = holdDuration > Duration.zero
-        ? record.occurredAt.add(holdDuration)
-        : record.holdUntil;
+        ? record.occurredAt.toUtc().add(holdDuration)
+        : record.holdUntil.toUtc();
 
-    final readyRecord = record.copyWith(holdUntil: effectiveHoldUntil);
+    final readyRecord = record.copyWith(
+      holdUntil: effectiveHoldUntil,
+      createdAt: (record.createdAt ?? record.occurredAt).toUtc(),
+    );
     await db.insert(
       'local_outbox',
       readyRecord.toMap(),
@@ -197,7 +202,7 @@ class SqliteOutboxRepository extends LocalOutboxRepository {
   @override
   Future<int> getPendingCount({DateTime? asOf}) async {
     final db = await _getDb();
-    final checkTimeIso = (asOf ?? DateTime.now()).toIso8601String();
+    final checkTimeIso = (asOf ?? DateTime.now()).toUtc().toIso8601String();
     final result = await db.rawQuery(
       '''
       SELECT COUNT(*) as count FROM local_outbox
@@ -262,7 +267,7 @@ class InMemoryOutboxRepository extends LocalOutboxRepository {
     int limit = 20,
     DateTime? asOf,
   }) async {
-    final checkTime = asOf ?? DateTime.now();
+    final checkTime = (asOf ?? DateTime.now()).toUtc();
     final pending = _storage.values
         .where((r) => r.isReadyForReplay(asOf: checkTime))
         .toList()
@@ -331,7 +336,7 @@ class InMemoryOutboxRepository extends LocalOutboxRepository {
 
   @override
   Future<int> getPendingCount({DateTime? asOf}) async {
-    final checkTime = asOf ?? DateTime.now();
+    final checkTime = (asOf ?? DateTime.now()).toUtc();
     return _storage.values.where((r) => r.isReadyForReplay(asOf: checkTime)).length;
   }
 
