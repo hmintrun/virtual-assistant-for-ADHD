@@ -2,15 +2,18 @@
 
 from __future__ import annotations
 
+import base64
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
+from urllib.parse import urlsplit
 
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 BACKEND_DIR = Path(__file__).resolve().parents[2]
 ENV_FILE_PATH = BACKEND_DIR / ".env"
+DEFAULT_SECRET_KEY = "change-this-to-a-super-secret-jwt-key"
 
 
 class Settings(BaseSettings):
@@ -21,16 +24,18 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
         case_sensitive=True,
         extra="ignore",
+        hide_input_in_errors=True,
     )
 
     # Cấu hình chung của ứng dụng
     ENVIRONMENT: Literal["development", "staging", "production", "testing"] = "development"
     PROJECT_NAME: str = "ProPlan VA"
     API_V1_STR: str = "/api/v1"
+    CORS_ALLOWED_ORIGINS: list[str] | None = None
     SECRET_KEY: str = Field(
-        default="change-this-to-a-super-secret-jwt-key",
+        default=DEFAULT_SECRET_KEY,
         repr=False,
-        description="Khóa bí mật ký JWT; ẩn khỏi repr/log để bảo mật.",
+        description="Khóa tương thích dùng để dẫn xuất khóa Calendar cục bộ.",
     )
 
     # App authentication is separate from Calendar OAuth/credential encryption.
@@ -62,7 +67,7 @@ class Settings(BaseSettings):
     GOOGLE_CLOUD_LOCATION: str = "global"
 
     # Định danh Model AI & Voice (Đã kiểm chứng thực nghiệm trên Postpay Tier 1 & Groq 2026)
-    GEMINI_FLASH_MODEL: str = "gemini-3.5-flash-lite"
+    GEMINI_FLASH_MODEL: str = "gemini-3.8-flash"
     GEMINI_BACKUP_MODEL: str = "gemini-3.5-flash-lite"
     GEMINI_UF1_MODEL: str = "gemini-3.5-flash-lite"
     GROQ_FALLBACK_MODEL: str = "qwen/qwen3.8-27b"
@@ -99,7 +104,7 @@ class Settings(BaseSettings):
 
     # Voice STT (V01 & A21) — hỗ trợ Gemini Transcribe và Groq Whisper (whisper-large-v3-turbo).
     # Dự phòng khi Backend lỗi/mất mạng nằm ở Mobile (speech_to_text on-device).
-    VOICE_STT_PROVIDER: Literal["gemini", "groq", "auto", "fake"] = "gemini"
+    VOICE_STT_PROVIDER: Literal["gemini", "groq", "auto", "fake"] = "groq"
     GEMINI_STT_MODEL: str = "gemini-3.5-transcribe"
     GEMINI_STT_MODE: Literal["smart", "verbatim"] = "smart"
     VOICE_STT_LANGUAGE: str = "vi-VN"
@@ -119,7 +124,7 @@ class Settings(BaseSettings):
     AI_UF1_GROQ_FAST_FAIL_SECONDS: float = Field(default=3.5, ge=0.0, le=15.0)
 
     # Khung thời gian A — Chỉnh kế hoạch bằng ngôn ngữ tự nhiên và UF6:
-    # 0.0s Primary (3.5-flash-lite) -> 1.5s Warm Backup (3.5-flash-lite) -> 2.2s Groq (còn 2.3s) -> ưu tiên Primary tới 3.0s -> cắt 4.5s
+    # 0.0s Primary -> 1.5s Warm Backup -> 2.2s Groq -> ưu tiên Primary tới 3.0s -> cắt 4.5s.
     AI_TIMEOUT_SECONDS: float = Field(default=4.5, gt=0.0, le=20.0)
     AI_PRIMARY_PRIORITY_SECONDS: float = Field(default=3.0, gt=0.0, le=20.0)
     AI_WARM_BACKUP_DELAY_SECONDS: float = Field(default=1.5, ge=0.0, le=20.0)
@@ -139,6 +144,66 @@ class Settings(BaseSettings):
     DEFAULT_MIN_INTER_SESSION_GAP_SECONDS: int = 900  # Khoảng cách tối thiểu 15 phút giữa 2 phiên
     DEFAULT_BUFFER_MULTIPLIER: float = 1.2
     DEFAULT_TIMEZONE: str = "Asia/Ho_Chi_Minh"
+
+    @field_validator("CORS_ALLOWED_ORIGINS")
+    @classmethod
+    def validate_cors_origins(cls, origins: list[str] | None) -> list[str] | None:
+        for origin in origins or []:
+            try:
+                parsed = urlsplit(origin)
+                port = parsed.port
+            except ValueError:
+                raise ValueError("CORS_ALLOWED_ORIGINS cần các HTTP(S) origin hợp lệ") from None
+            if (
+                parsed.scheme not in {"http", "https"}
+                or not parsed.hostname
+                or parsed.username is not None
+                or origin != f"{parsed.scheme}://{parsed.netloc}"
+                or port == 0
+                or not origin.isprintable()
+                or any(char.isspace() or char in "*\\%" for char in origin)
+            ):
+                raise ValueError(
+                    "CORS_ALLOWED_ORIGINS chỉ nhận origin HTTP(S) đầy đủ, không wildcard"
+                )
+        return origins
+
+    @property
+    def is_deployed(self) -> bool:
+        return self.ENVIRONMENT in {"staging", "production"}
+
+    @property
+    def browser_origins(self) -> list[str]:
+        if self.CORS_ALLOWED_ORIGINS is not None:
+            return self.CORS_ALLOWED_ORIGINS
+        if self.is_deployed:
+            return []
+        return ["http://localhost:8080", "http://127.0.0.1:8080"]
+
+    def validate_secret_configuration(self) -> None:
+        if not self.is_deployed:
+            return
+        key = self.SECRET_KEY.strip()
+        if len(key.encode()) < 32 or key == DEFAULT_SECRET_KEY:
+            raise ValueError("Staging/production yêu cầu SECRET_KEY riêng, tối thiểu 32 byte")
+        self.calendar_credential_key()
+
+    def calendar_credential_key(self) -> bytes | None:
+        """Trả khóa Fernet tường minh, hoặc cho phép khóa dẫn xuất ở dev/test."""
+        value = self.CALENDAR_CREDENTIAL_SECRET_KEY.strip()
+        if value:
+            try:
+                key = value.encode("ascii")
+                raw = base64.b64decode(key, altchars=b"-_", validate=True)
+                if len(raw) == 32 and base64.urlsafe_b64encode(raw) == key:
+                    return key
+            except ValueError:
+                pass
+        if self.is_deployed:
+            raise ValueError(
+                "Staging/production yêu cầu CALENDAR_CREDENTIAL_SECRET_KEY hợp lệ (Fernet)"
+            )
+        return None
 
     @property
     def resolved_google_credentials_file(self) -> Path | None:
@@ -194,7 +259,9 @@ class Settings(BaseSettings):
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
     """Trả về singleton Settings được cache trong bộ nhớ."""
-    return Settings()
+    config = Settings()
+    config.validate_secret_configuration()
+    return config
 
 
 settings = get_settings()

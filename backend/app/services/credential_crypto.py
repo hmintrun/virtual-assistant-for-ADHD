@@ -24,15 +24,12 @@ ENVELOPE_PREFIX = "fernet:v1:"
 
 
 def _get_fernet_key() -> bytes:
-    """Lấy khóa Fernet 32-byte base64 từ cấu hình hoặc sinh fallback ổn định từ SECRET_KEY."""
-    configured_key = settings.CALENDAR_CREDENTIAL_SECRET_KEY.strip()
-    if configured_key:
-        try:
-            raw = base64.urlsafe_b64decode(configured_key.encode("ascii"))
-            if len(raw) == 32:
-                return configured_key.encode("ascii")
-        except Exception:
-            logger.warning("[Crypto] CALENDAR_CREDENTIAL_SECRET_KEY không hợp lệ, chuyển sang fallback.")
+    """Dùng khóa Fernet tường minh khi triển khai. Dev/test có thể dẫn xuất từ SECRET_KEY."""
+    configured_key = settings.calendar_credential_key()
+    if configured_key is not None:
+        return configured_key
+    if settings.CALENDAR_CREDENTIAL_SECRET_KEY.strip():
+        logger.warning("[Crypto] CALENDAR_CREDENTIAL_SECRET_KEY không hợp lệ, chuyển sang fallback.")
 
     # Fallback cho môi trường dev/fake: băm SHA-256 từ SECRET_KEY để sinh 32 bytes base64
     derived = hashlib.sha256(f"calendar-fernet:{settings.SECRET_KEY}".encode()).digest()
