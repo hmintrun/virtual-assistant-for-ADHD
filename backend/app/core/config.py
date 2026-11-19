@@ -106,6 +106,8 @@ class Settings(BaseSettings):
     # Đo thực tế ~8-9s/clip ngắn (gồm ~2,5s upload) nên timeout rộng hơn luồng LLM.
     VOICE_STT_TIMEOUT_SECONDS: float = Field(default=20.0, gt=0.0, le=120.0)
     VOICE_MAX_AUDIO_BYTES: int = Field(default=10 * 1024 * 1024, gt=0)
+    MAX_JSON_BODY_BYTES: int = Field(default=1 * 1024 * 1024, gt=0)
+    VOICE_MULTIPART_OVERHEAD_BYTES: int = Field(default=1 * 1024 * 1024, gt=0)
 
     # Voice TTS (W3-09) — ưu tiên Edge-TTS trên Backend, fallback sang flutter_tts on-device.
     VOICE_TTS_PROVIDER: Literal["edge_tts", "fake"] = "edge_tts"

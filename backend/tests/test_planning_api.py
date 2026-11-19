@@ -813,7 +813,7 @@ async def test_uf1_deadline_without_start_at_and_resolved_ai_clarification_can_c
     api, monkeypatch
 ):
     client, _ = api
-    future_deadline = (datetime.now(UTC) + timedelta(days=5)).replace(microsecond=0)
+    future_deadline = (datetime.now(UTC) + timedelta(days=8)).replace(microsecond=0)
     created = await post(
         client,
         "/drafts",
@@ -930,7 +930,7 @@ async def test_uf1_round2_clears_ai_missing_availability_and_scope_when_resolved
     api, monkeypatch
 ):
     client, _ = api
-    future_deadline = (datetime.now(UTC) + timedelta(days=5)).replace(microsecond=0)
+    future_deadline = (datetime.now(UTC) + timedelta(days=8)).replace(microsecond=0)
     created = await post(
         client,
         "/drafts",

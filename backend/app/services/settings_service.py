@@ -12,12 +12,14 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import AppError
+from app.models.execution import CheckIn
 from app.models.execution import SessionRun as SessionRunRow
 from app.models.schedule_proposal import RescheduleProposal as ProposalRow
 from app.models.session import Session as SessionRow
 from app.models.settings import AdaptationSuggestion as SuggestionRow
 from app.models.settings import SettingChangeRequest as SettingChangeRow
 from app.models.step import Step as StepRow
+from app.models.system import Reminder
 from app.models.task import Task as TaskRow
 from app.models.user import UserPreference as PreferenceRow
 from app.schemas.draft import UpdateDraftRequest
@@ -31,6 +33,7 @@ from app.schemas.settings import (
     SuggestionResponseRequest,
     SuggestionResponseResult,
     SuggestionStatus,
+    validate_strict_descending_offsets,
 )
 from app.services import draft_service, reschedule_service
 from app.services.command_service import durable_command, owner_uuid
@@ -56,7 +59,6 @@ _SCHEDULE_IMPACT_PREF_FIELDS = frozenset(
         "work_interval_seconds",
         "rest_interval_seconds",
         "buffer_multiplier",
-        "reminder_offsets",
     }
 )
 _CANCELLABLE_CHANGE_STATES = frozenset({"pending_review", "pending_proposal"})
@@ -205,13 +207,18 @@ def _validate_preferences_payload(
         "reminder_style",
         preferences.reminder_style if preferences else "",
     )
+    valid_offsets = True
+    try:
+        validate_strict_descending_offsets(offsets)
+    except Exception:
+        valid_offsets = False
+
     if (
         work <= 0
         or rest < 0
-        or buffer < 1
-        or not 1 <= len(offsets) <= 3
-        or len(set(offsets)) != len(offsets)
-        or any(offset < 0 for offset in offsets)
+        or not (1.0 <= buffer <= 2.0)
+        or not math.isfinite(buffer)
+        or not valid_offsets
         or not str(style).strip()
     ):
         raise AppError(
@@ -247,16 +254,48 @@ async def apply_settings_change(
             next_action="reload_and_review",
         )
 
+    pref_changes = getattr(payload.changes, "preferences", None)
+    if pref_changes is None and isinstance(payload.changes, dict):
+        pref_changes = payload.changes.get("preferences")
+
+    if (payload.target_task_id is not None or payload.target_draft_id is not None) and pref_changes is not None:
+        touches_global_sched = any(
+            (pref_changes.get(k) if isinstance(pref_changes, dict) else getattr(pref_changes, k, None)) is not None
+            for k in _SCHEDULE_IMPACT_PREF_FIELDS
+        )
+        if touches_global_sched:
+            raise AppError(
+                status_code=422,
+                code="VALIDATION_ERROR",
+                message="Không thể đổi cấu hình làm/nghỉ/buffer toàn cục kèm target_task_id; hãy tách thành yêu cầu toàn cục và yêu cầu sửa giờ riêng của công việc.",
+                next_action="fix_fields",
+            )
+
     pref_values: dict[str, Any] = {}
-    if payload.changes.preferences is not None:
-        pref_values = payload.changes.preferences.model_dump(exclude_unset=True)
+    if pref_changes is not None:
+        pref_values = (
+            pref_changes.model_dump(exclude_unset=True)
+            if hasattr(pref_changes, "model_dump")
+            else dict(pref_changes)
+        )
         _validate_preferences_payload(values=pref_values, preferences=preferences)
 
     updated_draft = None
     target_task: TaskRow | None = None
     avail_impacts_schedule = False
-    if payload.changes.availability is not None:
+    avail_changes = getattr(payload.changes, "availability", None)
+    if avail_changes is None and isinstance(payload.changes, dict):
+        avail_changes = payload.changes.get("availability")
+
+    if avail_changes is not None:
         if payload.target_task_id is not None:
+            if payload.expected_task_revision is None:
+                raise AppError(
+                    status_code=422,
+                    code="VALIDATION_ERROR",
+                    message="Cần expected_task_revision khi sửa availability cho task.",
+                    next_action="fix_fields",
+                )
             task_uuid = _parse_uuid(payload.target_task_id)
             target_task = await db.scalar(
                 select(TaskRow).where(TaskRow.id == task_uuid, TaskRow.user_id == owner)
@@ -417,8 +456,57 @@ async def apply_settings_change(
         elif any(getattr(preferences, k) != v for k, v in pref_values.items()):
             for k, v in pref_values.items():
                 setattr(preferences, k, v)
-            preferences.effective_revision += 1
+            if preferences.pending_proposal_id is not None:
+                new_eff_rev = max(preferences.effective_revision, preferences.requested_revision or 0) + 1
+                preferences.effective_revision = new_eff_rev
+                if preferences.requested_revision is not None and preferences.requested_revision <= new_eff_rev:
+                    preferences.requested_revision = new_eff_rev + 1
+            else:
+                preferences.effective_revision += 1
             preferences.updated_at = now
+
+        if "reminder_offsets" in pref_values:
+            new_offsets = pref_values["reminder_offsets"]
+            future_sessions = list(
+                await db.scalars(
+                    select(SessionRow)
+                    .where(
+                        SessionRow.user_id == owner,
+                        SessionRow.status == "scheduled",
+                        SessionRow.scheduled_start > now,
+                    )
+                )
+            )
+            if future_sessions:
+                existing_rems = list(
+                    await db.scalars(
+                        select(Reminder)
+                        .where(
+                            Reminder.user_id == owner,
+                            Reminder.session_id.in_([s.id for s in future_sessions]),
+                            Reminder.delivery_state.in_(("scheduled", "snoozed")),
+                        )
+                    )
+                )
+                for r in existing_rems:
+                    r.delivery_state = "cancelled"
+                    r.updated_at = now
+                for s in future_sessions:
+                    for offset in new_offsets:
+                        fire_at = s.scheduled_start - timedelta(seconds=offset)
+                        if fire_at < now:
+                            continue
+                        db.add(
+                            Reminder(
+                                user_id=owner,
+                                session_id=s.id,
+                                schedule_revision=s.schedule_revision,
+                                kind="pre_session",
+                                fire_at=fire_at,
+                                dedupe_key=f"session:{s.id}:version:{s.schedule_revision}:reminder:{offset}:pref:{preferences.effective_revision}",
+                                delivery_state="scheduled",
+                            )
+                        )
         await db.flush()
 
     effective_rev = preferences.effective_revision if preferences else 0
@@ -592,19 +680,44 @@ async def collect_buffer_step_samples(
         )
     ).all()
 
+    run_ids = [r.id for r in run_rows]
+    final_checkins = (
+        await db.scalars(
+            select(CheckIn)
+            .where(
+                CheckIn.user_id == owner,
+                CheckIn.run_id.in_(run_ids),
+                CheckIn.kind == "final",
+            )
+            .order_by(CheckIn.responded_at.desc(), CheckIn.updated_at.desc())
+        )
+    ).all() if run_ids else []
+
+    final_ci_by_run_id: dict[UUID, CheckIn] = {}
+    for ci in final_checkins:
+        if ci.run_id not in final_ci_by_run_id:
+            final_ci_by_run_id[ci.run_id] = ci
+
     runs_by_step: dict[UUID, list[SessionRunRow]] = {}
     for run in run_rows:
         step_id = session_to_step.get(run.session_id)
         if step_id is None:
             continue
-        if run.run_state in ("running", "paused"):
+        if run.ended_at is None or run.run_state in ("running", "paused", "awaiting_checkin"):
             continue
-        if run.outcome == "cancelled":
+        if run.outcome in ("cancelled", "unknown", "no_response", "skipped"):
             continue
         if run.actual_work_seconds is None or run.actual_work_seconds <= 0:
             continue
         if run.actual_source not in ("timer_proxy", "self_report"):
             continue
+        final_ci = final_ci_by_run_id.get(run.id)
+        if final_ci is not None:
+            if final_ci.response_state != "answered":
+                continue
+        else:
+            if not (run.run_state in ("closed", "ended") and run.outcome == "completed"):
+                continue
         runs_by_step.setdefault(step_id, []).append(run)
 
     ordered_entries: list[tuple[datetime, dict[str, Any]]] = []
@@ -737,6 +850,10 @@ async def get_current_suggestion(
         .limit(1)
     )
     last_rejected_at = _as_utc(last_rejected.updated_at) if last_rejected is not None else None
+    if last_rejected_at is not None and last_rejected_at > calc_now:
+        if pref_created and commit_if_created:
+            await db.commit()
+        return None
 
     samples = await collect_buffer_step_samples(db, owner=owner)
     current_buffer = preferences.buffer_multiplier if preferences else DEFAULT_BUFFER_MULTIPLIER
@@ -813,19 +930,18 @@ def _validate_accepted_suggestion_value(
         return round(numeric, 4)
 
     if kind == "reminder_offset":
-        if (
-            not isinstance(raw_value, list)
-            or not 1 <= len(raw_value) <= 3
-            or any(isinstance(v, bool) or not isinstance(v, int) or v < 0 for v in raw_value)
-            or len(set(raw_value)) != len(raw_value)
-        ):
+        try:
+            res = validate_strict_descending_offsets(raw_value)
+            if res is None:
+                raise ValueError()
+            return res
+        except Exception as err:
             raise AppError(
                 status_code=422,
                 code="VALIDATION_ERROR",
-                message="Mốc nhắc phải gồm 1–3 số nguyên không âm và không trùng nhau.",
+                message="Mốc nhắc phải gồm 1–3 số nguyên không âm giảm dần nghiêm ngặt.",
                 next_action="fix_fields",
-            )
-        return [int(v) for v in raw_value]
+            ) from err
 
     raise AppError(
         status_code=422,
@@ -938,10 +1054,59 @@ async def respond_to_suggestion(
     suggestion.updated_at = now
 
     has_future_sessions = await _has_future_confirmed_sessions(db, owner)
-    if not has_future_sessions:
+    if not has_future_sessions or kind == "reminder_offset":
         setattr(pref_row, pref_field, accepted_value)
-        pref_row.effective_revision += 1
+        if pref_row.pending_proposal_id is not None:
+            new_eff_rev = max(pref_row.effective_revision, pref_row.requested_revision or 0) + 1
+            pref_row.effective_revision = new_eff_rev
+            if pref_row.requested_revision is not None and pref_row.requested_revision <= new_eff_rev:
+                pref_row.requested_revision = new_eff_rev + 1
+        else:
+            pref_row.effective_revision += 1
         pref_row.updated_at = now
+
+        if kind == "reminder_offset":
+            future_sessions = list(
+                await db.scalars(
+                    select(SessionRow)
+                    .where(
+                        SessionRow.user_id == owner,
+                        SessionRow.status == "scheduled",
+                        SessionRow.scheduled_start > now,
+                    )
+                )
+            )
+            if future_sessions:
+                existing_rems = list(
+                    await db.scalars(
+                        select(Reminder)
+                        .where(
+                            Reminder.user_id == owner,
+                            Reminder.session_id.in_([s.id for s in future_sessions]),
+                            Reminder.delivery_state.in_(("scheduled", "snoozed")),
+                        )
+                    )
+                )
+                for r in existing_rems:
+                    r.delivery_state = "cancelled"
+                    r.updated_at = now
+                for s in future_sessions:
+                    for offset in accepted_value:
+                        fire_at = s.scheduled_start - timedelta(seconds=offset)
+                        if fire_at < now:
+                            continue
+                        db.add(
+                            Reminder(
+                                user_id=owner,
+                                session_id=s.id,
+                                schedule_revision=s.schedule_revision,
+                                kind="pre_session",
+                                fire_at=fire_at,
+                                dedupe_key=f"session:{s.id}:version:{s.schedule_revision}:reminder:{offset}:pref:{pref_row.effective_revision}",
+                                delivery_state="scheduled",
+                            )
+                        )
+
         change = SettingChangeRow(
             user_id=owner,
             application_state="effective_from_next_session",

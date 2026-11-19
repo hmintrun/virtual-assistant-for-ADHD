@@ -6,6 +6,8 @@ from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from app.core.middleware import get_current_request_id
+
 VN_TZ = timezone(timedelta(hours=7))
 
 
@@ -23,8 +25,9 @@ class ResponseMeta(ApiModel):
 
 def build_response_meta(request_id: str | None = None) -> ResponseMeta:
     """Tạo metadata chuẩn cho mọi HTTP response."""
+    resolved_id = request_id or get_current_request_id() or f"req-{uuid4().hex[:8]}"
     return ResponseMeta(
-        request_id=request_id or f"req-{uuid4().hex[:8]}",
+        request_id=resolved_id,
         server_time=datetime.now(VN_TZ),
     )
 

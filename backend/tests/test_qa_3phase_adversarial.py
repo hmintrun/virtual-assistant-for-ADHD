@@ -369,7 +369,6 @@ async def test_adv_p1_uf7_availability_moved_earlier_with_seg_same_true(
                     "expected_task_revision": 1,
                     "changes": {
                         "availability": _daily_availability_dict("09:00", "12:00"),
-                        "preferences": {"work_interval_seconds": 1800},
                     },
                 },
             )
@@ -493,7 +492,6 @@ async def test_adv_p1_uf7_availability_moved_earlier_with_seg_same_rest_change(
                     "expected_task_revision": 1,
                     "changes": {
                         "availability": _daily_availability_dict("09:00", "12:00"),
-                        "preferences": {"rest_interval_seconds": 600},
                     },
                 },
             )
