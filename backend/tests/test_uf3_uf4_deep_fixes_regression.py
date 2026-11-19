@@ -36,6 +36,7 @@ from app.models import (
     Base,
     PlanningDraft,
     Reminder,
+    RescheduleProposal,
     RunEvent,
     Session,
     SessionRun,
@@ -556,6 +557,117 @@ async def test_b_bug03_recent_runs_15m_gap_when_other_sessions_empty(regression_
         },
     )
     assert res_b_ok.status_code == 201
+    run_b_id = res_b_ok.json()["data"]["run_id"]
+
+    # 3. Subcase C: Đóng Session B lúc now + 25m.
+    # Tạo Session C và RescheduleProposal có gap_exceptions với applied_gap_seconds=None (null).
+    # Kiểm chứng: không crash TypeError: int() argument must be a string... và fallback về 15p gap.
+    t_end_b = now + timedelta(minutes=25)
+    simulated_clock.set(t_end_b)
+    res_end_b = await client.post(
+        f"/api/v1/runs/{run_b_id}/end",
+        headers={"Idempotency-Key": str(uuid4())},
+        json={
+            "device_id": "dev_new",
+            "expected_run_revision": 1,
+            "event_id": str(uuid4()),
+            "ended_at": t_end_b.isoformat(),
+            "end_reason": "user_stopped",
+            "work_elapsed_seconds": 1500,
+            "rest_elapsed_seconds": 0,
+        },
+    )
+    assert res_end_b.status_code == 200
+
+    t_start_c = t_end_b + timedelta(minutes=5)  # 5 phút sau khi B kết thúc
+    simulated_clock.set(t_start_c)
+
+    async with factory() as db:
+        sess_c = Session(
+            id=uuid4(),
+            user_id=user_id,
+            step_id=step_a.id,
+            scheduled_start=t_start_c,
+            scheduled_end=t_start_c + timedelta(minutes=25),
+            work_seconds=1500,
+            rest_seconds=0,
+            duration_seconds=1500,
+            segments=[{"order_index": 0, "kind": "work", "duration_seconds": 1500}],
+            schedule_revision=1,
+            status="scheduled",
+        )
+        proposal_none_gap = RescheduleProposal(
+            id=uuid4(),
+            user_id=user_id,
+            trigger_reason="continuation",
+            allowed_task_ids=[str(task_a.id)],
+            affected_task_ids=[str(task_a.id)],
+            base_schedule_revision=1,
+            source_revisions={"schedule": 1},
+            proposal_revision=1,
+            status="approved",
+            feasibility={"feasible": True},
+            explanation="Continuation proposal for testing",
+            proposed_changes={
+                "_meta": {
+                    "continuation_request": True,
+                    "gap_exceptions": [
+                        {
+                            "from_session_ref": str(sess_b_id),
+                            "to_session_ref": str(sess_c.id),
+                            "applied_gap_seconds": None,  # null trong json
+                        }
+                    ],
+                }
+            },
+        )
+        db.add_all([sess_c, proposal_none_gap])
+        await db.commit()
+        sess_c_id = sess_c.id
+        prop_id = proposal_none_gap.id
+
+    # Session C bắt đầu sau 5 phút: null gap fallback thành 15p -> 409 START_REQUIRES_REPLAN
+    res_c_blocked = await client.post(
+        f"/api/v1/sessions/{sess_c_id}/start",
+        headers={"Idempotency-Key": str(uuid4())},
+        json={
+            "expected_schedule_revision": 1,
+            "device_id": "dev_new",
+            "requested_start_at": t_start_c.isoformat(),
+        },
+    )
+    assert res_c_blocked.status_code == 409
+    assert res_c_blocked.json()["error"]["code"] == "START_REQUIRES_REPLAN"
+
+    # 4. Subcase D: Cập nhật proposal có applied_gap_seconds=0 (ngoại lệ làm tiếp ngay)
+    async with factory() as db:
+        prop_row = await db.get(RescheduleProposal, prop_id)
+        assert prop_row is not None
+        prop_row.proposed_changes = {
+            "_meta": {
+                "continuation_request": True,
+                "gap_exceptions": [
+                    {
+                        "from_session_ref": str(sess_b_id),
+                        "to_session_ref": str(sess_c_id),
+                        "applied_gap_seconds": 0,
+                    }
+                ],
+            }
+        }
+        await db.commit()
+
+    # Bắt đầu Session C thành công 201 Created nhờ applied_gap_seconds=0!
+    res_c_ok = await client.post(
+        f"/api/v1/sessions/{sess_c_id}/start",
+        headers={"Idempotency-Key": str(uuid4())},
+        json={
+            "expected_schedule_revision": 1,
+            "device_id": "dev_new",
+            "requested_start_at": t_start_c.isoformat(),
+        },
+    )
+    assert res_c_ok.status_code == 201
 
 
 # ==============================================================================

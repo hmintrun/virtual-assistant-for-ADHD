@@ -594,7 +594,12 @@ async def _validate_start_feasibility(
         for gx in gap_exceptions:
             from_ref = str(gx.get("from_session_ref") or "")
             to_ref = str(gx.get("to_session_ref") or "")
-            applied_gap = int(gx.get("applied_gap_seconds", MIN_INTER_SESSION_GAP_SECONDS))
+            raw_gap = gx.get("applied_gap_seconds")
+            applied_gap = (
+                int(raw_gap)
+                if raw_gap is not None
+                else MIN_INTER_SESSION_GAP_SECONDS
+            )
 
             from_uuid = session_uuid_by_ref.get(from_ref)
             if from_uuid is None:

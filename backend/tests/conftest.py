@@ -71,7 +71,11 @@ def legacy_test_clock_adapter(request, monkeypatch):
                                         pass
                             if event_times:
                                 token = _request_clock_ctx.set(max(event_times))
-                        elif ts is not None and "skew" not in str(data.get("device_id", "")).lower():
+                        elif (
+                            ts is not None
+                            and "skew" not in str(data.get("device_id", "")).lower()
+                            and "skew" not in str(data.get("event_id", "")).lower()
+                        ):
                             token = _request_clock_ctx.set(datetime.fromisoformat(ts).astimezone(UTC))
             except Exception:
                 pass
