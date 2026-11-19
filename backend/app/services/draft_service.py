@@ -7,7 +7,6 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import ValidationError
 from sqlalchemy import delete, select, update
-from sqlalchemy.exc import MultipleResultsFound
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import AppError
@@ -20,7 +19,6 @@ from app.models.settings import Availability as AvailabilityModel
 from app.models.task import Task as TaskModel
 from app.models.user import User as UserModel
 from app.models.user import UserPreference as UserPreferenceModel
-from app.repositories import run_repository, thought_repository
 from app.schemas.availability import (
     Availability,
     DateOverride,

@@ -687,22 +687,33 @@ def _compute_max_extension_without_borrow(
     else:
         # Tính latest_start của phiên movable đầu tiên trước rào chắn cố định gần nhất
         first_sess = movable_sessions[0]
-        if earliest_locked is not None and earliest_locked > first_sess.scheduled_start:
+        if earliest_locked is not None and earliest_locked <= first_sess.scheduled_start:
+            avail_secs = int((earliest_locked - continuation_start).total_seconds())
+            max_ext = max(0, min(3600, avail_secs - STANDARD_INTER_SESSION_GAP_SECONDS))
+        elif earliest_locked is not None and earliest_locked > first_sess.scheduled_start:
             # Các phiên movable nằm trước earliest_locked
             squeezed = [
                 s for s in movable_sessions if s.scheduled_start < earliest_locked
             ]
             total_squeezed_dur = sum(s.duration_seconds for s in squeezed)
             inter_gaps = max(0, len(squeezed) - 1) * STANDARD_INTER_SESSION_GAP_SECONDS
-            first_latest_start = earliest_locked - timedelta(seconds=total_squeezed_dur + inter_gaps)
+            first_latest_start = min(
+                first_sess.scheduled_start + timedelta(seconds=3600),
+                earliest_locked - timedelta(seconds=total_squeezed_dur + inter_gaps),
+            )
+            avail_before_first = int((first_latest_start - continuation_start).total_seconds())
+            max_ext = max(0, min(3600, avail_before_first - STANDARD_INTER_SESSION_GAP_SECONDS))
         else:
             # Nếu không bị chặn bởi sự kiện cố định gần đó, cho phép dịch tối đa 60 phút
             first_latest_start = first_sess.scheduled_start + timedelta(seconds=3600)
-
-        avail_before_first = int((first_latest_start - continuation_start).total_seconds())
-        max_ext = max(0, min(3600, avail_before_first - STANDARD_INTER_SESSION_GAP_SECONDS))
+            avail_before_first = int((first_latest_start - continuation_start).total_seconds())
+            max_ext = max(0, min(3600, avail_before_first - STANDARD_INTER_SESSION_GAP_SECONDS))
 
     hard_caps: list[int] = []
+    if earliest_locked is not None:
+        hard_caps.append(
+            max(0, int((earliest_locked - continuation_start).total_seconds()) - STANDARD_INTER_SESSION_GAP_SECONDS)
+        )
     if deadline_at is not None:
         hard_caps.append(max(0, int((_ensure_aware(deadline_at) - continuation_start).total_seconds())))
     if availability_end is not None:
@@ -863,7 +874,7 @@ async def get_upcoming_schedule_context(
                 scheduled_end=_ensure_aware(r.scheduled_end),
                 duration_seconds=r.duration_seconds,
                 status=r.status,
-                is_movable=(r.status == "scheduled"),
+                is_movable=(r.status == "scheduled" and tk is not None and tk.id == task_row.id),
             )
         )
 
@@ -904,10 +915,75 @@ async def get_upcoming_schedule_context(
         availability_end = (
             matching_iv.end_at.astimezone(UTC) if matching_iv is not None else continuation_start
         )
+    # Độc lập hoàn toàn với cửa sổ phân trang UI: truy vấn toàn khung [continuation_start, continuation_start + 24h)
+    calc_window_from = continuation_start
+    calc_window_to = continuation_start + timedelta(hours=24)
+    if window_from <= calc_window_from and window_to >= calc_window_to:
+        calc_session_items = session_items
+        calc_busy_items = busy_items
+    else:
+        calc_rows = (
+            await db.scalars(
+                select(SessionRow)
+                .where(
+                    SessionRow.user_id == owner,
+                    SessionRow.id != run.session_id,
+                    SessionRow.status.in_(("scheduled", "in_progress")),
+                    SessionRow.scheduled_end > calc_window_from,
+                    SessionRow.scheduled_start < calc_window_to,
+                )
+                .order_by(SessionRow.scheduled_start.asc())
+            )
+        ).all()
+        calc_step_ids = list({r.step_id for r in calc_rows})
+        calc_steps_map: dict[UUID, StepRow] = dict(steps_map)
+        missing_step_ids = [sid for sid in calc_step_ids if sid not in calc_steps_map]
+        if missing_step_ids:
+            s_rows = (
+                await db.scalars(
+                    select(StepRow).where(StepRow.user_id == owner, StepRow.id.in_(missing_step_ids))
+                )
+            ).all()
+            for s in s_rows:
+                calc_steps_map[s.id] = s
+        calc_t_ids = list({s.task_id for s in calc_steps_map.values() if s.task_id not in tasks_map})
+        calc_tasks_map: dict[UUID, TaskRow] = dict(tasks_map)
+        if calc_t_ids:
+            t_rows = (
+                await db.scalars(
+                    select(TaskRow).where(TaskRow.user_id == owner, TaskRow.id.in_(calc_t_ids))
+                )
+            ).all()
+            for t in t_rows:
+                calc_tasks_map[t.id] = t
+
+        calc_session_items = []
+        for r in calc_rows:
+            st = calc_steps_map.get(r.step_id)
+            tk = calc_tasks_map.get(st.task_id) if st is not None else None
+            calc_session_items.append(
+                TimelineSessionItem(
+                    kind="session",
+                    session_id=str(r.id),
+                    task_id=str(tk.id) if tk is not None else str(task_row.id),
+                    task_title=tk.title if tk is not None else task_row.title,
+                    step_id=str(r.step_id),
+                    step_title=st.title if st is not None else step_row.title,
+                    scheduled_start=_ensure_aware(r.scheduled_start),
+                    scheduled_end=_ensure_aware(r.scheduled_end),
+                    duration_seconds=r.duration_seconds,
+                    status=r.status,
+                    is_movable=(r.status == "scheduled" and tk is not None and tk.id == task_row.id),
+                )
+            )
+        calc_busy_items, _, _ = await _load_google_busy_items(
+            db, owner, calc_window_from, calc_window_to
+        )
+
     max_ext, rec_ext = _compute_max_extension_without_borrow(
         continuation_start,
-        session_items,
-        busy_items,
+        calc_session_items,
+        calc_busy_items,
         deadline_at=task_deadline,
         availability_end=availability_end,
     )
@@ -3594,7 +3670,7 @@ async def approve_proposal(
                     select(Reminder).where(
                         Reminder.user_id == owner,
                         Reminder.session_id == s_row.id,
-                        Reminder.delivery_state == "scheduled",
+                        Reminder.delivery_state.in_(("scheduled", "snoozed")),
                     )
                 )
             ).all()
@@ -3707,7 +3783,7 @@ async def approve_proposal(
                 select(Reminder).where(
                     Reminder.user_id == owner,
                     Reminder.session_id == s_row.id,
-                    Reminder.delivery_state == "scheduled",
+                    Reminder.delivery_state.in_(("scheduled", "snoozed")),
                 )
             )
         ).all()

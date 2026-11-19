@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import datetime
 from typing import Any, Literal
 
 from pydantic import AwareDatetime, Field, model_validator
@@ -146,11 +146,6 @@ class RunEventItem(ApiModel):
     def validate_occurred_at(self) -> RunEventItem:
         if self.occurred_at.utcoffset() is None:
             raise ValueError("Thời điểm sự kiện phải có múi giờ.")
-        now_utc = datetime.now(UTC)
-        if self.occurred_at.astimezone(UTC) > now_utc + timedelta(seconds=300):
-            raise ValueError(
-                "Thời điểm sự kiện vượt quá giới hạn sai lệch đồng hồ cho phép (tương lai quá 5 phút)."
-            )
         return self
 
 
@@ -216,6 +211,8 @@ class ActualCorrectionRequest(ApiModel):
     def validate_occurred_at(self) -> ActualCorrectionRequest:
         if self.occurred_at.utcoffset() is None:
             raise ValueError("Thời điểm hiệu chỉnh phải có múi giờ.")
+        if not self.reason.strip():
+            raise ValueError("Lý do hiệu chỉnh không được để trống.")
         return self
 
 
@@ -297,7 +294,7 @@ class DeviceStateReportRequest(ApiModel):
     dnd_apply_state: str = Field(min_length=1)
     dnd_restore_state: str = Field(min_length=1)
     reported_at: AwareDatetime
-    app_visibility: Literal["foreground", "background"]
+    app_visibility: Literal["foreground", "background", "unknown"]
 
 
 class DeviceStateData(DeviceStateReportRequest):

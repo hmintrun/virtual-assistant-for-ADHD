@@ -25,6 +25,7 @@ from app.schemas.execution import (
     SessionStartRequest,
 )
 from app.schemas.reschedule import UpcomingScheduleContextData
+from app.services import run_service
 
 router = APIRouter(tags=["Focus & Devices - UF3"])
 
@@ -40,12 +41,14 @@ async def start_session_run(
     db: DbSessionDep,
     idempotency_key: IdempotencyKey,
 ) -> SuccessEnvelope[SessionRunData]:
+    now = run_service._current_utc_now()
     data = await service_handler("run_service", "start_session_run")(
         db=db,
         user_id=current_user.user_id,
         session_id=session_id,
         payload=payload,
         idempotency_key=idempotency_key,
+        now=now,
     )
     return success(request, data)
 
@@ -119,12 +122,14 @@ async def post_run_events(
     db: DbSessionDep,
     idempotency_key: IdempotencyKey,
 ) -> SuccessEnvelope[RunEventBatchResult]:
+    now = run_service._current_utc_now()
     data = await service_handler("run_service", "record_run_events")(
         db=db,
         user_id=current_user.user_id,
         run_id=run_id,
         payload=payload,
         idempotency_key=idempotency_key,
+        now=now,
     )
     return success(request, data)
 
@@ -138,12 +143,14 @@ async def end_session_run(
     db: DbSessionDep,
     idempotency_key: IdempotencyKey,
 ) -> SuccessEnvelope[SessionRunData]:
+    now = run_service._current_utc_now()
     data = await service_handler("run_service", "end_session_run")(
         db=db,
         user_id=current_user.user_id,
         run_id=run_id,
         payload=payload,
         idempotency_key=idempotency_key,
+        now=now,
     )
     return success(request, data)
 
@@ -161,12 +168,14 @@ async def post_actual_correction(
     db: DbSessionDep,
     idempotency_key: IdempotencyKey,
 ) -> SuccessEnvelope[ActualCorrectionData]:
+    now = run_service._current_utc_now()
     data = await service_handler("run_service", "record_actual_correction")(
         db=db,
         user_id=current_user.user_id,
         run_id=run_id,
         payload=payload,
         idempotency_key=idempotency_key,
+        now=now,
     )
     return success(request, data)
 

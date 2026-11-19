@@ -1,10 +1,10 @@
 # Router cho API giọng nói (STT POST /voice/transcriptions, TTS POST /voice/tts, Prompt UF5 POST /voice/uf5-checkin-prompt)
 import asyncio
 import base64
-from collections import OrderedDict
 import hashlib
 import json
 import time
+from collections import OrderedDict
 from typing import Annotated, Literal
 from uuid import UUID
 
@@ -13,7 +13,6 @@ from fastapi import APIRouter, File, Form, Header, UploadFile
 from app.api.deps import CurrentUserDep, DbSessionDep
 from app.core.config import settings
 from app.core.errors import AppError
-from app.repositories import run_repository, thought_repository
 from app.schemas.common import ErrorEnvelope, FieldError, SuccessEnvelope, build_response_meta
 from app.schemas.voice import (
     TranscriptionData,
