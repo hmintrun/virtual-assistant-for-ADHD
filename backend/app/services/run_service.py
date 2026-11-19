@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 from uuid import UUID
@@ -91,15 +90,6 @@ def _validation_error(message: str, field_path: str = "") -> AppError:
         field_errors=[FieldError(field_path=field_path, message=message)] if field_path else [],
         next_action="fix_fields",
     )
-
-
-def _is_legacy_test() -> bool:
-    pytest_test = os.environ.get("PYTEST_CURRENT_TEST", "")
-    if not pytest_test:
-        return False
-    if "test_uf3_verification" in pytest_test:
-        return False
-    return True
 
 
 def _current_utc_now(now: datetime | None = None) -> datetime:
@@ -546,7 +536,10 @@ async def _validate_start_feasibility(
                 SessionRow.user_id == user_uuid,
                 SessionRow.id != session.id,
                 SessionRow.status.notin_(("cancelled", "skipped")),
+                SessionRow.scheduled_end >= req_start - timedelta(hours=24),
+                SessionRow.scheduled_start <= req_end + timedelta(hours=24),
             )
+            .order_by(SessionRow.scheduled_start.asc())
         )
     )
     if other_sessions:
@@ -589,7 +582,15 @@ async def _validate_start_feasibility(
             session_uuid_by_ref: dict[str, UUID] = {
                 str(s.id): s.id for s in all_relevant_sessions
             }
-            # Ánh xạ các temp_session_id trong sessions_to_add với các SessionRow thật
+            # 1. Ánh xạ trực tiếp từ applied_session_ids
+            applied_ids = (prop.proposed_changes or {}).get("applied_session_ids") or {}
+            for ref_k, real_id_str in applied_ids.items():
+                try:
+                    session_uuid_by_ref[str(ref_k)] = UUID(str(real_id_str))
+                except (ValueError, TypeError):
+                    pass
+
+            # 2. Ánh xạ các temp_session_id trong sessions_to_add với các SessionRow thật (fallback nới lỏng cửa sổ)
             for add_item in (prop.proposed_changes or {}).get("sessions_to_add") or []:
                 after_obj = add_item.get("after") or {}
                 item_step_id = add_item.get("step_id") or after_obj.get("step_id")
@@ -601,11 +602,11 @@ async def _validate_start_feasibility(
                 except (ValueError, TypeError):
                     continue
                 for s in all_relevant_sessions:
-                    if str(s.step_id) == str(item_step_id) and abs((s.scheduled_start.astimezone(UTC) - item_start).total_seconds()) < 2.0:
+                    if str(s.step_id) == str(item_step_id) and abs((s.scheduled_start.astimezone(UTC) - item_start).total_seconds()) <= 3600.0:
                         for rk in ("temp_session_id", "session_ref", "id"):
                             ref_val = add_item.get(rk)
                             if ref_val:
-                                session_uuid_by_ref[str(ref_val)] = s.id
+                                session_uuid_by_ref.setdefault(str(ref_val), s.id)
 
             for gx in gap_exceptions:
                 from_ref = str(gx.get("from_session_ref") or "")
@@ -636,7 +637,6 @@ async def _validate_start_feasibility(
                     prev_gap = gap_override_by_other_id.get(other_target_id)
                     if prev_gap is None or applied_gap < prev_gap:
                         gap_override_by_other_id[other_target_id] = max(0, applied_gap)
-            break
 
         for other in other_sessions:
             ended_run = ended_run_by_session.get(other.id)
@@ -651,6 +651,26 @@ async def _validate_start_feasibility(
                 seconds=gap_override_by_other_id.get(other.id, MIN_INTER_SESSION_GAP_SECONDS)
             )
             if not (req_end + required_gap <= other_start or other_end + required_gap <= req_start):
+                raise _require_replan(
+                    "Thời điểm bắt đầu mới vi phạm khoảng cách tối thiểu 15 phút hoặc chồng lấn với phiên khác. Cần xếp lại lịch."
+                )
+
+        recent_runs = list(
+            await db.scalars(
+                select(SessionRun).where(
+                    SessionRun.user_id == user_uuid,
+                    SessionRun.session_id != session.id,
+                    SessionRun.ended_at.is_not(None),
+                    SessionRun.ended_at >= req_start - timedelta(seconds=MIN_INTER_SESSION_GAP_SECONDS),
+                )
+            )
+        )
+        for r_run in recent_runs:
+            req_gap_sec = gap_override_by_other_id.get(
+                r_run.session_id, MIN_INTER_SESSION_GAP_SECONDS
+            )
+            r_ended = r_run.ended_at.astimezone(UTC)
+            if (req_start - r_ended).total_seconds() < req_gap_sec:
                 raise _require_replan(
                     "Thời điểm bắt đầu mới vi phạm khoảng cách tối thiểu 15 phút hoặc chồng lấn với phiên khác. Cần xếp lại lịch."
                 )
@@ -678,9 +698,6 @@ async def start_session_run(
         )
 
     server_now = _current_utc_now(now)
-    if _is_legacy_test() and "test_unit_clock_skew" not in os.environ.get("PYTEST_CURRENT_TEST", "").lower():
-        server_now = payload.requested_start_at.astimezone(UTC)
-
     skew = abs(
         (payload.requested_start_at.astimezone(UTC) - server_now).total_seconds()
     )
@@ -954,12 +971,6 @@ async def record_run_events(
     num_segments = len(segments)
     started_utc = run.started_at.astimezone(UTC)
     server_now = _current_utc_now(now)
-    if _is_legacy_test() and payload.events:
-        if not any(
-            ev.occurred_at.astimezone(UTC) > run.started_at.astimezone(UTC) + timedelta(days=1)
-            for ev in payload.events
-        ):
-            server_now = max(ev.occurred_at.astimezone(UTC) for ev in payload.events)
 
     last_saved_occurred_at = await db.scalar(
         select(func.max(RunEvent.occurred_at)).where(
@@ -1186,9 +1197,6 @@ async def end_session_run(
         )
 
     server_now = _current_utc_now(now)
-    if _is_legacy_test():
-        if not (payload.ended_at.astimezone(UTC) > run.started_at.astimezone(UTC) + timedelta(days=1)):
-            server_now = payload.ended_at.astimezone(UTC)
     ended_utc = payload.ended_at.astimezone(UTC)
     started_utc = run.started_at.astimezone(UTC)
     if (
@@ -1215,7 +1223,6 @@ async def end_session_run(
             "work_elapsed_seconds",
         )
 
-    snap = await _resolve_settings_snapshot(db, run)
     wall_elapsed = max(0, int((ended_utc - started_utc).total_seconds()))
     max_reasonable = wall_elapsed + MAX_CLOCK_SKEW_SECONDS
     if (payload.work_elapsed_seconds + payload.rest_elapsed_seconds) > max_reasonable:
@@ -1291,7 +1298,6 @@ async def end_session_run(
     return await _run_to_schema(
         db,
         run,
-        settings_snapshot=snap,
         check_in=checkin,
     )
 
@@ -1342,16 +1348,6 @@ async def record_actual_correction(
         raise _validation_error("Lý do hiệu chỉnh không được để trống.", "reason")
 
     server_now = _current_utc_now(now)
-    if _is_legacy_test():
-        if not (payload.occurred_at.astimezone(UTC) > run.started_at.astimezone(UTC) + timedelta(days=1)):
-            server_now = payload.occurred_at.astimezone(UTC)
-    if run.ended_at is None:
-        raise AppError(
-            status_code=409,
-            code="INVALID_RUN_STATE",
-            message="Chỉ hiệu chỉnh thời gian khi phiên đã kết thúc hợp lệ.",
-            next_action="reload_and_review",
-        )
     occurred_utc = payload.occurred_at.astimezone(UTC)
     ended_utc = run.ended_at.astimezone(UTC)
     if (

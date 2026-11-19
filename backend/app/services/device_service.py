@@ -1,6 +1,5 @@
 """W06: nhận trạng thái thiết bị thực và lời nhắc theo Session còn hiệu lực."""
 
-import os
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from uuid import UUID
@@ -106,9 +105,7 @@ async def save_device_state_report(
 ) -> DeviceStateData:
     owner = command_service.owner_uuid(user_id)
     server_now = _now()
-    pytest_test = os.environ.get("PYTEST_CURRENT_TEST", "")
-    is_legacy = bool(pytest_test and "test_uf3_verification" not in pytest_test)
-    if not is_legacy and payload.reported_at.astimezone(UTC) > server_now + timedelta(seconds=300):
+    if payload.reported_at.astimezone(UTC) > server_now + timedelta(seconds=300):
         raise _error("VALIDATION_ERROR", "Thời điểm báo cáo vượt quá giới hạn sai lệch đồng hồ cho phép.")
     for value, allowed in [
         (payload.notification_permission, PERMISSIONS),
@@ -314,9 +311,7 @@ async def record_reminder_receipt(
 ) -> ReminderData:
     owner = command_service.owner_uuid(user_id)
     server_now = _now()
-    pytest_test = os.environ.get("PYTEST_CURRENT_TEST", "")
-    is_legacy = bool(pytest_test and "test_uf3_verification" not in pytest_test)
-    if not is_legacy and payload.occurred_at.astimezone(UTC) > server_now + timedelta(seconds=300):
+    if payload.occurred_at.astimezone(UTC) > server_now + timedelta(seconds=300):
         raise _error("VALIDATION_ERROR", "Thời điểm biên nhận vượt quá giới hạn sai lệch đồng hồ cho phép.")
     if payload.delivery_state == "cancelled":
         raise _error("VALIDATION_ERROR", "Client không được tự ý gửi trạng thái cancelled.")
@@ -343,10 +338,12 @@ async def record_reminder_receipt(
             revisions={"schedule": session.schedule_revision},
             next_action="reload_reminders",
         )
-    if row.delivery_state == "cancelled" or session.status != "scheduled":
+    if row.delivery_state in ("dismissed", "acknowledged", "cancelled") or session.status != "scheduled":
+        if row.delivery_state == payload.delivery_state and row.user_action == payload.user_action:
+            return _reminder_data(row)
         raise _error(
             "INVALID_REMINDER_STATE",
-            "Lời nhắc đã bị hủy hoặc phiên đã bắt đầu.",
+            "Lời nhắc đã ở trạng thái kết thúc (dismissed/acknowledged/cancelled) hoặc phiên đã bắt đầu.",
             status=409,
             next_action="ignore_or_reload",
         )
@@ -355,6 +352,11 @@ async def record_reminder_receipt(
         and payload.delivery_state == "scheduled"
     ):
         raise _error("INVALID_REMINDER_STATE", "Không thể quay lại trạng thái scheduled.", status=409)
+    if (
+        row.delivery_state in ("fired", "snoozed", "dismissed", "acknowledged")
+        and payload.delivery_state == "delivered"
+    ):
+        raise _error("INVALID_REMINDER_STATE", "Không thể lùi trạng thái về delivered.", status=409)
     if row.device_id is not None and row.device_id != payload.device_id:
         raise _error("DEVICE_CONFLICT", "Lời nhắc thuộc thiết bị khác.", status=409)
     if payload.delivery_state not in DELIVERY_STATES or payload.user_action not in USER_ACTIONS:

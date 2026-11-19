@@ -696,10 +696,10 @@ def _compute_max_extension_without_borrow(
                 s for s in movable_sessions if s.scheduled_start < earliest_locked
             ]
             total_squeezed_dur = sum(s.duration_seconds for s in squeezed)
-            inter_gaps = max(0, len(squeezed) - 1) * STANDARD_INTER_SESSION_GAP_SECONDS
+            required_gaps = max(0, len(squeezed) - 1) * STANDARD_INTER_SESSION_GAP_SECONDS
             first_latest_start = min(
                 first_sess.scheduled_start + timedelta(seconds=3600),
-                earliest_locked - timedelta(seconds=total_squeezed_dur + inter_gaps),
+                earliest_locked - timedelta(seconds=total_squeezed_dur + required_gaps),
             )
             avail_before_first = int((first_latest_start - continuation_start).total_seconds())
             max_ext = max(0, min(3600, avail_before_first - STANDARD_INTER_SESSION_GAP_SECONDS))
@@ -715,7 +715,11 @@ def _compute_max_extension_without_borrow(
             max(0, int((earliest_locked - continuation_start).total_seconds()) - STANDARD_INTER_SESSION_GAP_SECONDS)
         )
     if deadline_at is not None:
-        hard_caps.append(max(0, int((_ensure_aware(deadline_at) - continuation_start).total_seconds())))
+        dl_aware = _ensure_aware(deadline_at)
+        total_movable_dur = sum(s.duration_seconds for s in movable_sessions)
+        total_movable_gaps = len(movable_sessions) * STANDARD_INTER_SESSION_GAP_SECONDS
+        avail_for_cont = int((dl_aware - continuation_start).total_seconds()) - total_movable_dur - total_movable_gaps
+        hard_caps.append(max(0, avail_for_cont))
     if availability_end is not None:
         hard_caps.append(
             max(0, int((_ensure_aware(availability_end) - continuation_start).total_seconds()))
@@ -3734,6 +3738,24 @@ async def approve_proposal(
                     )
                 )
     await db.flush()
+
+    applied_ids: dict[str, str] = {}
+    for a_item, new_sess in zip(changes.sessions_to_add, added_rows, strict=False):
+        ref = (
+            getattr(a_item, "temp_session_id", None)
+            or getattr(a_item, "session_ref", None)
+            or getattr(a_item, "id", None)
+        )
+        if ref:
+            applied_ids[str(ref)] = str(new_sess.id)
+    if applied_ids:
+        changes_dict = (
+            dict(row.proposed_changes)
+            if isinstance(row.proposed_changes, dict)
+            else {}
+        )
+        changes_dict["applied_session_ids"] = applied_ids
+        row.proposed_changes = changes_dict
 
     # 4. Áp dụng sessions_to_move
     moved_rows: list[SessionRow] = []
