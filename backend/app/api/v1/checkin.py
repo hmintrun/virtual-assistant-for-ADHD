@@ -14,6 +14,7 @@ from app.schemas.execution import (
     CheckInListResult,
     CheckInResponseRequest,
 )
+from app.services import run_service
 
 router = APIRouter(tags=["CheckIn - UF5"])
 
@@ -67,6 +68,7 @@ async def create_run_checkin(
         run_id=run_id,
         payload=payload,
         idempotency_key=idempotency_key,
+        now=run_service._current_utc_now(),
     )
     return success(request, data)
 
@@ -92,5 +94,6 @@ async def submit_checkin_response(
         checkin_id=checkin_id,
         payload=payload,
         idempotency_key=idempotency_key,
+        now=run_service._current_utc_now(),
     )
     return success(request, data)
