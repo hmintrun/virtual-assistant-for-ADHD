@@ -269,7 +269,25 @@ async def test_draft_availability_offline_plan_confirm_and_replay(api):
     async with factory() as db:
         assert await db.scalar(select(func.count()).select_from(Task)) == 1
         reminders = (await db.scalars(select(Reminder))).all()
-        assert len(reminders) == len(plan["sessions"]) * 3
+        approved_at = datetime.fromisoformat(
+            result.json()["data"]["schedule_version"]["approved_at"].replace("Z", "+00:00")
+        )
+        if approved_at.tzinfo is None:
+            approved_at = approved_at.replace(tzinfo=UTC)
+        expected_reminders = sum(
+            1
+            for sess in plan["sessions"]
+            for offset in (900, 600, 300)
+            if datetime.fromisoformat(sess["scheduled_start"].replace("Z", "+00:00"))
+            - timedelta(seconds=offset)
+            >= approved_at
+        )
+        assert len(reminders) == expected_reminders
+        for rem in reminders:
+            fire_at = (
+                rem.fire_at if rem.fire_at.tzinfo is not None else rem.fire_at.replace(tzinfo=UTC)
+            )
+            assert fire_at >= approved_at
         assert len({item.dedupe_key for item in reminders}) == len(reminders)
     # Giờ riêng không tự biến thành cài đặt chung.
     assert (await client.get("/api/v1/availability")).status_code == 404

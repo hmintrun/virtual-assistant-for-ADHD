@@ -372,16 +372,17 @@ GUARDRAILS:
 - Single-Round:`is_complete=true` iff đủ 4 trường+không `is_ambiguous`+`has_conflict=false`(`clarification_questions=[]`);ngược lại `is_complete=false`,gộp câu hỏi ấm áp(W3C COGA) vào `clarification_questions`&`clarification_issues` đúng `field_path`."""
 
 UF2_DECOMPOSITION_SYSTEM_PROMPT = """Bạn là chuyên gia hỗ trợ chức năng điều hành (Executive Function Coach) cho người mắc ADHD-I trên ứng dụng ProPlan VA.
-Nhiệm vụ của bạn ở bước UF2 là bẻ nhỏ một công việc đã xác nhận thành phương án các bước tuần tự (Default Decomposition Proposal) để giúp người dùng vượt qua hội chứng Tê liệt khởi động (ADHD Blank Canvas / Task Initiation Paralysis).
-Nếu `user_step_proposal` khác null, hãy tôn trọng ý tưởng của người dùng. Nếu ý tưởng thiếu rõ ràng hoặc mâu thuẫn với phạm vi đã xác nhận, đặt requires_clarification=true, clarification_question là một câu hỏi gộp và steps=[]; không bịa Steps để lấp mâu thuẫn. Chỉ sinh Steps khi ý tưởng đủ rõ, với requires_clarification=false và clarification_question=null.
+Nhiệm vụ ở UF2: bẻ nhỏ công việc đã xác nhận thành các bước tuần tự (Default Decomposition Proposal) để phá vỡ tê liệt khởi động.
+Nếu `user_step_proposal` khác null, tôn trọng ý tưởng của người dùng. Nếu ý tưởng thiếu rõ ràng hoặc mâu thuẫn phạm vi, đặt requires_clarification=true, clarification_question là 1 câu hỏi gộp và steps=[]; ngược lại requires_clarification=false, clarification_question=null.
 
-Với việc dài hạn, chỉ chia Steps chi tiết cho phạm vi đầu phù hợp horizon được cung cấp. Giữ tổng quan chưa chia ở `unexpanded_scope` (null nếu đã chia đầy đủ). Không tạo Part, Steps giả hoặc khẳng định phần sau đã có lịch. Thuật toán Python kiểm khả thi, AI không tính giờ bắt đầu/kết thúc Session.
-
-QUY TẮC BẤT BIẾN (STRICT GUARDRAILS — TUYỆT ĐỐI TUÂN THỦ):
-1. SỐ LƯỢNG BƯỚC VỪA SỨC: Chia công việc thành từ 2 đến 5 bước tuần tự (`steps`, `order_index` đánh số liên tục từ 1), mỗi bước có đầu ra cụ thể (`expected_output`) và thời lượng làm chính dự kiến gốc hợp lý (`estimated_minutes`, thường từ 15 đến 60 phút, CHƯA nhân hệ số đệm buffer).
-2. BẮT BUỘC CÓ MICRO-TASK KHỞI ĐỘNG 2 PHÚT (`micro_task_prompt`): Mỗi bước phải đi kèm duy nhất 1 hành động vật lý siêu nhỏ, không đòi hỏi suy nghĩ phức tạp, làm xong trong 2 phút đầu để kích hoạt đà hành động (ví dụ: "Mở sẵn file báo cáo trên máy và gõ dòng tiêu đề", KHÔNG dùng câu mơ hồ như "Bắt đầu nghiên cứu tài liệu").
-3. GẮN NHÃN TẢI NHẬN THỨC NGẦM (`cognitive_load`): Đánh giá mức tiêu hao năng lượng nhận thức của từng bước là `"light"`, `"medium"`, hoặc `"heavy"`.
-4. RANH GIỚI KIẾN TRÚC: Bạn CHỈ phân rã ngữ nghĩa từ Task sang Steps. TUYỆT ĐỐI KHÔNG tự chia thành các phiên (Sessions), KHÔNG tự cộng/trừ ngày giờ lịch biểu hay nhân hệ số buffer (việc xếp lịch do thuật toán Python đảm nhận 100%)."""
+QUY TẮC BẤT BIẾN (STRICT GUARDRAILS):
+1. PHẠM VI TOÀN KỲ & SỐ BƯỚC:
+   - Nếu `total_project_days <= 14`: chia từ 2 đến 7 bước (`15–120` phút/bước).
+   - Nếu `total_project_days > 14`: bắt buộc chia TOÀN BỘ phạm vi tới Deadline theo Cột mốc / Chương / Tuần (`6–18` bước, tối đa `20` bước, `60–480` phút/bước) để thuật toán Python tự cắt thành các Session `25p/5p`; đặt `unexpanded_scope=null` khi đã bao phủ đủ phạm vi.
+   - `order_index` đánh số liên tục từ 1; viết `title`, `expected_output`, `micro_task_prompt`, `reasoning` súc tích 1 câu.
+2. BẮT BUỘC CÓ MICRO-TASK KHỞI ĐỘNG 2 PHÚT (`micro_task_prompt`): 1 hành động vật lý siêu nhỏ làm xong trong 2 phút đầu (VD: "Mở file báo cáo và gõ tiêu đề").
+3. GẮN NHÃN TẢI NHẬN THỨC (`cognitive_load`): `"light"`, `"medium"`, hoặc `"heavy"`.
+4. RANH GIỚI KIẾN TRÚC: CHỈ phân rã ngữ nghĩa Task -> Steps. TUYỆT ĐỐI KHÔNG tự chia Session, KHÔNG tự tính ngày giờ hay nhân hệ số buffer."""
 
 UF2_PLAN_ADJUSTMENT_SYSTEM_PROMPT = """Bạn là chuyên gia hỗ trợ lập kế hoạch linh hoạt cho người mắc ADHD-I trên ứng dụng ProPlan VA.
 Ở bước 4 của UF2, người dùng đang xem phương án chia bước (`current_steps`), khung giờ rảnh (`current_free_slots`) và hạn chót (`current_deadline`), sau đó đưa ra yêu cầu điều chỉnh bằng ngôn ngữ tự nhiên (`user_instruction`).
@@ -547,14 +548,35 @@ class AIService:
             groq_hedge_at=min(hard, self._settings.AI_GROQ_HEDGE_DELAY_SECONDS),
         )
 
-    def _decomposition_profile(self) -> ExecutionTimingProfile:
-        """Khung thời gian B cho luồng bẻ nhỏ công việc có màn hình Breathing Circle (UF2)."""
-        hard = self._settings.AI_UF2_TIMEOUT_SECONDS
+    def _decomposition_profile(
+        self,
+        *,
+        total_project_days: int = 14,
+        total_free_hours: float = 0.0,
+    ) -> ExecutionTimingProfile:
+        """Khung thời gian B 3 bậc theo quy mô công việc (RISK-UF2-03)."""
+        base_hard = self._settings.AI_UF2_TIMEOUT_SECONDS
+        if base_hard < 1.0 or (total_project_days <= 14 and total_free_hours <= 20.0):
+            return ExecutionTimingProfile(
+                hard_timeout=base_hard,
+                primary_priority_until=min(base_hard, self._settings.AI_UF2_PRIMARY_PRIORITY_SECONDS),
+                warm_backup_at=min(base_hard, self._settings.AI_UF2_WARM_BACKUP_DELAY_SECONDS),
+                groq_hedge_at=min(base_hard, self._settings.AI_UF2_GROQ_HEDGE_DELAY_SECONDS),
+            )
+        if total_project_days >= 46 or total_free_hours > 60.0:
+            hard = min(25.0, max(base_hard, 20.0))
+            return ExecutionTimingProfile(
+                hard_timeout=hard,
+                primary_priority_until=min(hard, 7.0),
+                warm_backup_at=min(hard, 3.0),
+                groq_hedge_at=min(hard, 6.5),
+            )
+        hard = min(25.0, max(base_hard, 14.0))
         return ExecutionTimingProfile(
             hard_timeout=hard,
-            primary_priority_until=min(hard, self._settings.AI_UF2_PRIMARY_PRIORITY_SECONDS),
-            warm_backup_at=min(hard, self._settings.AI_UF2_WARM_BACKUP_DELAY_SECONDS),
-            groq_hedge_at=min(hard, self._settings.AI_UF2_GROQ_HEDGE_DELAY_SECONDS),
+            primary_priority_until=min(hard, 5.5),
+            warm_backup_at=min(hard, 2.5),
+            groq_hedge_at=min(hard, 5.5),
         )
 
     async def _call_gemini_structured(
@@ -718,27 +740,20 @@ class AIService:
                 if active_model_ref is not None:
                     active_model_ref[:] = [groq_model]
                 try:
+                    create_kwargs: dict[str, Any] = {
+                        "model": groq_model,
+                        "messages": [
+                            {"role": "system", "content": strict_system_prompt},
+                            {"role": "user", "content": user_prompt},
+                        ],
+                        "response_format": {"type": "json_object"},
+                        "temperature": 0.2,
+                    }
                     if "gpt-oss" in groq_model.lower():
-                        completion = await client.chat.completions.create(
-                            model=groq_model,
-                            messages=[
-                                {"role": "system", "content": strict_system_prompt},
-                                {"role": "user", "content": user_prompt},
-                            ],
-                            response_format={"type": "json_object"},
-                            temperature=0.2,
-                            reasoning_effort="low",
-                        )
-                    else:
-                        completion = await client.chat.completions.create(
-                            model=groq_model,
-                            messages=[
-                                {"role": "system", "content": strict_system_prompt},
-                                {"role": "user", "content": user_prompt},
-                            ],
-                            response_format={"type": "json_object"},
-                            temperature=0.2,
-                        )
+                        create_kwargs["reasoning_effort"] = "low"
+                    if deadline is not None:
+                        create_kwargs["timeout"] = max(1.0, deadline - loop.time())
+                    completion = await client.chat.completions.create(**create_kwargs)
                     content = completion.choices[0].message.content
                     if not content:
                         raise ValueError(f"Groq ({groq_model}) trả về message content rỗng.")
@@ -970,6 +985,7 @@ class AIService:
         user_prompt: str,
         schema_cls: type[SchemaT],
         profile: ExecutionTimingProfile,
+        force_minimal_thinking: bool = False,
     ) -> tuple[SchemaT, GenerationTier]:
         """
         UF1 chỉ gọi Flash-Lite và cho phép Qwen khi thiếu Gemini hoặc Gemini lỗi sớm.
@@ -1066,7 +1082,7 @@ class AIService:
 
         primary_thinking_level = (
             types.ThinkingLevel.MINIMAL
-            if is_uf1 or "flash-lite" in primary_model.lower()
+            if force_minimal_thinking or is_uf1 or "flash-lite" in primary_model.lower()
             else types.ThinkingLevel.LOW
         )
         primary_task: asyncio.Task[SchemaT] | None = None
@@ -1733,6 +1749,68 @@ class AIService:
     # UF2 (BƯỚC 1): PHÂN RÃ CÔNG VIỆC CHỦ ĐỘNG & GỢI Ý MICRO-TASK 2 PHÚT
     # ==========================================================================
 
+    _UF2_PROPOSAL_INLINE_SPLIT_RE = re.compile(
+        r"(?:^|(?<=\s))(?=(?:bước\s*\d+\s*[:.)\-]?|\d+[.)](?=\s*[^\d\s])|[•](?=\s*\S)|-(?=\s+\S)))",
+        re.IGNORECASE,
+    )
+    _UF2_PROPOSAL_PREFIX_RE = re.compile(
+        r"^(?:bước\s*\d+\s*[:.)\-]?|\d+[.)]|[•\-])\s*",
+        re.IGNORECASE,
+    )
+    _UF2_DURATION_RE = re.compile(
+        r"(?:(\d+)\s*(?:h|giờ|tiếng)\s*(\d{1,2})\s*(?:p|phút)?|(\d+(?:[.,]\d+)?)\s*(phút|p|giờ|tiếng|h)(?![a-zà-ỹ0-9_]))",
+        re.IGNORECASE,
+    )
+    _UF2_TRAILING_DUR_RE = re.compile(
+        r"\s*(?:\(|[-–:])?\s*(?:\d+\s*(?:h|giờ|tiếng)\s*\d{1,2}\s*(?:p|phút)?|\d+(?:[.,]\d+)?\s*(?:phút|p|giờ|tiếng|h))\s*\)?\s*$",
+        re.IGNORECASE,
+    )
+    _UF2_DRAFT_UPDATE_RE = re.compile(
+        r"(?:giờ\s*rảnh|khung\s*giờ|thời\s*hạn|deadline|hạn\s*chót|lùi\s*hạn|dời\s*hạn|ngày\s*bắt\s*đầu|mốc\s*bắt\s*đầu|múi\s*giờ|timezone)",
+        re.IGNORECASE,
+    )
+    _UF2_ADJUST_UNSUPPORTED_RE = re.compile(
+        r"(?:thêm|bớt|xóa|xoá|gộp|tách|chia\s*đôi|chia\s*nhỏ|đổi\s*thứ\s*tự|đảo\s*thứ\s*tự|sắp\s*(?:xếp\s*)?lại|lên\s*trước|ra\s*sau|đổi\s*tên|tiêu\s*đề|đầu\s*ra|kết\s*quả)",
+        re.IGNORECASE,
+    )
+    _UF2_STEP_REF_RE = re.compile(
+        r"\bbước\s+(\d+|đầu(?:\s+tiên)?|nhất|một|hai|ba|tư|bốn|năm|sáu|bảy|tám|chín|mười)\b",
+        re.IGNORECASE,
+    )
+    _UF2_ORDINAL_MAP = {
+        "đầu": 1,
+        "đầu tiên": 1,
+        "nhất": 1,
+        "một": 1,
+        "hai": 2,
+        "ba": 3,
+        "tư": 4,
+        "bốn": 4,
+        "năm": 5,
+        "sáu": 6,
+        "bảy": 7,
+        "tám": 8,
+        "chín": 9,
+        "mười": 10,
+    }
+
+    @classmethod
+    def _extract_duration_minutes(cls, text: str) -> list[int]:
+        minutes: list[int] = []
+        for match in cls._UF2_DURATION_RE.finditer(text):
+            h_str, m_str, num_str, unit_str = match.groups()
+            if h_str is not None and m_str is not None:
+                val_min = int(h_str) * 60 + int(m_str)
+            elif num_str is not None and unit_str is not None:
+                num = float(num_str.replace(",", "."))
+                unit = unit_str.lower()
+                val_min = round(num * 60) if unit in {"giờ", "tiếng", "h"} else round(num)
+            else:
+                continue
+            if val_min > 0:
+                minutes.append(val_min)
+        return minutes
+
     async def decompose_task(
         self,
         *,
@@ -1742,11 +1820,12 @@ class AIService:
         user_step_proposal: str | None = None,
         user_focus_duration: int = 25,
         planning_horizon_days: int = 14,
+        total_project_days: int | None = None,
+        total_free_hours: float | None = None,
     ) -> TaskDecompositionResult:
         """
-        Sinh Default Decomposition Proposal (2–5 bước + Micro-task 2 phút) ở UF2
-        theo khung thời gian B (trần 9.0s, ưu tiên 3.8-flash tới 7.5s, Warm Backup 3.5-flash-lite từ 3.1s).
-        Hỗ trợ `user_step_proposal` (O05) nếu người dùng chủ động gợi ý cách chia bước.
+        Sinh Default Decomposition Proposal (2–7 bước <= 14d hoặc toàn kỳ tối đa 20 bước) ở UF2
+        theo khung thời gian B 3 bậc. Hỗ trợ `user_step_proposal` (O05).
         """
         cleaned_title = task_title.strip() or "Công việc cần thực hiện"
         cleaned_proposal = (
@@ -1754,6 +1833,8 @@ class AIService:
             if user_step_proposal and user_step_proposal.strip()
             else None
         )
+        eff_days = total_project_days if total_project_days is not None else planning_horizon_days
+        eff_free_hours = float(total_free_hours) if total_free_hours is not None else 0.0
         context_payload: dict[str, Any] = {
             "task_title": cleaned_title,
             "scope": scope,
@@ -1761,6 +1842,8 @@ class AIService:
             "user_step_proposal": cleaned_proposal,
             "preferred_focus_duration_minutes": user_focus_duration,
             "planning_horizon_days": planning_horizon_days,
+            "total_project_days": eff_days,
+            "total_free_hours": eff_free_hours,
         }
         user_prompt = json.dumps(context_payload, ensure_ascii=False)
 
@@ -1770,7 +1853,11 @@ class AIService:
                 system_prompt=UF2_DECOMPOSITION_SYSTEM_PROMPT,
                 user_prompt=user_prompt,
                 schema_cls=LLMTaskDecompositionPayload,
-                profile=self._decomposition_profile(),
+                profile=self._decomposition_profile(
+                    total_project_days=eff_days,
+                    total_free_hours=eff_free_hours,
+                ),
+                force_minimal_thinking=(eff_days > 14),
             )
             if not llm_payload.requires_clarification and any(
                 not step.expected_output or not step.expected_output.strip()
@@ -1787,7 +1874,13 @@ class AIService:
                 type(exc).__name__,
             )
             return self._fallback_decompose_task(
-                cleaned_title, user_focus_duration=user_focus_duration, scope=scope
+                cleaned_title,
+                user_focus_duration=user_focus_duration,
+                scope=scope,
+                user_step_proposal=cleaned_proposal,
+                extra_requirements=extra_requirements,
+                planning_horizon_days=planning_horizon_days,
+                total_project_days=eff_days,
             )
 
     def _fallback_decompose_task(
@@ -1795,16 +1888,66 @@ class AIService:
         task_title: str,
         user_focus_duration: int = 25,
         scope: str | None = None,
+        *,
+        user_step_proposal: str | None = None,
+        extra_requirements: list[str] | None = None,
+        planning_horizon_days: int = 14,
+        total_project_days: int | None = None,
     ) -> TaskDecompositionResult:
         """
         Tầng 3 (Rule-based Fallback cho UF2):
-        Khi mất kết nối tới cả 2 tầng AI, tự động chia thành 3 bước chuẩn theo thời lượng
-        tập trung mặc định của người dùng kèm Micro-task khởi động 2 phút cụ thể.
+        Ưu tiên tách theo `user_step_proposal` nếu có danh sách bước phân tách được (tối đa 20 bước),
+        ngược lại tự động chia thành 3 bước chuẩn theo thời lượng mặc định kèm Micro-task 2 phút.
         """
+        _ = extra_requirements, planning_horizon_days, total_project_days
         cleaned_title = (task_title.strip() or "Công việc hiện tại")[:100]
-        safe_duration = max(5, min(180, user_focus_duration))
-        scope_hint = f" ({scope.strip()[:80]})" if scope and scope.strip() else ""
+        safe_duration = max(5, min(480, user_focus_duration))
 
+        if user_step_proposal and user_step_proposal.strip():
+            normalized = self._UF2_PROPOSAL_INLINE_SPLIT_RE.sub(
+                "\n", user_step_proposal.strip()
+            )
+            raw_chunks = [
+                part.strip(" \t\r\n.,")
+                for line in normalized.splitlines()
+                for part in line.split(";")
+                if part.strip(" \t\r\n.,")
+            ]
+            parsed_items: list[tuple[str, int]] = []
+            for idx, chunk in enumerate(raw_chunks):
+                cleaned_chunk = self._UF2_PROPOSAL_PREFIX_RE.sub("", chunk).strip()
+                if not cleaned_chunk:
+                    continue
+                if idx == 0 and len(raw_chunks) >= 3 and cleaned_chunk.endswith(":"):
+                    continue
+                durations = self._extract_duration_minutes(cleaned_chunk)
+                est_min = max(5, min(480, durations[0])) if durations else safe_duration
+                stripped_title = self._UF2_TRAILING_DUR_RE.sub("", cleaned_chunk).strip(" -–:,.")
+                step_title = stripped_title if len(stripped_title) >= 3 else cleaned_chunk
+                parsed_items.append((step_title[:255], est_min))
+
+            if len(parsed_items) >= 2:
+                proposal_steps = [
+                    StepPromptItem(
+                        order_index=idx + 1,
+                        title=step_title,
+                        expected_output=f"Hoàn thành đầu ra của bước: {step_title[:160]}",
+                        estimated_minutes=est_min,
+                        micro_task_prompt=f"Mở tài liệu và bắt đầu 2 phút cho: {step_title[:180]}",
+                        cognitive_load="medium",
+                    )
+                    for idx, (step_title, est_min) in enumerate(parsed_items[:20])
+                ]
+                return TaskDecompositionResult(
+                    task_title=cleaned_title,
+                    steps=proposal_steps,
+                    reasoning=(
+                        f"Đã giữ đúng {len(proposal_steps)} bước theo gợi ý của bạn ở chế độ dự phòng ngoại tuyến."
+                    ),
+                    generation_tier="tier_3_rule_based",
+                )
+
+        scope_hint = f" ({scope.strip()[:80]})" if scope and scope.strip() else ""
         steps = [
             StepPromptItem(
                 order_index=1,
@@ -1842,6 +1985,57 @@ class AIService:
             reasoning=(
                 f"Hệ thống đang ở chế độ ngoại tuyến AI nên tự động chia công việc thành 3 bước "
                 f"cố định ({safe_duration} phút/bước) để bạn bắt đầu ngay không bị gián đoạn."
+            ),
+            generation_tier="tier_3_rule_based",
+        )
+
+    @classmethod
+    def _fallback_adjust_candidate_by_nl(
+        cls,
+        instruction: str,
+        snapshots: list[dict[str, Any]],
+    ) -> CandidateAdjustmentResult | None:
+        """Fallback offline an toàn cho `adjust_candidate_by_nl` (RISK-UF2-04)."""
+        if cls._UF2_DRAFT_UPDATE_RE.search(instruction):
+            return CandidateAdjustmentResult(
+                step_edits=[],
+                requires_clarification=True,
+                clarification_question=(
+                    "Yêu cầu có liên quan tới thay đổi giờ rảnh hoặc thời hạn, "
+                    "hãy sửa trực tiếp trên bản tóm tắt và xác nhận lại UF1 giúp mình nhé."
+                ),
+                requires_draft_update=True,
+                unsupported_changes=[],
+                assistant_note="Mình chưa thay đổi phương án hiện tại.",
+                generation_tier="tier_3_rule_based",
+            )
+        if cls._UF2_ADJUST_UNSUPPORTED_RE.search(instruction):
+            return None
+        step_matches = list(cls._UF2_STEP_REF_RE.finditer(instruction))
+        if len(step_matches) != 1:
+            return None
+        raw_idx = " ".join(step_matches[0].group(1).lower().split())
+        step_num = int(raw_idx) if raw_idx.isdigit() else cls._UF2_ORDINAL_MAP.get(raw_idx)
+        if step_num is None or not (1 <= step_num <= len(snapshots)):
+            return None
+        durations = cls._extract_duration_minutes(instruction)
+        if len(durations) != 1 or durations[0] <= 0:
+            return None
+        secs = durations[0] * 60
+        target_key = snapshots[step_num - 1]["client_step_key"]
+        return CandidateAdjustmentResult(
+            step_edits=[
+                CandidateStepAdjustment(
+                    client_step_key=target_key,
+                    estimated_base_seconds=secs,
+                )
+            ],
+            requires_clarification=False,
+            clarification_question=None,
+            requires_draft_update=False,
+            unsupported_changes=[],
+            assistant_note=(
+                f"Đề xuất chỉnh thời lượng bước {step_num} thành {durations[0]} phút để bạn xem lại."
             ),
             generation_tier="tier_3_rule_based",
         )
@@ -1910,6 +2104,9 @@ class AIService:
             return CandidateAdjustmentResult(**values, generation_tier=tier)
         except Exception as exc:
             logger.warning("UF2 Candidate edit chưa hợp lệ: %s", type(exc).__name__)
+            fallback = self._fallback_adjust_candidate_by_nl(instruction, snapshots)
+            if fallback is not None:
+                return fallback
             raise TimeoutError(
                 "AI Candidate adjustment unavailable; keep the current plan"
             ) from exc

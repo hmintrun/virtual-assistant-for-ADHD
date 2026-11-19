@@ -878,7 +878,7 @@ class StepPromptItem(BaseModel):
     estimated_minutes: int = Field(
         ...,
         ge=5,
-        le=180,
+        le=480,
         description="Thời lượng làm chính dự kiến gốc tính bằng phút (chưa nhân hệ số buffer).",
     )
     micro_task_prompt: str = Field(
@@ -929,7 +929,7 @@ class LLMTaskDecompositionPayload(BaseModel):
     clarification_question: str | None = Field(default=None, max_length=350)
     steps: list[StepPromptItem] = Field(
         ...,
-        max_length=7,
+        max_length=20,
         description="Danh sách Steps; chỉ để rỗng khi cần làm rõ ý tưởng chia bước.",
     )
     reasoning: str = Field(
@@ -1053,7 +1053,7 @@ class LLMPlanAdjustmentPayload(BaseModel):
     updated_steps: list[StepPromptItem] = Field(
         ...,
         min_length=1,
-        max_length=7,
+        max_length=20,
         description=(
             "Danh sách các bước sau khi áp dụng yêu cầu chỉnh sửa của người dùng "
             "(giữ nguyên danh sách bước cũ nếu người dùng chỉ đổi giờ rảnh hoặc deadline)."

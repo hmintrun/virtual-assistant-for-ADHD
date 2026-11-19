@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
@@ -883,6 +885,8 @@ class AiLoadingScreen extends StatefulWidget {
 
 class _AiLoadingScreenState extends State<AiLoadingScreen> {
   String? _error;
+  Timer? _longPlanTimer;
+  bool _isLongPlanHint = false;
 
   @override
   void initState() {
@@ -890,8 +894,23 @@ class _AiLoadingScreenState extends State<AiLoadingScreen> {
     WidgetsBinding.instance.addPostFrameCallback((_) => _analyze());
   }
 
+  @override
+  void dispose() {
+    _longPlanTimer?.cancel();
+    super.dispose();
+  }
+
   Future<void> _analyze() async {
-    setState(() => _error = null);
+    _longPlanTimer?.cancel();
+    setState(() {
+      _error = null;
+      _isLongPlanHint = false;
+    });
+    _longPlanTimer = Timer(const Duration(seconds: 5), () {
+      if (mounted) {
+        setState(() => _isLongPlanHint = true);
+      }
+    });
     try {
       await context.read<TaskProvider>().prepareDraftAndAnalyze();
       if (!mounted) return;
@@ -901,6 +920,8 @@ class _AiLoadingScreenState extends State<AiLoadingScreen> {
       );
     } catch (error) {
       if (mounted) setState(() => _error = error.toString());
+    } finally {
+      _longPlanTimer?.cancel();
     }
   }
 
@@ -1044,7 +1065,9 @@ class _AiLoadingScreenState extends State<AiLoadingScreen> {
               ),
               const SizedBox(height: 6),
               Text(
-                'Cứ thong thả, từng chút một',
+                _isLongPlanHint
+                    ? 'Kế hoạch dài hạn đang được sắp theo từng cột mốc cho bạn...'
+                    : 'Cứ thong thả, từng chút một',
                 textAlign: TextAlign.center,
                 style: TextStyle(
                   fontFamily: 'Be Vietnam Pro',
