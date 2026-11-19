@@ -1,9 +1,13 @@
 # Định nghĩa lỗi nghiệp vụ (AppError) và bộ bắt lỗi tập trung theo đúng Error Envelope của Sheet
+import logging
+
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from app.schemas.common import ErrorDetail, ErrorEnvelope, FieldError, build_response_meta
+
+logger = logging.getLogger(__name__)
 
 
 class AppError(Exception):
@@ -46,7 +50,7 @@ def register_exception_handlers(app: FastAPI) -> None:
                 current_revisions=exc.current_revisions,
                 next_action=exc.next_action,
             ),
-            meta=build_response_meta(),
+            meta=build_response_meta(getattr(request.state, "request_id", None)),
         )
         return JSONResponse(
             status_code=exc.status_code,
@@ -75,9 +79,35 @@ def register_exception_handlers(app: FastAPI) -> None:
                 current_revisions={},
                 next_action="fix_fields",
             ),
-            meta=build_response_meta(),
+            meta=build_response_meta(getattr(request.state, "request_id", None)),
         )
         return JSONResponse(
             status_code=422,
+            content=envelope.model_dump(mode="json"),
+        )
+
+    @app.exception_handler(Exception)
+    async def handle_unexpected_error(request: Request, exc: Exception) -> JSONResponse:
+        request_id = getattr(request.state, "request_id", None)
+        logger.exception("Unhandled exception [request_id=%s]", request_id, exc_info=exc)
+        envelope = ErrorEnvelope(
+            error=ErrorDetail(
+                code="INTERNAL_ERROR",
+                message="Đã xảy ra lỗi hệ thống ngoài dự kiến.",
+                field_errors=[],
+                retryable=True,
+                current_revisions={},
+                next_action="retry_later",
+            ),
+            meta=build_response_meta(request_id),
+        )
+        headers = (
+            {"X-Request-ID": request_id}
+            if isinstance(request_id, str) and request_id
+            else None
+        )
+        return JSONResponse(
+            status_code=500,
+            headers=headers,
             content=envelope.model_dump(mode="json"),
         )
