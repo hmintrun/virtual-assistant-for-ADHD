@@ -116,8 +116,10 @@ class Settings(BaseSettings):
     VOICE_TTS_MAX_CHARS: int = Field(default=600, gt=0, le=2000)
     VOICE_TTS_CACHE_SIZE: int = Field(default=64, ge=0, le=512)
 
-    # UF1: Flash-Lite MINIMAL từ đầu; chuyển Qwen khi lỗi trong ngưỡng còn đủ thời gian dưới trần.
+    # UF1: trần cơ sở, ưu tiên Gemini và mốc hedge là ba giới hạn riêng.
     AI_UF1_TIMEOUT_SECONDS: float = Field(default=6.0, gt=0.0, le=15.0)
+    AI_UF1_ADAPTIVE_TIMEOUT_ENABLED: bool = True
+    AI_UF1_PRIMARY_PRIORITY_SECONDS: float = Field(default=4.5, ge=0.0, le=15.0)
     AI_UF1_GROQ_FAST_FAIL_SECONDS: float = Field(default=3.5, ge=0.0, le=15.0)
 
     # Khung thời gian A — Chỉnh kế hoạch bằng ngôn ngữ tự nhiên và UF6:

@@ -73,6 +73,18 @@ class ExecutionTimingProfile(NamedTuple):
     groq_hedge_at: float | None
 
 
+class _UF1DeadlineExceeded(TimeoutError):
+    """The UF1 request budget expired independently of the provider's timeout."""
+
+
+class _NoEligibleProvider(RuntimeError):
+    """None of the configured models can accept a request right now."""
+
+
+class _ProviderAttemptsExhausted(RuntimeError):
+    """The available branches ended without a usable response."""
+
+
 CircuitState = Literal["closed", "open", "half_open"]
 ErrorCategory = Literal["auth", "rate_limit", "timeout", "transient"]
 
@@ -101,6 +113,20 @@ class _ProbePingSchema(BaseModel):
 
 _RETRY_AFTER_SEC_RE = re.compile(r"try again in\s+(\d+(?:\.\d+)?)s", re.IGNORECASE)
 _RETRY_AFTER_MS_RE = re.compile(r"try again in\s+(\d+(?:\.\d+)?)ms", re.IGNORECASE)
+
+_UF1_RELATIVE_DATE_RE = re.compile(r"\b(?:hôm\s+nay|ngày\s+mai|mai|mốt|tuần\s+(?:này|sau)|cuối\s+tuần)\b", re.IGNORECASE)
+_UF1_EXCEPTION_RE = re.compile(r"\b(?:riêng|ngoại\s+lệ|trừ|chỉ\s+khi|bù\s+lại)\b", re.IGNORECASE)
+_UF1_CORRECTION_RE = re.compile(r"\b(?:à\s+nhầm|đính\s+chính|sửa\s+lại|thay\s+vì)\b", re.IGNORECASE)
+_UF1_TIME_RANGE_RE = re.compile(
+    r"\b\d{1,2}\s*(?::\d{2}|h(?:\d{2})?|giờ)\s*(?:–|-|đến|tới)\s*"
+    r"\d{1,2}\s*(?::\d{2}|h(?:\d{2})?|giờ)\b",
+    re.IGNORECASE,
+)
+_UF1_FOLLOWUP_FIELDS = (
+    re.compile(r"\b(?:phạm\s+vi|đầu\s+ra|\d+\s*(?:trang|slide|chương|mục|endpoint))\b", re.IGNORECASE),
+    re.compile(r"\b(?:rảnh|bận|khung\s+giờ)\b", re.IGNORECASE),
+    re.compile(r"\b(?:hạn(?:\s+chót)?|deadline|bắt\s+đầu|mốc\s+kết\s+thúc)\b", re.IGNORECASE),
+)
 
 _TIER3_CLAUSE_SPLIT_RE = re.compile(r"[,;\n]+|\.(?=\s|$)")
 _TIER3_DAILY_RE = re.compile(r"\b(?:hằng\s+ngày|hàng\s+ngày|mỗi\s+ngày)\b", re.IGNORECASE)
@@ -273,6 +299,8 @@ class ProviderHealthTracker:
         exc: BaseException,
         *,
         latency_ms: int | None = None,
+        failure_threshold_override: int | None = None,
+        cooldown_override: float | None = None,
     ) -> tuple[ErrorCategory, bool]:
         """Ghi nhận lỗi provider; bỏ qua `CancelledError` vì đó là hủy tác vụ sau khi có winner."""
         category, retryable, explicit_cooldown = _classify_provider_error(exc)
@@ -285,11 +313,16 @@ class ProviderHealthTracker:
         rec.last_error_type = type(exc).__name__
         rec.last_error_category = category
 
+        threshold = (
+            max(1, failure_threshold_override)
+            if failure_threshold_override is not None
+            else self._failure_threshold
+        )
         should_open = (
             was_half_open
             or category == "auth"
             or (category == "rate_limit" and explicit_cooldown is not None)
-            or rec.consecutive_failures >= self._failure_threshold
+            or rec.consecutive_failures >= threshold
         )
         if should_open:
             cooldown = (
@@ -298,7 +331,11 @@ class ProviderHealthTracker:
                 else (
                     min(60.0, max(1.0, explicit_cooldown))
                     if explicit_cooldown is not None
-                    else self._cooldown_seconds
+                    else (
+                        max(0.05, cooldown_override)
+                        if cooldown_override is not None
+                        else self._cooldown_seconds
+                    )
                 )
             )
             rec.state = "open"
@@ -354,7 +391,7 @@ class ProviderHealthTracker:
 
 UF1_EXTRACTION_SYSTEM_PROMPT = """UF1 ProPlan VA(ADHD-I):trích 4 trường từ `user_raw_input`(gộp `previous_draft` nếu có):
 1.`content`&`title`:việc cần làm;BẮT BUỘC sinh `title`<=100 ký tự từ `content`(CẤM `title=null` khi có việc);`goal` nếu nêu.
-2.`scope`:phạm vi/đầu ra.Nêu số lượng+đơn vị/hạng mục(VD:"10 trang Word","8 slide","3 module","2 service nhỏ","5 chương","6 bài","3 đề")->nhận ngay làm `scope`,CẤM `null` hỏi thêm định dạng;chỉ `null` khi thiếu khối lượng/đầu ra.
+2.`scope`:phạm vi/đầu ra.Giữ đủ số lượng,đơn vị,hạng mục và ràng buộc.VD:"10 trang Word","8 slide","3 module","4 bài"->nhận ngay làm `scope`,CẤM `null`(định dạng tùy chọn không chặn).Hai đầu ra rõ là chưa chọn->hỏi gộp với issue field_path="scope",blocking=true;không chốt thay user.
 3.`free_time_slots`&`structured_free_windows`:
 - `kind`:`'daily'`(mỗi/hằng ngày,tối nào cũng);`'weekly_rule'`(`weekday`/`weekdays`:`[1..5]`T2-T6,`[6,7]`cuối tuần);`'specific_date'`(`date` YYYY-MM-DD);`'date_range'`(`date_from`..`date_to`).
 - ISO Weekday("Thứ N"->N-1,CẤM Thứ Sáu=6):`1=T2,2=T3,3=T4,4=T5,5=T6(Thứ Sáu),6=T7(Thứ Bảy),7=CN`.
@@ -531,12 +568,36 @@ class AIService:
             )
         return self._groq_client
 
-    def _extraction_profile(self) -> ExecutionTimingProfile:
-        """UF1 dùng cùng một deadline cho Flash-Lite và nhánh Qwen dự phòng."""
+    def _extraction_profile(
+        self,
+        text: str = "",
+        *,
+        followup: bool = False,
+        edits_locked_field: bool = False,
+        needs_user_decision: bool = False,
+        retrying_fallback_edit: bool = False,
+    ) -> ExecutionTimingProfile:
+        """Budget semantic work from the current turn and cap every provider at the same deadline."""
         hard = self._settings.AI_UF1_TIMEOUT_SECONDS
+        if self._settings.AI_UF1_ADAPTIVE_TIMEOUT_ENABLED and hard >= 1.0 and not needs_user_decision:
+            spans = len(_UF1_TIME_RANGE_RE.findall(text))
+            exceptions = len(_UF1_EXCEPTION_RE.findall(text))
+            relative_dates = len(_UF1_RELATIVE_DATE_RE.findall(text))
+            if edits_locked_field or spans >= 3 or exceptions >= 2 or (exceptions and spans >= 2):
+                hard = min(15.0, hard + 4.0)
+            elif (
+                retrying_fallback_edit
+                or spans >= 2
+                or relative_dates >= 2
+                or (relative_dates and spans)
+                or _UF1_CORRECTION_RE.search(text)
+                or (followup and sum(bool(pattern.search(text)) for pattern in _UF1_FOLLOWUP_FIELDS) >= 2)
+            ):
+                hard = min(15.0, hard + 2.0)
         fast_fail = self._settings.AI_UF1_GROQ_FAST_FAIL_SECONDS
         groq_hedge_at = fast_fail if (fast_fail >= 1.0 and hard - fast_fail >= 1.0) else None
-        return ExecutionTimingProfile(hard, hard, hard, groq_hedge_at=groq_hedge_at)
+        priority = min(hard, self._settings.AI_UF1_PRIMARY_PRIORITY_SECONDS)
+        return ExecutionTimingProfile(hard, priority, hard, groq_hedge_at=groq_hedge_at)
 
     def _interactive_profile(self) -> ExecutionTimingProfile:
         """Khung thời gian A cho chỉnh kế hoạch bằng ngôn ngữ tự nhiên và UF6."""
@@ -988,7 +1049,7 @@ class AIService:
         force_minimal_thinking: bool = False,
     ) -> tuple[SchemaT, GenerationTier]:
         """
-        UF1 chỉ gọi Flash-Lite và cho phép Qwen khi thiếu Gemini hoặc Gemini lỗi sớm.
+        UF1 chạy Gemini và có thể hedge sang Groq trong cùng ngân sách.
         Các luồng còn lại dùng điều phối ưu tiên chất lượng:
         0. Pre-check Circuit Breaker (<0.01ms): bỏ qua model/provider đang OPEN để không chờ vô ích.
         1. `0.0s`: Chạy Primary. Nếu xong trước `primary_priority_until` -> nhận ngay.
@@ -1043,9 +1104,12 @@ class AIService:
 
         # Trường hợp cả Gemini lẫn Groq đều không có chứng thực hoặc đang OPEN toàn bộ -> thoát ngay <1ms
         if not primary_available and not can_use_backup and not has_groq:
-            raise RuntimeError(
+            raise _NoEligibleProvider(
                 f"{flow_name}: Toàn bộ provider AI chưa cấu hình hoặc đang tạm ngưng (Circuit Breaker OPEN)."
             )
+
+        uf1_timeout_threshold = max(4, self._health._failure_threshold * 2) if is_uf1 else None
+        uf1_timeout_cooldown = min(15.0, self._health._cooldown_seconds) if is_uf1 else None
 
         def _record_groq_timeout(active_model_ref: list[str]) -> None:
             targets = active_model_ref or [
@@ -1053,7 +1117,11 @@ class AIService:
             ]
             for gm in targets:
                 self._health.record_failure(
-                    "groq", gm, TimeoutError(f"{flow_name} timeout")
+                    "groq",
+                    gm,
+                    TimeoutError(f"{flow_name} timeout"),
+                    failure_threshold_override=uf1_timeout_threshold,
+                    cooldown_override=uf1_timeout_cooldown,
                 )
 
         # Không có Gemini khả dụng (chưa cấu hình hoặc cả Primary+Backup đều OPEN) -> chạy thẳng Groq ở 0.0s
@@ -1076,6 +1144,8 @@ class AIService:
                     return groq_only.result(), "tier_2_groq"
                 if not groq_only.done():
                     _record_groq_timeout(groq_only_active_model)
+                if is_uf1:
+                    raise _UF1DeadlineExceeded(f"UF1 vượt trần {profile.hard_timeout}s.")
                 raise TimeoutError(f"{flow_name} vượt trần thời gian xử lý ({profile.hard_timeout}s).")
             finally:
                 self._cancel_provider_task(groq_only)
@@ -1159,14 +1229,26 @@ class AIService:
                         return warm_result
                     if primary_task is not None and not primary_task.done():
                         self._health.record_failure(
-                            "gemini", primary_model, TimeoutError(f"{flow_name} timeout")
+                            "gemini",
+                            primary_model,
+                            TimeoutError(f"{flow_name} timeout"),
+                            failure_threshold_override=uf1_timeout_threshold,
+                            cooldown_override=uf1_timeout_cooldown,
                         )
                     if backup_task is not None and not backup_task.done():
                         self._health.record_failure(
-                            "gemini", backup_model, TimeoutError(f"{flow_name} timeout")
+                            "gemini",
+                            backup_model,
+                            TimeoutError(f"{flow_name} timeout"),
+                            failure_threshold_override=uf1_timeout_threshold,
+                            cooldown_override=uf1_timeout_cooldown,
                         )
                     if groq_task is not None and not groq_task.done():
                         _record_groq_timeout(groq_active_model)
+                    if is_uf1:
+                        # Local deadline cancels valid in-flight work; only prolonged
+                        # repeated UF1 timeouts should trip the breaker (threshold >= 4).
+                        raise _UF1DeadlineExceeded(f"UF1 vượt trần {profile.hard_timeout}s.")
                     raise TimeoutError(
                         f"{flow_name} vượt trần thời gian xử lý ({profile.hard_timeout}s)."
                     )
@@ -1253,7 +1335,7 @@ class AIService:
                 )
                 groq_exhausted = not has_groq or groq_harvested or (is_uf1 and groq_task is None)
                 if primary_failed and backup_exhausted and groq_exhausted and warm_result is None:
-                    raise RuntimeError(f"{flow_name}: Toàn bộ các tầng AI đều thất bại.")
+                    raise _ProviderAttemptsExhausted(f"{flow_name}: Toàn bộ các tầng AI đều thất bại.")
 
                 # 7. Tính mốc đánh thức gần nhất để không dùng vòng lặp bận (no busy-polling)
                 next_wake = deadline
@@ -1345,6 +1427,10 @@ class AIService:
         default_free_windows: list[dict[str, Any]] | None = None,
         locked_fields: list[str] | None = None,
         reference_now: datetime | None = None,
+        followup_message: str | None = None,
+        requested_edit_fields: tuple[str, ...] = (),
+        needs_user_decision: bool = False,
+        retrying_fallback_edit: bool = False,
     ) -> TaskExtractionResult:
         """
         Trích xuất 4 trường bắt buộc ở UF1 (hỗ trợ hợp nhất `previous_draft` khi người dùng trả lời
@@ -1383,6 +1469,14 @@ class AIService:
         if locked_fields:
             context_payload["locked_fields"] = list(locked_fields)
         user_prompt = json.dumps(context_payload, ensure_ascii=False, separators=(",", ":"))
+        profile = self._extraction_profile(
+            followup_message if followup_message is not None else cleaned_input,
+            followup=followup_message is not None,
+            edits_locked_field=bool(set(locked_fields or ()).intersection(requested_edit_fields)),
+            needs_user_decision=needs_user_decision,
+            retrying_fallback_edit=retrying_fallback_edit,
+        )
+        started = time.perf_counter()
 
         try:
             llm_payload, winner_tier = await self._execute_hedged_structured(
@@ -1390,13 +1484,13 @@ class AIService:
                 system_prompt=UF1_EXTRACTION_SYSTEM_PROMPT,
                 user_prompt=user_prompt,
                 schema_cls=LLMTaskExtractionPayload,
-                profile=self._extraction_profile(),
+                profile=profile,
             )
             result = TaskExtractionResult(
                 **llm_payload.model_dump(),
                 generation_tier=winner_tier,
             )
-            return self._enforce_uf1_temporal_guardrails(
+            verified = self._enforce_uf1_temporal_guardrails(
                 result,
                 current_dt=current_dt,
                 timezone=timezone,
@@ -1405,10 +1499,28 @@ class AIService:
                 ),
                 user_input=cleaned_input,
             )
+            logger.info(
+                "UF1 extraction tier=%s budget_s=%.2f latency_ms=%d",
+                winner_tier,
+                profile.hard_timeout,
+                round((time.perf_counter() - started) * 1000),
+            )
+            return verified
         except Exception as exc:
+            if isinstance(exc, _UF1DeadlineExceeded):
+                reason = "deadline_exhausted"
+            elif isinstance(exc, _NoEligibleProvider):
+                reason = "no_eligible_provider"
+            elif isinstance(exc, _ProviderAttemptsExhausted):
+                reason = "provider_attempts_exhausted"
+            else:
+                reason = _classify_provider_error(exc)[0]
             logger.warning(
-                "UF1 chuyển sang Tier 3 Rule-based do lỗi: %s",
+                "UF1 fallback reason=%s error=%s budget_s=%.2f latency_ms=%d",
+                reason,
                 type(exc).__name__,
+                profile.hard_timeout,
+                round((time.perf_counter() - started) * 1000),
             )
             return self._fallback_extract_task(
                 cleaned_input,

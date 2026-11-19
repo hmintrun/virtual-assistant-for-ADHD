@@ -548,33 +548,44 @@ def _item_dates(item: ExtractedFreeWindowSchema) -> list[date]:
     return []
 
 
+_UF1_QTY = r"(?:\d+|một|hai|ba|bốn|năm|sáu|bảy|tám|chín|mười)"
+_UF1_SCOPE_UNIT = (
+    r"(?:trang|slide|chương|bài|mục|đề|endpoint|biểu\s+đồ|module|service|báo\s+cáo|video|file|phần)"
+)
+
 _FIELD_EXPLICIT_EDIT_PATTERNS: dict[str, re.Pattern[str]] = {
     "title": re.compile(
-        r"(?:đổi|sửa|chỉnh|cập\s+nhật|đặt\s+lại|thay)\s+(?:lại\s+)?(?:tiêu\s+đề|tên|title)"
+        r"(?:đổi|sửa|chỉnh|cập\s+nhật|đặt\s+lại|thay(?:\s+đổi)?)\s+(?:lại\s+)?(?:tiêu\s+đề|tên|title)"
         r"|tiêu\s+đề\s+mới",
         re.IGNORECASE,
     ),
     "description": re.compile(
-        r"(?:đổi|sửa|chỉnh|cập\s+nhật|thay\s+đổi|thay)\s+(?:lại\s+)?(?:nội\s+dung|mô\s+tả|description|công\s+việc)",
+        r"(?:đổi|sửa|chỉnh|cập\s+nhật|thay(?:\s+đổi)?)\s+(?:lại\s+)?(?:nội\s+dung|mô\s+tả|description|công\s+việc)",
         re.IGNORECASE,
     ),
     "goal": re.compile(
-        r"(?:đổi|sửa|chỉnh|cập\s+nhật|thay)\s+(?:lại\s+)?(?:mục\s+tiêu|goal)",
+        r"(?:đổi|sửa|chỉnh|cập\s+nhật|thay(?:\s+đổi)?)\s+(?:lại\s+)?(?:mục\s+tiêu|goal)",
         re.IGNORECASE,
     ),
     "scope": re.compile(
-        r"(?:đổi|sửa|chỉnh|cập\s+nhật|tăng|giảm|thêm|bớt|thay)\s+(?:lại\s+)?(?:phạm\s+vi|scope|đầu\s+ra|số\s+(?:trang|slide|chương|bài|đề))"
+        r"(?:đổi|sửa|chỉnh|cập\s+nhật|tăng|giảm|thêm|bớt|thay(?:\s+đổi)?)\s+"
+        r"(?:lại\s+|sang\s+|thành\s+|lên\s+|xuống\s+)?"
+        r"(?:phạm\s+vi|scope|đầu\s+ra|(?:số\s+)?(?:trang|slide|chương|bài|đề)"
+        r"|" + _UF1_QTY + r"\s+" + _UF1_SCOPE_UNIT + r"\b)"
         r"|phạm\s+vi\s+(?:mới|là|thành)"
+        r"|(?:làm|viết|soạn)\s+" + _UF1_QTY + r"\s+" + _UF1_SCOPE_UNIT
+        + r"\b[^.!?\n]{0,30}\bthay\s+vì\b"
         r"|(?:thầy|cô|sếp|nhóm)\s+yêu\s+cầu.*\b(?:trang|slide|chương|bài|đề|module|service)\b",
         re.IGNORECASE,
     ),
     "time_constraint": re.compile(
-        r"(?:đổi|sửa|chỉnh|cập\s+nhật|lùi|dời|nới|gia\s+hạn|thay)\s+(?:lại\s+)?(?:hạn(?:\s+chót)?|deadline|thời\s+hạn|ngày\s+nộp|giờ\s+nộp|mốc|thời\s+gian)"
+        r"(?:đổi|sửa|chỉnh|cập\s+nhật|lùi|dời|nới|gia\s+hạn|thay(?:\s+đổi)?)\s+(?:lại\s+)?(?:hạn(?:\s+chót)?|deadline|thời\s+hạn|ngày\s+nộp|giờ\s+nộp|mốc|thời\s+gian)"
+        r"|(?:lùi|dời|nới|đổi)\s+(?:lại\s+)?(?:sang|thành|tới|đến)\s+(?:\d{1,2}\s*(?:h|:|g|giờ)|ngày\s+mai|mai|mốt|thứ\s*(?:hai|ba|tư|năm|sáu|bảy|[2-7])|chủ\s*nhật|tuần\s+sau|cuối\s+tuần|(?:ngày\s+)?\d{1,2}/\d{1,2})"
         r"|(?:hạn\s+chót|deadline|thời\s+hạn)\s+(?:mới|đổi|sang|thành|lại)",
         re.IGNORECASE,
     ),
     "availability": re.compile(
-        r"(?:đổi|sửa|chỉnh|cập\s+nhật|thêm|bớt|xóa|bỏ|thay|mở\s+thêm)\s+(?:lại\s+)?(?:giờ\s+rảnh|khung\s+giờ|lịch\s+rảnh|lịch\s+học|lịch\s+làm|ngoại\s+lệ)"
+        r"(?:đổi|sửa|chỉnh|cập\s+nhật|thêm|bớt|xóa|bỏ|thay(?:\s+đổi)?|mở\s+thêm)\s+(?:lại\s+)?(?:giờ\s+rảnh|khung\s+giờ|lịch\s+rảnh|lịch\s+học|lịch\s+làm|ngoại\s+lệ)"
         r"|\b(?:rảnh|bận)\b.*(?:\d{1,2}\s*(?:h|:|g|giờ)|cả\s+ngày|cuối\s+tuần|hằng\s+ngày|mỗi\s+ngày|thứ\s*(?:hai|ba|tư|năm|sáu|bảy|[2-7])|chủ\s*nhật)"
         r"|(?:dùng|theo|lấy|áp\s+dụng)\s+(?:lại\s+)?(?:lịch|giờ(?:\s+rảnh)?)\s+mặc\s+định",
         re.IGNORECASE,
@@ -591,6 +602,71 @@ _DEFAULT_AVAIL_EXCLUDE_RE = re.compile(
     re.IGNORECASE,
 )
 
+_UF1_NEGATED_EDIT_RE = re.compile(r"\b(?:không|đừng|chưa)(?:\s+(?:cần|muốn))?\s*$", re.IGNORECASE)
+_UF1_KEEP_FIELD_RE = re.compile(r"\bgiữ\s+nguyên\s*$", re.IGNORECASE)
+_UF1_KEEP_CURRENT_RE = re.compile(
+    r"\bgiữ\s+(?:nguyên|như\s+cũ"
+    r"|lại(?:\s+(?:cái|giá\s+trị|mức|bản))?(?:\s+(?:cũ|hiện\s+tại)|(?=\s*[.!?,;\n]|$))"
+    r"|giá\s+trị\s+(?:cũ|hiện\s+tại)"
+    r"|(?:lại\s+)?(?:tiêu\s+đề|nội\s+dung|mô\s+tả|mục\s+tiêu|phạm\s+vi|đầu\s+ra|thời\s+gian|hạn(?:\s+chót)?|deadline|giờ\s+rảnh|lịch\s+rảnh|khung\s+giờ)\s+(?:cũ|hiện\s+tại))\b"
+    r"|\b(?:không|khỏi|thôi)\s+(?:(?:cần|muốn)\s+)?(?:đổi|sửa|chỉnh|cập\s+nhật|thay(?:\s+đổi)?)(?:\s+(?:nữa|lại|thêm))?\b",
+    re.IGNORECASE,
+)
+_UF1_KEEP_ALL_RE = re.compile(r"\b(?:tất\s+cả|toàn\s+bộ|cả\s+hai|hết)\b", re.IGNORECASE)
+_UF1_FIELD_MENTION_PATTERNS: dict[str, re.Pattern[str]] = {
+    "title": re.compile(r"\b(?:tiêu\s+đề|tên|title)\b", re.IGNORECASE),
+    "description": re.compile(r"\b(?:nội\s+dung|mô\s+tả|description|công\s+việc)\b", re.IGNORECASE),
+    "goal": re.compile(r"\b(?:mục\s+tiêu|goal)\b", re.IGNORECASE),
+    "scope": re.compile(r"\b(?:phạm\s+vi|scope|đầu\s+ra)\b", re.IGNORECASE),
+    "time_constraint": re.compile(
+        r"\b(?:thời\s+gian|hạn(?:\s+chót)?|deadline|thời\s+hạn|ngày\s+nộp|giờ\s+nộp)\b",
+        re.IGNORECASE,
+    ),
+    "availability": re.compile(
+        r"\b(?:giờ\s+rảnh|khung\s+giờ|lịch\s+rảnh|lịch\s+học|lịch\s+làm|ngoại\s+lệ|availability)\b",
+        re.IGNORECASE,
+    ),
+}
+_UF1_SCOPE_CHOICE_RE = re.compile(
+    r"\b(?:chưa\s+(?:chốt|quyết\s+định|chọn)(?:\s+được)?\s+(?:phạm\s+vi|đầu\s+ra)"
+    r"|(?:hai|ba|2|3|các)\s+phương\s+án\s+(?:đều\s+)?(?:đang\s+)?(?:để\s+ngỏ|chưa\s+chốt))\b",
+    re.IGNORECASE,
+)
+_UF1_SCOPE_ALTERNATIVES_RE = re.compile(r"\b(?:hoặc|hay|phương\s+án)\b", re.IGNORECASE)
+_UF1_SCOPE_UNDECIDED_RE = re.compile(
+    r"\b(?:chưa\s+(?:chốt|quyết\s+định|chọn|biết)(?:\s+được)?|phân\s+vân)\b",
+    re.IGNORECASE,
+)
+_UF1_SCOPE_ALT_DELIVERABLE_RE = re.compile(
+    r"\b" + _UF1_QTY + r"\s+" + _UF1_SCOPE_UNIT
+    + r"\b[^.!?\n]{0,25}\b(?:hoặc|hay|với|và)\b[^.!?\n]{0,25}\b"
+    + _UF1_QTY + r"\s+" + _UF1_SCOPE_UNIT + r"\b"
+    + r"|\b(?:phương\s+án|đầu\s+ra|phạm\s+vi)\b[^.!?\n]{0,40}\b(?:hoặc|hay)\b",
+    re.IGNORECASE,
+)
+_UF1_SCOPE_UNIT_RE = re.compile(r"\b" + _UF1_SCOPE_UNIT + r"\b", re.IGNORECASE)
+_UF1_SCOPE_SELECTION_RE = re.compile(
+    r"(?:^|[.!?;\n,])\s*(?:(?:tôi|mình|em|anh|chị|nhóm|chúng\s+tôi|thôi|vậy|thế|ok|oke)\s+){0,2}"
+    r"(?:chốt|chọn|quyết\s+định|lấy)\b"
+    r"|(?:^|[.!?;\n,])\s*(?:(?:thôi|vậy|mình|tôi|em|anh|chị)\s+)?(?:làm|viết|soạn|nộp)\s+"
+    r"(?:(?:báo\s+cáo|bài|bản|tài\s+liệu|bộ|đề|phần)\s+)?"
+    + _UF1_QTY + r"\s+" + _UF1_SCOPE_UNIT + r"\b"
+    r"|^\s*(?:(?:báo\s+cáo|bài|bản|tài\s+liệu|bộ)\s+)?"
+    + _UF1_QTY + r"\s+" + _UF1_SCOPE_UNIT
+    + r"(?:\s+(?:word|pdf|powerpoint|ppt|pptx|excel|docs?|thuyết\s+trình))?"
+    + r"\s*(?:(?:thôi|nhé|nha|đi|nhỉ|là\s+được|như\s+vậy)\s*)?[.!]?$"
+    r"|\bphương\s+án\s+(?:\d+|một|hai|ba|đầu(?:\s+tiên)?|thứ\s+(?:nhất|hai|ba)|sau|cuối)\b",
+    re.IGNORECASE,
+)
+_UF1_REVIEW_FIELD_LABELS = {
+    "title": "tiêu đề",
+    "description": "nội dung",
+    "goal": "mục tiêu",
+    "scope": "phạm vi",
+    "time_constraint": "thời gian",
+    "availability": "giờ rảnh",
+}
+
 
 def _user_explicitly_edits_field(text: str | None, field_name: str) -> bool:
     """Kiểm tra người dùng có chủ động yêu cầu sửa trường đang bị khóa hay không (RISK-UF1-03)."""
@@ -600,6 +676,52 @@ def _user_explicitly_edits_field(text: str | None, field_name: str) -> bool:
     if pattern is None:
         return False
     return bool(pattern.search(text))
+
+
+def _uf1_requested_edits(text: str, summary: TaskSummary) -> tuple[str, ...]:
+    fields: list[str] = []
+    for field, pattern in _FIELD_EXPLICIT_EDIT_PATTERNS.items():
+        if getattr(summary, field) is None and not (
+            field == "availability" and summary.availability_ref is not None
+        ):
+            continue
+        if any(
+            not _UF1_NEGATED_EDIT_RE.search(text[max(0, hit.start() - 30):hit.start()])
+            and not _UF1_KEEP_FIELD_RE.search(text[max(0, hit.start() - 30):hit.start()])
+            for hit in pattern.finditer(text)
+        ):
+            fields.append(field)
+    return tuple(fields)
+
+
+def _uf1_kept_pending_fields(
+    text: str,
+    pending_fields: tuple[str, ...],
+    requested_edits: tuple[str, ...],
+) -> set[str]:
+    if not text.strip() or not pending_fields or not _UF1_KEEP_CURRENT_RE.search(text):
+        return set()
+    candidates = [field for field in pending_fields if field not in requested_edits]
+    if not candidates:
+        return set()
+    mentioned = {
+        field
+        for field in candidates
+        if (pattern := _UF1_FIELD_MENTION_PATTERNS.get(field)) is not None and pattern.search(text)
+    }
+    if mentioned:
+        return mentioned
+    if len(candidates) == 1 or _UF1_KEEP_ALL_RE.search(text):
+        return set(candidates)
+    return set()
+
+
+def _is_scope_choice_requirement(text: str) -> bool:
+    return bool(
+        _UF1_SCOPE_CHOICE_RE.search(text)
+        or _UF1_SCOPE_ALT_DELIVERABLE_RE.search(text)
+        or (_UF1_SCOPE_ALTERNATIVES_RE.search(text) and _UF1_SCOPE_UNIT_RE.search(text))
+    )
 
 
 def _user_requests_default_availability(text: str | None) -> bool:
@@ -1628,27 +1750,44 @@ async def patch_draft(
         if "availability" in summary_patch:
             # User sửa/xóa giờ riêng không có nghĩa đồng ý quay về giờ chung cũ.
             summary_patch["availability_ref"] = None
-        current_summary_dict = draft.summary.model_dump()
         updated_fields: list[str] = []
         for field_name, new_val in summary_patch.items():
             if field_name == "extra_requirements" and new_val is None:
                 new_val = []
-            if current_summary_dict.get(field_name) != new_val:
+            current_val = getattr(draft.summary, field_name, None)
+            if current_val != new_val:
                 updated_fields.append(field_name)
                 summary_changed = True
 
         # User có thể chọn giữ giá trị cũ khi trả lời câu hỏi review của AI.
-        reviewed_fields = {
-            issue.field_path
+        review_issue_roots = {
+            issue.field_path.split(".")[0]
             for issue in draft.summary.clarification_issues
             if issue.code.startswith("AI_")
-            and issue.field_path.split(".")[0] in summary_patch
             and (
-                len(payload.changes.summary.model_fields_set) == 1
-                or summary_patch[issue.field_path.split(".")[0]]
-                != current_summary_dict.get(issue.field_path.split(".")[0])
+                issue.code.endswith("_REVIEW_REQUIRED")
+                or issue.code == "AI_SCOPE_CHOICE_REQUIRED"
             )
         }
+        all_sent_fields_under_review = bool(payload.changes.summary.model_fields_set) and (
+            payload.changes.summary.model_fields_set <= review_issue_roots
+        )
+        reviewed_fields: set[str] = set()
+        for issue in draft.summary.clarification_issues:
+            if not issue.code.startswith("AI_"):
+                continue
+            root = issue.field_path.split(".")[0]
+            if root not in summary_patch:
+                continue
+            patched_val = summary_patch[root]
+            if root == "extra_requirements" and patched_val is None:
+                patched_val = []
+            if (
+                len(payload.changes.summary.model_fields_set) == 1
+                or all_sent_fields_under_review
+                or patched_val != getattr(draft.summary, root, None)
+            ):
+                reviewed_fields.add(issue.field_path)
         if reviewed_fields:
             summary_changed = True
             updated_fields.extend(
@@ -1977,6 +2116,53 @@ async def analyze_draft(
     if db is not None and db.in_transaction():
         await db.rollback()
     input_text = "\n".join(value for value in (payload.raw_input, payload.message) if value)
+    latest_message = (payload.message or "").strip()
+    new_raw_text = (payload.raw_input or "").strip()
+    raw_changed = new_raw_text != (snapshot_draft.raw_input or "").strip()
+    edit_text = latest_message or (new_raw_text if raw_changed else "")
+    never_analyzed = (
+        not snapshot_draft.ai_context.get("uf1_analyzed")
+        and not any(s.source == "ai_suggested" for s in summary.field_sources.values())
+        and not any(i.code.startswith("AI_") for i in summary.clarification_issues)
+    )
+    latest_text = edit_text or (
+        new_raw_text if (snapshot_draft.summary_revision == 1 or never_analyzed) else ""
+    )
+    requested_edits = _uf1_requested_edits(edit_text, summary)
+    pending_fields = tuple(
+        dict.fromkeys(
+            issue.field_path
+            for issue in summary.clarification_issues
+            if issue.code == "AI_FALLBACK_REVIEW_REQUIRED"
+        )
+    )
+    kept_pending_fields = _uf1_kept_pending_fields(edit_text, pending_fields, requested_edits)
+    active_pending_fields = set(pending_fields) - kept_pending_fields
+    reviewed_edits = set(requested_edits)
+    if pending_fields and not latest_message and new_raw_text:
+        reviewed_edits.update(_uf1_requested_edits(new_raw_text, summary))
+    scope_needs_choice = bool(
+        (
+            _UF1_SCOPE_CHOICE_RE.search(latest_text)
+            and _UF1_SCOPE_ALTERNATIVES_RE.search(latest_text)
+        )
+        or (
+            _UF1_SCOPE_UNDECIDED_RE.search(latest_text)
+            and _UF1_SCOPE_ALT_DELIVERABLE_RE.search(latest_text)
+        )
+    )
+    scope_choice_pending = any(
+        issue.code == "AI_SCOPE_CHOICE_REQUIRED" for issue in summary.clarification_issues
+    )
+    has_explicit_decision_verb = bool(
+        re.search(r"\b(?:chốt|chọn|quyết\s+định)\b", edit_text, re.IGNORECASE)
+    )
+    user_selected_scope = bool(
+        not scope_needs_choice
+        and _UF1_SCOPE_SELECTION_RE.search(edit_text)
+        and (has_explicit_decision_verb or not _UF1_SCOPE_ALT_DELIVERABLE_RE.search(edit_text))
+    )
+    needs_scope_decision = scope_needs_choice or (scope_choice_pending and not user_selected_scope)
     try:
         extracted = TaskExtractionResult.model_validate(
             await ai_service.extract_task_intent(
@@ -1985,6 +2171,10 @@ async def analyze_draft(
                 previous_draft=previous,
                 default_free_windows=default_free_windows,
                 locked_fields=locked_fields or None,
+                followup_message=latest_message or None,
+                requested_edit_fields=tuple(sorted(reviewed_edits | active_pending_fields)),
+                needs_user_decision=needs_scope_decision,
+                retrying_fallback_edit=bool(active_pending_fields),
             )
         )
     except (TimeoutError, ValidationError) as exc:
@@ -2033,12 +2223,21 @@ async def analyze_draft(
     merged_updates: dict[str, object] = {}
     ai_issues: list[ClarificationIssue] = []
     has_followup_message = bool(payload.message and payload.message.strip())
+    used_fallback = extracted.generation_tier == "tier_3_rule_based"
+    if used_fallback:
+        frozen_fields = set(pending_fields) | set(requested_edits)
+    else:
+        frozen_fields = set(kept_pending_fields)
+    if needs_scope_decision:
+        frozen_fields.add("scope")
     for field_name, proposed_val in (
         ("title", extracted.title),
         ("description", extracted.content),
         ("goal", extracted.goal),
         ("scope", extracted.scope),
     ):
+        if field_name in frozen_fields:
+            continue
         current_value = getattr(current_draft.summary, field_name)
         if proposed_val is None or proposed_val == current_value:
             continue
@@ -2048,8 +2247,10 @@ async def analyze_draft(
             and source.source in {"user_confirmed", "user_input"}
             and source.source_ref != "raw_input"
         ):
-            if has_followup_message and not _user_explicitly_edits_field(
-                payload.message, field_name
+            if (
+                has_followup_message
+                and field_name not in active_pending_fields
+                and not _user_explicitly_edits_field(payload.message, field_name)
             ):
                 continue
             ai_issues.append(
@@ -2075,7 +2276,17 @@ async def analyze_draft(
         )
     requirements = list(current_draft.summary.extra_requirements)
     seen_requirements = {item.strip() for item in requirements}
-    for item in extracted.extra_requirements:
+    if used_fallback and frozen_fields:
+        accepted_requirements: tuple[str, ...] | list[str] = ()
+    elif needs_scope_decision:
+        accepted_requirements = [
+            item
+            for item in extracted.extra_requirements
+            if not _is_scope_choice_requirement(item)
+        ]
+    else:
+        accepted_requirements = extracted.extra_requirements
+    for item in accepted_requirements:
         cleaned = item.strip()
         if cleaned and cleaned not in seen_requirements:
             requirements.append(cleaned)
@@ -2094,7 +2305,9 @@ async def analyze_draft(
         getattr(proposed_time, field) is not None
         for field in ("start_at", "deadline_at", "finish_by_at")
     )
-    if has_proposed_time or extracted.deadline is not None:
+    if "time_constraint" not in frozen_fields and (
+        has_proposed_time or extracted.deadline is not None
+    ):
         old_time = current_draft.summary.time_constraint
         values = (
             old_time.model_dump(mode="json")
@@ -2179,6 +2392,7 @@ async def analyze_draft(
             ):
                 if not (
                     has_followup_message
+                    and "time_constraint" not in active_pending_fields
                     and not _user_explicitly_edits_field(payload.message, "time_constraint")
                 ):
                     time_ai_issues.append(
@@ -2213,14 +2427,16 @@ async def analyze_draft(
                     "free_time_slots": [w.raw_phrase for w in default_windows_objs],
                 }
             )
-    proposed_availability, availability_state = _availability_proposal(
-        extracted,
-        current_draft,
-        availability,
-        timezone_name,
-        effective_time=effective_time,
-    )
-    if availability_state is not None:
+    proposed_availability, availability_state = None, None
+    if "availability" not in frozen_fields:
+        proposed_availability, availability_state = _availability_proposal(
+            extracted,
+            current_draft,
+            availability,
+            timezone_name,
+            effective_time=effective_time,
+        )
+    if availability_state is not None and proposed_availability is not None:
         proposal_windows, unresolved = availability_state
         old_availability = current_draft.summary.availability
         source = current_draft.summary.field_sources.get("availability")
@@ -2228,6 +2444,7 @@ async def analyze_draft(
         if proposed_availability != old_availability and protected:
             if not (
                 has_followup_message
+                and "availability" not in active_pending_fields
                 and not _user_explicitly_edits_field(payload.message, "availability")
             ):
                 context["availability_proposal"] = proposed_availability.model_dump(mode="json")
@@ -2288,6 +2505,29 @@ async def analyze_draft(
         unresolved = []
 
     ai_issues.extend(time_ai_issues)
+    for field in requested_edits if used_fallback else ():
+        if field in pending_fields:
+            continue
+        label = _UF1_REVIEW_FIELD_LABELS[field]
+        ai_issues.append(
+            ClarificationIssue(
+                code="AI_FALLBACK_REVIEW_REQUIRED",
+                field_path=field,
+                message=f"Yêu cầu đổi {label} chưa được áp dụng. Bản nháp vẫn giữ giá trị hiện tại.",
+                question=f"Bạn muốn giữ {label} hiện tại hay cập nhật lại?",
+                blocking=True,
+            )
+        )
+    if scope_needs_choice:
+        ai_issues.append(
+            ClarificationIssue(
+                code="AI_SCOPE_CHOICE_REQUIRED",
+                field_path="scope",
+                message="Phạm vi còn nhiều phương án chưa chốt.",
+                question="Bạn muốn chốt phương án đầu ra nào cho việc này?",
+                blocking=True,
+            )
+        )
 
     eff_title = merged_updates.get("title", current_draft.summary.title)
     eff_desc = merged_updates.get("description", current_draft.summary.description)
@@ -2324,6 +2564,8 @@ async def analyze_draft(
     )
     for item in extracted.clarification_issues:
         normalized_code = item.code if item.code.startswith("AI_") else f"AI_{item.code}"
+        if normalized_code in {"AI_FALLBACK_REVIEW_REQUIRED", "AI_SCOPE_CHOICE_REQUIRED"}:
+            continue
         is_avail_issue = item.field_path in {
             "availability",
             "availability_ref",
@@ -2344,17 +2586,7 @@ async def analyze_draft(
             )
         ):
             continue
-        if (
-            has_scope
-            and (
-                item.field_path == "scope"
-                or normalized_code in {"AI_MISSING_SCOPE", "AI_SCOPE_REQUIRED"}
-            )
-            and not any(
-                i.code == "AI_FIELD_REVIEW_REQUIRED" and i.field_path == "scope"
-                for i in ai_issues
-            )
-        ):
+        if has_scope and normalized_code in {"AI_MISSING_SCOPE", "AI_SCOPE_REQUIRED"}:
             continue
         if (
             has_tc
@@ -2511,6 +2743,48 @@ async def analyze_draft(
         if i.code.startswith("AI_") and i.code != "AI_FALLBACK_NOTICE"
     }
     for key, issue in active_keys.items():
+        if issue.code == "AI_SCOPE_CHOICE_REQUIRED":
+            same_scope_confirmed = (
+                extracted.scope is not None
+                and current_draft.summary.scope is not None
+                and extracted.scope.strip() == current_draft.summary.scope.strip()
+            )
+            if (
+                not scope_needs_choice
+                and not used_fallback
+                and user_selected_scope
+                and (
+                    "scope" in merged_updates
+                    or same_scope_confirmed
+                    or any(
+                        current.field_path == "scope" and current.code == "AI_FIELD_REVIEW_REQUIRED"
+                        for current in ai_issues
+                    )
+                )
+            ):
+                continue
+            if issue not in ai_issues:
+                ai_issues.append(issue)
+            continue
+        if issue.code == "AI_FALLBACK_REVIEW_REQUIRED":
+            kept_by_user = (
+                issue.field_path in kept_pending_fields
+                and issue.field_path not in requested_edits
+            )
+            resolved_by_ai = not used_fallback and (
+                issue.field_path in merged_updates
+                or any(
+                    current.field_path == issue.field_path
+                    and current.code.endswith("_REVIEW_REQUIRED")
+                    and current.code != "AI_FALLBACK_REVIEW_REQUIRED"
+                    for current in ai_issues
+                )
+            )
+            if kept_by_user or resolved_by_ai:
+                continue
+            if issue not in ai_issues:
+                ai_issues.append(issue)
+            continue
         if (
             not issue.code.endswith("_REVIEW_REQUIRED")
             and (
@@ -2667,6 +2941,7 @@ async def analyze_draft(
     if payload.message is not None:
         new_raw_input = "\n".join(value for value in (new_raw_input, payload.message) if value)
 
+    context["uf1_analyzed"] = True
     updated_draft = current_draft.model_copy(
         update={
             "raw_input": new_raw_input,
