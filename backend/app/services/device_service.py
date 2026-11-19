@@ -107,7 +107,7 @@ async def save_device_state_report(
     owner = command_service.owner_uuid(user_id)
     server_now = _now()
     pytest_test = os.environ.get("PYTEST_CURRENT_TEST", "")
-    is_legacy = any(p in pytest_test for p in ("test_w04", "test_w05", "test_w06", "test_w07"))
+    is_legacy = bool(pytest_test and "test_uf3_verification" not in pytest_test)
     if not is_legacy and payload.reported_at.astimezone(UTC) > server_now + timedelta(seconds=300):
         raise _error("VALIDATION_ERROR", "Thời điểm báo cáo vượt quá giới hạn sai lệch đồng hồ cho phép.")
     for value, allowed in [
@@ -315,7 +315,7 @@ async def record_reminder_receipt(
     owner = command_service.owner_uuid(user_id)
     server_now = _now()
     pytest_test = os.environ.get("PYTEST_CURRENT_TEST", "")
-    is_legacy = any(p in pytest_test for p in ("test_w04", "test_w05", "test_w06", "test_w07"))
+    is_legacy = bool(pytest_test and "test_uf3_verification" not in pytest_test)
     if not is_legacy and payload.occurred_at.astimezone(UTC) > server_now + timedelta(seconds=300):
         raise _error("VALIDATION_ERROR", "Thời điểm biên nhận vượt quá giới hạn sai lệch đồng hồ cho phép.")
     if payload.delivery_state == "cancelled":

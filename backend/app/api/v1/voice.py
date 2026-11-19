@@ -294,6 +294,8 @@ async def create_transcription(
     # 1. REPLAY FIRST: kiểm tra DB và cache bộ nhớ TRƯỚC khi gọi guard nghiệp vụ
     saved = await command_service.replay(db, current_user.user_id, idempotency_key, digest)
     if saved is not None:
+        if db.in_transaction():
+            await db.rollback()
         return SuccessEnvelope(
             data=TranscriptionData.model_validate(saved), meta=build_response_meta()
         )
@@ -325,6 +327,8 @@ async def create_transcription(
         await event.wait()
         saved = await command_service.replay(db, current_user.user_id, idempotency_key, digest)
         if saved is not None:
+            if db.in_transaction():
+                await db.rollback()
             return SuccessEnvelope(
                 data=TranscriptionData.model_validate(saved), meta=build_response_meta()
             )
@@ -347,7 +351,7 @@ async def create_transcription(
                 data=saved_data,
                 meta=build_response_meta(),
             )
-        break
+        continue
 
     async def check_thought():
         if purpose != "thought_to_draft":
