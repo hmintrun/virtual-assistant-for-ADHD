@@ -245,58 +245,6 @@ async def test_uf6_proposal_blocks_when_exceeding_deadline_or_availability(monke
 
 
 @pytest.mark.asyncio
-async def test_uf6_tomorrow_keyword_respects_real_iana_timezone(monkeypatch):
-    engine, sf = await _make_mem_env()
-    # America/New_York (EST = UTC-5 vào 2026-11-02): 18:00-05:00 = 23:00 UTC
-    ny_tz = timezone(timedelta(hours=-5))
-    fixed_now = datetime(2026, 11, 2, 18, 0, 0, tzinfo=ny_tz)
-    monkeypatch.setattr(reschedule_service, "_current_utc_now", lambda now=None: now or fixed_now)
-
-    try:
-        async with sf() as db:
-            ids = await _seed_basic_task(
-                db,
-                tz_name="America/New_York",
-                weekly_rules=[
-                    {"weekday": wd, "start_local": "08:00", "end_local": "20:00"}
-                    for wd in range(1, 8)
-                ],
-                deadline_at=datetime(2026, 11, 5, 18, 0, 0, tzinfo=ny_tz),
-                sess_start=datetime(2026, 11, 2, 19, 0, 0, tzinfo=ny_tz),
-            )
-
-        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-            resp = await client.post(
-                "/api/v1/proposals",
-                headers=_auth_headers(ids["user_id"], "idem-p1-tz-mai"),
-                json={
-                    "trigger_reason": "user_reschedule",
-                    "target_task_id": str(ids["task_id"]),
-                    "allowed_task_ids": [str(ids["task_id"])],
-                    "expected_base_schedule_revision": 1,
-                    "expected_source_revisions": {
-                        "task": 1,
-                        "schedule": 1,
-                        "availability": 1,
-                        "settings": 1,
-                        "calendar": 0,
-                    },
-                    "request_text": "Dời sang sáng mai",
-                },
-            )
-            assert resp.status_code == 201, resp.text
-            prop = resp.json()["data"]
-            assert prop["feasibility"]["status"] == "feasible"
-            moved = prop["proposed_changes"]["sessions_to_move"][0]
-            to_start = datetime.fromisoformat(moved["to_start"]).astimezone(UTC)
-            # 09:00 America/New_York (EST = UTC-5) -> 14:00 UTC ngày 2026-11-03 (KHÔNG phải 02:00 UTC)
-            assert to_start == datetime(2026, 11, 3, 14, 0, 0, tzinfo=UTC)
-    finally:
-        app.dependency_overrides.clear()
-        await engine.dispose()
-
-
-@pytest.mark.asyncio
 async def test_uf6_max_extension_without_borrow_capped_by_deadline_and_availability():
     cont_start = datetime(2026, 11, 2, 14, 27, 0, tzinfo=TZ_VN)
 

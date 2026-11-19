@@ -12,7 +12,7 @@ import re
 import time
 from collections.abc import Awaitable, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, timedelta
 from typing import Any, Literal, NamedTuple, TypeVar
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -34,6 +34,7 @@ from app.schemas.schedule import (
 from app.schemas.task import (
     CandidateAdjustmentResult,
     CandidateStepAdjustment,
+    ExtractedFreeWindowSchema,
     ExtractedTimeConstraint,
     GenerationTier,
     LLMCandidateAdjustmentPayload,
@@ -44,6 +45,7 @@ from app.schemas.task import (
     StepPromptItem,
     TaskDecompositionResult,
     TaskExtractionResult,
+    _extract_explicit_time_range,
 )
 
 logger = logging.getLogger(__name__)
@@ -99,6 +101,28 @@ class _ProbePingSchema(BaseModel):
 
 _RETRY_AFTER_SEC_RE = re.compile(r"try again in\s+(\d+(?:\.\d+)?)s", re.IGNORECASE)
 _RETRY_AFTER_MS_RE = re.compile(r"try again in\s+(\d+(?:\.\d+)?)ms", re.IGNORECASE)
+
+_TIER3_CLAUSE_SPLIT_RE = re.compile(r"[,;\n]+|\.(?=\s|$)")
+_TIER3_DAILY_RE = re.compile(r"\b(?:hằng\s+ngày|hàng\s+ngày|mỗi\s+ngày)\b", re.IGNORECASE)
+_TIER3_WEEKDAYS_RE = re.compile(
+    r"\bthứ\s*(?:2|hai)\s*(?:đến|tới|-|–)\s*thứ\s*(?:6|sáu)\b", re.IGNORECASE
+)
+_TIER3_WEEKEND_RE = re.compile(r"\bcuối\s+tuần\b", re.IGNORECASE)
+_TIER3_BUSY_HINT_RE = re.compile(r"\b(?:bận|trừ|nghỉ|họp|không\s+rảnh)\b", re.IGNORECASE)
+_TIER3_DEADLINE_PREFIX_RE = re.compile(r"\b(?:hạn(?:\s+chót)?|trước|deadline)\b", re.IGNORECASE)
+_TIER3_EXPLICIT_DMY_RE = re.compile(r"(?<!\d)(\d{1,2})/(\d{1,2})/(\d{4})(?!\d)")
+_TIER3_EXPLICIT_TIME_RE = re.compile(
+    r"(?<!\d)(\d{1,2})\s*(?:(?::|h|g)\s*(\d{2})?|giờ\s*(\d{2})?)(?!\d)",
+    re.IGNORECASE,
+)
+_TIER3_EXTRA_REQ_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(
+        r"\btối\s+đa\s+\d+\s*(?:phút|p|giờ|tiếng)(?:\s*/\s*ngày|\s+mỗi\s+ngày)?\b",
+        re.IGNORECASE,
+    ),
+    re.compile(r"\bít\s+nhất\s+\d+\s*(?:phút|p)\s+trống\s+liền\b", re.IGNORECASE),
+    re.compile(r"\bưu\s+tiên\s+sau\s+\d{1,2}\s*(?:h|:|g)\s*\d{0,2}\b", re.IGNORECASE),
+)
 
 
 def _extract_error_http_status(exc: BaseException) -> int | None:
@@ -328,30 +352,24 @@ class ProviderHealthTracker:
 # SYSTEM PROMPTS TIẾNG VIỆT CHUẨN NGHIỆP VỤ ADHD-I (UF1, UF2, UF6)
 # ==============================================================================
 
-UF1_EXTRACTION_SYSTEM_PROMPT = """Bạn là trợ lý lập kế hoạch chuyên biệt dành cho người trưởng thành mắc hội chứng giảm chú ý (ADHD-I) trên ứng dụng ProPlan VA.
-Nhiệm vụ của bạn ở bước UF1 là đọc nội dung công việc người dùng vừa nói/nhập (kết hợp với bản nháp `previous_draft` nếu đang ở lượt trả lời bổ sung) và trích xuất chính xác 4 thông tin bắt buộc:
-1. `content`: Nội dung công việc cần làm.
-2. `scope`: Phạm vi hoặc đầu ra cụ thể mong muốn (ví dụ: bao nhiêu trang, bao nhiêu slide, tiêu chuẩn hoàn thành).
-   Nếu người dùng đã nêu số lượng và phần cần làm (ví dụ báo cáo 2 trang chỉ gồm kết quả và kết luận), phải giữ thông tin đó trong scope dù đang thiếu giờ rảnh; không bắt cung cấp thêm định dạng file hay bảng số liệu khi user chưa yêu cầu.
-3. `free_time_slots` & `structured_free_windows`: Các khung giờ rảnh người dùng dành cho việc này, đồng thời chuẩn hóa sang dạng có cấu trúc (`weekday` 1=Thứ Hai..7=Chủ Nhật hoặc `date` YYYY-MM-DD, kèm `start_local` và `end_local` định dạng HH:mm 24h) để chuyển cho thuật toán Python.
-   Giờ rảnh thuộc yêu cầu lập kế hoạch hiện tại, không tự lấy cài đặt chung khi user chưa chọn. Khi trả lời bổ sung, giữ các khung rõ đã có và hoàn thiện khung đang hỏi. `availability_update_mode=merge` mặc định để bổ sung; chỉ dùng `replace` khi user chủ động thay/xóa khung cũ, khi đó trả toàn bộ danh sách còn lại (có thể rỗng). Nêu vấn đề giờ rảnh bằng clarification_issues với field_path="availability"; không tự xác nhận thay user.
-
-4. `deadline`: Thời hạn hoàn thành (ISO 8601 có múi giờ).
-
-QUY TẮC BẤT BIẾN (STRICT GUARDRAILS — TUYỆT ĐỐI TUÂN THỦ):
-- HỢP NHẤT BẢN NHÁP (`previous_draft`): Nếu `previous_draft` khác null, giữ nguyên toàn bộ thông tin hợp lệ đã có từ lượt trước và cập nhật/điền thêm các thông tin mới từ `user_raw_input`. Nếu người dùng chủ động sửa một trường đã có, ưu tiên giá trị mới nhất của người dùng.
-- KHÔNG TỰ ĐOÁN DỮ LIỆU (ZERO HALLUCINATION):
-  + Nếu chưa rõ `scope`, `free_time_slots` hoặc `deadline`, bắt buộc trả về `null` (hoặc mảng rỗng `[]`). Tuyệt đối không tự bịa hạn chót cuối tuần/cuối ngày.
-  + Chỉ kế thừa `default_free_windows` khi người dùng chủ động nói dùng khung giờ rảnh mặc định đã lưu.
-  + Nếu người dùng nêu buổi mơ hồ mà thiếu mốc giờ cụ thể (ví dụ chỉ nói "tối thứ 6", "chiều mai" mà không rõ từ mấy giờ đến mấy giờ và chưa chủ động xác nhận dùng một khung giờ cụ thể đã có), TUYỆT ĐỐI KHÔNG tự gán "19:00-21:00"; phải đặt `start_local = null`, `end_local = null`, `is_ambiguous = true`, `is_complete = false` và hỏi rõ mốc giờ trong `clarification_questions`.
-- PHÁT HIỆN MÂU THUẪN: Đối chiếu với `current_datetime` và `busy_intervals_from_calendar`. Đặt `has_conflict = true` nếu hạn chót nằm trong quá khứ (`<= current_datetime`), khung giờ rảnh rơi sau `deadline`, hoặc toàn bộ khung giờ rảnh bị trùng với lịch bận.
-- GỘP CÂU HỎI LÀM RÕ TRONG 1 VÒNG DUY NHẤT (SINGLE-ROUND CLARIFICATION): Nếu thiếu bất kỳ thông tin nào, còn khung giờ mơ hồ (`is_ambiguous = true`) hoặc có mâu thuẫn (`has_conflict = true`), đặt `is_complete = false` và gom TẤT CẢ câu hỏi vào `clarification_questions` một cách ngắn gọn, ấm áp trong 1 màn hình duy nhất.
-- CHỈ ĐẶT `is_complete = true` KHI VÀ CHỈ KHI đủ cả 4 trường rõ ràng, mọi `structured_free_windows` đều có `is_ambiguous = false`, và `has_conflict = false` (khi đó `clarification_questions` bắt buộc là `[]`; KHÔNG tự đặt thêm câu hỏi phụ ngoài 4 trường bắt buộc).
-- time_constraint dùng kind=deadline/window, start_at, input_timezone và đúng một mốc cuối deadline_at/finish_by_at. Nếu user chỉ nêu hạn chót mà không nêu mốc bắt đầu riêng, đặt `start_at = current_datetime`; chỉ để `null` khi thiếu hẳn hạn chót hoàn thành, không tự đoán hạn chót. Kế thừa thông tin đã rõ từ previous_draft. Trích goal chỉ khi user nêu.
-- Trả clarification_issues có code, field_path, message, question, blocking. Câu hỏi phải gắn đúng trường con nếu biết.
-- field_review_notes chứa giải thích bất lợi có căn cứ theo từng trường khi đề xuất khác previous_draft. Nếu user muốn giữ giá trị cũ, giải thích bất lợi có căn cứ rồi hỏi xác nhận; không ép đổi, không bịa số phút thiếu hoặc kết luận khả thi khi chưa có phép tính.
-- resolved_issue_keys chỉ chứa khóa code|field_path|question của AI_CLARIFICATION trong previous_draft mà câu trả lời mới thực sự giải quyết; không tự xóa field-review đã bảo vệ giá trị user.
-- Giọng điệu tiếng Việt ấm áp, súc tích, giảm tải nhận thức theo chuẩn W3C COGA."""
+UF1_EXTRACTION_SYSTEM_PROMPT = """UF1 ProPlan VA(ADHD-I):trích 4 trường từ `user_raw_input`(gộp `previous_draft` nếu có):
+1.`content`&`title`:việc cần làm;BẮT BUỘC sinh `title`<=100 ký tự từ `content`(CẤM `title=null` khi có việc);`goal` nếu nêu.
+2.`scope`:phạm vi/đầu ra.Nêu số lượng+đơn vị/hạng mục(VD:"10 trang Word","8 slide","3 module","2 service nhỏ","5 chương","6 bài","3 đề")->nhận ngay làm `scope`,CẤM `null` hỏi thêm định dạng;chỉ `null` khi thiếu khối lượng/đầu ra.
+3.`free_time_slots`&`structured_free_windows`:
+- `kind`:`'daily'`(mỗi/hằng ngày,tối nào cũng);`'weekly_rule'`(`weekday`/`weekdays`:`[1..5]`T2-T6,`[6,7]`cuối tuần);`'specific_date'`(`date` YYYY-MM-DD);`'date_range'`(`date_from`..`date_to`).
+- ISO Weekday("Thứ N"->N-1,CẤM Thứ Sáu=6):`1=T2,2=T3,3=T4,4=T5,5=T6(Thứ Sáu),6=T7(Thứ Bảy),7=CN`.
+- `op`:`'add'`(thêm/nối),`'replace_day'`(thay ngày/thứ),`'exclude'`(+`is_excluded=true`;nêu giờ bận cụ thể VD "bận 15h-16h" BẮT BUỘC điền `start_local`&`end_local`,chỉ `null` khi bận cả ngày),`'reset_override'`(xóa ngoại lệ về lịch tuần).
+- `duration_minutes`:phút khi có giờ đầu+thời lượng("19h30 rảnh 90p"->`start_local='19:30',duration_minutes=90`) hoặc sau sự kiện("sau họp rảnh 2 tiếng"->`duration_minutes=120,is_ambiguous=true`).
+- `window_timezone`:IANA TZ riêng(VD`'Asia/Tokyo'`).
+- Tra ngày từ `relative_calendar_anchor`;ngày thiếu năm PHẢI dùng đúng năm từ `relative_calendar_anchor.today`(CẤM năm quá khứ);"cũng giờ đó" kế thừa `start_local`/`end_local` khung trước;giờ nói("bảy rưỡi tối"=19:30,"chín kém mười lăm tối"=20:45);tự đính chính("à nhầm"->bỏ vế trước,giữ vế sau).
+- Ràng buộc("tối đa X phút/ngày","ít nhất X phút trống liền","ưu tiên sau Xh","T7/CN chọn 1 buổi","thiếu giờ mới dùng cuối tuần")->`extra_requirements`.
+- `availability_update_mode`:`'merge'` mặc định;`'replace'` khi thay/xóa lịch cũ.
+4.`deadline`&`time_constraint`:ISO 8601 có offset(`kind='deadline'|'window'`,chỉ nêu hạn thì `start_at=current_datetime`,`deadline_at`/`finish_by_at`,`input_timezone`).
+GUARDRAILS:
+- Merge `previous_draft`:giữ trường hợp lệ cũ,cập nhật mới;`locked_fields`:giữ nguyên từ `previous_draft` trừ khi user nói rõ muốn sửa trường đó;`field_review_notes` khi khác cũ;`resolved_issue_keys`(`code|field_path|question`) khi xong.
+- Zero Hallucination:thiếu để `null`/`[]`;nếu user yêu cầu dùng lịch/giờ rảnh mặc định và `default_free_windows` khác rỗng->BẮT BUỘC copy nguyên `default_free_windows` vào `structured_free_windows`(CẤM `[]`);nếu user nói giữ nguyên lịch mặc định hoặc không đòi thì không copy;giờ mơ hồ("tối thứ 6","tối rảnh","rảnh cả ngày","sau 19h30","sau họp...")->`null` đầu/cuối thiếu,`is_ambiguous=true`,`is_complete=false`.
+- Conflict(`has_conflict=true`):`deadline<=current_datetime`,giờ rảnh sau `deadline` hoặc trùng kín `busy_intervals_from_calendar`.
+- Single-Round:`is_complete=true` iff đủ 4 trường+không `is_ambiguous`+`has_conflict=false`(`clarification_questions=[]`);ngược lại `is_complete=false`,gộp câu hỏi ấm áp(W3C COGA) vào `clarification_questions`&`clarification_issues` đúng `field_path`."""
 
 UF2_DECOMPOSITION_SYSTEM_PROMPT = """Bạn là chuyên gia hỗ trợ chức năng điều hành (Executive Function Coach) cho người mắc ADHD-I trên ứng dụng ProPlan VA.
 Nhiệm vụ của bạn ở bước UF2 là bẻ nhỏ một công việc đã xác nhận thành phương án các bước tuần tự (Default Decomposition Proposal) để giúp người dùng vượt qua hội chứng Tê liệt khởi động (ADHD Blank Canvas / Task Initiation Paralysis).
@@ -657,7 +675,9 @@ class AIService:
         if client is None:
             raise RuntimeError("GROQ_API_KEY chưa được cấu hình.")
 
-        schema_json = json.dumps(schema_cls.model_json_schema(), ensure_ascii=False)
+        schema_json = json.dumps(
+            schema_cls.model_json_schema(), ensure_ascii=False, separators=(",", ":")
+        )
         strict_system_prompt = (
             f"{system_prompt}\n\n"
             "BẮT BUỘC chỉ trả về duy nhất một đối tượng JSON hợp lệ khớp chính xác với JSON Schema sau "
@@ -666,15 +686,30 @@ class AIService:
 
         eligible = self._eligible_groq_models(allow_secondary=allow_secondary)
         available_models = [m for m in eligible if self._health.can_attempt("groq", m)]
+        if not available_models and not allow_secondary:
+            primary_groq = self._settings.GROQ_FALLBACK_MODEL.strip()
+            rec = self._health._records.get(("groq", primary_groq))
+            secondary = self._settings.GROQ_SECONDARY_FALLBACK_MODEL.strip()
+            if (
+                rec is not None
+                and rec.last_error_category == "rate_limit"
+                and "ratelimit" in (rec.last_error_type or "").lower()
+                and secondary
+                and self._health.can_attempt("groq", secondary)
+            ):
+                available_models = [secondary]
         if not available_models:
             raise RuntimeError("Toàn bộ model Groq đang tạm ngưng (Circuit Breaker OPEN).")
 
         loop = asyncio.get_running_loop()
         last_exc: Exception | None = None
-        for idx, groq_model in enumerate(available_models):
+        idx = 0
+        while idx < len(available_models):
+            groq_model = available_models[idx]
+            idx += 1
             if not self._health.acquire_attempt("groq", groq_model):
                 continue
-            is_last_model = idx == len(available_models) - 1
+            is_last_model = idx == len(available_models)
             max_attempts = 1 + (
                 self._max_transient_retries if (allow_retry and is_last_model) else 0
             )
@@ -683,15 +718,27 @@ class AIService:
                 if active_model_ref is not None:
                     active_model_ref[:] = [groq_model]
                 try:
-                    completion = await client.chat.completions.create(
-                        model=groq_model,
-                        messages=[
-                            {"role": "system", "content": strict_system_prompt},
-                            {"role": "user", "content": user_prompt},
-                        ],
-                        response_format={"type": "json_object"},
-                        temperature=0.2,
-                    )
+                    if "gpt-oss" in groq_model.lower():
+                        completion = await client.chat.completions.create(
+                            model=groq_model,
+                            messages=[
+                                {"role": "system", "content": strict_system_prompt},
+                                {"role": "user", "content": user_prompt},
+                            ],
+                            response_format={"type": "json_object"},
+                            temperature=0.2,
+                            reasoning_effort="low",
+                        )
+                    else:
+                        completion = await client.chat.completions.create(
+                            model=groq_model,
+                            messages=[
+                                {"role": "system", "content": strict_system_prompt},
+                                {"role": "user", "content": user_prompt},
+                            ],
+                            response_format={"type": "json_object"},
+                            temperature=0.2,
+                        )
                     content = completion.choices[0].message.content
                     if not content:
                         raise ValueError(f"Groq ({groq_model}) trả về message content rỗng.")
@@ -720,6 +767,32 @@ class AIService:
                         category,
                         type(exc).__name__,
                     )
+                    rec_after = self._health._records.get(("groq", groq_model))
+                    is_sdk_rate_limit = (
+                        _extract_error_http_status(exc) == 429
+                        or "ratelimit" in type(exc).__name__.lower()
+                        or _extract_retry_after_s(exc) is not None
+                    )
+                    if (
+                        not allow_secondary
+                        and category == "rate_limit"
+                        and (
+                            is_sdk_rate_limit
+                            or (
+                                rec_after is not None
+                                and rec_after.consecutive_failures
+                                < self._health._failure_threshold
+                            )
+                        )
+                    ):
+                        secondary = self._settings.GROQ_SECONDARY_FALLBACK_MODEL.strip()
+                        if (
+                            secondary
+                            and secondary not in available_models
+                            and self._health.can_attempt("groq", secondary)
+                        ):
+                            available_models.append(secondary)
+                            break
                     remaining = (deadline - loop.time()) if deadline is not None else 0.0
                     if (
                         attempt < max_attempts
@@ -934,6 +1007,20 @@ class AIService:
             and self._health.can_attempt("gemini", backup_model)
         )
         eligible_groq = self._eligible_groq_models(allow_secondary=not is_uf1)
+        if is_uf1:
+            primary_groq = self._settings.GROQ_FALLBACK_MODEL.strip()
+            secondary_groq = self._settings.GROQ_SECONDARY_FALLBACK_MODEL.strip()
+            rec_groq = self._health._records.get(("groq", primary_groq))
+            if (
+                not any(self._health.can_attempt("groq", m) for m in eligible_groq)
+                and rec_groq is not None
+                and rec_groq.last_error_category == "rate_limit"
+                and "ratelimit" in (rec_groq.last_error_type or "").lower()
+                and secondary_groq
+                and secondary_groq not in eligible_groq
+                and self._health.can_attempt("groq", secondary_groq)
+            ):
+                eligible_groq = [*eligible_groq, secondary_groq]
         has_groq = has_groq_client and any(
             self._health.can_attempt("groq", m) for m in eligible_groq
         )
@@ -1204,6 +1291,30 @@ class AIService:
             return target_dt.replace(tzinfo=reference_dt.tzinfo)
         return target_dt.astimezone(reference_dt.tzinfo)
 
+    @staticmethod
+    def _build_relative_calendar_anchor(current_dt: datetime) -> dict[str, Any]:
+        """Sinh bảng neo ngày tương đối 14 ngày tới để AI đối chiếu chính xác 'hôm nay/mai/mốt/tuần này/tuần sau' (#6)."""
+        base_date = current_dt.date()
+        days_until_sunday = 7 - base_date.isoweekday()
+        upcoming: list[dict[str, Any]] = []
+        for offset in range(14):
+            d = base_date + timedelta(days=offset)
+            upcoming.append(
+                {
+                    "date": d.isoformat(),
+                    "weekday": d.isoweekday(),
+                    "week_offset": 0 if offset <= days_until_sunday else 1,
+                }
+            )
+        return {
+            "today": base_date.isoformat(),
+            "today_weekday_iso": base_date.isoweekday(),
+            "tomorrow_mai": (base_date + timedelta(days=1)).isoformat(),
+            "day_after_tomorrow_mot": (base_date + timedelta(days=2)).isoformat(),
+            "end_of_this_week_sunday": (base_date + timedelta(days=days_until_sunday)).isoformat(),
+            "upcoming_14_days": upcoming,
+        }
+
     # ==========================================================================
     # UF1: TRÍCH XUẤT MỤC TIÊU, HỢP NHẤT NHÁP & GỘP CÂU HỎI LÀM RÕ 1 VÒNG
     # ==========================================================================
@@ -1216,6 +1327,7 @@ class AIService:
         busy_intervals: list[dict[str, str]] | None = None,
         previous_draft: LLMTaskExtractionPayload | dict[str, Any] | None = None,
         default_free_windows: list[dict[str, Any]] | None = None,
+        locked_fields: list[str] | None = None,
         reference_now: datetime | None = None,
     ) -> TaskExtractionResult:
         """
@@ -1230,21 +1342,31 @@ class AIService:
             parsed_draft = LLMTaskExtractionPayload.model_validate(previous_draft)
 
         cleaned_input = user_input.strip()
-        if not cleaned_input:
-            return self._fallback_extract_task("", previous_draft=parsed_draft)
-
         current_dt = self._resolve_current_dt(timezone, reference_now)
+        if not cleaned_input:
+            return self._fallback_extract_task(
+                "",
+                previous_draft=parsed_draft,
+                timezone=timezone,
+                reference_now=current_dt,
+            )
+
         context_payload: dict[str, Any] = {
             "current_datetime": current_dt.isoformat(),
             "user_timezone": timezone,
+            "relative_calendar_anchor": self._build_relative_calendar_anchor(current_dt),
             "previous_draft": (
-                parsed_draft.model_dump(mode="json") if parsed_draft is not None else None
+                parsed_draft.model_dump(mode="json", exclude_none=True)
+                if parsed_draft is not None
+                else None
             ),
             "default_free_windows": default_free_windows or [],
             "busy_intervals_from_calendar": busy_intervals or [],
             "user_raw_input": cleaned_input,
         }
-        user_prompt = json.dumps(context_payload, ensure_ascii=False)
+        if locked_fields:
+            context_payload["locked_fields"] = list(locked_fields)
+        user_prompt = json.dumps(context_payload, ensure_ascii=False, separators=(",", ":"))
 
         try:
             llm_payload, winner_tier = await self._execute_hedged_structured(
@@ -1265,13 +1387,19 @@ class AIService:
                 previous_time_constraint=(
                     parsed_draft.time_constraint if parsed_draft is not None else None
                 ),
+                user_input=cleaned_input,
             )
         except Exception as exc:
             logger.warning(
                 "UF1 chuyển sang Tier 3 Rule-based do lỗi: %s",
                 type(exc).__name__,
             )
-            return self._fallback_extract_task(cleaned_input, previous_draft=parsed_draft)
+            return self._fallback_extract_task(
+                cleaned_input,
+                previous_draft=parsed_draft,
+                timezone=timezone,
+                reference_now=current_dt,
+            )
 
     @classmethod
     def _enforce_uf1_temporal_guardrails(
@@ -1281,12 +1409,53 @@ class AIService:
         current_dt: datetime,
         timezone: str = "Asia/Ho_Chi_Minh",
         previous_time_constraint: ExtractedTimeConstraint | None = None,
+        user_input: str = "",
     ) -> TaskExtractionResult:
         """
         Kiểm chứng thời gian bằng Python thuần túy (Hybrid Architecture Guardrail):
-        CẤM tin mù quáng phép so sánh ngày giờ của LLM — nếu deadline rơi vào quá khứ,
-        bắt buộc bật cờ has_conflict=True và is_complete=False.
+        1. Tự chỉnh năm quá khứ khi LLM điền nhầm năm cũ cho ngày không ghi năm (TC-LIVE-05 T2).
+        2. CẤM tin mù quáng phép so sánh ngày giờ của LLM — nếu deadline rơi vào quá khứ,
+           bắt buộc bật cờ has_conflict=True và is_complete=False.
         """
+        if result.structured_free_windows:
+            fixed_windows: list[ExtractedFreeWindowSchema] = []
+            windows_changed = False
+            for w in result.structured_free_windows:
+                w_updates: dict[str, Any] = {}
+                for attr in ("date", "date_from", "date_to"):
+                    raw_d = getattr(w, attr)
+                    if isinstance(raw_d, str) and len(raw_d) == 10:
+                        try:
+                            parsed_d = date.fromisoformat(raw_d)
+                        except ValueError:
+                            continue
+                        year_str = f"{parsed_d.year:04d}"
+                        if (
+                            parsed_d.year < current_dt.year
+                            and year_str not in w.raw_phrase
+                            and year_str not in user_input
+                        ):
+                            try:
+                                replaced_d = parsed_d.replace(year=current_dt.year)
+                                w_updates[attr] = replaced_d.isoformat()
+                            except ValueError:
+                                pass
+                if w_updates:
+                    w_payload = w.model_dump()
+                    w_payload.update(w_updates)
+                    if (
+                        w.is_ambiguous
+                        and w.clarification_hint
+                        and "mâu thuẫn giữa thứ và ngày" in w.clarification_hint
+                    ):
+                        w_payload["clarification_hint"] = None
+                    fixed_windows.append(ExtractedFreeWindowSchema.model_validate(w_payload))
+                    windows_changed = True
+                else:
+                    fixed_windows.append(w)
+            if windows_changed:
+                result = result.model_copy(update={"structured_free_windows": fixed_windows})
+
         tc = result.time_constraint
         tc_deadline = tc.deadline_at if tc is not None else None
         tc_finish_by = tc.finish_by_at if tc is not None else None
@@ -1374,11 +1543,14 @@ class AIService:
         user_input: str,
         *,
         previous_draft: LLMTaskExtractionPayload | None = None,
+        timezone: str = "Asia/Ho_Chi_Minh",
+        reference_now: datetime | None = None,
     ) -> TaskExtractionResult:
         """
         Tầng 3 (Rule-based Fallback cho UF1):
         Bảo toàn nguyên vẹn nội dung người dùng vừa nhập + mọi trường hợp lệ đã có trong
-        `previous_draft`, đánh dấu chưa đủ thông tin và chỉ hỏi gộp các phần còn thiếu.
+        `previous_draft`, trích nhẹ các mẫu 100% tường minh khi `prev_*` đang trống,
+        luôn giữ `is_complete=False` và chỉ hỏi gộp các phần còn thiếu.
         """
         cleaned = user_input.strip()
 
@@ -1400,6 +1572,7 @@ class AIService:
         prev_slots = list(previous_draft.free_time_slots) if previous_draft else []
         prev_windows = list(previous_draft.structured_free_windows) if previous_draft else []
         prev_deadline = previous_draft.deadline if previous_draft else None
+        prev_tc = previous_draft.time_constraint if previous_draft else None
         prev_extra = list(previous_draft.extra_requirements) if previous_draft else []
 
         if prev_content:
@@ -1410,6 +1583,115 @@ class AIService:
         else:
             content_val = cleaned if cleaned else None
             short_title = prev_title or (cleaned[:80] if cleaned else None)
+
+        if cleaned:
+            current_dt = self._resolve_current_dt(timezone, reference_now)
+            clauses = [c.strip() for c in _TIER3_CLAUSE_SPLIT_RE.split(cleaned) if c.strip()]
+
+            # 1. Trích khung giờ tường minh 100% (chỉ khi chưa có giờ rảnh)
+            if not prev_windows and not prev_slots:
+                extracted_windows: list[ExtractedFreeWindowSchema] = []
+                for clause in clauses:
+                    if _TIER3_BUSY_HINT_RE.search(clause):
+                        continue
+                    time_range = _extract_explicit_time_range(clause)
+                    if time_range is None:
+                        continue
+                    s_local, e_local = time_range
+                    phrase = clause[:200]
+                    candidate: ExtractedFreeWindowSchema | None = None
+                    if _TIER3_DAILY_RE.search(clause):
+                        candidate = ExtractedFreeWindowSchema(
+                            kind="daily",
+                            start_local=s_local,
+                            end_local=e_local,
+                            raw_phrase=phrase,
+                        )
+                    elif _TIER3_WEEKDAYS_RE.search(clause):
+                        candidate = ExtractedFreeWindowSchema(
+                            kind="weekly_rule",
+                            weekdays=[1, 2, 3, 4, 5],
+                            start_local=s_local,
+                            end_local=e_local,
+                            raw_phrase=phrase,
+                        )
+                    elif _TIER3_WEEKEND_RE.search(clause):
+                        candidate = ExtractedFreeWindowSchema(
+                            kind="weekly_rule",
+                            weekdays=[6, 7],
+                            start_local=s_local,
+                            end_local=e_local,
+                            raw_phrase=phrase,
+                        )
+                    elif (
+                        not _TIER3_DEADLINE_PREFIX_RE.search(clause)
+                        and (dmy := _TIER3_EXPLICIT_DMY_RE.search(clause)) is not None
+                    ):
+                        try:
+                            d_obj = date(int(dmy.group(3)), int(dmy.group(2)), int(dmy.group(1)))
+                            candidate = ExtractedFreeWindowSchema(
+                                kind="specific_date",
+                                date=d_obj.isoformat(),
+                                start_local=s_local,
+                                end_local=e_local,
+                                raw_phrase=phrase,
+                            )
+                        except ValueError:
+                            candidate = None
+                    if candidate is not None and not candidate.is_ambiguous:
+                        extracted_windows.append(candidate)
+                if extracted_windows:
+                    prev_windows = extracted_windows
+                    prev_slots = [w.raw_phrase for w in extracted_windows]
+
+            # 2. Trích hạn chót tường minh 100% (từ khóa + DD/MM/YYYY + giờ rõ, chỉ khi chưa có deadline)
+            has_prev_tc_end = prev_tc is not None and (
+                prev_tc.deadline_at is not None or prev_tc.finish_by_at is not None
+            )
+            if prev_deadline is None and not has_prev_tc_end:
+                for clause in clauses:
+                    if not _TIER3_DEADLINE_PREFIX_RE.search(clause):
+                        continue
+                    dmy = _TIER3_EXPLICIT_DMY_RE.search(clause)
+                    if dmy is None:
+                        continue
+                    clause_without_date = clause[: dmy.start()] + " " + clause[dmy.end() :]
+                    tm = _TIER3_EXPLICIT_TIME_RE.search(clause_without_date)
+                    if tm is None:
+                        continue
+                    hh = int(tm.group(1))
+                    mm = int(tm.group(2) or tm.group(3) or 0)
+                    if hh == 24 and mm == 0:
+                        hh, mm = 23, 59
+                    if not (0 <= hh <= 23 and 0 <= mm <= 59):
+                        continue
+                    try:
+                        dl_dt = datetime(
+                            int(dmy.group(3)),
+                            int(dmy.group(2)),
+                            int(dmy.group(1)),
+                            hh,
+                            mm,
+                            tzinfo=current_dt.tzinfo,
+                        )
+                    except ValueError:
+                        continue
+                    prev_deadline = dl_dt
+                    if dl_dt > current_dt:
+                        prev_tc = ExtractedTimeConstraint(
+                            kind="deadline",
+                            start_at=current_dt,
+                            deadline_at=dl_dt,
+                            input_timezone=timezone,
+                        )
+                    break
+
+            # 3. Trích extra_requirements số học tường minh
+            for pattern in _TIER3_EXTRA_REQ_PATTERNS:
+                for match in pattern.finditer(cleaned):
+                    req = match.group(0).strip()
+                    if req and req not in prev_extra:
+                        prev_extra.append(req)
 
         questions: list[str] = []
         if not content_val:
@@ -1436,7 +1718,7 @@ class AIService:
             free_time_slots=prev_slots,
             structured_free_windows=prev_windows,
             goal=previous_draft.goal if previous_draft else None,
-            time_constraint=previous_draft.time_constraint if previous_draft else None,
+            time_constraint=prev_tc,
             clarification_issues=previous_draft.clarification_issues if previous_draft else [],
             deadline=prev_deadline,
             extra_requirements=prev_extra,
