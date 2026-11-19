@@ -1,7 +1,10 @@
 # Router cho API giọng nói (STT POST /voice/transcriptions, TTS POST /voice/tts, Prompt UF5 POST /voice/uf5-checkin-prompt)
+import asyncio
 import base64
 import hashlib
 import json
+import time
+from collections import OrderedDict
 from typing import Annotated, Literal
 from uuid import UUID
 
@@ -10,7 +13,6 @@ from fastapi import APIRouter, File, Form, Header, UploadFile
 from app.api.deps import CurrentUserDep, DbSessionDep
 from app.core.config import settings
 from app.core.errors import AppError
-from app.repositories import run_repository, thought_repository
 from app.schemas.common import ErrorEnvelope, FieldError, SuccessEnvelope, build_response_meta
 from app.schemas.voice import (
     TranscriptionData,
@@ -22,6 +24,7 @@ from app.schemas.voice import (
 from app.services import command_service
 from app.services.ai_service import ai_service
 from app.services.draft_service import resolve_user_uuid
+from app.services.thought_service import ensure_thought_eligible_for_draft_conversion
 from app.services.voice_service import (
     SttError,
     SttErrorCode,
@@ -145,8 +148,72 @@ def _tts_error_to_app_error(exc: TtsError) -> AppError:
     )
 
 
+class VoiceIdempotencyCache:
+    """Bộ đệm bộ nhớ lưu biên nhận Voice Idempotency có TTL và giới hạn kích thước (LRU)."""
+
+    def __init__(self, max_entries: int = 512, ttl_seconds: float = 900.0) -> None:
+        self._max_entries = max_entries
+        self._ttl_seconds = ttl_seconds
+        self._store: OrderedDict[tuple[str, str], tuple[float, str, TranscriptionData]] = (
+            OrderedDict()
+        )
+
+    def _cleanup_expired(self, now_mono: float) -> None:
+        expired_keys = [k for k, (exp, _, _) in self._store.items() if exp <= now_mono]
+        for k in expired_keys:
+            self._store.pop(k, None)
+
+    def get(self, key: tuple[str, str], default=None) -> tuple[str, TranscriptionData] | None:
+        now_mono = time.monotonic()
+        self._cleanup_expired(now_mono)
+        if key not in self._store:
+            return default
+        exp, fp, data = self._store[key]
+        if exp <= now_mono:
+            self._store.pop(key, None)
+            return default
+        self._store.move_to_end(key)
+        return (fp, data)
+
+    def __getitem__(self, key: tuple[str, str]) -> tuple[str, TranscriptionData]:
+        val = self.get(key)
+        if val is None:
+            raise KeyError(key)
+        return val
+
+    def __setitem__(self, key: tuple[str, str], value: tuple[str, TranscriptionData]) -> None:
+        now_mono = time.monotonic()
+        self._cleanup_expired(now_mono)
+        fp, data = value
+        self._store[key] = (now_mono + self._ttl_seconds, fp, data)
+        self._store.move_to_end(key)
+        while len(self._store) > self._max_entries:
+            self._store.popitem(last=False)
+
+    def __contains__(self, key: tuple[str, str]) -> bool:
+        return self.get(key) is not None
+
+    def clear(self) -> None:
+        self._store.clear()
+
+    def pop(self, key: tuple[str, str], default=None):
+        now_mono = time.monotonic()
+        self._cleanup_expired(now_mono)
+        item = self._store.pop(key, None)
+        if item is None:
+            return default
+        return (item[1], item[2])
+
+
 # Lưu biên nhận Idempotency-Key tạm thời cho lệnh chuyển âm: (user_id, idempotency_key) -> (fingerprint, TranscriptionData)
-_VOICE_IDEMPOTENCY_STORE: dict[tuple[str, str], tuple[str, TranscriptionData]] = {}
+class _VoiceFlightLock:
+    def __init__(self) -> None:
+        self.lock = asyncio.Lock()
+        self.ref_count = 0
+
+
+_VOICE_IDEMPOTENCY_STORE = VoiceIdempotencyCache(max_entries=512, ttl_seconds=900.0)
+_INFLIGHT_VOICE_LOCKS: dict[tuple[str, str], _VoiceFlightLock] = {}
 
 
 @router.post("/transcriptions", response_model=SuccessEnvelope[TranscriptionData])
@@ -197,48 +264,6 @@ async def create_transcription(
             next_action="fix_fields",
         )
 
-    async def check_thought():
-        if purpose != "thought_to_draft":
-            return
-        try:
-            thought_uuid = UUID(thought_id)
-        except (TypeError, ValueError):
-            raise AppError(
-                status_code=404,
-                code="RESOURCE_NOT_FOUND",
-                message="Không tìm thấy Thought.",
-                next_action="reload",
-            ) from None
-        owner = resolve_user_uuid(current_user.user_id)
-        thought = await thought_repository.get_thought(db, owner, thought_uuid)
-        if thought is None:
-            raise AppError(
-                status_code=404,
-                code="RESOURCE_NOT_FOUND",
-                message="Không tìm thấy Thought.",
-                next_action="reload",
-            )
-        if thought.source_run_id is not None:
-            run = await run_repository.get_run(db, owner, thought.source_run_id)
-            if run is None:
-                raise AppError(
-                    status_code=404,
-                    code="RESOURCE_NOT_FOUND",
-                    message="Không tìm thấy phiên nguồn.",
-                    next_action="reload",
-                )
-            if run.ended_at is None:
-                raise AppError(
-                    status_code=409,
-                    code="SESSION_STILL_RUNNING",
-                    message="Chỉ chuyển chữ sau khi phiên dừng.",
-                    next_action="wait_for_session_end",
-                )
-
-    await check_thought()
-    # Đóng transaction đọc trước khi chờ provider.
-    if db.in_transaction():
-        await db.rollback()
     audio_bytes = await file.read(settings.VOICE_MAX_AUDIO_BYTES + 1)
     if len(audio_bytes) > settings.VOICE_MAX_AUDIO_BYTES:
         raise _stt_error_to_app_error(SttError(SttErrorCode.AUDIO_TOO_LARGE))
@@ -271,13 +296,20 @@ async def create_transcription(
     digest = command_service.command_hash(
         "voice_transcription", thought_id or "", json.loads(fingerprint)
     )
+
+    # 1. REPLAY FIRST: kiểm tra DB và cache bộ nhớ TRƯỚC khi gọi guard nghiệp vụ
     saved = await command_service.replay(db, current_user.user_id, idempotency_key, digest)
     if saved is not None:
+        if db.in_transaction():
+            await db.rollback()
         return SuccessEnvelope(
             data=TranscriptionData.model_validate(saved), meta=build_response_meta()
         )
-    await db.rollback()
-    idem_record = _VOICE_IDEMPOTENCY_STORE.get((current_user.user_id, idempotency_key))
+    if db.in_transaction():
+        await db.rollback()
+
+    flight_key = (current_user.user_id, idempotency_key)
+    idem_record = _VOICE_IDEMPOTENCY_STORE.get(flight_key)
     if idem_record is not None:
         saved_fingerprint, saved_data = idem_record
         if saved_fingerprint != fingerprint:
@@ -295,41 +327,103 @@ async def create_transcription(
             meta=build_response_meta(),
         )
 
-    # V01/A21 (Role Voice): chuyển audio thành chữ qua voice_service; lỗi đổi sang Error Envelope.
-    try:
-        stt_result = await get_voice_service().transcribe(
-            audio_bytes,
-            content_type=file.content_type,
-            filename=file.filename,
-        )
-    except SttError as exc:
-        raise _stt_error_to_app_error(exc) from exc
+    current_lock = _INFLIGHT_VOICE_LOCKS.get(flight_key)
+    if current_lock is None:
+        current_lock = _VoiceFlightLock()
+        _INFLIGHT_VOICE_LOCKS[flight_key] = current_lock
+    current_lock.ref_count += 1
 
-    await check_thought()
-    data = TranscriptionData(
-        text=stt_result.text,
-        input_source="thought" if purpose == "thought_to_draft" else "voice",
-        thought_id=thought_id if purpose == "thought_to_draft" else None,
-    )
-    await command_service.lock_owner(db, current_user.user_id)
-    saved = await command_service.replay(db, current_user.user_id, idempotency_key, digest)
-    if saved is not None:
-        await db.rollback()
-        return SuccessEnvelope(
-            data=TranscriptionData.model_validate(saved), meta=build_response_meta()
-        )
-    command_service.record(
-        db, current_user.user_id, idempotency_key, digest, "voice_transcription", data
-    )
-    await db.commit()
-    _VOICE_IDEMPOTENCY_STORE[(current_user.user_id, idempotency_key)] = (
-        fingerprint,
-        data,
-    )
-    return SuccessEnvelope(
-        data=data,
-        meta=build_response_meta(),
-    )
+    try:
+        async with current_lock.lock:
+            # Recheck DB & cache sau khi nhận lock để tránh thundering-herd stampede
+            saved = await command_service.replay(db, current_user.user_id, idempotency_key, digest)
+            if saved is not None:
+                if db.in_transaction():
+                    await db.rollback()
+                return SuccessEnvelope(
+                    data=TranscriptionData.model_validate(saved), meta=build_response_meta()
+                )
+            if db.in_transaction():
+                await db.rollback()
+
+            idem_record = _VOICE_IDEMPOTENCY_STORE.get(flight_key)
+            if idem_record is not None:
+                saved_fingerprint, saved_data = idem_record
+                if saved_fingerprint != fingerprint:
+                    raise AppError(
+                        status_code=409,
+                        code="IDEMPOTENCY_KEY_REUSED",
+                        message=(
+                            "Mã lệnh đã được dùng với nội dung khác. "
+                            "Giữ mã cũ khi retry đúng nội dung; tạo mã mới cho ý định mới."
+                        ),
+                        next_action="use_original_payload_or_new_command",
+                    )
+                return SuccessEnvelope(
+                    data=saved_data,
+                    meta=build_response_meta(),
+                )
+
+            async def check_thought():
+                if purpose != "thought_to_draft":
+                    return
+                try:
+                    thought_uuid = UUID(thought_id)
+                except (TypeError, ValueError):
+                    raise AppError(
+                        status_code=404,
+                        code="RESOURCE_NOT_FOUND",
+                        message="Không tìm thấy Thought.",
+                        next_action="reload",
+                    ) from None
+                owner = resolve_user_uuid(current_user.user_id)
+                await ensure_thought_eligible_for_draft_conversion(db, owner, thought_uuid)
+
+            await check_thought()
+            # Đóng transaction đọc trước khi chờ provider.
+            if db.in_transaction():
+                await db.rollback()
+
+            # V01/A21 (Role Voice): chuyển audio thành chữ qua voice_service; lỗi đổi sang Error Envelope.
+            try:
+                stt_result = await get_voice_service().transcribe(
+                    audio_bytes,
+                    content_type=file.content_type,
+                    filename=file.filename,
+                )
+            except SttError as exc:
+                raise _stt_error_to_app_error(exc) from exc
+
+            await command_service.lock_owner(db, current_user.user_id)
+            await check_thought()
+            data = TranscriptionData(
+                text=stt_result.text,
+                input_source="thought" if purpose == "thought_to_draft" else "voice",
+                thought_id=thought_id if purpose == "thought_to_draft" else None,
+            )
+            saved = await command_service.replay(db, current_user.user_id, idempotency_key, digest)
+            if saved is not None:
+                await db.rollback()
+                return SuccessEnvelope(
+                    data=TranscriptionData.model_validate(saved), meta=build_response_meta()
+                )
+            command_service.record(
+                db, current_user.user_id, idempotency_key, digest, "voice_transcription", data
+            )
+            await db.commit()
+            _VOICE_IDEMPOTENCY_STORE[flight_key] = (
+                fingerprint,
+                data,
+            )
+            return SuccessEnvelope(
+                data=data,
+                meta=build_response_meta(),
+            )
+    finally:
+        current_lock.ref_count -= 1
+        if current_lock.ref_count <= 0:
+            if _INFLIGHT_VOICE_LOCKS.get(flight_key) is current_lock:
+                _INFLIGHT_VOICE_LOCKS.pop(flight_key, None)
 
 
 @router.post(

@@ -7,7 +7,6 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import ValidationError
 from sqlalchemy import delete, select, update
-from sqlalchemy.exc import MultipleResultsFound
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import AppError
@@ -20,7 +19,6 @@ from app.models.settings import Availability as AvailabilityModel
 from app.models.task import Task as TaskModel
 from app.models.user import User as UserModel
 from app.models.user import UserPreference as UserPreferenceModel
-from app.repositories import run_repository, thought_repository
 from app.schemas.availability import (
     Availability,
     DateOverride,
@@ -310,47 +308,21 @@ async def _validate_source_thought(
         return None
     try:
         thought_id = UUID(source_thought_id)
-    except ValueError:
+    except (ValueError, TypeError):
         thought_id = None
-    owner = resolve_user_uuid(user_id)
-    thought = (
-        await thought_repository.get_thought(db, owner, thought_id)
-        if thought_id is not None
-        else None
-    )
-    if thought is None:
+    if thought_id is None:
         raise AppError(
             status_code=404,
             code="RESOURCE_NOT_FOUND",
             message="Không tìm thấy suy nghĩ nguồn.",
             next_action="reload",
         )
-    if thought.source_run_id is not None:
-        run = await run_repository.get_run(db, owner, thought.source_run_id)
-        if run is None or run.ended_at is None:
-            raise AppError(
-                status_code=409,
-                code="SESSION_STILL_RUNNING",
-                message="Chỉ tạo nháp từ suy nghĩ sau khi phiên nguồn kết thúc.",
-                next_action="wait_for_session_end",
-            )
-    try:
-        links = await thought_repository.get_links(db, owner, [thought.id])
-    except MultipleResultsFound:
-        raise AppError(
-            status_code=409,
-            code="SOURCE_CHANGED",
-            message="Dữ liệu cũ có nhiều nháp cùng nguồn suy nghĩ; cần đối soát liên kết.",
-            next_action="reload_and_review",
-        ) from None
-    linked = links.get(thought.id)
-    if linked is not None and linked.draft.id != resolve_draft_uuid(draft_id):
-        raise AppError(
-            status_code=409,
-            code="THOUGHT_ALREADY_LINKED",
-            message="Suy nghĩ này đã có bản nháp.",
-            next_action="open_linked_draft",
-        )
+    owner = resolve_user_uuid(user_id)
+    from app.services import thought_service
+
+    thought = await thought_service.ensure_thought_eligible_for_draft_conversion(
+        db, owner, thought_id, current_draft_id=resolve_draft_uuid(draft_id)
+    )
     return thought.id
 
 
