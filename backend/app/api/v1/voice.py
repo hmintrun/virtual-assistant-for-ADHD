@@ -206,8 +206,14 @@ class VoiceIdempotencyCache:
 
 
 # Lưu biên nhận Idempotency-Key tạm thời cho lệnh chuyển âm: (user_id, idempotency_key) -> (fingerprint, TranscriptionData)
+class _VoiceFlightLock:
+    def __init__(self) -> None:
+        self.lock = asyncio.Lock()
+        self.ref_count = 0
+
+
 _VOICE_IDEMPOTENCY_STORE = VoiceIdempotencyCache(max_entries=512, ttl_seconds=900.0)
-_INFLIGHT_VOICE_LOCKS: dict[tuple[str, str], asyncio.Event] = {}
+_INFLIGHT_VOICE_LOCKS: dict[tuple[str, str], _VoiceFlightLock] = {}
 
 
 @router.post("/transcriptions", response_model=SuccessEnvelope[TranscriptionData])
@@ -321,99 +327,103 @@ async def create_transcription(
             meta=build_response_meta(),
         )
 
-    # Single-flight: nếu đang có request khác cùng key đang gọi provider, chờ nó hoàn tất
-    while flight_key in _INFLIGHT_VOICE_LOCKS:
-        event = _INFLIGHT_VOICE_LOCKS[flight_key]
-        await event.wait()
-        saved = await command_service.replay(db, current_user.user_id, idempotency_key, digest)
-        if saved is not None:
+    current_lock = _INFLIGHT_VOICE_LOCKS.get(flight_key)
+    if current_lock is None:
+        current_lock = _VoiceFlightLock()
+        _INFLIGHT_VOICE_LOCKS[flight_key] = current_lock
+    current_lock.ref_count += 1
+
+    try:
+        async with current_lock.lock:
+            # Recheck DB & cache sau khi nhận lock để tránh thundering-herd stampede
+            saved = await command_service.replay(db, current_user.user_id, idempotency_key, digest)
+            if saved is not None:
+                if db.in_transaction():
+                    await db.rollback()
+                return SuccessEnvelope(
+                    data=TranscriptionData.model_validate(saved), meta=build_response_meta()
+                )
             if db.in_transaction():
                 await db.rollback()
-            return SuccessEnvelope(
-                data=TranscriptionData.model_validate(saved), meta=build_response_meta()
-            )
-        if db.in_transaction():
-            await db.rollback()
-        idem_record = _VOICE_IDEMPOTENCY_STORE.get(flight_key)
-        if idem_record is not None:
-            saved_fingerprint, saved_data = idem_record
-            if saved_fingerprint != fingerprint:
-                raise AppError(
-                    status_code=409,
-                    code="IDEMPOTENCY_KEY_REUSED",
-                    message=(
-                        "Mã lệnh đã được dùng với nội dung khác. "
-                        "Giữ mã cũ khi retry đúng nội dung; tạo mã mới cho ý định mới."
-                    ),
-                    next_action="use_original_payload_or_new_command",
+
+            idem_record = _VOICE_IDEMPOTENCY_STORE.get(flight_key)
+            if idem_record is not None:
+                saved_fingerprint, saved_data = idem_record
+                if saved_fingerprint != fingerprint:
+                    raise AppError(
+                        status_code=409,
+                        code="IDEMPOTENCY_KEY_REUSED",
+                        message=(
+                            "Mã lệnh đã được dùng với nội dung khác. "
+                            "Giữ mã cũ khi retry đúng nội dung; tạo mã mới cho ý định mới."
+                        ),
+                        next_action="use_original_payload_or_new_command",
+                    )
+                return SuccessEnvelope(
+                    data=saved_data,
+                    meta=build_response_meta(),
                 )
+
+            async def check_thought():
+                if purpose != "thought_to_draft":
+                    return
+                try:
+                    thought_uuid = UUID(thought_id)
+                except (TypeError, ValueError):
+                    raise AppError(
+                        status_code=404,
+                        code="RESOURCE_NOT_FOUND",
+                        message="Không tìm thấy Thought.",
+                        next_action="reload",
+                    ) from None
+                owner = resolve_user_uuid(current_user.user_id)
+                await ensure_thought_eligible_for_draft_conversion(db, owner, thought_uuid)
+
+            await check_thought()
+            # Đóng transaction đọc trước khi chờ provider.
+            if db.in_transaction():
+                await db.rollback()
+
+            # V01/A21 (Role Voice): chuyển audio thành chữ qua voice_service; lỗi đổi sang Error Envelope.
+            try:
+                stt_result = await get_voice_service().transcribe(
+                    audio_bytes,
+                    content_type=file.content_type,
+                    filename=file.filename,
+                )
+            except SttError as exc:
+                raise _stt_error_to_app_error(exc) from exc
+
+            await command_service.lock_owner(db, current_user.user_id)
+            await check_thought()
+            data = TranscriptionData(
+                text=stt_result.text,
+                input_source="thought" if purpose == "thought_to_draft" else "voice",
+                thought_id=thought_id if purpose == "thought_to_draft" else None,
+            )
+            saved = await command_service.replay(db, current_user.user_id, idempotency_key, digest)
+            if saved is not None:
+                await db.rollback()
+                return SuccessEnvelope(
+                    data=TranscriptionData.model_validate(saved), meta=build_response_meta()
+                )
+            command_service.record(
+                db, current_user.user_id, idempotency_key, digest, "voice_transcription", data
+            )
+            await db.commit()
+            _VOICE_IDEMPOTENCY_STORE[flight_key] = (
+                fingerprint,
+                data,
+            )
             return SuccessEnvelope(
-                data=saved_data,
+                data=data,
                 meta=build_response_meta(),
             )
-        continue
-
-    async def check_thought():
-        if purpose != "thought_to_draft":
-            return
-        try:
-            thought_uuid = UUID(thought_id)
-        except (TypeError, ValueError):
-            raise AppError(
-                status_code=404,
-                code="RESOURCE_NOT_FOUND",
-                message="Không tìm thấy Thought.",
-                next_action="reload",
-            ) from None
-        owner = resolve_user_uuid(current_user.user_id)
-        await ensure_thought_eligible_for_draft_conversion(db, owner, thought_uuid)
-
-    lock_event = asyncio.Event()
-    _INFLIGHT_VOICE_LOCKS[flight_key] = lock_event
-    try:
-        await check_thought()
-        # Đóng transaction đọc trước khi chờ provider.
-        if db.in_transaction():
-            await db.rollback()
-
-        # V01/A21 (Role Voice): chuyển audio thành chữ qua voice_service; lỗi đổi sang Error Envelope.
-        try:
-            stt_result = await get_voice_service().transcribe(
-                audio_bytes,
-                content_type=file.content_type,
-                filename=file.filename,
-            )
-        except SttError as exc:
-            raise _stt_error_to_app_error(exc) from exc
-
-        await check_thought()
-        data = TranscriptionData(
-            text=stt_result.text,
-            input_source="thought" if purpose == "thought_to_draft" else "voice",
-            thought_id=thought_id if purpose == "thought_to_draft" else None,
-        )
-        await command_service.lock_owner(db, current_user.user_id)
-        saved = await command_service.replay(db, current_user.user_id, idempotency_key, digest)
-        if saved is not None:
-            await db.rollback()
-            return SuccessEnvelope(
-                data=TranscriptionData.model_validate(saved), meta=build_response_meta()
-            )
-        command_service.record(
-            db, current_user.user_id, idempotency_key, digest, "voice_transcription", data
-        )
-        await db.commit()
-        _VOICE_IDEMPOTENCY_STORE[flight_key] = (
-            fingerprint,
-            data,
-        )
-        return SuccessEnvelope(
-            data=data,
-            meta=build_response_meta(),
-        )
     finally:
-        lock_event.set()
-        _INFLIGHT_VOICE_LOCKS.pop(flight_key, None)
+        current_lock.ref_count -= 1
+        if current_lock.ref_count <= 0:
+            if _INFLIGHT_VOICE_LOCKS.get(flight_key) is current_lock:
+                _INFLIGHT_VOICE_LOCKS.pop(flight_key, None)
 
 
 @router.post(

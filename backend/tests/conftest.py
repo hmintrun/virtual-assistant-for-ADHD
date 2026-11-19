@@ -26,22 +26,23 @@ _request_clock_ctx: contextvars.ContextVar[datetime | None] = contextvars.Contex
 )
 
 
-def _install_legacy_clock_middleware():
-    from starlette.requests import Request
+@pytest.fixture(autouse=True)
+def legacy_test_clock_adapter(request, monkeypatch):
+    """Đồng hồ thích ứng (Context-Aware Clock Adapter) cho các bộ test legacy (BUG-04)."""
+    test_file = Path(request.node.fspath).name
+    if test_file not in LEGACY_TIME_SUITES:
+        yield
+        return
 
-    from app.main import app
+    import httpx
 
-    @app.middleware("http")
-    async def legacy_clock_middleware(request: Request, call_next):
-        pytest_current = os.environ.get("PYTEST_CURRENT_TEST", "")
-        is_legacy = any(suite in pytest_current for suite in LEGACY_TIME_SUITES)
-        if not is_legacy:
-            return await call_next(request)
+    orig_client_send = httpx.AsyncClient.send
 
+    async def legacy_client_send(self, req, *args, **kwargs):
         token = None
-        if request.method in ("POST", "PUT", "PATCH"):
+        if req.method in ("POST", "PUT", "PATCH"):
             try:
-                body = await request.body()
+                body = req.content
                 if body:
                     data = json.loads(body)
                     if isinstance(data, dict):
@@ -70,27 +71,17 @@ def _install_legacy_clock_middleware():
                                         pass
                             if event_times:
                                 token = _request_clock_ctx.set(max(event_times))
-                        elif ts is not None:
+                        elif ts is not None and "skew" not in str(data.get("device_id", "")).lower():
                             token = _request_clock_ctx.set(datetime.fromisoformat(ts).astimezone(UTC))
             except Exception:
                 pass
         try:
-            return await call_next(request)
+            return await orig_client_send(self, req, *args, **kwargs)
         finally:
             if token is not None:
                 _request_clock_ctx.reset(token)
 
-
-_install_legacy_clock_middleware()
-
-
-@pytest.fixture(autouse=True)
-def legacy_test_clock_adapter(request, monkeypatch):
-    """Đồng hồ thích ứng (Context-Aware Clock Adapter) cho các bộ test legacy (BUG-04)."""
-    test_file = Path(request.node.fspath).name
-    if test_file not in LEGACY_TIME_SUITES:
-        yield
-        return
+    monkeypatch.setattr(httpx.AsyncClient, "send", legacy_client_send)
 
     def adaptive_utc_now(now: datetime | None = None) -> datetime:
         if now is not None:
@@ -184,6 +175,59 @@ def legacy_test_clock_adapter(request, monkeypatch):
     yield
 
 
+@pytest.fixture
+def simulated_clock(monkeypatch):
+    """Fixture cung cấp cơ chế điều khiển đồng hồ server trong test mà không can thiệp HTTP middleware."""
+
+    class ClockController:
+        def __init__(self, initial_time: datetime | None = None) -> None:
+            self._current_time: datetime = (
+                initial_time.astimezone(UTC)
+                if initial_time and initial_time.utcoffset()
+                else (initial_time.replace(tzinfo=UTC) if initial_time else datetime.now(UTC))
+            )
+
+        def set(self, dt: datetime) -> None:
+            if dt.utcoffset() is None:
+                dt = dt.replace(tzinfo=UTC)
+            self._current_time = dt.astimezone(UTC)
+
+        def advance(self, duration: timedelta) -> None:
+            self._current_time += duration
+
+        def now(self) -> datetime:
+            return self._current_time
+
+    controller = ClockController()
+
+    def _get_now(now: datetime | None = None) -> datetime:
+        if now is not None:
+            if now.utcoffset() is None:
+                from app.core.errors import AppError, FieldError
+
+                raise AppError(
+                    status_code=422,
+                    code="VALIDATION_ERROR",
+                    message="Mốc thời gian kiểm tra phải có múi giờ.",
+                    field_errors=[
+                        FieldError(
+                            field_path="now",
+                            message="Mốc thời gian kiểm tra phải có múi giờ.",
+                        )
+                    ],
+                    next_action="fix_fields",
+                )
+            return now.astimezone(UTC)
+        return controller.now()
+
+    from app.services import device_service, run_service
+
+    monkeypatch.setattr(run_service, "_current_utc_now", _get_now)
+    monkeypatch.setattr(device_service, "_current_utc_now", _get_now)
+    monkeypatch.setattr(device_service, "_now", _get_now)
+    return controller
+
+
 @pytest.fixture(autouse=True)
 def offline_test_environment(monkeypatch):
     """Chỉ dùng DB thử nghiệm và provider giả; cấm kết nối mạng từ test."""
@@ -242,6 +286,7 @@ def sqlite_migration(tmp_path):
             [sys.executable, "-m", "alembic", *args],
             cwd=cwd,
             env=env,
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
             timeout=60,

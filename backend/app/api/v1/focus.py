@@ -1,6 +1,6 @@
 """Router UF3: wire contract và điểm nối run_service/device_service của W03."""
 
-from datetime import UTC, datetime, timedelta
+from datetime import timedelta
 from typing import Annotated
 
 from fastapi import APIRouter, Path, Query, Request
@@ -58,7 +58,7 @@ async def get_active_run(
     request: Request, current_user: CurrentUserDep, db: DbSessionDep
 ) -> SuccessEnvelope[SessionRunData | None]:
     data = await service_handler("run_service", "get_active_run")(
-        db=db, user_id=current_user.user_id
+        db=db, user_id=current_user.user_id, now=run_service._current_utc_now()
     )
     return success(request, data)
 
@@ -71,7 +71,7 @@ async def get_run_detail(
     db: DbSessionDep,
 ) -> SuccessEnvelope[SessionRunData]:
     data = await service_handler("run_service", "get_run_detail")(
-        db=db, user_id=current_user.user_id, run_id=run_id
+        db=db, user_id=current_user.user_id, run_id=run_id, now=run_service._current_utc_now()
     )
     return success(request, data)
 
@@ -211,7 +211,7 @@ async def get_reminders(
     to_time: Annotated[AwareDatetime | None, Query(alias="to")] = None,
     schedule_revision: Annotated[int | None, Query(ge=0)] = None,
 ) -> SuccessEnvelope[ReminderListResult]:
-    now_utc = datetime.now(UTC)
+    now_utc = run_service._current_utc_now()
     effective_from = from_time or now_utc
     effective_to = to_time or (effective_from + timedelta(hours=24))
     if effective_from >= effective_to:

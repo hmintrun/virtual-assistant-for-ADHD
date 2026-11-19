@@ -542,6 +542,85 @@ async def _validate_start_feasibility(
             .order_by(SessionRow.scheduled_start.asc())
         )
     )
+    gap_override_by_other_id: dict[UUID, int] = {}
+    approved_proposals = list(
+        await db.scalars(
+            select(RescheduleProposal)
+            .where(
+                RescheduleProposal.user_id == user_uuid,
+                RescheduleProposal.status == "approved",
+            )
+            .order_by(RescheduleProposal.updated_at.desc())
+        )
+    )
+    all_relevant_sessions = [session, *other_sessions]
+    for prop in approved_proposals:
+        meta = (prop.proposed_changes or {}).get("_meta") or {}
+        if meta.get("continuation_request") is None:
+            continue
+        gap_exceptions = meta.get("gap_exceptions") or []
+        if not gap_exceptions:
+            continue
+
+        session_uuid_by_ref: dict[str, UUID] = {
+            str(s.id): s.id for s in all_relevant_sessions
+        }
+        # 1. Ánh xạ trực tiếp từ applied_session_ids
+        applied_ids = (prop.proposed_changes or {}).get("applied_session_ids") or {}
+        for ref_k, real_id_str in applied_ids.items():
+            try:
+                session_uuid_by_ref[str(ref_k)] = UUID(str(real_id_str))
+            except (ValueError, TypeError):
+                pass
+
+        # 2. Ánh xạ các temp_session_id trong sessions_to_add với các SessionRow thật (fallback nới lỏng cửa sổ)
+        for add_item in (prop.proposed_changes or {}).get("sessions_to_add") or []:
+            after_obj = add_item.get("after") or {}
+            item_step_id = add_item.get("step_id") or after_obj.get("step_id")
+            raw_start = after_obj.get("start")
+            if not item_step_id or not raw_start:
+                continue
+            try:
+                item_start = datetime.fromisoformat(str(raw_start)).astimezone(UTC)
+            except (ValueError, TypeError):
+                continue
+            for s in all_relevant_sessions:
+                if str(s.step_id) == str(item_step_id) and abs((s.scheduled_start.astimezone(UTC) - item_start).total_seconds()) <= 3600.0:
+                    for rk in ("temp_session_id", "session_ref", "id"):
+                        ref_val = add_item.get(rk)
+                        if ref_val:
+                            session_uuid_by_ref.setdefault(str(ref_val), s.id)
+
+        for gx in gap_exceptions:
+            from_ref = str(gx.get("from_session_ref") or "")
+            to_ref = str(gx.get("to_session_ref") or "")
+            applied_gap = int(gx.get("applied_gap_seconds", MIN_INTER_SESSION_GAP_SECONDS))
+
+            from_uuid = session_uuid_by_ref.get(from_ref)
+            if from_uuid is None:
+                try:
+                    from_uuid = UUID(from_ref)
+                except (ValueError, TypeError):
+                    from_uuid = None
+
+            to_uuid = session_uuid_by_ref.get(to_ref)
+            if to_uuid is None:
+                try:
+                    to_uuid = UUID(to_ref)
+                except (ValueError, TypeError):
+                    to_uuid = None
+
+            other_target_id: UUID | None = None
+            if from_uuid == session.id and to_uuid is not None:
+                other_target_id = to_uuid
+            elif to_uuid == session.id and from_uuid is not None:
+                other_target_id = from_uuid
+
+            if other_target_id is not None:
+                prev_gap = gap_override_by_other_id.get(other_target_id)
+                if prev_gap is None or applied_gap < prev_gap:
+                    gap_override_by_other_id[other_target_id] = max(0, applied_gap)
+
     if other_sessions:
         other_ids = [s.id for s in other_sessions]
         other_runs = list(
@@ -558,85 +637,6 @@ async def _validate_start_feasibility(
         ended_run_by_session: dict[UUID, SessionRun] = {}
         for r in other_runs:
             ended_run_by_session[r.session_id] = r
-
-        gap_override_by_other_id: dict[UUID, int] = {}
-        approved_proposals = list(
-            await db.scalars(
-                select(RescheduleProposal)
-                .where(
-                    RescheduleProposal.user_id == user_uuid,
-                    RescheduleProposal.status == "approved",
-                )
-                .order_by(RescheduleProposal.updated_at.desc())
-            )
-        )
-        all_relevant_sessions = [session, *other_sessions]
-        for prop in approved_proposals:
-            meta = (prop.proposed_changes or {}).get("_meta") or {}
-            if meta.get("continuation_request") is None:
-                continue
-            gap_exceptions = meta.get("gap_exceptions") or []
-            if not gap_exceptions:
-                continue
-
-            session_uuid_by_ref: dict[str, UUID] = {
-                str(s.id): s.id for s in all_relevant_sessions
-            }
-            # 1. Ánh xạ trực tiếp từ applied_session_ids
-            applied_ids = (prop.proposed_changes or {}).get("applied_session_ids") or {}
-            for ref_k, real_id_str in applied_ids.items():
-                try:
-                    session_uuid_by_ref[str(ref_k)] = UUID(str(real_id_str))
-                except (ValueError, TypeError):
-                    pass
-
-            # 2. Ánh xạ các temp_session_id trong sessions_to_add với các SessionRow thật (fallback nới lỏng cửa sổ)
-            for add_item in (prop.proposed_changes or {}).get("sessions_to_add") or []:
-                after_obj = add_item.get("after") or {}
-                item_step_id = add_item.get("step_id") or after_obj.get("step_id")
-                raw_start = after_obj.get("start")
-                if not item_step_id or not raw_start:
-                    continue
-                try:
-                    item_start = datetime.fromisoformat(str(raw_start)).astimezone(UTC)
-                except (ValueError, TypeError):
-                    continue
-                for s in all_relevant_sessions:
-                    if str(s.step_id) == str(item_step_id) and abs((s.scheduled_start.astimezone(UTC) - item_start).total_seconds()) <= 3600.0:
-                        for rk in ("temp_session_id", "session_ref", "id"):
-                            ref_val = add_item.get(rk)
-                            if ref_val:
-                                session_uuid_by_ref.setdefault(str(ref_val), s.id)
-
-            for gx in gap_exceptions:
-                from_ref = str(gx.get("from_session_ref") or "")
-                to_ref = str(gx.get("to_session_ref") or "")
-                applied_gap = int(gx.get("applied_gap_seconds", MIN_INTER_SESSION_GAP_SECONDS))
-
-                from_uuid = session_uuid_by_ref.get(from_ref)
-                if from_uuid is None:
-                    try:
-                        from_uuid = UUID(from_ref)
-                    except (ValueError, TypeError):
-                        from_uuid = None
-
-                to_uuid = session_uuid_by_ref.get(to_ref)
-                if to_uuid is None:
-                    try:
-                        to_uuid = UUID(to_ref)
-                    except (ValueError, TypeError):
-                        to_uuid = None
-
-                other_target_id: UUID | None = None
-                if from_uuid == session.id and to_uuid is not None:
-                    other_target_id = to_uuid
-                elif to_uuid == session.id and from_uuid is not None:
-                    other_target_id = from_uuid
-
-                if other_target_id is not None:
-                    prev_gap = gap_override_by_other_id.get(other_target_id)
-                    if prev_gap is None or applied_gap < prev_gap:
-                        gap_override_by_other_id[other_target_id] = max(0, applied_gap)
 
         for other in other_sessions:
             ended_run = ended_run_by_session.get(other.id)
@@ -655,25 +655,27 @@ async def _validate_start_feasibility(
                     "Thời điểm bắt đầu mới vi phạm khoảng cách tối thiểu 15 phút hoặc chồng lấn với phiên khác. Cần xếp lại lịch."
                 )
 
-        recent_runs = list(
-            await db.scalars(
-                select(SessionRun).where(
-                    SessionRun.user_id == user_uuid,
-                    SessionRun.session_id != session.id,
-                    SessionRun.ended_at.is_not(None),
-                    SessionRun.ended_at >= req_start - timedelta(seconds=MIN_INTER_SESSION_GAP_SECONDS),
-                )
+    recent_runs = list(
+        await db.scalars(
+            select(SessionRun).where(
+                SessionRun.user_id == user_uuid,
+                SessionRun.session_id != session.id,
+                SessionRun.ended_at.is_not(None),
+                SessionRun.ended_at >= req_start - timedelta(seconds=MIN_INTER_SESSION_GAP_SECONDS),
             )
         )
-        for r_run in recent_runs:
-            req_gap_sec = gap_override_by_other_id.get(
-                r_run.session_id, MIN_INTER_SESSION_GAP_SECONDS
+    )
+    for r_run in recent_runs:
+        if r_run.ended_at is None:
+            continue
+        req_gap_sec = gap_override_by_other_id.get(
+            r_run.session_id, MIN_INTER_SESSION_GAP_SECONDS
+        )
+        r_ended = r_run.ended_at.astimezone(UTC)
+        if (req_start - r_ended).total_seconds() < req_gap_sec:
+            raise _require_replan(
+                "Thời điểm bắt đầu mới vi phạm khoảng cách tối thiểu 15 phút hoặc chồng lấn với phiên khác. Cần xếp lại lịch."
             )
-            r_ended = r_run.ended_at.astimezone(UTC)
-            if (req_start - r_ended).total_seconds() < req_gap_sec:
-                raise _require_replan(
-                    "Thời điểm bắt đầu mới vi phạm khoảng cách tối thiểu 15 phút hoặc chồng lấn với phiên khác. Cần xếp lại lịch."
-                )
 
 
 @command_service.durable_command(
