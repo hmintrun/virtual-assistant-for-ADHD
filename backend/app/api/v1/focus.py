@@ -58,7 +58,7 @@ async def get_active_run(
     request: Request, current_user: CurrentUserDep, db: DbSessionDep
 ) -> SuccessEnvelope[SessionRunData | None]:
     data = await service_handler("run_service", "get_active_run")(
-        db=db, user_id=current_user.user_id, now=run_service._current_utc_now()
+        db=db, user_id=current_user.user_id
     )
     return success(request, data)
 
@@ -71,7 +71,7 @@ async def get_run_detail(
     db: DbSessionDep,
 ) -> SuccessEnvelope[SessionRunData]:
     data = await service_handler("run_service", "get_run_detail")(
-        db=db, user_id=current_user.user_id, run_id=run_id, now=run_service._current_utc_now()
+        db=db, user_id=current_user.user_id, run_id=run_id
     )
     return success(request, data)
 
