@@ -6,6 +6,7 @@ import '../core/api_client.dart';
 import '../core/api_session.dart';
 import '../models/outbox_record.dart';
 import '../repositories/local_outbox_repository.dart';
+import '../repositories/local_thought_repository.dart';
 
 /// Báo cáo tổng kết sau một đợt replay hàng đợi outbox ngoại tuyến.
 class ReplayReport {
@@ -43,11 +44,14 @@ class OutboxReplayWorker {
   OutboxReplayWorker({
     required LocalOutboxRepository repository,
     required ApiClient apiClient,
+    LocalThoughtRepository? thoughtRepository,
   })  : _repository = repository,
-        _apiClient = apiClient;
+        _apiClient = apiClient,
+        _thoughtRepository = thoughtRepository;
 
   final LocalOutboxRepository _repository;
   final ApiClient _apiClient;
+  final LocalThoughtRepository? _thoughtRepository;
 
   bool _isReplaying = false;
   bool _isPausedAuth = false;
@@ -123,6 +127,7 @@ class OutboxReplayWorker {
           await _sendRecord(record);
           await _repository.markSynced(record.clientEventId);
           syncedIds.add(record.clientEventId);
+          await _handleThoughtLifecycle(record);
         } on DioException catch (dioError) {
           final statusCode = dioError.response?.statusCode;
           final errorMessage = dioError.message ?? dioError.toString();
@@ -150,6 +155,15 @@ class OutboxReplayWorker {
             );
             conflictIds.add(record.clientEventId);
             // 409 là xung đột logic (revision conflict), không làm nghẽn bản ghi tiếp theo
+          } else if (statusCode == 404 &&
+              (record.eventType == OutboxEventType.thoughtDelete ||
+                  (record.httpMethod.toUpperCase() == 'DELETE' &&
+                      record.endpoint.contains('/thoughts/')))) {
+            // Khi xóa một thought đã không còn tồn tại trên máy chủ (404 Not Found),
+            // mục tiêu xóa coi như đã hoàn tất: đánh dấu synced và purge tombstone cục bộ.
+            await _repository.markSynced(record.clientEventId);
+            syncedIds.add(record.clientEventId);
+            await _handleThoughtLifecycle(record);
           } else if (statusCode != null &&
               statusCode >= 400 &&
               statusCode < 500 &&
@@ -210,6 +224,13 @@ class OutboxReplayWorker {
               reason: 'HTTP 409: $errorMessage',
             );
             conflictIds.add(record.clientEventId);
+          } else if (statusCode == 404 &&
+              (record.eventType == OutboxEventType.thoughtDelete ||
+                  (record.httpMethod.toUpperCase() == 'DELETE' &&
+                      record.endpoint.contains('/thoughts/')))) {
+            await _repository.markSynced(record.clientEventId);
+            syncedIds.add(record.clientEventId);
+            await _handleThoughtLifecycle(record);
           } else if (statusCode != null &&
               statusCode >= 400 &&
               statusCode < 500 &&
@@ -318,5 +339,41 @@ class OutboxReplayWorker {
         },
       ),
     );
+  }
+
+  /// Xử lý cập nhật trạng thái Thought sau khi replay thành công:
+  /// - DELETE 200 OK: Purge vĩnh viễn dòng tombstone khỏi SQLite.
+  /// - POST 200/201: Đánh dấu Thought là synced.
+  Future<void> _handleThoughtLifecycle(OutboxRecord record) async {
+    final thoughtRepo = _thoughtRepository;
+    if (thoughtRepo == null) return;
+
+    final method = record.httpMethod.toUpperCase();
+    final endpoint = record.endpoint;
+
+    if (method == 'DELETE' &&
+        (endpoint.contains('/thoughts/') ||
+            record.eventType == OutboxEventType.thoughtDelete)) {
+      final targetId = record.targetResourceId ??
+          _extractIdFromEndpoint(endpoint, '/thoughts/');
+      if (targetId != null && targetId.isNotEmpty) {
+        await thoughtRepo.purgeTombstone(targetId);
+      }
+    } else if (method == 'POST' &&
+        (endpoint.endsWith('/thoughts') ||
+            record.eventType == OutboxEventType.thoughtCapture)) {
+      final targetId = record.targetResourceId ?? record.clientEventId;
+      if (targetId.isNotEmpty) {
+        await thoughtRepo.markSynced(targetId);
+      }
+    }
+  }
+
+  static String? _extractIdFromEndpoint(String endpoint, String prefix) {
+    final idx = endpoint.indexOf(prefix);
+    if (idx < 0) return null;
+    final sub = endpoint.substring(idx + prefix.length);
+    final slashIdx = sub.indexOf('/');
+    return slashIdx >= 0 ? sub.substring(0, slashIdx) : sub;
   }
 }

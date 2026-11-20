@@ -6,6 +6,7 @@ class OutboxEventType {
   static const String checkinCreate = 'checkin_create';
   static const String checkinResponse = 'checkin_response';
   static const String thoughtCapture = 'thought_capture';
+  static const String thoughtDelete = 'thought_delete';
   static const String runEventBatch = 'run_event_batch';
   static const String actualCorrection = 'actual_correction';
 }

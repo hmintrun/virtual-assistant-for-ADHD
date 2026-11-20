@@ -72,7 +72,7 @@ class LocalDatabaseManager {
       _db = await factory.openDatabase(
         dbPath,
         options: OpenDatabaseOptions(
-          version: 1,
+          version: 2,
           onCreate: _onCreate,
           onUpgrade: _onUpgrade,
         ),
@@ -107,6 +107,7 @@ class LocalDatabaseManager {
       }
     }
     final closeCompleter = Completer<Database>();
+    closeCompleter.future.ignore();
     _openCompleter = closeCompleter;
     try {
       if (_db != null && _db!.isOpen) {
@@ -214,10 +215,46 @@ class LocalDatabaseManager {
       );
     ''');
 
+    // 5. local_thoughts: Lưu trữ ý nghĩ UF4 và phục vụ cơ chế Tombstone
+    batch.execute('''
+      CREATE TABLE IF NOT EXISTS local_thoughts (
+        id TEXT PRIMARY KEY,
+        owner_id TEXT NOT NULL,
+        title TEXT,
+        audio_path TEXT NOT NULL,
+        source_run_id TEXT,
+        state TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+    ''');
+    batch.execute('''
+      CREATE INDEX IF NOT EXISTS idx_local_thoughts_owner_state
+      ON local_thoughts(owner_id, state);
+    ''');
+
     await batch.commit(noResult: true);
   }
 
   Future<void> _onUpgrade(Database db, int oldVersion, int newVersion) async {
-    // Migration logic cho các phiên bản tiếp theo
+    // Migration logic cho các phiên bản tiếp theo (Additive-Only: Tuyệt đối không DROP TABLE)
+    if (oldVersion < 2) {
+      await db.execute('''
+        CREATE TABLE IF NOT EXISTS local_thoughts (
+          id TEXT PRIMARY KEY,
+          owner_id TEXT NOT NULL,
+          title TEXT,
+          audio_path TEXT NOT NULL,
+          source_run_id TEXT,
+          state TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+      ''');
+      await db.execute('''
+        CREATE INDEX IF NOT EXISTS idx_local_thoughts_owner_state
+        ON local_thoughts(owner_id, state);
+      ''');
+    }
   }
 }
