@@ -74,7 +74,7 @@ class UserPreference(ApiModel):
     reminder_offsets: ReminderOffsets
     buffer_multiplier: float = Field(gt=0)
     reminder_style: str = Field(min_length=1)
-    requested_changes: PreferenceChanges | None = None
+    requested_changes: dict[str, Any] | None = None
     pending_proposal_id: str | None = None
 
 
@@ -190,7 +190,7 @@ class SettingsChangeResult(ApiModel):
     effective_revision: int
     requested_availability_revision: int | None
     effective_availability_revision: int | None
-    requested_changes: SettingsChanges
+    requested_changes: SettingsChanges | dict[str, Any]
     pending_proposal_id: str | None
     target_draft_id: str | None = None
     target_task_id: str | None = None

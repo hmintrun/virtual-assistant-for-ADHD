@@ -359,6 +359,7 @@ async def _apply_final_checkin_projection(
         ]
         other_step_wins_completed = False
         other_step_wins_skipped = False
+        other_step_wins_deny = False
         if subsequent_step_checkins:
             latest_ci, _ = subsequent_step_checkins[0]
             if latest_ci.session_outcome == "completed" and (
@@ -370,6 +371,12 @@ async def _apply_final_checkin_projection(
                 and latest_ci.skip_scope == "skip_step"
             ):
                 other_step_wins_skipped = True
+            elif (
+                latest_ci.step_completed is False
+                or latest_ci.task_completed is False
+                or latest_ci.session_outcome != "completed"
+            ):
+                other_step_wins_deny = True
 
         this_explicit_step_deny = (payload.step_completed is False) or (
             payload.session_outcome != "completed"
@@ -388,7 +395,8 @@ async def _apply_final_checkin_projection(
         )
 
         if other_step_wins_completed or (
-            not this_explicit_step_deny
+            not other_step_wins_deny
+            and not this_explicit_step_deny
             and (this_explicit_step_complete or this_auto_step_complete)
         ):
             step.status = "completed"
@@ -472,6 +480,7 @@ async def _apply_final_checkin_projection(
                 if (r.ended_at or r.started_at or ci.asked_at).astimezone(UTC) > this_order
             ]
             other_task_wins_completed = False
+            other_task_wins_deny = False
             if subsequent_task_checkins:
                 latest_ci_task, _ = subsequent_task_checkins[0]
                 if (
@@ -479,6 +488,12 @@ async def _apply_final_checkin_projection(
                     and latest_ci_task.task_completed is True
                 ):
                     other_task_wins_completed = True
+                elif (
+                    latest_ci_task.task_completed is False
+                    or latest_ci_task.step_completed is False
+                    or latest_ci_task.session_outcome != "completed"
+                ):
+                    other_task_wins_deny = True
 
             this_explicit_task_deny = (
                 (payload.task_completed is False)
@@ -496,7 +511,8 @@ async def _apply_final_checkin_projection(
             )
 
             if other_task_wins_completed or (
-                not this_explicit_task_deny
+                not other_task_wins_deny
+                and not this_explicit_task_deny
                 and (this_explicit_task_complete or auto_task_complete)
             ):
                 task.status = "completed"

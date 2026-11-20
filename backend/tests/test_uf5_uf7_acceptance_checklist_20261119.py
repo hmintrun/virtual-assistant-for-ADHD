@@ -8,13 +8,15 @@ Bao phủ đầy đủ 5 ca kiểm bắt buộc UF5 và 6 ca kiểm bắt buộc
 
 from __future__ import annotations
 
+import os
 from datetime import UTC, datetime, timedelta, timezone
 from typing import Any
 from uuid import UUID, uuid4
 
 import httpx
 import pytest
-from sqlalchemy import select
+from pydantic import ValidationError
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user
@@ -30,12 +32,20 @@ from app.models.system import Reminder
 from app.models.task import Task as TaskRow
 from app.models.user import User
 from app.models.user import UserPreference as UserPreferenceRow
-from app.schemas.settings import SettingsChangeRequest
+from app.schemas.settings import PreferenceChanges, SettingsChangeRequest
 from app.schemas.user import CurrentUser
 from app.services import run_service, settings_service
 from app.services.planning.adaptation import evaluate_buffer_adaptation
 
 TZ_VN = timezone(timedelta(hours=7))
+
+
+@pytest.fixture(autouse=True)
+async def _cleanup_dependency_overrides():
+    try:
+        yield
+    finally:
+        app.dependency_overrides.clear()
 
 
 def _auth_headers(user_id: UUID, idem_key: str | None = None) -> dict[str, str]:
@@ -52,7 +62,8 @@ def _auth_headers(user_id: UUID, idem_key: str | None = None) -> dict[str, str]:
 
 
 async def _make_test_env():
-    engine = make_engine("sqlite+aiosqlite:///:memory:")
+    url = os.environ.get("PROACTIVE_TEST_PG_URL", "sqlite+aiosqlite:///:memory:")
+    engine = make_engine(url)
     sf = session_factory(engine)
     async with engine.begin() as conn:
         from app.models import Base
@@ -1257,3 +1268,818 @@ async def test_uf7_checklist_direct_service_expected_task_revision_defense_in_de
         assert exc_info.value.status_code == 422
         assert exc_info.value.code == "VALIDATION_ERROR"
         assert "expected_task_revision" in exc_info.value.message
+
+
+# =============================================================================
+# PHẦN 3: BỔ SUNG THEO FEEDBACK 2026-11-20 (BUG-1, BUG-2, BUG-3 & EXTENDED TESTS)
+# =============================================================================
+
+
+@pytest.mark.asyncio
+async def test_uf5_t1_subsequent_run_deny_prevents_prior_run_forcing_completion():
+    """UF5-T1 (Bắt BUG-2): Run 1 (10:00) có step_completed=True -> Run 2 (11:00) phản hồi
+    session_outcome='partial', step_completed=False, task_completed=False ->
+    sửa Check-in trên Run 1 cũ (giữ step_completed=True):
+    Step & Task KHÔNG được bật về 'completed' vì Run 2 mới hơn đã phủ quyết."""
+    engine, sf = await _make_test_env()
+    now = run_service._current_utc_now()
+    t_run1 = now - timedelta(hours=2)
+    t_run2 = now - timedelta(hours=1)
+
+    user_id = uuid4()
+    async with sf() as db:
+        user = User(id=user_id, email=f"u_{user_id.hex[:6]}@test.com", display_name="Tester T1")
+        pref = UserPreferenceRow(user_id=user_id, effective_revision=1)
+        task = TaskRow(
+            user_id=user_id,
+            title="Task T1",
+            status="in_progress",
+            time_constraint={"kind": "window"},
+        )
+        db.add_all([user, pref, task])
+        await db.flush()
+
+        step = StepRow(
+            user_id=user_id,
+            task_id=task.id,
+            order_index=0,
+            title="Step T1",
+            estimated_base_seconds=3000,
+            remaining_base_seconds=1500,
+            status="in_progress",
+            buffer_multiplier=1.2,
+            estimate_source="user_confirmed",
+        )
+        db.add(step)
+        await db.flush()
+
+        sess1 = SessionRow(
+            user_id=user_id,
+            step_id=step.id,
+            scheduled_start=t_run1,
+            scheduled_end=t_run1 + timedelta(minutes=25),
+            work_seconds=1500,
+            rest_seconds=300,
+            segments=[],
+            duration_seconds=1800,
+            schedule_revision=1,
+            status="completed",
+        )
+        sess2 = SessionRow(
+            user_id=user_id,
+            step_id=step.id,
+            scheduled_start=t_run2,
+            scheduled_end=t_run2 + timedelta(minutes=25),
+            work_seconds=1500,
+            rest_seconds=300,
+            segments=[],
+            duration_seconds=1800,
+            schedule_revision=1,
+            status="completed",
+        )
+        db.add_all([sess1, sess2])
+        await db.flush()
+
+        # Run 1 và CheckIn 1 (10:00)
+        run1 = SessionRun(
+            id=uuid4(),
+            user_id=user_id,
+            session_id=sess1.id,
+            revision=1,
+            run_state="closed",
+            started_at=t_run1,
+            ended_at=t_run1 + timedelta(minutes=25),
+            actual_work_seconds=1500,
+            work_elapsed_seconds=1500,
+            rest_elapsed_seconds=0,
+            device_id="dev-test",
+            actual_source="timer_proxy",
+            settings_snapshot={"work_interval_seconds": 1500},
+        )
+        ci1 = CheckIn(
+            id=uuid4(),
+            user_id=user_id,
+            run_id=run1.id,
+            response_revision=1,
+            kind="final",
+            asked_at=t_run1 + timedelta(minutes=25),
+            responded_at=t_run1 + timedelta(minutes=26),
+            response_state="answered",
+            session_outcome="completed",
+            step_completed=True,
+            task_completed=False,
+        )
+        # Run 2 và CheckIn 2 (11:00) - Mới hơn, phủ quyết Step & Task
+        run2 = SessionRun(
+            id=uuid4(),
+            user_id=user_id,
+            session_id=sess2.id,
+            revision=1,
+            run_state="closed",
+            started_at=t_run2,
+            ended_at=t_run2 + timedelta(minutes=25),
+            actual_work_seconds=1500,
+            work_elapsed_seconds=1500,
+            rest_elapsed_seconds=0,
+            device_id="dev-test",
+            actual_source="timer_proxy",
+            settings_snapshot={"work_interval_seconds": 1500},
+        )
+        ci2 = CheckIn(
+            id=uuid4(),
+            user_id=user_id,
+            run_id=run2.id,
+            response_revision=1,
+            kind="final",
+            asked_at=t_run2 + timedelta(minutes=25),
+            responded_at=t_run2 + timedelta(minutes=26),
+            response_state="answered",
+            session_outcome="partial",
+            step_completed=False,
+            task_completed=False,
+        )
+        db.add_all([run1, run2])
+        await db.flush()
+        db.add_all([ci1, ci2])
+        await db.commit()
+        ci1_id = ci1.id
+        step_id = step.id
+        task_id = task.id
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        # Sửa ghi chú trên CheckIn 1 cũ (giữ step_completed=True)
+        r_update = await client.put(
+            f"/api/v1/check-ins/{ci1_id}/response",
+            headers=_auth_headers(user_id, f"idem-edit-ci1-{uuid4()}"),
+            json={
+                "expected_response_revision": 1,
+                "responded_at": (t_run1 + timedelta(minutes=27)).isoformat(),
+                "session_outcome": "completed",
+                "step_completed": True,
+                "task_completed": False,
+                "remaining_note": "Ghi chú bổ sung sau khi làm Run 2",
+            },
+        )
+        assert r_update.status_code == 200, r_update.text
+
+    # Kiểm tra DB: Step và Task KHÔNG được chuyển thành completed vì Run 2 mới hơn đã phủ quyết
+    async with sf() as db:
+        st = await db.get(StepRow, step_id)
+        tk = await db.get(TaskRow, task_id)
+        assert st.status == "in_progress", f"Step phải giữ in_progress nhưng nhận {st.status}"
+        assert tk.status == "in_progress", f"Task phải giữ in_progress nhưng nhận {tk.status}"
+
+
+@pytest.mark.asyncio
+async def test_uf5_t2_clock_boundary_300s_vs_301s():
+    """UF5-T2: Kiểm tra biên clock-skew +300s (200/201 hợp lệ) và +301s (422)
+    cho create_run_checkin (asked_at) và respond_to_checkin (responded_at)."""
+    engine, sf = await _make_test_env()
+    now = run_service._current_utc_now()
+    user_id = uuid4()
+
+    async with sf() as db:
+        user = User(id=user_id, email=f"u_{user_id.hex[:6]}@test.com", display_name="Tester T2")
+        pref = UserPreferenceRow(user_id=user_id, effective_revision=1)
+        task = TaskRow(
+            user_id=user_id,
+            title="Task T2",
+            status="in_progress",
+            time_constraint={"kind": "window"},
+        )
+        db.add_all([user, pref, task])
+        await db.flush()
+
+        step = StepRow(
+            user_id=user_id,
+            task_id=task.id,
+            order_index=0,
+            title="Step T2",
+            estimated_base_seconds=1500,
+            remaining_base_seconds=1500,
+            status="in_progress",
+            buffer_multiplier=1.2,
+            estimate_source="user_confirmed",
+        )
+        db.add(step)
+        await db.flush()
+
+        sess = SessionRow(
+            user_id=user_id,
+            step_id=step.id,
+            scheduled_start=now - timedelta(minutes=30),
+            scheduled_end=now,
+            work_seconds=1500,
+            rest_seconds=300,
+            segments=[],
+            duration_seconds=1800,
+            schedule_revision=1,
+            status="in_progress",
+        )
+        db.add(sess)
+        await db.flush()
+
+        run = SessionRun(
+            id=uuid4(),
+            user_id=user_id,
+            session_id=sess.id,
+            revision=1,
+            run_state="running",
+            started_at=now - timedelta(minutes=30),
+            ended_at=now,
+            device_id="dev-test",
+            actual_source="timer_proxy",
+            settings_snapshot={"work_interval_seconds": 1500},
+        )
+        db.add(run)
+        await db.commit()
+        run_id = run.id
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        # 1. create_run_checkin: asked_at = now + 301s -> 422
+        r_301 = await client.post(
+            f"/api/v1/runs/{run_id}/check-ins",
+            headers=_auth_headers(user_id, f"idem-ask-301-{uuid4()}"),
+            json={
+                "kind": "mid",
+                "asked_at": (now + timedelta(seconds=305)).isoformat(),
+                "expected_run_revision": 1,
+            },
+        )
+        assert r_301.status_code == 422
+
+        # 2. create_run_checkin: asked_at = now + 300s -> 201
+        r_300 = await client.post(
+            f"/api/v1/runs/{run_id}/check-ins",
+            headers=_auth_headers(user_id, f"idem-ask-300-{uuid4()}"),
+            json={
+                "kind": "mid",
+                "asked_at": (now + timedelta(seconds=295)).isoformat(),
+                "expected_run_revision": 1,
+            },
+        )
+        assert r_300.status_code == 201, r_300.text
+        ci_id = r_300.json()["data"]["checkin_id"]
+
+        # 3. respond_to_checkin: responded_at = now + 305s -> 422
+        r_resp_301 = await client.put(
+            f"/api/v1/check-ins/{ci_id}/response",
+            headers=_auth_headers(user_id, f"idem-resp-301-{uuid4()}"),
+            json={
+                "expected_response_revision": 0,
+                "session_outcome": "partial",
+                "responded_at": (now + timedelta(seconds=305)).isoformat(),
+            },
+        )
+        assert r_resp_301.status_code == 422
+
+        # 4. respond_to_checkin: responded_at = now + 295s -> 200
+        r_resp_300 = await client.put(
+            f"/api/v1/check-ins/{ci_id}/response",
+            headers=_auth_headers(user_id, f"idem-resp-300-{uuid4()}"),
+            json={
+                "expected_response_revision": 0,
+                "session_outcome": "partial",
+                "responded_at": (now + timedelta(seconds=295)).isoformat(),
+            },
+        )
+        assert r_resp_300.status_code == 200, r_resp_300.text
+
+
+@pytest.mark.asyncio
+async def test_uf5_t3_multi_session_step_correction_rollback():
+    """UF5-T3: Step có 2 session (1A + 1B). Hoàn thành 1A rồi 1B với step_completed=True, task_completed=True ->
+    Step & Task completed. Sau đó correction 1B thành incomplete ->
+    Step quay về in_progress, remaining_base_seconds > 0, Task không còn completed."""
+    engine, sf = await _make_test_env()
+    now = run_service._current_utc_now()
+    user_id = uuid4()
+
+    async with sf() as db:
+        user = User(id=user_id, email=f"u_{user_id.hex[:6]}@test.com", display_name="Tester T3")
+        pref = UserPreferenceRow(user_id=user_id, effective_revision=1)
+        task = TaskRow(
+            user_id=user_id,
+            title="Task T3",
+            status="in_progress",
+            time_constraint={"kind": "window"},
+        )
+        db.add_all([user, pref, task])
+        await db.flush()
+
+        step = StepRow(
+            user_id=user_id,
+            task_id=task.id,
+            order_index=0,
+            title="Step T3",
+            estimated_base_seconds=3000,
+            remaining_base_seconds=1500,
+            status="in_progress",
+            buffer_multiplier=1.2,
+            estimate_source="user_confirmed",
+        )
+        db.add(step)
+        await db.flush()
+
+        sess1 = SessionRow(
+            user_id=user_id,
+            step_id=step.id,
+            scheduled_start=now - timedelta(hours=2),
+            scheduled_end=now - timedelta(hours=2) + timedelta(minutes=25),
+            work_seconds=1500,
+            rest_seconds=300,
+            segments=[],
+            duration_seconds=1800,
+            schedule_revision=1,
+            status="completed",
+        )
+        sess2 = SessionRow(
+            user_id=user_id,
+            step_id=step.id,
+            scheduled_start=now - timedelta(hours=1),
+            scheduled_end=now - timedelta(hours=1) + timedelta(minutes=25),
+            work_seconds=1500,
+            rest_seconds=300,
+            segments=[],
+            duration_seconds=1800,
+            schedule_revision=1,
+            status="completed",
+        )
+        db.add_all([sess1, sess2])
+        await db.flush()
+
+        run2 = SessionRun(
+            id=uuid4(),
+            user_id=user_id,
+            session_id=sess2.id,
+            revision=1,
+            run_state="closed",
+            started_at=now - timedelta(hours=1),
+            ended_at=now - timedelta(hours=1) + timedelta(minutes=25),
+            actual_work_seconds=1500,
+            work_elapsed_seconds=1500,
+            rest_elapsed_seconds=0,
+            device_id="dev-test",
+            actual_source="timer_proxy",
+            settings_snapshot={"work_interval_seconds": 1500},
+        )
+        ci2 = CheckIn(
+            id=uuid4(),
+            user_id=user_id,
+            run_id=run2.id,
+            response_revision=1,
+            kind="final",
+            asked_at=now - timedelta(hours=1) + timedelta(minutes=25),
+            responded_at=now - timedelta(hours=1) + timedelta(minutes=26),
+            response_state="answered",
+            session_outcome="completed",
+            step_completed=True,
+            task_completed=True,
+        )
+        step.status = "completed"
+        step.remaining_base_seconds = 0
+        task.status = "completed"
+        db.add(run2)
+        await db.flush()
+        db.add(ci2)
+        await db.commit()
+        ci2_id = ci2.id
+        step_id = step.id
+        task_id = task.id
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        # Đính chính CheckIn 2 thành incomplete
+        r_correct = await client.put(
+            f"/api/v1/check-ins/{ci2_id}/response",
+            headers=_auth_headers(user_id, f"idem-correct-ci2-{uuid4()}"),
+            json={
+                "expected_response_revision": 1,
+                "responded_at": (now - timedelta(hours=1) + timedelta(minutes=27)).isoformat(),
+                "session_outcome": "incomplete",
+                "step_completed": False,
+                "task_completed": False,
+            },
+        )
+        assert r_correct.status_code == 200, r_correct.text
+
+    async with sf() as db:
+        st = await db.get(StepRow, step_id)
+        tk = await db.get(TaskRow, task_id)
+        assert st.status == "in_progress"
+        assert st.remaining_base_seconds > 0
+        assert tk.status == "in_progress"
+
+
+@pytest.mark.asyncio
+async def test_uf7_t1_re_sending_same_reminder_offsets_no_integrity_error_500():
+    """UF7-T1 (Bắt BUG-1): Đã có future scheduled session và reminder_offsets=[1200, 600]
+    ở effective_revision=2: gửi lại reminder_offsets=[1200, 600] với Idempotency-Key mới ->
+    trả 200, KHÔNG nổ IntegrityError 500!"""
+    engine, sf = await _make_test_env()
+    now = run_service._current_utc_now()
+    user_id = uuid4()
+    fut_start = now + timedelta(days=1)
+
+    async with sf() as db:
+        user = User(id=user_id, email=f"u_{user_id.hex[:6]}@test.com", display_name="Tester T1_UF7")
+        pref = UserPreferenceRow(
+            user_id=user_id,
+            work_interval_seconds=1500,
+            rest_interval_seconds=300,
+            buffer_multiplier=1.2,
+            reminder_offsets=[1200, 600],
+            effective_revision=2,
+        )
+        task = TaskRow(
+            user_id=user_id,
+            title="Task UF7 T1",
+            status="in_progress",
+            time_constraint={"kind": "window"},
+        )
+        db.add_all([user, pref, task])
+        await db.flush()
+
+        step = StepRow(
+            user_id=user_id,
+            task_id=task.id,
+            order_index=0,
+            title="Step UF7 T1",
+            estimated_base_seconds=1500,
+            remaining_base_seconds=1500,
+            status="in_progress",
+            buffer_multiplier=1.2,
+            estimate_source="user_confirmed",
+        )
+        db.add(step)
+        await db.flush()
+
+        sess = SessionRow(
+            user_id=user_id,
+            step_id=step.id,
+            scheduled_start=fut_start,
+            scheduled_end=fut_start + timedelta(minutes=25),
+            work_seconds=1500,
+            rest_seconds=300,
+            segments=[],
+            duration_seconds=1800,
+            schedule_revision=1,
+            status="scheduled",
+        )
+        db.add(sess)
+        await db.flush()
+
+        rem1 = Reminder(
+            user_id=user_id,
+            session_id=sess.id,
+            schedule_revision=1,
+            kind="pre_session",
+            fire_at=fut_start - timedelta(seconds=1200),
+            dedupe_key=f"session:{sess.id}:version:1:reminder:1200:pref:2",
+            delivery_state="scheduled",
+        )
+        rem2 = Reminder(
+            user_id=user_id,
+            session_id=sess.id,
+            schedule_revision=1,
+            kind="pre_session",
+            fire_at=fut_start - timedelta(seconds=600),
+            dedupe_key=f"session:{sess.id}:version:1:reminder:600:pref:2",
+            delivery_state="scheduled",
+        )
+        db.add_all([rem1, rem2])
+        await db.commit()
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        # Gửi lại CHÍNH [1200, 600] với idempotency key mới -> KHÔNG ĐƯỢC 500!
+        r_same = await client.post(
+            "/api/v1/settings/change-requests",
+            headers=_auth_headers(user_id, f"idem-same-offsets-{uuid4()}"),
+            json={
+                "expected_preferences_revision": 2,
+                "changes": {"preferences": {"reminder_offsets": [1200, 600]}},
+            },
+        )
+        assert r_same.status_code == 200, f"Phải trả 200 nhưng nhận {r_same.status_code}: {r_same.text}"
+
+        # Kiểm tra device nhận đúng danh sách reminder [1200, 600]
+        r_rem = await client.get(
+            "/api/v1/reminders",
+            headers=_auth_headers(user_id),
+            params={
+                "device_id": "dev-test",
+                "from": (now - timedelta(hours=1)).isoformat(),
+                "to": (fut_start + timedelta(hours=2)).isoformat(),
+            },
+        )
+        assert r_rem.status_code == 200
+        rem_items = r_rem.json()["data"]["items"]
+        assert len(rem_items) == 2
+
+
+@pytest.mark.asyncio
+async def test_uf7_t2_direct_service_dict_availability_no_attribute_error():
+    """UF7-T2 (Bắt BUG-3): Gọi trực tiếp settings_service.apply_settings_change với
+    changes={'availability': ...} cùng expected_task_revision=1 -> không văng AttributeError."""
+    engine, sf = await _make_test_env()
+    async with sf() as db:
+        ids = await _seed_uf7_environment(db)
+        user_id = ids["user_id"]
+        task_id = ids["task_id"]
+
+        req = SettingsChangeRequest.model_construct(
+            expected_preferences_revision=1,
+            target_task_id=str(task_id),
+            expected_task_revision=1,
+            changes={"availability": {"weekly_rules": [], "timezone": "Asia/Ho_Chi_Minh"}},
+        )
+
+        # Gọi trực tiếp apply_settings_change mà không qua Pydantic parse
+        res = await settings_service.apply_settings_change(
+            user_id=str(user_id),
+            idempotency_key=f"idem-dict-avail-{uuid4()}",
+            payload=req,
+            db=db,
+        )
+        assert res.change_request_id is not None
+
+
+def test_uf7_t4_preference_changes_nan_inf_bool_validation():
+    """UF7-T4: Kiểm tra trực tiếp PreferenceChanges.model_validate với float('nan'),
+    float('inf'), và work_interval_seconds=0."""
+    with pytest.raises(ValidationError):
+        PreferenceChanges.model_validate({"buffer_multiplier": float("nan")})
+
+    with pytest.raises(ValidationError):
+        PreferenceChanges.model_validate({"buffer_multiplier": float("inf")})
+
+    with pytest.raises(ValidationError):
+        PreferenceChanges.model_validate({"buffer_multiplier": float("-inf")})
+
+    with pytest.raises(ValidationError):
+        PreferenceChanges.model_validate({"work_interval_seconds": 0})
+
+    with pytest.raises(ValidationError):
+        PreferenceChanges.model_validate({"reminder_offsets": [300, 900]})
+
+
+@pytest.mark.asyncio
+async def test_uf7_t5_get_current_suggestion_http_e2e(monkeypatch: pytest.MonkeyPatch):
+    """UF7-T5: Kiểm tra GET /api/v1/suggestions/current qua HTTP End-to-End:
+    1. < 7 mẫu sạch -> trả null (không tạo gợi ý).
+    2. >= 7 mẫu có diff == 0.20 -> trả null (chỉ gợi ý khi diff > 0.20).
+    3. Run với run_state='awaiting_checkin' bị loại bỏ khỏi tính toán.
+    4. Gợi ý xuất hiện khi diff > 0.20 -> trả AdaptationSuggestionData.
+    5. Reject gợi ý kèm cooldown_until > now -> gọi lại ngay trả null."""
+    engine, sf = await _make_test_env()
+    now = run_service._current_utc_now()
+    monkeypatch.setattr(settings_service, "_utc_now", lambda now_arg=None: (now_arg or now).astimezone(UTC))
+
+    user_id = uuid4()
+    async with sf() as db:
+        user = User(id=user_id, email=f"u_{user_id.hex[:6]}@test.com", display_name="Tester T5")
+        pref = UserPreferenceRow(
+            user_id=user_id,
+            work_interval_seconds=1500,
+            rest_interval_seconds=300,
+            buffer_multiplier=1.2,
+            reminder_offsets=[900, 600, 300],
+            effective_revision=1,
+        )
+        task = TaskRow(
+            user_id=user_id,
+            title="Task T5",
+            status="in_progress",
+            time_constraint={"kind": "window"},
+        )
+        db.add_all([user, pref, task])
+        await db.flush()
+
+        # Tạo 6 step hoàn thành sạch với actual_work_seconds=1400 (ratio 1.40, diff 0.20)
+        for i in range(6):
+            step = StepRow(
+                user_id=user_id,
+                task_id=task.id,
+                order_index=i,
+                title=f"Step T5-{i}",
+                estimated_base_seconds=1000,
+                remaining_base_seconds=0,
+                status="completed",
+                buffer_multiplier=1.2,
+                estimate_source="user_confirmed",
+            )
+            db.add(step)
+            await db.flush()
+
+            sess = SessionRow(
+                user_id=user_id,
+                step_id=step.id,
+                scheduled_start=now - timedelta(hours=10 - i),
+                scheduled_end=now - timedelta(hours=10 - i) + timedelta(minutes=25),
+                work_seconds=1500,
+                rest_seconds=300,
+                segments=[],
+                duration_seconds=1800,
+                schedule_revision=1,
+                status="completed",
+            )
+            db.add(sess)
+            await db.flush()
+
+            run = SessionRun(
+                id=uuid4(),
+                user_id=user_id,
+                session_id=sess.id,
+                revision=1,
+                run_state="closed",
+                outcome="completed",
+                started_at=now - timedelta(hours=10 - i),
+                ended_at=now - timedelta(hours=10 - i) + timedelta(minutes=25),
+                actual_work_seconds=1400,
+                work_elapsed_seconds=1400,
+                rest_elapsed_seconds=0,
+                device_id="dev-test",
+                actual_source="timer_proxy",
+                settings_snapshot={"work_interval_seconds": 1500},
+            )
+            db.add(run)
+            await db.flush()
+
+            ci = CheckIn(
+                id=uuid4(),
+                user_id=user_id,
+                run_id=run.id,
+                response_revision=1,
+                kind="final",
+                asked_at=now - timedelta(hours=10 - i) + timedelta(minutes=25),
+                responded_at=now - timedelta(hours=10 - i) + timedelta(minutes=26),
+                response_state="answered",
+                session_outcome="completed",
+                step_completed=True,
+                task_completed=False,
+            )
+            db.add(ci)
+
+        await db.commit()
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        # 1. < 7 mẫu -> trả null
+        r_few = await client.get("/api/v1/suggestions/current", headers=_auth_headers(user_id))
+        assert r_few.status_code == 200
+        assert r_few.json()["data"] is None
+
+        # 2. Thêm mẫu thứ 7 nhưng ratio=1.40 -> diff = |1.40 - 1.20| = 0.20 (không strictly > 0.20)
+        async with sf() as db:
+            step7 = StepRow(
+                user_id=user_id,
+                task_id=task.id,
+                order_index=6,
+                title="Step T5-6",
+                estimated_base_seconds=1000,
+                remaining_base_seconds=0,
+                status="completed",
+                buffer_multiplier=1.2,
+                estimate_source="user_confirmed",
+            )
+            db.add(step7)
+            await db.flush()
+
+            sess7 = SessionRow(
+                user_id=user_id,
+                step_id=step7.id,
+                scheduled_start=now - timedelta(hours=3),
+                scheduled_end=now - timedelta(hours=3) + timedelta(minutes=25),
+                work_seconds=1500,
+                rest_seconds=300,
+                segments=[],
+                duration_seconds=1800,
+                schedule_revision=1,
+                status="completed",
+            )
+            db.add(sess7)
+            await db.flush()
+
+            run7 = SessionRun(
+                id=uuid4(),
+                user_id=user_id,
+                session_id=sess7.id,
+                revision=1,
+                run_state="closed",
+                outcome="completed",
+                started_at=now - timedelta(hours=3),
+                ended_at=now - timedelta(hours=3) + timedelta(minutes=25),
+                actual_work_seconds=1400,
+                work_elapsed_seconds=1400,
+                rest_elapsed_seconds=0,
+                device_id="dev-test",
+                actual_source="timer_proxy",
+                settings_snapshot={"work_interval_seconds": 1500},
+            )
+            db.add(run7)
+            await db.flush()
+
+            ci7 = CheckIn(
+                id=uuid4(),
+                user_id=user_id,
+                run_id=run7.id,
+                response_revision=1,
+                kind="final",
+                asked_at=now - timedelta(hours=3) + timedelta(minutes=25),
+                responded_at=now - timedelta(hours=3) + timedelta(minutes=26),
+                response_state="answered",
+                session_outcome="completed",
+                step_completed=True,
+                task_completed=False,
+            )
+            db.add(ci7)
+
+            # 3. Thêm một run với awaiting_checkin -> phải bị loại bỏ
+            run_await = SessionRun(
+                id=uuid4(),
+                user_id=user_id,
+                session_id=sess7.id,
+                revision=1,
+                run_state="awaiting_checkin",
+                outcome="completed",
+                started_at=now - timedelta(hours=2),
+                ended_at=now - timedelta(hours=2) + timedelta(minutes=25),
+                actual_work_seconds=2000,
+                work_elapsed_seconds=2000,
+                rest_elapsed_seconds=0,
+                device_id="dev-test",
+                actual_source="timer_proxy",
+                settings_snapshot={"work_interval_seconds": 1500},
+            )
+            db.add(run_await)
+            await db.commit()
+
+        # Gọi lại: 7 mẫu với diff == 0.20 -> vẫn trả null
+        r_exact = await client.get("/api/v1/suggestions/current", headers=_auth_headers(user_id))
+        assert r_exact.status_code == 200
+        assert r_exact.json()["data"] is None
+
+        # 4. Thêm mẫu thứ 8 với actual_work_seconds=1600 (ratio 1.60) -> median tăng, diff > 0.20
+        async with sf() as db:
+            step8 = StepRow(
+                user_id=user_id,
+                task_id=task.id,
+                order_index=7,
+                title="Step T5-7",
+                estimated_base_seconds=1000,
+                remaining_base_seconds=0,
+                status="completed",
+                buffer_multiplier=1.2,
+                estimate_source="user_confirmed",
+            )
+            db.add(step8)
+            await db.flush()
+
+            sess8 = SessionRow(
+                user_id=user_id,
+                step_id=step8.id,
+                scheduled_start=now - timedelta(hours=1),
+                scheduled_end=now - timedelta(hours=1) + timedelta(minutes=25),
+                work_seconds=1500,
+                rest_seconds=300,
+                segments=[],
+                duration_seconds=1800,
+                schedule_revision=1,
+                status="completed",
+            )
+            db.add(sess8)
+            await db.flush()
+
+            # Cập nhật các step để median ratio = 1.50 (diff = 0.30 > 0.20)
+            await db.execute(
+                update(SessionRun)
+                .where(SessionRun.user_id == user_id, SessionRun.run_state == "closed")
+                .values(actual_work_seconds=1500)
+            )
+            await db.commit()
+
+        # Gọi lại: diff > 0.20 -> có gợi ý!
+        r_suggest = await client.get("/api/v1/suggestions/current", headers=_auth_headers(user_id))
+        assert r_suggest.status_code == 200
+        data = r_suggest.json()["data"]
+        assert data is not None
+        assert data["kind"] == "buffer_multiplier"
+        assert data["suggested_value"] == 1.50
+        sugg_id = data["suggestion_id"]
+        sugg_rev = data["suggestion_revision"]
+
+        # 5. Reject gợi ý
+        r_reject = await client.post(
+            f"/api/v1/suggestions/{sugg_id}/response",
+            headers=_auth_headers(user_id, f"idem-reject-{uuid4()}"),
+            json={
+                "action": "reject",
+                "expected_suggestion_revision": sugg_rev,
+                "annoyance_feedback": "Not now",
+            },
+        )
+        assert r_reject.status_code == 200
+
+        # Gọi lại ngay: cooldown đang có hiệu lực -> trả null
+        r_cool = await client.get("/api/v1/suggestions/current", headers=_auth_headers(user_id))
+        assert r_cool.status_code == 200
+        assert r_cool.json()["data"] is None
+

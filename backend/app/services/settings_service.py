@@ -119,6 +119,26 @@ def _suggestion_to_schema(row: SuggestionRow) -> AdaptationSuggestionData:
     )
 
 
+def _dump_availability_payload(avail_raw: Any) -> dict[str, Any] | None:
+    if avail_raw is None:
+        return None
+    if isinstance(avail_raw, dict):
+        return avail_raw
+    if hasattr(avail_raw, "model_dump"):
+        return avail_raw.model_dump(mode="json", exclude_none=True)
+    return None
+
+
+def _dump_changes_payload(changes_raw: Any) -> dict[str, Any]:
+    if changes_raw is None:
+        return {}
+    if isinstance(changes_raw, dict):
+        return changes_raw
+    if hasattr(changes_raw, "model_dump"):
+        return changes_raw.model_dump(mode="json", exclude_none=True)
+    return {}
+
+
 async def _has_future_confirmed_sessions(
     db: AsyncSession,
     owner: UUID,
@@ -338,6 +358,14 @@ async def apply_settings_change(
                     message="Draft đã thành Task; cần chỉnh Task qua xem tác động.",
                     next_action="review_task",
                 )
+            avail_dump = _dump_availability_payload(avail_changes)
+            if avail_dump is None:
+                raise AppError(
+                    status_code=422,
+                    code="VALIDATION_ERROR",
+                    message="Thiếu availability trong changes khi sửa draft.",
+                    next_action="fix_fields",
+                )
             updated_draft = await draft_service.patch_draft(
                 user_id=user_id,
                 draft_id=payload.target_draft_id,
@@ -347,7 +375,7 @@ async def apply_settings_change(
                     expected_planning_input_revision=payload.expected_planning_input_revision,
                     changes={
                         "summary": {
-                            "availability": payload.changes.availability.model_dump(mode="json")
+                            "availability": avail_dump
                         }
                     },
                 ),
@@ -364,6 +392,7 @@ async def apply_settings_change(
         if touches_schedule_field:
             pref_impacts_schedule = await _has_future_confirmed_sessions(db, owner)
 
+    avail_dump_for_proposal = _dump_availability_payload(avail_changes)
     if avail_impacts_schedule or pref_impacts_schedule:
         # Tạo RescheduleProposal trước khi ghi requested_* lên UserPreference vì helper bên dưới sẽ dọn proposal pending cũ.
         proposal_target_id = payload.target_task_id if avail_impacts_schedule else None
@@ -375,11 +404,7 @@ async def apply_settings_change(
             allowed_task_ids=allowed_ids,
             request_text="Đề xuất điều chỉnh lịch do thay đổi cài đặt UF7",
             override_preferences=dict(pref_values) if pref_values else None,
-            override_availability=(
-                payload.changes.availability.model_dump(mode="json")
-                if payload.changes.availability is not None
-                else None
-            ),
+            override_availability=avail_dump_for_proposal,
             now=now,
         )
         proposal_uuid = UUID(proposal.proposal_id)
@@ -400,8 +425,8 @@ async def apply_settings_change(
         eff_avail_rev = target_task.revision if target_task is not None else None
 
         stored_changes: dict[str, Any] = {}
-        if payload.changes.availability is not None:
-            stored_changes["availability"] = payload.changes.availability.model_dump(mode="json")
+        if avail_dump_for_proposal is not None:
+            stored_changes["availability"] = avail_dump_for_proposal
         if payload.target_task_id is not None:
             stored_changes["target_task_id"] = payload.target_task_id
         if payload.target_draft_id is not None:
@@ -443,7 +468,10 @@ async def apply_settings_change(
 
     # Nhánh không ảnh hưởng lịch tương lai: áp dụng ngay cho Draft hoặc từ phiên tiếp theo (giữ nguyên settings_snapshot của phiên đang chạy).
     if pref_values:
+        preferences_created = False
+        old_offsets = list(preferences.reminder_offsets) if preferences and preferences.reminder_offsets else []
         if preferences is None:
+            preferences_created = True
             preferences = PreferenceRow(
                 user_id=owner,
                 effective_revision=1,
@@ -465,8 +493,12 @@ async def apply_settings_change(
                 preferences.effective_revision += 1
             preferences.updated_at = now
 
-        if "reminder_offsets" in pref_values:
-            new_offsets = pref_values["reminder_offsets"]
+        new_offsets = pref_values.get("reminder_offsets")
+        offsets_actually_changed = (
+            "reminder_offsets" in pref_values
+            and (preferences_created or new_offsets != old_offsets)
+        )
+        if offsets_actually_changed and isinstance(new_offsets, list):
             future_sessions = list(
                 await db.scalars(
                     select(SessionRow)
@@ -496,17 +528,23 @@ async def apply_settings_change(
                         fire_at = s.scheduled_start - timedelta(seconds=offset)
                         if fire_at < now:
                             continue
-                        db.add(
-                            Reminder(
-                                user_id=owner,
-                                session_id=s.id,
-                                schedule_revision=s.schedule_revision,
-                                kind="pre_session",
-                                fire_at=fire_at,
-                                dedupe_key=f"session:{s.id}:version:{s.schedule_revision}:reminder:{offset}:pref:{preferences.effective_revision}",
-                                delivery_state="scheduled",
-                            )
-                        )
+                        key = f"session:{s.id}:version:{s.schedule_revision}:reminder:{offset}:pref:{preferences.effective_revision}"
+                        try:
+                            async with db.begin_nested():
+                                db.add(
+                                    Reminder(
+                                        user_id=owner,
+                                        session_id=s.id,
+                                        schedule_revision=s.schedule_revision,
+                                        kind="pre_session",
+                                        fire_at=fire_at,
+                                        dedupe_key=key,
+                                        delivery_state="scheduled",
+                                    )
+                                )
+                                await db.flush()
+                        except IntegrityError:
+                            pass
         await db.flush()
 
     effective_rev = preferences.effective_revision if preferences else 0
@@ -519,7 +557,7 @@ async def apply_settings_change(
         effective_revision=effective_rev,
         requested_availability_revision=None,
         effective_availability_revision=None,
-        requested_changes=payload.changes.model_dump(mode="json", exclude_none=True),
+        requested_changes=_dump_changes_payload(payload.changes),
         pending_proposal_id=None,
         created_at=now,
         updated_at=now,
@@ -1065,7 +1103,7 @@ async def respond_to_suggestion(
             pref_row.effective_revision += 1
         pref_row.updated_at = now
 
-        if kind == "reminder_offset":
+        if kind == "reminder_offset" and isinstance(accepted_value, list):
             future_sessions = list(
                 await db.scalars(
                     select(SessionRow)
@@ -1095,17 +1133,23 @@ async def respond_to_suggestion(
                         fire_at = s.scheduled_start - timedelta(seconds=offset)
                         if fire_at < now:
                             continue
-                        db.add(
-                            Reminder(
-                                user_id=owner,
-                                session_id=s.id,
-                                schedule_revision=s.schedule_revision,
-                                kind="pre_session",
-                                fire_at=fire_at,
-                                dedupe_key=f"session:{s.id}:version:{s.schedule_revision}:reminder:{offset}:pref:{pref_row.effective_revision}",
-                                delivery_state="scheduled",
-                            )
-                        )
+                        key = f"session:{s.id}:version:{s.schedule_revision}:reminder:{offset}:pref:{pref_row.effective_revision}"
+                        try:
+                            async with db.begin_nested():
+                                db.add(
+                                    Reminder(
+                                        user_id=owner,
+                                        session_id=s.id,
+                                        schedule_revision=s.schedule_revision,
+                                        kind="pre_session",
+                                        fire_at=fire_at,
+                                        dedupe_key=key,
+                                        delivery_state="scheduled",
+                                    )
+                                )
+                                await db.flush()
+                        except IntegrityError:
+                            pass
 
         change = SettingChangeRow(
             user_id=owner,
