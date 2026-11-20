@@ -2216,7 +2216,7 @@ async def test_uf7_t3_suggestion_response_with_pending_proposal_and_duplicate_of
             current_value=[900, 300],
             suggested_value=[1200, 600],
             reason="Tối ưu mốc nhắc việc",
-            policy_revision=1,
+            policy_revision="v2",
             sample_refs=[],
             status="pending",
         )
