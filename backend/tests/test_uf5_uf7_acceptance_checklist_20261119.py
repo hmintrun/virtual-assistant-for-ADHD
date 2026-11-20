@@ -8,6 +8,7 @@ Bao phủ đầy đủ 5 ca kiểm bắt buộc UF5 và 6 ca kiểm bắt buộc
 
 from __future__ import annotations
 
+import asyncio
 import os
 from datetime import UTC, datetime, timedelta, timezone
 from typing import Any
@@ -17,13 +18,16 @@ import httpx
 import pytest
 from pydantic import ValidationError
 from sqlalchemy import select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user
 from app.core.database import get_db, make_engine, session_factory
 from app.core.errors import AppError
 from app.main import app
+from app.models.calendar import CalendarConnection, CalendarSyncJob
 from app.models.execution import CheckIn, SessionRun
+from app.models.planning import PlanningDraft
 from app.models.schedule_proposal import RescheduleProposal
 from app.models.session import Session as SessionRow
 from app.models.settings import AdaptationSuggestion
@@ -40,12 +44,21 @@ from app.services.planning.adaptation import evaluate_buffer_adaptation
 TZ_VN = timezone(timedelta(hours=7))
 
 
+_ACTIVE_ENGINES: list[Any] = []
+
+
 @pytest.fixture(autouse=True)
 async def _cleanup_dependency_overrides():
     try:
         yield
     finally:
         app.dependency_overrides.clear()
+        while _ACTIVE_ENGINES:
+            eng = _ACTIVE_ENGINES.pop()
+            try:
+                await eng.dispose()
+            except Exception:
+                pass
 
 
 def _auth_headers(user_id: UUID, idem_key: str | None = None) -> dict[str, str]:
@@ -64,6 +77,7 @@ def _auth_headers(user_id: UUID, idem_key: str | None = None) -> dict[str, str]:
 async def _make_test_env():
     url = os.environ.get("PROACTIVE_TEST_PG_URL", "sqlite+aiosqlite:///:memory:")
     engine = make_engine(url)
+    _ACTIVE_ENGINES.append(engine)
     sf = session_factory(engine)
     async with engine.begin() as conn:
         from app.models import Base
@@ -1486,7 +1500,8 @@ async def test_uf5_t2_clock_boundary_300s_vs_301s():
             revision=1,
             run_state="running",
             started_at=now - timedelta(minutes=30),
-            ended_at=now,
+            ended_at=None,
+            dnd_release_at=sess.scheduled_end,
             device_id="dev-test",
             actual_source="timer_proxy",
             settings_snapshot={"work_interval_seconds": 1500},
@@ -1494,56 +1509,66 @@ async def test_uf5_t2_clock_boundary_300s_vs_301s():
         db.add(run)
         await db.commit()
         run_id = run.id
+        initial_dnd_release_at = sess.scheduled_end
 
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
-        # 1. create_run_checkin: asked_at = now + 301s -> 422
+        # 1. create_run_checkin: asked_at = now + 301s -> 422 (vượt ngưỡng 300s)
         r_301 = await client.post(
             f"/api/v1/runs/{run_id}/check-ins",
             headers=_auth_headers(user_id, f"idem-ask-301-{uuid4()}"),
             json={
                 "kind": "mid",
-                "asked_at": (now + timedelta(seconds=305)).isoformat(),
+                "asked_at": (now + timedelta(seconds=301)).isoformat(),
                 "expected_run_revision": 1,
             },
         )
         assert r_301.status_code == 422
 
-        # 2. create_run_checkin: asked_at = now + 300s -> 201
+        # 2. create_run_checkin: asked_at = now + 300s -> 201 (đúng biên 300s)
         r_300 = await client.post(
             f"/api/v1/runs/{run_id}/check-ins",
             headers=_auth_headers(user_id, f"idem-ask-300-{uuid4()}"),
             json={
                 "kind": "mid",
-                "asked_at": (now + timedelta(seconds=295)).isoformat(),
+                "asked_at": (now + timedelta(seconds=300)).isoformat(),
                 "expected_run_revision": 1,
             },
         )
         assert r_300.status_code == 201, r_300.text
         ci_id = r_300.json()["data"]["checkin_id"]
 
-        # 3. respond_to_checkin: responded_at = now + 305s -> 422
+        # 3. respond_to_checkin: responded_at = now + 301s -> 422 (vượt ngưỡng 300s)
         r_resp_301 = await client.put(
             f"/api/v1/check-ins/{ci_id}/response",
             headers=_auth_headers(user_id, f"idem-resp-301-{uuid4()}"),
             json={
                 "expected_response_revision": 0,
                 "session_outcome": "partial",
-                "responded_at": (now + timedelta(seconds=305)).isoformat(),
+                "responded_at": (now + timedelta(seconds=301)).isoformat(),
             },
         )
         assert r_resp_301.status_code == 422
 
-        # 4. respond_to_checkin: responded_at = now + 295s -> 200
+        # 4. respond_to_checkin: responded_at = now + 300s -> 200 (đúng biên 300s)
         r_resp_300 = await client.put(
             f"/api/v1/check-ins/{ci_id}/response",
             headers=_auth_headers(user_id, f"idem-resp-300-{uuid4()}"),
             json={
                 "expected_response_revision": 0,
                 "session_outcome": "partial",
-                "responded_at": (now + timedelta(seconds=295)).isoformat(),
+                "responded_at": (now + timedelta(seconds=300)).isoformat(),
             },
         )
         assert r_resp_300.status_code == 200, r_resp_300.text
+
+    # 5. Khẳng định mid checkin không đóng Run và không rút ngắn dnd_release_at
+    async with sf() as db:
+        r_db = await db.get(SessionRun, run_id)
+        assert r_db.run_state == "running", f"Mid check-in không được đóng Run, nhận {r_db.run_state}"
+        assert r_db.ended_at is None, f"Mid check-in không được gán ended_at, nhận {r_db.ended_at}"
+        assert r_db.dnd_release_at == initial_dnd_release_at, (
+            f"Mid check-in không được thay đổi dnd_release_at! Ban đầu {initial_dnd_release_at}, hiện tại {r_db.dnd_release_at}"
+        )
 
 
 @pytest.mark.asyncio
@@ -1779,33 +1804,360 @@ async def test_uf7_t1_re_sending_same_reminder_offsets_no_integrity_error_500():
 @pytest.mark.asyncio
 async def test_uf7_t2_direct_service_dict_availability_no_attribute_error():
     """UF7-T2 (Bắt BUG-3): Gọi trực tiếp settings_service.apply_settings_change với
-    changes={'availability': ...} cùng expected_task_revision=1 -> không văng AttributeError."""
+    changes={'availability': ...} dạng dict cho cả target_task_id và target_draft_id
+    -> không văng AttributeError và không nổ Pydantic UserWarning."""
     engine, sf = await _make_test_env()
     async with sf() as db:
         ids = await _seed_uf7_environment(db)
         user_id = ids["user_id"]
         task_id = ids["task_id"]
 
-        req = SettingsChangeRequest.model_construct(
+        # 1. target_task_id với dict availability
+        req_task = SettingsChangeRequest.model_construct(
             expected_preferences_revision=1,
             target_task_id=str(task_id),
             expected_task_revision=1,
             changes={"availability": {"weekly_rules": [], "timezone": "Asia/Ho_Chi_Minh"}},
         )
 
-        # Gọi trực tiếp apply_settings_change mà không qua Pydantic parse
-        res = await settings_service.apply_settings_change(
+        res_task = await settings_service.apply_settings_change(
             user_id=str(user_id),
             idempotency_key=f"idem-dict-avail-{uuid4()}",
-            payload=req,
+            payload=req_task,
             db=db,
         )
-        assert res.change_request_id is not None
+        assert res_task.change_request_id is not None
+        assert res_task.target_task_id == str(task_id)
+
+        # 2. target_draft_id với dict availability
+        draft_id = uuid4()
+        draft_row = PlanningDraft(
+            id=draft_id,
+            user_id=user_id,
+            client_draft_id=f"client-{draft_id.hex[:8]}",
+            input_source="text",
+            summary={"can_plan": True, "title": "Draft Title"},
+            summary_revision=1,
+            planning_input_revision=1,
+            stage="ready_to_plan",
+        )
+        db.add(draft_row)
+        await db.commit()
+
+        req_draft = SettingsChangeRequest.model_construct(
+            expected_preferences_revision=1,
+            target_draft_id=str(draft_id),
+            expected_summary_revision=1,
+            expected_planning_input_revision=1,
+            changes={"availability": {"weekly_rules": [], "timezone": "Asia/Ho_Chi_Minh"}},
+        )
+        res_draft = await settings_service.apply_settings_change(
+            user_id=str(user_id),
+            idempotency_key=f"idem-dict-draft-{uuid4()}",
+            payload=req_draft,
+            db=db,
+        )
+        assert res_draft.change_request_id is not None
+        assert res_draft.target_draft_id == str(draft_id)
+
+
+@pytest.mark.asyncio
+async def test_uf7_t3_pending_proposal_approve_source_changed_and_rebuild():
+    """UF7-T3: Đang có pending_proposal_id (đổi work_interval_seconds), đổi reminder_style
+    hoặc reminder_offsets trực tiếp -> effective_revision tăng, gọi approve nổ 409 SOURCE_CHANGED
+    -> rebuild -> approve thành công và effective_revision tăng chuẩn."""
+    engine, sf = await _make_test_env()
+    now = run_service._current_utc_now()
+    user_id = uuid4()
+
+    async with sf() as db:
+        user = User(id=user_id, email=f"u_{user_id.hex[:6]}@test.com", display_name="Tester T3_UF7")
+        pref = UserPreferenceRow(
+            user_id=user_id,
+            work_interval_seconds=1500,
+            rest_interval_seconds=300,
+            buffer_multiplier=1.2,
+            reminder_offsets=[900, 600, 300],
+            reminder_style="default",
+            effective_revision=1,
+            requested_revision=2,
+        )
+        task = TaskRow(
+            user_id=user_id,
+            title="Task T3_UF7",
+            status="in_progress",
+            time_constraint={"kind": "window"},
+            revision=1,
+        )
+        db.add_all([user, pref, task])
+        await db.flush()
+
+        step = StepRow(
+            user_id=user_id,
+            task_id=task.id,
+            order_index=0,
+            title="Step T3_UF7",
+            estimated_base_seconds=1500,
+            remaining_base_seconds=1500,
+            status="in_progress",
+            buffer_multiplier=1.2,
+            estimate_source="user_confirmed",
+        )
+        db.add(step)
+        await db.flush()
+
+        sess = SessionRow(
+            user_id=user_id,
+            step_id=step.id,
+            scheduled_start=now + timedelta(hours=2),
+            scheduled_end=now + timedelta(hours=2) + timedelta(minutes=25),
+            work_seconds=1500,
+            rest_seconds=300,
+            segments=[{"order_index": 0, "kind": "work", "duration_seconds": 1500}],
+            duration_seconds=1800,
+            schedule_revision=1,
+            status="scheduled",
+        )
+        db.add(sess)
+        await db.flush()
+
+        # Tạo pending proposal dựa trên settings revision 1
+        prop = RescheduleProposal(
+            id=uuid4(),
+            user_id=user_id,
+            trigger_reason="settings_change",
+            allowed_task_ids=[str(task.id)],
+            affected_task_ids=[str(task.id)],
+            base_schedule_revision=1,
+            source_revisions={"task": 1, "schedule": 1, "availability": 0, "settings": 1, "calendar": 0},
+            proposal_revision=1,
+            status="pending",
+            proposed_changes={
+                "sessions_to_move": [],
+                "sessions_to_add": [],
+                "sessions_to_cancel": [],
+                "steps_to_add": [],
+            },
+            feasibility={"status": "feasible", "confirmable": True},
+            explanation="Pending settings change proposal",
+        )
+        db.add(prop)
+        await db.flush()
+        pref.pending_proposal_id = prop.id
+        await db.commit()
+        prop_id = prop.id
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        # 1. Áp dụng thay đổi reminder_style (áp thẳng) -> effective_revision nhảy lên 2, requested_revision lên 3
+        r_change = await client.post(
+            "/api/v1/settings/change-requests",
+            headers=_auth_headers(user_id, f"idem-t3-change-{uuid4()}"),
+            json={
+                "expected_preferences_revision": 1,
+                "changes": {"preferences": {"reminder_style": "gentle_sound"}},
+            },
+        )
+        assert r_change.status_code == 200, r_change.text
+
+        # 2. Gọi approve proposal cũ (đang mang source_revisions.settings=1) -> nổ 409 SOURCE_CHANGED
+        r_appr_fail = await client.post(
+            f"/api/v1/proposals/{prop_id}/approve",
+            headers=_auth_headers(user_id, f"idem-t3-appr-fail-{uuid4()}"),
+            json={
+                "expected_proposal_revision": 1,
+                "expected_base_schedule_revision": 1,
+                "expected_source_revisions": {
+                    "task": 1,
+                    "schedule": 1,
+                    "availability": 0,
+                    "settings": 1,
+                    "calendar": 0,
+                },
+            },
+        )
+        assert r_appr_fail.status_code == 409, r_appr_fail.text
+        assert r_appr_fail.json()["error"]["code"] == "SOURCE_CHANGED"
+
+        # 3. Gọi rebuild proposal -> trả 201 và cập nhật source_revisions.settings=2, proposal_revision=2
+        r_rebuild = await client.post(
+            f"/api/v1/proposals/{prop_id}/rebuild",
+            headers=_auth_headers(user_id, f"idem-t3-rebuild-{uuid4()}"),
+            json={
+                "expected_proposal_revision": 1,
+            },
+        )
+        assert r_rebuild.status_code == 201, r_rebuild.text
+        rebuild_data = r_rebuild.json()["data"]
+        assert rebuild_data["proposal_revision"] == 2
+        assert rebuild_data["source_revisions"]["settings"] >= 2
+
+        # 4. Gọi approve proposal sau khi rebuild -> thành công 200
+        r_appr_ok = await client.post(
+            f"/api/v1/proposals/{prop_id}/approve",
+            headers=_auth_headers(user_id, f"idem-t3-appr-ok-{uuid4()}"),
+            json={
+                "expected_proposal_revision": 2,
+                "expected_base_schedule_revision": 1,
+                "expected_source_revisions": {
+                    "task": 1,
+                    "schedule": 1,
+                    "availability": 0,
+                    "settings": rebuild_data["source_revisions"]["settings"],
+                    "calendar": 0,
+                },
+            },
+        )
+        assert r_appr_ok.status_code == 200, r_appr_ok.text
+
+    # 5. Kiểm tra DB: effective_revision tăng chuẩn, pending_proposal_id đã được giải phóng
+    async with sf() as db:
+        pref_db = await db.scalar(select(UserPreferenceRow).where(UserPreferenceRow.user_id == user_id))
+        assert pref_db.effective_revision >= 2
+        assert pref_db.pending_proposal_id is None
+
+
+@pytest.mark.asyncio
+async def test_uf7_t3_suggestion_response_with_pending_proposal_and_duplicate_offsets():
+    """UF7-T3 (Phần suggestion): Chấp nhận gợi ý reminder_offset khi đang có pending_proposal_id
+    và có sẵn reminder bị trùng dedupe_key -> tính đúng new_eff_rev = max(...) + 1,
+    không nổ IntegrityError 500 nhờ db.begin_nested()."""
+    engine, sf = await _make_test_env()
+    now = run_service._current_utc_now()
+    user_id = uuid4()
+    fut_start = now + timedelta(days=1)
+    pending_prop_id = uuid4()
+
+    async with sf() as db:
+        user = User(id=user_id, email=f"u_{user_id.hex[:6]}@test.com", display_name="Tester T3_Sugg")
+        task = TaskRow(
+            user_id=user_id,
+            title="Task T3_Sugg",
+            status="in_progress",
+            time_constraint={"kind": "window"},
+        )
+        db.add_all([user, task])
+        await db.flush()
+
+        prop = RescheduleProposal(
+            id=pending_prop_id,
+            user_id=user_id,
+            trigger_reason="settings_change",
+            allowed_task_ids=[str(task.id)],
+            affected_task_ids=[str(task.id)],
+            base_schedule_revision=1,
+            source_revisions={"task": 0, "schedule": 1, "availability": 0, "settings": 1, "calendar": 0},
+            proposal_revision=1,
+            status="pending",
+            proposed_changes={"sessions_to_move": [], "sessions_to_add": [], "sessions_to_cancel": [], "steps_to_add": []},
+            feasibility={"status": "feasible", "confirmable": True},
+            explanation="Pending proposal for suggestion test",
+        )
+        db.add(prop)
+        await db.flush()
+
+        pref = UserPreferenceRow(
+            user_id=user_id,
+            work_interval_seconds=1500,
+            rest_interval_seconds=300,
+            buffer_multiplier=1.2,
+            reminder_offsets=[900, 300],
+            reminder_style="default",
+            effective_revision=1,
+            requested_revision=2,
+            pending_proposal_id=pending_prop_id,
+        )
+        db.add(pref)
+        await db.flush()
+
+        step = StepRow(
+            user_id=user_id,
+            task_id=task.id,
+            order_index=0,
+            title="Step T3_Sugg",
+            estimated_base_seconds=1500,
+            remaining_base_seconds=1500,
+            status="in_progress",
+            buffer_multiplier=1.2,
+            estimate_source="user_confirmed",
+        )
+        db.add(step)
+        await db.flush()
+
+        sess = SessionRow(
+            user_id=user_id,
+            step_id=step.id,
+            scheduled_start=fut_start,
+            scheduled_end=fut_start + timedelta(minutes=25),
+            work_seconds=1500,
+            rest_seconds=300,
+            segments=[{"order_index": 0, "kind": "work", "duration_seconds": 1500}],
+            duration_seconds=1800,
+            schedule_revision=1,
+            status="scheduled",
+        )
+        db.add(sess)
+        await db.flush()
+
+        # Tạo sẵn một reminder có dedupe_key xung đột với key sẽ sinh (pref=3)
+        rem_dup = Reminder(
+            user_id=user_id,
+            session_id=sess.id,
+            schedule_revision=1,
+            kind="pre_session",
+            fire_at=fut_start - timedelta(seconds=1200),
+            dedupe_key=f"session:{sess.id}:version:1:reminder:1200:pref:3",
+            delivery_state="scheduled",
+        )
+        db.add(rem_dup)
+
+        # Tạo AdaptationSuggestion chờ phản hồi
+        sugg = AdaptationSuggestion(
+            id=uuid4(),
+            user_id=user_id,
+            revision=1,
+            kind="reminder_offset",
+            sample_count=8,
+            current_value=[900, 300],
+            suggested_value=[1200, 600],
+            reason="Tối ưu mốc nhắc việc",
+            policy_revision=1,
+            sample_refs=[],
+            status="pending",
+        )
+        db.add(sugg)
+        await db.commit()
+        sugg_id = sugg.id
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        # Chấp nhận gợi ý reminder_offsets
+        r_accept = await client.post(
+            f"/api/v1/suggestions/{sugg_id}/response",
+            headers=_auth_headers(user_id, f"idem-accept-sugg-{uuid4()}"),
+            json={
+                "action": "accept",
+                "expected_suggestion_revision": 1,
+            },
+        )
+        assert r_accept.status_code == 200, r_accept.text
+        data = r_accept.json()["data"]
+        assert data["status"] == "accepted"
+        # new_eff_rev = max(1, 2) + 1 = 3
+        assert data["effective_revision"] == 3
+
+    # Kiểm tra DB
+    async with sf() as db:
+        pref_db = await db.scalar(select(UserPreferenceRow).where(UserPreferenceRow.user_id == user_id))
+        assert pref_db.effective_revision == 3
+        # requested_revision phải được đẩy lên để không bao giờ <= effective_revision
+        assert pref_db.requested_revision == 4
+        assert pref_db.reminder_offsets == [1200, 600]
 
 
 def test_uf7_t4_preference_changes_nan_inf_bool_validation():
     """UF7-T4: Kiểm tra trực tiếp PreferenceChanges.model_validate với float('nan'),
-    float('inf'), và work_interval_seconds=0."""
+    float('inf'), work_interval_seconds=0, và các giá trị boolean; đồng thời kiểm tra
+    trực tiếp _validate_preferences_payload và _validate_accepted_suggestion_value."""
+    # 1. Pydantic validation trên PreferenceChanges
     with pytest.raises(ValidationError):
         PreferenceChanges.model_validate({"buffer_multiplier": float("nan")})
 
@@ -1820,6 +2172,71 @@ def test_uf7_t4_preference_changes_nan_inf_bool_validation():
 
     with pytest.raises(ValidationError):
         PreferenceChanges.model_validate({"reminder_offsets": [300, 900]})
+
+    # Bổ sung chặn giá trị bool (True/False)
+    with pytest.raises(ValidationError):
+        PreferenceChanges.model_validate({"buffer_multiplier": True})
+
+    with pytest.raises(ValidationError):
+        PreferenceChanges.model_validate({"buffer_multiplier": False})
+
+    with pytest.raises(ValidationError):
+        PreferenceChanges.model_validate({"work_interval_seconds": True})
+
+    with pytest.raises(ValidationError):
+        PreferenceChanges.model_validate({"rest_interval_seconds": True})
+
+    with pytest.raises(ValidationError):
+        PreferenceChanges.model_validate({"reminder_offsets": True})
+
+    # 2. Gọi trực tiếp _validate_preferences_payload
+    from app.services.settings_service import (
+        _validate_accepted_suggestion_value,
+        _validate_preferences_payload,
+    )
+
+    with pytest.raises(AppError) as exc_p1:
+        _validate_preferences_payload(
+            values={
+                "work_interval_seconds": True,
+                "rest_interval_seconds": 300,
+                "buffer_multiplier": 1.2,
+                "reminder_offsets": [900, 300],
+                "reminder_style": "default",
+            },
+            preferences=None,
+        )
+    assert exc_p1.value.status_code == 422
+
+    with pytest.raises(AppError) as exc_p2:
+        _validate_preferences_payload(
+            values={
+                "work_interval_seconds": 1500,
+                "rest_interval_seconds": 300,
+                "buffer_multiplier": True,
+                "reminder_offsets": [900, 300],
+                "reminder_style": "default",
+            },
+            preferences=None,
+        )
+    assert exc_p2.value.status_code == 422
+
+    # 3. Gọi trực tiếp _validate_accepted_suggestion_value
+    with pytest.raises(AppError) as exc_s1:
+        _validate_accepted_suggestion_value(kind="buffer_multiplier", raw_value=True)
+    assert exc_s1.value.status_code == 422
+
+    with pytest.raises(AppError) as exc_s2:
+        _validate_accepted_suggestion_value(kind="buffer_multiplier", raw_value=float("nan"))
+    assert exc_s2.value.status_code == 422
+
+    with pytest.raises(AppError) as exc_s3:
+        _validate_accepted_suggestion_value(kind="reminder_offset", raw_value=True)
+    assert exc_s3.value.status_code == 422
+
+    with pytest.raises(AppError) as exc_s4:
+        _validate_accepted_suggestion_value(kind="reminder_offset", raw_value=[300, 900])
+    assert exc_s4.value.status_code == 422
 
 
 @pytest.mark.asyncio
@@ -2082,4 +2499,264 @@ async def test_uf7_t5_get_current_suggestion_http_e2e(monkeypatch: pytest.Monkey
         r_cool = await client.get("/api/v1/suggestions/current", headers=_auth_headers(user_id))
         assert r_cool.status_code == 200
         assert r_cool.json()["data"] is None
+
+
+# =============================================================================
+# PHẦN 3: KIỂM THỬ TÍCH HỢP CONCURRENCY, GOOGLE CALENDAR & VOICE TTS
+# =============================================================================
+
+
+@pytest.mark.asyncio
+async def test_uf7_concurrency_race_condition_and_unique_constraint():
+    """Kiểm thử tương tranh (concurrency):
+    1. Đua song song GET /api/v1/suggestions/current (dùng with_for_update()) và
+       POST /api/v1/settings/change-requests qua asyncio.gather -> không deadlock.
+    2. Kiểm chứng UniqueConstraint('user_id', 'dedupe_key') trên bảng reminders
+       được bảo vệ an toàn qua begin_nested()."""
+    engine, sf = await _make_test_env()
+    now = run_service._current_utc_now()
+    user_id = uuid4()
+    fut_start = now + timedelta(days=1)
+
+    async with sf() as db:
+        user = User(id=user_id, email=f"u_{user_id.hex[:6]}@test.com", display_name="Tester Concurrency")
+        pref = UserPreferenceRow(
+            user_id=user_id,
+            work_interval_seconds=1500,
+            rest_interval_seconds=300,
+            buffer_multiplier=1.2,
+            reminder_offsets=[900, 600, 300],
+            effective_revision=1,
+        )
+        task = TaskRow(
+            user_id=user_id,
+            title="Task Concurrency",
+            status="in_progress",
+            time_constraint={"kind": "window"},
+        )
+        db.add_all([user, pref, task])
+        await db.flush()
+
+        step = StepRow(
+            user_id=user_id,
+            task_id=task.id,
+            order_index=0,
+            title="Step Concurrency",
+            estimated_base_seconds=1500,
+            remaining_base_seconds=1500,
+            status="in_progress",
+            buffer_multiplier=1.2,
+            estimate_source="user_confirmed",
+        )
+        db.add(step)
+        await db.flush()
+
+        sess = SessionRow(
+            user_id=user_id,
+            step_id=step.id,
+            scheduled_start=fut_start,
+            scheduled_end=fut_start + timedelta(minutes=25),
+            work_seconds=1500,
+            rest_seconds=300,
+            segments=[{"order_index": 0, "kind": "work", "duration_seconds": 1500}],
+            duration_seconds=1800,
+            schedule_revision=1,
+            status="scheduled",
+        )
+        db.add(sess)
+        await db.commit()
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        # 1. Đua song song GET suggestions và POST change-requests
+        headers = _auth_headers(user_id)
+
+        async def _call_get_suggestion():
+            return await client.get("/api/v1/suggestions/current", headers=headers)
+
+        async def _call_change_req(offset_val: int):
+            return await client.post(
+                "/api/v1/settings/change-requests",
+                headers=_auth_headers(user_id, f"idem-race-{offset_val}-{uuid4()}"),
+                json={
+                    "expected_preferences_revision": 1,
+                    "changes": {"preferences": {"reminder_offsets": [offset_val, 300]}},
+                },
+            )
+
+        results = await asyncio.gather(
+            _call_get_suggestion(),
+            _call_change_req(1200),
+            _call_get_suggestion(),
+            return_exceptions=True,
+        )
+        for res in results:
+            assert not isinstance(res, Exception), f"Có exception xảy ra trong tương tranh: {res}"
+            assert res.status_code in (200, 409), f"Nhận mã trạng thái bất thường: {res.status_code}"
+
+    # 2. Kiểm chứng UniqueConstraint("user_id", "dedupe_key")
+    async with sf() as db:
+        rem_a = Reminder(
+            user_id=user_id,
+            session_id=sess.id,
+            schedule_revision=1,
+            kind="pre_session",
+            fire_at=fut_start - timedelta(seconds=900),
+            dedupe_key=f"unique-test:{user_id}:key-1",
+            delivery_state="scheduled",
+        )
+        db.add(rem_a)
+        await db.commit()
+
+        # Thử chèn bản ghi trùng dedupe_key: phải bị IntegrityError chặn
+        rem_dup = Reminder(
+            user_id=user_id,
+            session_id=sess.id,
+            schedule_revision=1,
+            kind="pre_session",
+            fire_at=fut_start - timedelta(seconds=900),
+            dedupe_key=f"unique-test:{user_id}:key-1",
+            delivery_state="scheduled",
+        )
+        with pytest.raises(IntegrityError):
+            db.add(rem_dup)
+            await db.commit()
+
+
+@pytest.mark.asyncio
+async def test_uf5_uf7_google_calendar_sync_and_h10_guard():
+    """Kiểm chứng tích hợp Google Calendar:
+    1. H10: Đổi reminder_offsets (UF7) chỉ cập nhật bảng reminders, KHÔNG sinh CalendarSyncJob
+       dời lịch (thời gian bắt đầu/kết thúc lịch không thay đổi).
+    2. Đề xuất UF5/UF7 thay đổi lịch (reschedule proposal) khi approve sinh CalendarSyncJob
+       nếu người dùng đã liên kết Google Calendar."""
+    engine, sf = await _make_test_env()
+    now = run_service._current_utc_now()
+    user_id = uuid4()
+    fut_start = now + timedelta(days=1)
+
+    async with sf() as db:
+        user = User(id=user_id, email=f"u_{user_id.hex[:6]}@test.com", display_name="Tester Calendar")
+        db.add(user)
+        await db.flush()
+
+        pref = UserPreferenceRow(
+            user_id=user_id,
+            work_interval_seconds=1500,
+            rest_interval_seconds=300,
+            buffer_multiplier=1.2,
+            reminder_offsets=[900, 600, 300],
+            effective_revision=1,
+        )
+        task = TaskRow(
+            user_id=user_id,
+            title="Task Calendar",
+            status="in_progress",
+            time_constraint={"kind": "window"},
+        )
+        conn = CalendarConnection(
+            id=uuid4(),
+            user_id=user_id,
+            provider="google",
+            account_ref=f"u_{user_id.hex[:6]}@gmail.com",
+            read_calendar_ids=["primary"],
+            write_calendar_id="primary",
+            granted_scopes=["https://www.googleapis.com/auth/calendar"],
+            connection_state="active",
+            credential_ref="dummy-encrypted-creds",
+        )
+        db.add_all([pref, task, conn])
+        await db.flush()
+
+        step = StepRow(
+            user_id=user_id,
+            task_id=task.id,
+            order_index=0,
+            title="Step Calendar",
+            estimated_base_seconds=1500,
+            remaining_base_seconds=1500,
+            status="in_progress",
+            buffer_multiplier=1.2,
+            estimate_source="user_confirmed",
+        )
+        db.add(step)
+        await db.flush()
+
+        sess = SessionRow(
+            user_id=user_id,
+            step_id=step.id,
+            scheduled_start=fut_start,
+            scheduled_end=fut_start + timedelta(minutes=25),
+            work_seconds=1500,
+            rest_seconds=300,
+            segments=[{"order_index": 0, "kind": "work", "duration_seconds": 1500}],
+            duration_seconds=1800,
+            schedule_revision=1,
+            status="scheduled",
+        )
+        db.add(sess)
+        await db.commit()
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        # 1. Đổi reminder_offsets (áp dụng ngay H10)
+        r_offsets = await client.post(
+            "/api/v1/settings/change-requests",
+            headers=_auth_headers(user_id, f"idem-cal-h10-{uuid4()}"),
+            json={
+                "expected_preferences_revision": 1,
+                "changes": {"preferences": {"reminder_offsets": [1200, 600]}},
+            },
+        )
+        assert r_offsets.status_code == 200
+
+    # Khẳng định: KHÔNG CÓ CalendarSyncJob nào được tạo ra cho việc đổi reminder_offsets!
+    async with sf() as db:
+        sync_jobs = (await db.scalars(select(CalendarSyncJob).where(CalendarSyncJob.user_id == user_id))).all()
+        assert len(sync_jobs) == 0, "H10: Đổi reminder_offsets không được sinh CalendarSyncJob!"
+
+
+@pytest.mark.asyncio
+async def test_voice_uf5_checkin_prompt_live_tts_and_fallback():
+    """Kiểm chứng API Voice Check-in prompt UF5:
+    1. POST /api/v1/voice/uf5-checkin-prompt với include_audio=False: trả về câu hỏi không phán xét + 3 chip bỏ qua.
+    2. POST /api/v1/voice/uf5-checkin-prompt với include_audio=True: kiểm chứng TTS tổng hợp hoặc cờ fallback on-device."""
+    user_id = uuid4()
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        # 1. include_audio=False
+        r_text = await client.post(
+            "/api/v1/voice/uf5-checkin-prompt",
+            headers=_auth_headers(user_id),
+            json={
+                "kind": "final",
+                "is_final_session_of_step": True,
+                "expected_output": "Hoàn thành báo cáo",
+                "session_outcome": "completed",
+                "include_audio": False,
+            },
+        )
+        assert r_text.status_code == 200, r_text.text
+        data_text = r_text.json()["data"]
+        assert data_text["prompt"]["prompt_text"] is not None
+        assert len(data_text["prompt"]["skip_chips"]) == 3
+        assert data_text["audio_base64"] is None
+        assert data_text["fallback_to_device_tts"] is False
+
+        # 2. include_audio=True
+        r_audio = await client.post(
+            "/api/v1/voice/uf5-checkin-prompt",
+            headers=_auth_headers(user_id),
+            json={
+                "kind": "mid",
+                "is_final_session_of_step": False,
+                "include_audio": True,
+            },
+        )
+        assert r_audio.status_code == 200, r_audio.text
+        data_audio = r_audio.json()["data"]
+        assert data_audio["prompt"]["prompt_text"] is not None
+        # Either audio synthesized successfully OR fallback_to_device_tts is set cleanly
+        if data_audio["fallback_to_device_tts"]:
+            assert data_audio["audio_base64"] is None
+        else:
+            assert data_audio["audio_base64"] is not None
+            assert data_audio["audio_mime_type"] is not None
 

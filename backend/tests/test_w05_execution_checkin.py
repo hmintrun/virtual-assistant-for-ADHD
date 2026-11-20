@@ -1844,11 +1844,6 @@ async def test_w306_correction_reverts_projection_and_protects_other_run_confirm
     s1b_id = str(w05_env["session1b_id"])
     s1b_start = cast(datetime, w05_env["session1b_start"])
     s1b_end = cast(datetime, w05_env["session1b_end"])
-    monkeypatch.setattr(
-        run_service,
-        "_current_utc_now",
-        lambda now=None: (now or s1b_end).astimezone(UTC),
-    )
     r_s1b = await w05_client.post(
         f"/api/v1/sessions/{s1b_id}/start",
         headers={"Idempotency-Key": "cmd-w306-start-1b"},
@@ -1998,11 +1993,6 @@ async def test_w306_completion_cascade_early_confirm_and_contradictory_flags(
     s1b_id = str(w05_env["session1b_id"])
     s1b_start = cast(datetime, w05_env["session1b_start"])
     s1b_end = cast(datetime, w05_env["session1b_end"])
-    monkeypatch.setattr(
-        run_service,
-        "_current_utc_now",
-        lambda now=None: (now or s1b_end).astimezone(UTC),
-    )
     r_s1b = await w05_client.post(
         f"/api/v1/sessions/{s1b_id}/start",
         headers={"Idempotency-Key": "cmd-w306-r01-start-1b"},
@@ -2054,11 +2044,6 @@ async def test_w306_completion_cascade_early_confirm_and_contradictory_flags(
     s2_id = str(w05_env["session2_id"])
     s2_start = cast(datetime, w05_env["session2_start"])
     s2_end = cast(datetime, w05_env["session2_end"])
-    monkeypatch.setattr(
-        run_service,
-        "_current_utc_now",
-        lambda now=None: (now or s2_end).astimezone(UTC),
-    )
     r_s2 = await w05_client.post(
         f"/api/v1/sessions/{s2_id}/start",
         headers={"Idempotency-Key": "cmd-w306-r01-start-2"},

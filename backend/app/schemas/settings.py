@@ -49,6 +49,20 @@ class PreferenceChanges(ApiModel):
     buffer_multiplier: float | None = Field(default=None, ge=1.0, le=2.0)
     reminder_style: str | None = None
 
+    @field_validator("buffer_multiplier", mode="before")
+    @classmethod
+    def validate_buffer_not_bool(cls, v: Any) -> Any:
+        if isinstance(v, bool):
+            raise ValueError("buffer_multiplier không được là boolean")
+        return v
+
+    @field_validator("work_interval_seconds", "rest_interval_seconds", mode="before")
+    @classmethod
+    def validate_intervals_not_bool(cls, v: Any) -> Any:
+        if isinstance(v, bool):
+            raise ValueError("interval seconds không được là boolean")
+        return v
+
     @field_validator("buffer_multiplier")
     @classmethod
     def validate_buffer_finite(cls, v: float | None) -> float | None:
@@ -125,8 +139,8 @@ class AvailabilityChanges(ApiModel):
 
 
 class SettingsChanges(ApiModel):
-    availability: DraftAvailability | None = None
-    preferences: PreferenceChanges | None = None
+    availability: DraftAvailability | dict[str, Any] | None = None
+    preferences: PreferenceChanges | dict[str, Any] | None = None
 
     @model_validator(mode="after")
     def nonempty(self):
@@ -134,11 +148,15 @@ class SettingsChanges(ApiModel):
             getattr(self, k) is None for k in self.model_fields_set
         ):
             raise ValueError("Cần ít nhất một nhóm thay đổi không rỗng")
-        if self.preferences is not None and (
-            not self.preferences.model_fields_set
-            or any(getattr(self.preferences, k) is None for k in self.preferences.model_fields_set)
-        ):
-            raise ValueError("preferences không được rỗng hoặc có null")
+        if self.preferences is not None:
+            if isinstance(self.preferences, dict):
+                if not self.preferences:
+                    raise ValueError("preferences không được rỗng hoặc có null")
+            elif (
+                not self.preferences.model_fields_set
+                or any(getattr(self.preferences, k) is None for k in self.preferences.model_fields_set)
+            ):
+                raise ValueError("preferences không được rỗng hoặc có null")
         return self
 
 
@@ -150,11 +168,19 @@ class SettingsChangeRequest(ApiModel):
     expected_summary_revision: int | None = Field(default=None, ge=1)
     expected_planning_input_revision: int | None = Field(default=None, ge=1)
     expected_task_revision: int | None = Field(default=None, ge=1)
-    changes: SettingsChanges
+    changes: SettingsChanges | dict[str, Any]
 
     @model_validator(mode="after")
     def required_revisions(self):
-        if self.changes.availability is not None:
+        ch = self.changes
+        if isinstance(ch, dict):
+            ch_avail = ch.get("availability")
+            ch_pref = ch.get("preferences")
+        else:
+            ch_avail = getattr(ch, "availability", None)
+            ch_pref = getattr(ch, "preferences", None)
+
+        if ch_avail is not None:
             if (self.target_draft_id is None) == (self.target_task_id is None):
                 raise ValueError("Chỉnh giờ cần chọn đúng một Draft hoặc Task đã có")
             if self.target_draft_id is not None and (
@@ -168,13 +194,19 @@ class SettingsChangeRequest(ApiModel):
                 raise ValueError("Giờ riêng không dùng revision bộ giờ chung")
         elif self.target_draft_id is not None or self.target_task_id is not None:
             raise ValueError("Target chỉ áp dụng khi chỉnh giờ đã khai báo")
-        if self.changes.preferences is not None and self.expected_preferences_revision is None:
+        if ch_pref is not None and self.expected_preferences_revision is None:
             raise ValueError("Đổi cài đặt cần expected_preferences_revision; lần đầu dùng 0")
-        if (self.target_draft_id is not None or self.target_task_id is not None) and self.changes.preferences is not None:
-            touches_global_sched = any(
-                getattr(self.changes.preferences, k) is not None
-                for k in ("work_interval_seconds", "rest_interval_seconds", "buffer_multiplier")
-            )
+        if (self.target_draft_id is not None or self.target_task_id is not None) and ch_pref is not None:
+            if isinstance(ch_pref, dict):
+                touches_global_sched = any(
+                    ch_pref.get(k) is not None
+                    for k in ("work_interval_seconds", "rest_interval_seconds", "buffer_multiplier")
+                )
+            else:
+                touches_global_sched = any(
+                    getattr(ch_pref, k) is not None
+                    for k in ("work_interval_seconds", "rest_interval_seconds", "buffer_multiplier")
+                )
             if touches_global_sched:
                 raise ValueError(
                     "Không thể đổi cấu hình làm/nghỉ/buffer toàn cục kèm target_task_id; hãy tách thành yêu cầu toàn cục và yêu cầu sửa giờ riêng của công việc."

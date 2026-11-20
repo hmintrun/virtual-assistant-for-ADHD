@@ -234,7 +234,14 @@ def _validate_preferences_payload(
         valid_offsets = False
 
     if (
-        work <= 0
+        isinstance(work, bool)
+        or isinstance(rest, bool)
+        or isinstance(buffer, bool)
+        or isinstance(offsets, bool)
+        or not isinstance(work, int)
+        or not isinstance(rest, int)
+        or not isinstance(buffer, (int, float))
+        or work <= 0
         or rest < 0
         or not (1.0 <= buffer <= 2.0)
         or not math.isfinite(buffer)
@@ -968,6 +975,13 @@ def _validate_accepted_suggestion_value(
         return round(numeric, 4)
 
     if kind == "reminder_offset":
+        if isinstance(raw_value, bool):
+            raise AppError(
+                status_code=422,
+                code="VALIDATION_ERROR",
+                message="Mốc nhắc phải gồm 1–3 số nguyên không âm giảm dần nghiêm ngặt.",
+                next_action="fix_fields",
+            )
         try:
             res = validate_strict_descending_offsets(raw_value)
             if res is None:

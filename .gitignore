@@ -25,6 +25,17 @@ desktop.ini
 *.cert
 credentials.json
 client_secret*.json
+cilent_secret*.json
+*client_secret*
+*cilent_secret*
+
+# QA & Handoff Feedback Documents (DECISION LOCKED A1)
+00_UF3_TO_UF7_*.md
+UF5_BUGS_*.md
+UF7_BUGS_*.md
+FEEDBACK_*.md
+*HANDOFF*.md
+*ALIGNMENT*.md
 
 # Local Developer Personalization Profile (Per-Machine)
 DEVELOPER.md

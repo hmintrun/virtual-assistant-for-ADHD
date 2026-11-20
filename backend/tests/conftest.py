@@ -52,6 +52,8 @@ def legacy_test_clock_adapter(request, monkeypatch):
                             "ended_at",
                             "occurred_at",
                             "reported_at",
+                            "responded_at",
+                            "asked_at",
                         ):
                             val = data.get(key)
                             if isinstance(val, str):

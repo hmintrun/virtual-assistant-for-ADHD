@@ -26,14 +26,12 @@ Nguồn tham chiếu đặc tả bất biến
 
 from __future__ import annotations
 
-import asyncio
 from datetime import UTC, datetime, timedelta, timezone
 from typing import Any
 from uuid import UUID, uuid4
 
 import httpx
 import pytest
-from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -41,26 +39,14 @@ from app.api.deps import get_current_user
 from app.core.database import get_db, make_engine, session_factory
 from app.main import app
 from app.models.calendar import CalendarConnection, CalendarSyncJob, PlanningContext
-from app.models.execution import CheckIn, RunEvent, SessionRun
+from app.models.execution import CheckIn, SessionRun
 from app.models.planning import ScheduleVersion as ScheduleVersionRow
 from app.models.session import Session as SessionRow
 from app.models.settings import Availability as AvailabilityRow
 from app.models.step import Step as StepRow
 from app.models.task import Task as TaskRow
-from app.models.user import User, UserPreference as UserPreferenceRow
-from app.schemas.execution import (
-    ActualCorrectionRequest,
-    CheckInCreateRequest,
-    CheckInResponseRequest,
-    RunEndRequest,
-)
-from app.schemas.reschedule import (
-    ApproveProposalRequest,
-    ContinuationRequest,
-    CreateProposalRequest,
-    RebuildProposalRequest,
-    RejectProposalRequest,
-)
+from app.models.user import User
+from app.models.user import UserPreference as UserPreferenceRow
 from app.schemas.user import CurrentUser
 from app.services import reschedule_service, run_service
 
@@ -1105,7 +1091,7 @@ async def test_TC_UF5_11_voice_checkin_prompt_and_transcription(
 
 @pytest.mark.asyncio
 async def test_TC_UF5_12_live_run_lock_released_on_awaiting_checkin(
-    sqlite_migration: tuple[str, Any],
+    sqlite_migration: tuple[str, Any], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """TC-UF5-12: Giải phóng khoá live run (uq_user_live_run)
     - Ngay khi phiên 1 kết thúc và bước vào awaiting_checkin, người dùng được
@@ -1125,6 +1111,7 @@ async def test_TC_UF5_12_live_run_lock_released_on_awaiting_checkin(
     try:
         async with sf() as db:
             ids = await _seed_uf5_uf6_environment(db, run_state="awaiting_checkin")
+        monkeypatch.setattr(run_service, "_current_utc_now", lambda now=None: now or ids["t_sess2_start"])
 
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app), base_url="http://test"
