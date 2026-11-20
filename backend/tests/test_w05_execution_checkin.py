@@ -1855,6 +1855,11 @@ async def test_w306_correction_reverts_projection_and_protects_other_run_confirm
     )
     assert r_s1b.status_code == 201
     run_1b_id = r_s1b.json()["data"]["run_id"]
+    monkeypatch.setattr(
+        run_service,
+        "_current_utc_now",
+        lambda now=None: (now or s1b_end).astimezone(UTC),
+    )
 
     r_end_1b = await w05_client.post(
         f"/api/v1/runs/{run_1b_id}/end",
@@ -2004,6 +2009,11 @@ async def test_w306_completion_cascade_early_confirm_and_contradictory_flags(
     )
     assert r_s1b.status_code == 201
     run_1b_id = r_s1b.json()["data"]["run_id"]
+    monkeypatch.setattr(
+        run_service,
+        "_current_utc_now",
+        lambda now=None: (now or s1b_end).astimezone(UTC),
+    )
     r_end_1b = await w05_client.post(
         f"/api/v1/runs/{run_1b_id}/end",
         headers={"Idempotency-Key": "cmd-w306-r01-end-1b"},
@@ -2055,6 +2065,11 @@ async def test_w306_completion_cascade_early_confirm_and_contradictory_flags(
     )
     assert r_s2.status_code == 201
     run_2_id = r_s2.json()["data"]["run_id"]
+    monkeypatch.setattr(
+        run_service,
+        "_current_utc_now",
+        lambda now=None: (now or s2_end).astimezone(UTC),
+    )
     r_end_2 = await w05_client.post(
         f"/api/v1/runs/{run_2_id}/end",
         headers={"Idempotency-Key": "cmd-w306-r01-end-2"},

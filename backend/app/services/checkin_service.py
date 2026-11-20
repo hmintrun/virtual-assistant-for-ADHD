@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
@@ -77,6 +77,7 @@ async def create_run_checkin(
     run_id: str,
     idempotency_key: str,
     payload: CheckInCreateRequest,
+    now: datetime | None = None,
 ) -> CheckInData:
     """Dòng 30 trên API Sheet (POST /api/v1/runs/{run_id}/check-ins - HTTP 201)."""
     user_uuid = command_service.owner_uuid(user_id)
@@ -100,9 +101,16 @@ async def create_run_checkin(
             next_action="reload_and_review",
         )
 
-    if payload.asked_at.astimezone(UTC) < run.started_at.astimezone(UTC):
+    ref_now = run_service._current_utc_now(now)
+    asked_at_utc = payload.asked_at.astimezone(UTC)
+    if asked_at_utc < run.started_at.astimezone(UTC):
         raise run_service._validation_error(
             "Thông tin check-in hoặc phiên bản câu trả lời không hợp lệ.",
+            "asked_at",
+        )
+    if asked_at_utc > ref_now + timedelta(seconds=300):
+        raise run_service._validation_error(
+            "Thời điểm check-in không được vượt quá thời gian hiện tại quá 5 phút.",
             "asked_at",
         )
 
@@ -121,6 +129,11 @@ async def create_run_checkin(
                 code="INVALID_RUN_STATE",
                 message="Chỉ có thể mở check-in cuối phiên sau khi phiên tập trung đã kết thúc.",
                 next_action="reload_and_review",
+            )
+        if asked_at_utc < run.ended_at.astimezone(UTC):
+            raise run_service._validation_error(
+                "Thời điểm check-in cuối phiên phải từ khi kết thúc phiên trở đi.",
+                "asked_at",
             )
         existing_final = await run_repository.get_final_checkin(db, user_uuid, run.id)
         if existing_final is not None:
@@ -319,9 +332,9 @@ async def _apply_final_checkin_projection(
             s.status == "completed" for s in step_sessions
         )
 
-        other_step_checkins = list(
-            await db.scalars(
-                select(CheckIn)
+        other_step_rows = list(
+            await db.execute(
+                select(CheckIn, SessionRun)
                 .join(SessionRun, CheckIn.run_id == SessionRun.id)
                 .join(SessionRow, SessionRun.session_id == SessionRow.id)
                 .where(
@@ -334,33 +347,61 @@ async def _apply_final_checkin_projection(
                     SessionRow.user_id == user_uuid,
                     SessionRow.step_id == step.id,
                 )
-                .order_by(CheckIn.responded_at.desc(), CheckIn.updated_at.desc())
+                .order_by(SessionRun.ended_at.desc(), CheckIn.responded_at.desc())
             )
         )
-        other_step_completed = any(
-            ci.session_outcome == "completed"
-            and (ci.step_completed is True or ci.task_completed is True)
-            for ci in other_step_checkins
-        )
-        other_step_skipped = any(
-            ci.session_outcome == "skipped" and ci.skip_scope == "skip_step"
-            for ci in other_step_checkins
-        )
+        this_order = (run.ended_at or run.started_at or checkin.asked_at).astimezone(UTC)
 
+        subsequent_step_checkins = [
+            (ci, r)
+            for ci, r in other_step_rows
+            if (r.ended_at or r.started_at or ci.asked_at).astimezone(UTC) > this_order
+        ]
+        other_step_wins_completed = False
+        other_step_wins_skipped = False
+        other_step_wins_deny = False
+        if subsequent_step_checkins:
+            latest_ci, _ = subsequent_step_checkins[0]
+            if latest_ci.session_outcome == "completed" and (
+                latest_ci.step_completed is True or latest_ci.task_completed is True
+            ):
+                other_step_wins_completed = True
+            elif (
+                latest_ci.session_outcome == "skipped"
+                and latest_ci.skip_scope == "skip_step"
+            ):
+                other_step_wins_skipped = True
+            elif (
+                latest_ci.step_completed is False
+                or latest_ci.task_completed is False
+                or latest_ci.session_outcome != "completed"
+            ):
+                other_step_wins_deny = True
+
+        this_explicit_step_deny = (payload.step_completed is False) or (
+            payload.session_outcome != "completed"
+        )
         this_explicit_step_complete = payload.session_outcome == "completed" and (
             payload.step_completed is True or payload.task_completed is True
         )
         this_auto_step_complete = (
-            payload.session_outcome == "completed" and all_step_sessions_completed
+            (payload.session_outcome == "completed")
+            and (payload.step_completed is None)
+            and (payload.task_completed is not False)
+            and all_step_sessions_completed
         )
         this_explicit_step_skip = (
             payload.session_outcome == "skipped" and payload.skip_scope == "skip_step"
         )
 
-        if this_explicit_step_complete or this_auto_step_complete or other_step_completed:
+        if other_step_wins_completed or (
+            not other_step_wins_deny
+            and not this_explicit_step_deny
+            and (this_explicit_step_complete or this_auto_step_complete)
+        ):
             step.status = "completed"
             step.remaining_base_seconds = 0
-        elif this_explicit_step_skip or other_step_skipped:
+        elif other_step_wins_skipped or this_explicit_step_skip:
             step.status = "skipped"
             step.remaining_base_seconds = 0
         elif step.status in ("completed", "skipped"):
@@ -370,9 +411,30 @@ async def _apply_final_checkin_projection(
                 "skipped",
             ):
                 step.status = restored_step_status
-                restored_rem = baseline.get("step_remaining_base_seconds")
-                if isinstance(restored_rem, int) and restored_rem >= 0:
-                    step.remaining_base_seconds = restored_rem
+            else:
+                step.status = "in_progress"
+
+            restored_rem = baseline.get("step_remaining_base_seconds")
+            if isinstance(restored_rem, int) and restored_rem > 0:
+                step.remaining_base_seconds = restored_rem
+            else:
+                closed_runs = list(
+                    await db.scalars(
+                        select(SessionRun)
+                        .join(SessionRow, SessionRun.session_id == SessionRow.id)
+                        .where(
+                            SessionRun.user_id == user_uuid,
+                            SessionRow.user_id == user_uuid,
+                            SessionRow.step_id == step.id,
+                            SessionRun.ended_at.is_not(None),
+                            SessionRun.run_state.in_(("closed", "ended")),
+                        )
+                    )
+                )
+                step_actual_work = sum(int(r.actual_work_seconds or 0) for r in closed_runs)
+                step.remaining_base_seconds = max(
+                    1, int(step.estimated_base_seconds or 0) - step_actual_work
+                )
         await db.flush()
 
         if task is not None:
@@ -393,9 +455,9 @@ async def _apply_final_checkin_projection(
                 task.unexpanded_scope and task.unexpanded_scope.strip()
             )
 
-            other_task_checkins = list(
-                await db.scalars(
-                    select(CheckIn)
+            other_task_rows = list(
+                await db.execute(
+                    select(CheckIn, SessionRun)
                     .join(SessionRun, CheckIn.run_id == SessionRun.id)
                     .join(SessionRow, SessionRun.session_id == SessionRow.id)
                     .join(StepRow, SessionRow.step_id == StepRow.id)
@@ -409,27 +471,60 @@ async def _apply_final_checkin_projection(
                         StepRow.user_id == user_uuid,
                         StepRow.task_id == task.id,
                     )
+                    .order_by(SessionRun.ended_at.desc(), CheckIn.responded_at.desc())
                 )
             )
-            other_explicit_task_complete = any(
-                ci.session_outcome == "completed" and ci.task_completed is True
-                for ci in other_task_checkins
+            subsequent_task_checkins = [
+                (ci, r)
+                for ci, r in other_task_rows
+                if (r.ended_at or r.started_at or ci.asked_at).astimezone(UTC) > this_order
+            ]
+            other_task_wins_completed = False
+            other_task_wins_deny = False
+            if subsequent_task_checkins:
+                latest_ci_task, _ = subsequent_task_checkins[0]
+                if (
+                    latest_ci_task.session_outcome == "completed"
+                    and latest_ci_task.task_completed is True
+                ):
+                    other_task_wins_completed = True
+                elif (
+                    latest_ci_task.task_completed is False
+                    or latest_ci_task.step_completed is False
+                    or latest_ci_task.session_outcome != "completed"
+                ):
+                    other_task_wins_deny = True
+
+            this_explicit_task_deny = (
+                (payload.task_completed is False)
+                or (payload.step_completed is False)
+                or (payload.session_outcome != "completed")
             )
             this_explicit_task_complete = (
                 payload.session_outcome == "completed" and payload.task_completed is True
             )
-            auto_task_complete = all_task_steps_completed and not has_unexpanded_scope
+            auto_task_complete = (
+                all_task_steps_completed
+                and (not has_unexpanded_scope)
+                and (payload.task_completed is None)
+                and (payload.step_completed is not False)
+            )
 
-            if (
-                this_explicit_task_complete
-                or other_explicit_task_complete
-                or auto_task_complete
+            if other_task_wins_completed or (
+                not other_task_wins_deny
+                and not this_explicit_task_deny
+                and (this_explicit_task_complete or auto_task_complete)
             ):
                 task.status = "completed"
             elif task.status == "completed":
                 restored_task_status = baseline.get("task_status")
-                if isinstance(restored_task_status, str) and restored_task_status != "completed":
+                if (
+                    isinstance(restored_task_status, str)
+                    and restored_task_status != "completed"
+                ):
                     task.status = restored_task_status
+                else:
+                    task.status = "in_progress"
             await db.flush()
 
     after_state = {
@@ -460,6 +555,7 @@ async def respond_to_checkin(
     checkin_id: str,
     idempotency_key: str,
     payload: CheckInResponseRequest,
+    now: datetime | None = None,
 ) -> CheckInData:
     """Dòng 31 trên API Sheet (PUT /api/v1/check-ins/{checkin_id}/response - HTTP 200)."""
     user_uuid = command_service.owner_uuid(user_id)
@@ -495,9 +591,16 @@ async def respond_to_checkin(
 
     _validate_completion_flags(payload)
 
-    if payload.responded_at.astimezone(UTC) < checkin.asked_at.astimezone(UTC):
+    ref_now = run_service._current_utc_now(now)
+    responded_at_utc = payload.responded_at.astimezone(UTC)
+    if responded_at_utc < checkin.asked_at.astimezone(UTC):
         raise run_service._validation_error(
             "Thông tin check-in hoặc phiên bản câu trả lời không hợp lệ.",
+            "responded_at",
+        )
+    if responded_at_utc > ref_now + timedelta(seconds=300):
+        raise run_service._validation_error(
+            "Thời điểm phản hồi check-in không được vượt quá thời gian hiện tại quá 5 phút.",
             "responded_at",
         )
 
@@ -518,7 +621,7 @@ async def respond_to_checkin(
                 message="Chỉ có thể trả lời check-in cuối phiên sau khi phiên tập trung đã kết thúc.",
                 next_action="reload_and_review",
             )
-        if payload.responded_at.astimezone(UTC) < run.ended_at.astimezone(UTC):
+        if responded_at_utc < run.ended_at.astimezone(UTC):
             raise run_service._validation_error(
                 "Thông tin check-in hoặc phiên bản câu trả lời không hợp lệ.",
                 "responded_at",
