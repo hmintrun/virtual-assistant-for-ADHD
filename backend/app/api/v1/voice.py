@@ -400,6 +400,7 @@ async def create_transcription(
                 text=stt_result.text,
                 input_source="thought" if purpose == "thought_to_draft" else "voice",
                 thought_id=thought_id if purpose == "thought_to_draft" else None,
+                low_confidence=bool(getattr(stt_result, "low_confidence", False)),
             )
             saved = await command_service.replay(db, current_user.user_id, idempotency_key, digest)
             if saved is not None:

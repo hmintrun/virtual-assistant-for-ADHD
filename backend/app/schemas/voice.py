@@ -13,6 +13,7 @@ class TranscriptionData(StrictSchema):
     text: str = Field(min_length=1)
     input_source: Literal["voice", "thought"]
     thought_id: str | None = None
+    low_confidence: bool = False
 
 
 class TtsSynthesizeRequest(StrictSchema):

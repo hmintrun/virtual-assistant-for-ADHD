@@ -99,7 +99,7 @@ class Settings(BaseSettings):
 
     # Voice STT (V01 & A21) — hỗ trợ Gemini Transcribe và Groq Whisper (whisper-large-v3-turbo).
     # Dự phòng khi Backend lỗi/mất mạng nằm ở Mobile (speech_to_text on-device).
-    VOICE_STT_PROVIDER: Literal["gemini", "groq", "auto", "fake"] = "gemini"
+    VOICE_STT_PROVIDER: Literal["gemini", "groq", "auto", "fake"] = "auto"
     GEMINI_STT_MODEL: str = "gemini-3.5-transcribe"
     GEMINI_STT_MODE: Literal["smart", "verbatim"] = "smart"
     VOICE_STT_LANGUAGE: str = "vi-VN"

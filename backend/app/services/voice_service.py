@@ -17,6 +17,8 @@ import asyncio
 import hashlib
 import io
 import logging
+import math
+import re
 import struct
 import time
 from collections import OrderedDict
@@ -115,6 +117,17 @@ class SttResult:
     text: str
     provider: str
     latency_ms: int
+    low_confidence: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class SttProviderDetails:
+    """Chi tiết kết quả từ provider STT (kèm chỉ số âm học từ verbose_json nếu có)."""
+
+    text: str
+    no_speech_prob: float | None = None
+    avg_logprob: float | None = None
+    all_segments_silent: bool | None = None
 
 
 class SttProvider(Protocol):
@@ -251,8 +264,186 @@ class FakeSttProvider:
 
 _DEFAULT_STT_PROMPT = (
     "ProPlan VA, ADHD, Pomodoro, Focus Session, Micro-task, deadline, "
-    "lịch bận, Google Calendar, cất suy nghĩ, phiên tập trung."
+    "lịch bận, Google Calendar, cất suy nghĩ, phiên tập trung, "
+    "Thứ 2, Thứ 3, Thứ 4, Thứ 5, Thứ 6, Thứ 7, Chủ nhật, hằng ngày, cuối tuần, "
+    "19h30, 20h45, tiếng rưỡi, 90 phút, rảnh, bận, trừ, riêng, ngoại lệ, báo cáo, slide."
 )
+
+_WHISPER_HALLUCINATION_SUBSTRINGS: tuple[str, ...] = (
+    "hãy subscribe",
+    "đăng ký kênh",
+    "cảm ơn các bạn đã xem",
+    "hẹn gặp lại các bạn",
+    "hẹn gặp lại ở video",
+    "like và subscribe",
+    "nhấn chuông thông báo",
+    "subtitles by",
+    "amara.org",
+    "transcribed by",
+)
+_HALLUCINATION_PUNCT_RE = re.compile(r"[,\.!?;:\"'()\[\]…\-/\\]+")
+
+
+def _is_whisper_hallucination(text: str) -> bool:
+    """Phát hiện ảo giác đặc trưng của Whisper tiếng Việt khi audio im lặng hoặc nhiễu."""
+    raw_cleaned = (text or "").strip()
+    if not raw_cleaned:
+        return False
+    normalized = " ".join(raw_cleaned.lower().split()).strip(" ,.!?;:\"'")
+    if not normalized:
+        return True
+    if any(sub in normalized for sub in _WHISPER_HALLUCINATION_SUBSTRINGS):
+        return True
+
+    stripped = " ".join(_HALLUCINATION_PUNCT_RE.sub(" ", normalized).split())
+    if not stripped:
+        return True
+    if any(sub in stripped for sub in _WHISPER_HALLUCINATION_SUBSTRINGS if "." not in sub):
+        return True
+
+    words = stripped.split()
+    n_words = len(words)
+    for phrase_len in range(1, 6):
+        if n_words < phrase_len * 4:
+            continue
+        if n_words % phrase_len == 0:
+            unit = words[:phrase_len]
+            if all(words[i : i + phrase_len] == unit for i in range(0, n_words, phrase_len)):
+                return True
+        max_start = n_words - phrase_len * 4
+        for start in range(max_start + 1):
+            unit = words[start : start + phrase_len]
+            repeats = 1
+            cursor = start + phrase_len
+            while cursor + phrase_len <= n_words and words[cursor : cursor + phrase_len] == unit:
+                repeats += 1
+                cursor += phrase_len
+            if repeats >= 4 and (repeats * phrase_len) / n_words >= 0.8:
+                return True
+
+    return False
+
+
+def _to_finite_float(value: Any) -> float | None:
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        num = float(value)
+    except (TypeError, ValueError):
+        return None
+    return num if math.isfinite(num) else None
+
+
+def _is_segment_silent(no_speech_prob: float | None, avg_logprob: float | None) -> bool:
+    return (
+        no_speech_prob is not None
+        and avg_logprob is not None
+        and no_speech_prob > 0.85
+        and avg_logprob < -1.2
+    )
+
+
+def _extract_segment_metrics(
+    response: Any,
+) -> tuple[float | None, float | None, bool | None]:
+    """Rút trích chỉ số âm học theo từng segment từ verbose_json.
+
+    - Đánh giá im lặng trên từng segment (``no_speech_prob > 0.85`` và ``avg_logprob < -1.2``).
+    - ``all_segments_silent = True`` chỉ khi TẤT CẢ segment có chỉ số đều im lặng.
+    - Khi có ít nhất 1 segment không im lặng, ``(max_no_speech_prob, min_avg_logprob)`` chỉ
+      tính trên các segment không im lặng để khoảng lặng cuối câu không làm hỏng câu nói rõ.
+    """
+    segments = (
+        response.get("segments")
+        if isinstance(response, dict)
+        else getattr(response, "segments", None)
+    )
+    all_no_speech_probs: list[float] = []
+    all_avg_logprobs: list[float] = []
+    non_silent_no_speech_probs: list[float] = []
+    non_silent_avg_logprobs: list[float] = []
+    metric_segment_count = 0
+    silent_segment_count = 0
+
+    if isinstance(segments, (list, tuple)):
+        for seg in segments:
+            raw_no_speech = (
+                seg.get("no_speech_prob")
+                if isinstance(seg, dict)
+                else getattr(seg, "no_speech_prob", None)
+            )
+            raw_avg_logprob = (
+                seg.get("avg_logprob")
+                if isinstance(seg, dict)
+                else getattr(seg, "avg_logprob", None)
+            )
+            val_no_speech = _to_finite_float(raw_no_speech)
+            val_avg_logprob = _to_finite_float(raw_avg_logprob)
+            if val_no_speech is None and val_avg_logprob is None:
+                continue
+
+            metric_segment_count += 1
+            if val_no_speech is not None:
+                all_no_speech_probs.append(val_no_speech)
+            if val_avg_logprob is not None:
+                all_avg_logprobs.append(val_avg_logprob)
+
+            if _is_segment_silent(val_no_speech, val_avg_logprob):
+                silent_segment_count += 1
+            else:
+                if val_no_speech is not None:
+                    non_silent_no_speech_probs.append(val_no_speech)
+                if val_avg_logprob is not None:
+                    non_silent_avg_logprobs.append(val_avg_logprob)
+
+    if metric_segment_count > 0:
+        all_segments_silent = silent_segment_count == metric_segment_count
+        if all_segments_silent:
+            max_no_speech = max(all_no_speech_probs) if all_no_speech_probs else None
+            min_avg_logprob = min(all_avg_logprobs) if all_avg_logprobs else None
+        else:
+            max_no_speech = (
+                max(non_silent_no_speech_probs) if non_silent_no_speech_probs else None
+            )
+            min_avg_logprob = (
+                min(non_silent_avg_logprobs) if non_silent_avg_logprobs else None
+            )
+        return max_no_speech, min_avg_logprob, all_segments_silent
+
+    top_no_speech = (
+        response.get("no_speech_prob")
+        if isinstance(response, dict)
+        else getattr(response, "no_speech_prob", None)
+    )
+    top_avg_logprob = (
+        response.get("avg_logprob")
+        if isinstance(response, dict)
+        else getattr(response, "avg_logprob", None)
+    )
+    return (
+        _to_finite_float(top_no_speech),
+        _to_finite_float(top_avg_logprob),
+        None,
+    )
+
+
+async def _call_provider_details(
+    provider: Any, audio: bytes, mime_type: str
+) -> SttProviderDetails:
+    """Gọi provider ưu tiên transcribe_verbose, nhưng tôn trọng mock patch.object(..., 'transcribe')."""
+    inst_dict = getattr(provider, "__dict__", {}) or {}
+    transcribe_verbose = getattr(provider, "transcribe_verbose", None)
+    if (
+        "transcribe" in inst_dict and "transcribe_verbose" not in inst_dict
+    ) or not callable(transcribe_verbose):
+        raw = await provider.transcribe(audio, mime_type)
+        if isinstance(raw, SttProviderDetails):
+            return raw
+        return SttProviderDetails(text=raw)
+    raw_details = await transcribe_verbose(audio, mime_type)
+    if isinstance(raw_details, SttProviderDetails):
+        return raw_details
+    return SttProviderDetails(text=str(raw_details))
 
 
 class GroqWhisperSttProvider:
@@ -287,7 +478,7 @@ class GroqWhisperSttProvider:
             )
         return self._client
 
-    async def transcribe(self, audio: bytes, mime_type: str) -> str:
+    async def transcribe_verbose(self, audio: bytes, mime_type: str) -> SttProviderDetails:
         client = self._get_client()
         ext = _MIME_TO_EXTENSION.get(mime_type, ".m4a")
         try:
@@ -297,7 +488,7 @@ class GroqWhisperSttProvider:
                     file=(f"audio{ext}", audio, mime_type),
                     language=self._language,
                     prompt=self._prompt,
-                    response_format="json",
+                    response_format="verbose_json",
                     temperature=0.0,
                 )
             else:
@@ -305,12 +496,28 @@ class GroqWhisperSttProvider:
                     model=self._model,
                     file=(f"audio{ext}", audio, mime_type),
                     language=self._language,
-                    response_format="json",
+                    response_format="verbose_json",
                     temperature=0.0,
                 )
-            return (getattr(response, "text", None) or "").strip()
+            raw_text = (
+                response.get("text")
+                if isinstance(response, dict)
+                else getattr(response, "text", None)
+            )
+            text = (raw_text or "").strip()
+            no_speech_prob, avg_logprob, all_segments_silent = _extract_segment_metrics(response)
+            return SttProviderDetails(
+                text=text,
+                no_speech_prob=no_speech_prob,
+                avg_logprob=avg_logprob,
+                all_segments_silent=all_segments_silent,
+            )
         except Exception as exc:
             raise map_provider_exception(exc) from exc
+
+    async def transcribe(self, audio: bytes, mime_type: str) -> str:
+        details = await self.transcribe_verbose(audio, mime_type)
+        return details.text
 
 
 class FallbackSttProvider:
@@ -321,10 +528,12 @@ class FallbackSttProvider:
         self._fallback = fallback
         self.name = f"{primary.name}->{fallback.name}"
 
-    async def transcribe_with_provider(self, audio: bytes, mime_type: str) -> tuple[str, str]:
+    async def transcribe_verbose_with_provider(
+        self, audio: bytes, mime_type: str
+    ) -> tuple[SttProviderDetails, str]:
         try:
-            text = await self._primary.transcribe(audio, mime_type)
-            return text, self._primary.name
+            details = await _call_provider_details(self._primary, audio, mime_type)
+            return details, self._primary.name
         except SttError as exc:
             if not (exc.code == SttErrorCode.PROVIDER_UNAVAILABLE or exc.retryable):
                 raise
@@ -345,8 +554,12 @@ class FallbackSttProvider:
                 self._fallback.name,
             )
 
-        text = await self._fallback.transcribe(audio, mime_type)
-        return text, self._fallback.name
+        details = await _call_provider_details(self._fallback, audio, mime_type)
+        return details, self._fallback.name
+
+    async def transcribe_with_provider(self, audio: bytes, mime_type: str) -> tuple[str, str]:
+        details, provider_name = await self.transcribe_verbose_with_provider(audio, mime_type)
+        return details.text, provider_name
 
     async def transcribe(self, audio: bytes, mime_type: str) -> str:
         text, _ = await self.transcribe_with_provider(audio, mime_type)
@@ -389,16 +602,34 @@ class VoiceService:
 
         started = time.perf_counter()
         try:
+            inst_dict = getattr(self._provider, "__dict__", {}) or {}
+            transcribe_verbose_with_provider = getattr(
+                self._provider, "transcribe_verbose_with_provider", None
+            )
             transcribe_with_provider = getattr(self._provider, "transcribe_with_provider", None)
-            if callable(transcribe_with_provider):
-                text, active_provider = await asyncio.wait_for(
+            if (
+                callable(transcribe_verbose_with_provider)
+                and "transcribe_with_provider" not in inst_dict
+                and "transcribe" not in inst_dict
+            ):
+                details, active_provider = await asyncio.wait_for(
+                    transcribe_verbose_with_provider(audio, mime_type),
+                    timeout=self._timeout_seconds,
+                )
+            elif callable(transcribe_with_provider) and "transcribe" not in inst_dict:
+                raw_text, active_provider = await asyncio.wait_for(
                     transcribe_with_provider(audio, mime_type),
                     timeout=self._timeout_seconds,
                 )
+                details = (
+                    raw_text
+                    if isinstance(raw_text, SttProviderDetails)
+                    else SttProviderDetails(text=raw_text)
+                )
             else:
                 try:
-                    text = await asyncio.wait_for(
-                        self._provider.transcribe(audio, mime_type),
+                    details = await asyncio.wait_for(
+                        _call_provider_details(self._provider, audio, mime_type),
                         timeout=self._timeout_seconds,
                     )
                     active_provider = self._provider.name
@@ -418,8 +649,8 @@ class VoiceService:
                             mapped_primary.code,
                             self._fallback_provider.name,
                         )
-                        text = await asyncio.wait_for(
-                            self._fallback_provider.transcribe(audio, mime_type),
+                        details = await asyncio.wait_for(
+                            _call_provider_details(self._fallback_provider, audio, mime_type),
                             timeout=self._timeout_seconds,
                         )
                         active_provider = self._fallback_provider.name
@@ -434,14 +665,44 @@ class VoiceService:
             raise mapped from exc
 
         latency_ms = int((time.perf_counter() - started) * 1000)
-        cleaned = (text or "").strip()
-        if not cleaned:
+        cleaned = (details.text or "").strip()
+        if not cleaned or not _HALLUCINATION_PUNCT_RE.sub("", cleaned).strip():
             no_speech = SttError(SttErrorCode.NO_SPEECH, "empty_transcript")
             self._log_failure(no_speech, started)
             raise no_speech
 
-        logger.info("STT thành công: provider=%s latency_ms=%d", active_provider, latency_ms)
-        return SttResult(text=cleaned, provider=active_provider, latency_ms=latency_ms)
+        if _is_whisper_hallucination(cleaned):
+            hallucinated = SttError(SttErrorCode.NO_SPEECH, "hallucination_filtered")
+            self._log_failure(hallucinated, started)
+            raise hallucinated
+
+        is_acoustically_silent = (
+            details.all_segments_silent
+            if details.all_segments_silent is not None
+            else _is_segment_silent(details.no_speech_prob, details.avg_logprob)
+        )
+        if is_acoustically_silent:
+            silent = SttError(SttErrorCode.NO_SPEECH, "high_no_speech_prob")
+            self._log_failure(silent, started)
+            raise silent
+
+        low_confidence = bool(
+            (details.no_speech_prob is not None and details.no_speech_prob > 0.7)
+            or (details.avg_logprob is not None and details.avg_logprob < -1.0)
+        )
+
+        logger.info(
+            "STT thành công: provider=%s latency_ms=%d low_confidence=%s",
+            active_provider,
+            latency_ms,
+            low_confidence,
+        )
+        return SttResult(
+            text=cleaned,
+            provider=active_provider,
+            latency_ms=latency_ms,
+            low_confidence=low_confidence,
+        )
 
     def _log_failure(self, exc: SttError, started: float) -> None:
         elapsed_ms = int((time.perf_counter() - started) * 1000)
