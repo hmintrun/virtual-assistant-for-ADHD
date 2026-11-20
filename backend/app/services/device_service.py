@@ -23,6 +23,7 @@ from app.schemas.execution import (
     ReminderReceiptRequest,
 )
 from app.services import command_service
+from app.services.run_service import _current_utc_now
 
 PERMISSIONS = {"granted", "denied", "not_determined", "restricted", "unknown"}
 ALARMS = {
@@ -50,7 +51,7 @@ USER_ACTIONS = {None, "start_micro_task", "start_session", "snooze", "dismiss"}
 
 
 def _now() -> datetime:
-    return datetime.now(UTC)
+    return _current_utc_now()
 
 
 def _error(
@@ -103,6 +104,9 @@ async def save_device_state_report(
     payload: DeviceStateReportRequest,
 ) -> DeviceStateData:
     owner = command_service.owner_uuid(user_id)
+    server_now = _now()
+    if payload.reported_at.astimezone(UTC) > server_now + timedelta(seconds=300):
+        raise _error("VALIDATION_ERROR", "Thời điểm báo cáo vượt quá giới hạn sai lệch đồng hồ cho phép.")
     for value, allowed in [
         (payload.notification_permission, PERMISSIONS),
         (payload.microphone_permission, PERMISSIONS),
@@ -201,7 +205,7 @@ async def list_reminders(
             .where(
                 Reminder.user_id == owner,
                 Session.user_id == owner,
-                Reminder.delivery_state == "scheduled",
+                Reminder.delivery_state.in_(("scheduled", "snoozed")),
             )
         )
         for reminder, session in stale:
@@ -279,7 +283,7 @@ async def list_reminders(
                     Reminder.device_id == device_id,
                     Reminder.fire_at >= from_time,
                     Reminder.fire_at <= to_time,
-                    or_(Reminder.delivery_state != "scheduled", Reminder.fire_at >= now),
+                    or_(Reminder.delivery_state.not_in(("scheduled", "snoozed")), Reminder.fire_at >= now),
                 )
                 .order_by(Reminder.fire_at, Reminder.id)
             )
@@ -306,6 +310,13 @@ async def record_reminder_receipt(
     payload: ReminderReceiptRequest,
 ) -> ReminderData:
     owner = command_service.owner_uuid(user_id)
+    server_now = _now()
+    if payload.occurred_at.astimezone(UTC) > server_now + timedelta(seconds=300):
+        raise _error("VALIDATION_ERROR", "Thời điểm biên nhận vượt quá giới hạn sai lệch đồng hồ cho phép.")
+    if payload.delivery_state == "cancelled":
+        raise _error("VALIDATION_ERROR", "Client không được tự ý gửi trạng thái cancelled.")
+    if payload.delivery_state == "failed" and payload.user_action is not None:
+        raise _error("VALIDATION_ERROR", "Trạng thái thất bại không được kèm hành động người dùng.")
     row = await db.scalar(
         select(Reminder).where(Reminder.user_id == owner, Reminder.id == _uuid(reminder_id))
     )
@@ -327,13 +338,25 @@ async def record_reminder_receipt(
             revisions={"schedule": session.schedule_revision},
             next_action="reload_reminders",
         )
-    if row.delivery_state == "cancelled" or session.status != "scheduled":
+    if row.delivery_state in ("dismissed", "acknowledged", "cancelled") or session.status != "scheduled":
+        if row.delivery_state == payload.delivery_state and row.user_action == payload.user_action:
+            return _reminder_data(row)
         raise _error(
             "INVALID_REMINDER_STATE",
-            "Lời nhắc đã bị hủy hoặc phiên đã bắt đầu.",
+            "Lời nhắc đã ở trạng thái kết thúc (dismissed/acknowledged/cancelled) hoặc phiên đã bắt đầu.",
             status=409,
             next_action="ignore_or_reload",
         )
+    if (
+        row.delivery_state in ("delivered", "fired", "snoozed", "dismissed", "acknowledged")
+        and payload.delivery_state == "scheduled"
+    ):
+        raise _error("INVALID_REMINDER_STATE", "Không thể quay lại trạng thái scheduled.", status=409)
+    if (
+        row.delivery_state in ("fired", "snoozed", "dismissed", "acknowledged")
+        and payload.delivery_state == "delivered"
+    ):
+        raise _error("INVALID_REMINDER_STATE", "Không thể lùi trạng thái về delivered.", status=409)
     if row.device_id is not None and row.device_id != payload.device_id:
         raise _error("DEVICE_CONFLICT", "Lời nhắc thuộc thiết bị khác.", status=409)
     if payload.delivery_state not in DELIVERY_STATES or payload.user_action not in USER_ACTIONS:

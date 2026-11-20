@@ -174,6 +174,7 @@ class _SessionWindow:
     scheduled_start: datetime
     scheduled_end: datetime
     step_id: UUID | None
+    status: str = "scheduled"
 
 
 @dataclass(frozen=True)
@@ -262,6 +263,7 @@ async def ingest_calendar_sources(
             scheduled_start=sess.scheduled_start,
             scheduled_end=sess.scheduled_end,
             step_id=sess.step_id,
+            status=sess.status,
         )
         if link.google_calendar_id and link.google_event_id:
             event_to_session[(link.google_calendar_id, link.google_event_id)] = win
@@ -325,6 +327,7 @@ async def ingest_calendar_sources(
                                     scheduled_start=direct_sess.scheduled_start,
                                     scheduled_end=direct_sess.scheduled_end,
                                     step_id=direct_sess.step_id,
+                                    status=direct_sess.status,
                                 )
                                 session_id_to_session[proactive_session_id] = win
                                 matched_session = win
@@ -333,7 +336,7 @@ async def ingest_calendar_sources(
                                     session_id_to_task_id[proactive_session_id] = str(step.task_id)
                         except Exception:
                             pass
-                elif (src.google_calendar_id, normalized.google_event_id) in event_to_session:
+                if matched_session is None and (src.google_calendar_id, normalized.google_event_id) in event_to_session:
                     matched_session = event_to_session[(src.google_calendar_id, normalized.google_event_id)]
 
                 if matched_session is not None:
@@ -348,6 +351,8 @@ async def ingest_calendar_sources(
                         and abs((ev_end - sess_end).total_seconds()) < 60.0
                     )
                     if is_untouched:
+                        if matched_session.status in ("cancelled", "skipped"):
+                            continue
                         # Chỉ bỏ qua nếu session thuộc chính task đang lập lịch lại (để không tự chặn chính nó).
                         # Session thuộc các Task khác BẮT BUỘC phải giữ lại để không bị xếp đè (Inter-task collision)!
                         is_own_rescheduled = False

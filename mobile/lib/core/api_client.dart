@@ -71,12 +71,14 @@ class ApiClient {
     Object? data,
     String? idempotencyKey,
     bool idempotent = true,
+    Duration? receiveTimeout,
   }) async {
     try {
       final response = await dio.post<Map<String, dynamic>>(
         path,
         data: data,
         options: Options(
+            receiveTimeout: receiveTimeout,
             headers: idempotent
                 ? {
                     'Idempotency-Key':
@@ -94,15 +96,19 @@ class ApiClient {
     String path, {
     required Object data,
     String? idempotencyKey,
+    Duration? receiveTimeout,
   }) async {
     try {
       final response = await dio.patch<Map<String, dynamic>>(
         path,
         data: data,
-        options: Options(headers: {
-          'Idempotency-Key':
-              idempotencyKey ?? newIdempotencyKey('mobile_patch'),
-        }),
+        options: Options(
+          receiveTimeout: receiveTimeout,
+          headers: {
+            'Idempotency-Key':
+                idempotencyKey ?? newIdempotencyKey('mobile_patch'),
+          },
+        ),
       );
       return _unwrap(response.data);
     } on DioException catch (error) {

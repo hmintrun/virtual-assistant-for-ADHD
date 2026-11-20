@@ -1329,6 +1329,113 @@ class TestAIService(unittest.TestCase):
         custom_uf1 = Settings(_env_file=None, AI_UF1_TIMEOUT_SECONDS=7.5)
         self.assertEqual(custom_uf1.AI_UF1_TIMEOUT_SECONDS, 7.5)
 
+    def test_uf1_chooses_budget_from_current_turn(self) -> None:
+        service = AIService(Settings(_env_file=None))
+        cases = (
+            ("Viết 2 trang, hạn 22h, rảnh 19:00–21:00.", {}, 6),
+            ("Rảnh 19:00–21:00.", {"followup": True}, 6),
+            ("Hạn ngày mai và rảnh 19:00–21:00.", {}, 8),
+            ("À nhầm, làm đúng 5 slide.", {}, 8),
+            ("Rảnh 08:00–10:00, 11:00–12:00, 20:00–22:00.", {}, 10),
+            ("Đổi hạn sang ngày mai.", {"edits_locked_field": True}, 10),
+            ("22:00 ngày 28/11/2026", {"retrying_fallback_edit": True}, 8),
+            ("Có ngoại lệ và nhiều giờ.", {"edits_locked_field": True, "needs_user_decision": True}, 6),
+        )
+        for text, context, expected in cases:
+            with self.subTest(text=text, context=context):
+                profile = service._extraction_profile(text, **context)
+                self.assertEqual(profile.hard_timeout, expected)
+                self.assertEqual(profile.primary_priority_until, 4.5)
+                self.assertEqual(profile.groq_hedge_at, 3.5)
+        fixed = AIService(Settings(_env_file=None, AI_UF1_ADAPTIVE_TIMEOUT_ENABLED=False))
+        self.assertEqual(fixed._extraction_profile("À nhầm", edits_locked_field=True).hard_timeout, 6)
+        capped = AIService(Settings(_env_file=None, AI_UF1_TIMEOUT_SECONDS=14))
+        self.assertEqual(capped._extraction_profile("À nhầm", edits_locked_field=True).hard_timeout, 15)
+        sub_second = AIService(Settings(_env_file=None, AI_UF1_TIMEOUT_SECONDS=0.05))
+        self.assertAlmostEqual(
+            sub_second._extraction_profile(
+                "Hạn ngày mai, rảnh 08:00–10:00, 11:00–12:00, 20:00–22:00.",
+                edits_locked_field=True,
+            ).hard_timeout,
+            0.05,
+        )
+
+    def test_uf1_budget_expiry_does_not_trip_provider_breaker(self) -> None:
+        service = AIService(Settings(_env_file=None, AI_UF1_TIMEOUT_SECONDS=0.05))
+
+        async def stalled(**_: Any) -> LLMTaskExtractionPayload:
+            await asyncio.sleep(2)
+            raise AssertionError("UF1 should cancel the unfinished provider call")
+
+        async def two_requests() -> None:
+            for _ in range(2):
+                result = await service.extract_task_intent("Làm báo cáo")
+                self.assertEqual(result.generation_tier, "tier_3_rule_based")
+
+        with (
+            patch.object(service, "_get_gemini_client", return_value=object()),
+            patch.object(service, "_get_groq_client", return_value=None),
+            patch.object(service, "_call_gemini_structured", side_effect=stalled) as gemini,
+        ):
+            asyncio.run(two_requests())
+        self.assertEqual(gemini.await_count, 2)
+        self.assertTrue(service.health.can_attempt("gemini", service._settings.GEMINI_UF1_MODEL))
+
+    def test_uf1_prolonged_budget_expiry_eventually_opens_provider_breaker(self) -> None:
+        service = AIService(
+            Settings(_env_file=None, AI_UF1_TIMEOUT_SECONDS=0.05),
+            failure_threshold=2,
+            cooldown_seconds=30.0,
+            max_transient_retries=0,
+        )
+
+        async def stalled(**_: Any) -> LLMTaskExtractionPayload:
+            await asyncio.sleep(2)
+            raise AssertionError("UF1 should cancel the unfinished provider call")
+
+        class _StalledGroqCompletions:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            async def create(self, **_: Any) -> Any:
+                self.calls += 1
+                await asyncio.sleep(2)
+                raise AssertionError("UF1 should cancel the unfinished Groq call")
+
+        groq_completions = _StalledGroqCompletions()
+
+        class _StalledGroqClient:
+            chat = type("_Chat", (), {"completions": groq_completions})()
+
+        async def five_requests() -> None:
+            for _ in range(5):
+                result = await service.extract_task_intent("Làm báo cáo")
+                self.assertEqual(result.generation_tier, "tier_3_rule_based")
+
+        with (
+            patch.object(service, "_get_gemini_client", return_value=object()),
+            patch.object(service, "_get_groq_client", return_value=None),
+            patch.object(service, "_call_gemini_structured", side_effect=stalled) as gemini,
+        ):
+            asyncio.run(five_requests())
+
+        self.assertEqual(gemini.await_count, 4)
+        self.assertFalse(service.health.can_attempt("gemini", service._settings.GEMINI_UF1_MODEL))
+        snap = service.health.snapshot()[f"gemini:{service._settings.GEMINI_UF1_MODEL}"]
+        self.assertEqual(snap["state"], "open")
+        self.assertEqual(snap["consecutive_failures"], 4)
+        self.assertLessEqual(snap["cooldown_remaining_s"], 15.0)
+
+        # Khi Gemini đã OPEN và chỉ còn Groq treo liên tục 4 lần, Groq cũng mở breaker ở lần 4.
+        with (
+            patch.object(service, "_get_gemini_client", return_value=None),
+            patch.object(service, "_get_groq_client", return_value=_StalledGroqClient()),
+        ):
+            asyncio.run(five_requests())
+
+        self.assertEqual(groq_completions.calls, 4)
+        self.assertFalse(service.health.can_attempt("groq", service._settings.GROQ_FALLBACK_MODEL))
+
     def test_uf1_stalled_gemini_rescued_by_hedged_groq_before_deadline(self) -> None:
         """Khi Gemini UF1 bị treo quá mốc fast-fail/hedge (1.0s), nhánh Groq hedge song song kịp trả kết quả trước deadline (2.2s)."""
         cfg = Settings(
@@ -1337,6 +1444,8 @@ class TestAIService(unittest.TestCase):
             GROQ_API_KEY="gsk_TestKey",
             GOOGLE_CREDENTIALS_PATH="",
             AI_UF1_TIMEOUT_SECONDS=2.2,
+            AI_UF1_ADAPTIVE_TIMEOUT_ENABLED=False,
+            AI_UF1_PRIMARY_PRIORITY_SECONDS=1.3,
             AI_UF1_GROQ_FAST_FAIL_SECONDS=1.0,
         )
         service = AIService(app_settings=cfg)
@@ -1357,17 +1466,21 @@ class TestAIService(unittest.TestCase):
                 summary="Groq hedge cứu hộ thành công khi Gemini UF1 treo.",
             )
 
+        async def request() -> TaskExtractionResult:
+            return await asyncio.wait_for(
+                service.extract_task_intent(
+                    "Ôn tập Cấu trúc dữ liệu 10 bài trước cuối tuần, rảnh tối thứ 5 19h-21h"
+                ),
+                timeout=1.9,
+            )
+
         with (
             patch.object(service, "_get_gemini_client", return_value=object()),
             patch.object(service, "_get_groq_client", return_value=object()),
             patch.object(service, "_call_gemini_structured", side_effect=_stalled_gemini) as gemini,
             patch.object(service, "_call_groq_structured", side_effect=_hedged_groq) as groq,
         ):
-            res = asyncio.run(
-                service.extract_task_intent(
-                    "Ôn tập Cấu trúc dữ liệu 10 bài trước cuối tuần, rảnh tối thứ 5 19h-21h"
-                )
-            )
+            res = asyncio.run(request())
 
         gemini.assert_awaited_once()
         groq.assert_awaited_once()

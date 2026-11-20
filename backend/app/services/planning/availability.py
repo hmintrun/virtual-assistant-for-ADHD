@@ -155,7 +155,7 @@ def compute_effective_free_intervals(
             dt_start = datetime(
                 curr_date.year, curr_date.month, curr_date.day, s_h, s_m, tzinfo=local_tz
             )
-            if e_h == 24 and e_m == 0:
+            if (e_h == 24 and e_m == 0) or (e_h == 23 and e_m == 59):
                 dt_end = datetime(
                     curr_date.year, curr_date.month, curr_date.day, 0, 0, tzinfo=local_tz
                 ) + timedelta(days=1)

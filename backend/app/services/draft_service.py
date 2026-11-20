@@ -1,12 +1,12 @@
 # Tầng Service điều phối nghiệp vụ cho bản nháp công việc UF1 (PlanningDraft)
-from datetime import UTC, datetime
+import re
+from datetime import UTC, date, datetime, time, timedelta
 from typing import Any, Literal, cast
 from uuid import NAMESPACE_DNS, UUID, uuid4, uuid5
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import ValidationError
 from sqlalchemy import delete, select, update
-from sqlalchemy.exc import MultipleResultsFound
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import AppError
@@ -19,8 +19,13 @@ from app.models.settings import Availability as AvailabilityModel
 from app.models.task import Task as TaskModel
 from app.models.user import User as UserModel
 from app.models.user import UserPreference as UserPreferenceModel
-from app.repositories import run_repository, thought_repository
-from app.schemas.availability import Availability, DraftAvailability
+from app.schemas.availability import (
+    Availability,
+    DateOverride,
+    DraftAvailability,
+    LocalInterval,
+    WeeklyRule,
+)
 from app.schemas.common import (
     AvailabilityRef,
     CandidateRef,
@@ -303,47 +308,21 @@ async def _validate_source_thought(
         return None
     try:
         thought_id = UUID(source_thought_id)
-    except ValueError:
+    except (ValueError, TypeError):
         thought_id = None
-    owner = resolve_user_uuid(user_id)
-    thought = (
-        await thought_repository.get_thought(db, owner, thought_id)
-        if thought_id is not None
-        else None
-    )
-    if thought is None:
+    if thought_id is None:
         raise AppError(
             status_code=404,
             code="RESOURCE_NOT_FOUND",
             message="Không tìm thấy suy nghĩ nguồn.",
             next_action="reload",
         )
-    if thought.source_run_id is not None:
-        run = await run_repository.get_run(db, owner, thought.source_run_id)
-        if run is None or run.ended_at is None:
-            raise AppError(
-                status_code=409,
-                code="SESSION_STILL_RUNNING",
-                message="Chỉ tạo nháp từ suy nghĩ sau khi phiên nguồn kết thúc.",
-                next_action="wait_for_session_end",
-            )
-    try:
-        links = await thought_repository.get_links(db, owner, [thought.id])
-    except MultipleResultsFound:
-        raise AppError(
-            status_code=409,
-            code="SOURCE_CHANGED",
-            message="Dữ liệu cũ có nhiều nháp cùng nguồn suy nghĩ; cần đối soát liên kết.",
-            next_action="reload_and_review",
-        ) from None
-    linked = links.get(thought.id)
-    if linked is not None and linked.draft.id != resolve_draft_uuid(draft_id):
-        raise AppError(
-            status_code=409,
-            code="THOUGHT_ALREADY_LINKED",
-            message="Suy nghĩ này đã có bản nháp.",
-            next_action="open_linked_draft",
-        )
+    owner = resolve_user_uuid(user_id)
+    from app.services import thought_service
+
+    thought = await thought_service.ensure_thought_eligible_for_draft_conversion(
+        db, owner, thought_id, current_draft_id=resolve_draft_uuid(draft_id)
+    )
     return thought.id
 
 
@@ -477,34 +456,591 @@ def _free_windows(availability: Availability | DraftAvailability) -> list[dict[s
     return windows
 
 
-def _merge_free_windows(previous, incoming):
-    """Chỉ hoàn thiện cùng ngày/thứ và các mốc đã rõ phải khớp; không đoán ngày."""
-    result = list(previous)
-    for item in incoming:
-        identity = (item.kind, item.weekday, item.date, item.start_local, item.end_local)
+_SAME_TIME_PHRASES: tuple[str, ...] = (
+    "cũng giờ đó",
+    "giờ đó",
+    "như trên",
+    "khung giờ đó",
+    "cùng giờ đó",
+    "y như vậy",
+)
+_UNANCHORED_REPEAT_PHRASES: tuple[str, ...] = (
+    "hằng ngày",
+    "hàng ngày",
+    "mỗi ngày",
+    "ngày nào cũng",
+    "cả tuần",
+    "tất cả các ngày",
+    "mọi ngày",
+    "tối nào cũng",
+    "sáng nào cũng",
+    "chiều nào cũng",
+    "sau cuộc họp",
+    "sau buổi họp",
+    "sau sự kiện",
+    "sau giờ họp",
+)
+
+
+def _merge_intervals_1d(intervals: list[LocalInterval]) -> list[LocalInterval]:
+    """Hợp (Union) các khoảng LocalInterval 1D trong cùng một ngày; giữ tách biệt các khung rời nhau (#1, #5)."""
+    if not intervals:
+        return []
+    ordered = sorted(intervals, key=lambda iv: (iv.start_local, iv.end_local))
+    merged: list[LocalInterval] = [ordered[0]]
+    for current in ordered[1:]:
+        last = merged[-1]
+        if current.start_local <= last.end_local:
+            if current.end_local > last.end_local:
+                merged[-1] = LocalInterval(
+                    start_local=last.start_local,
+                    end_local=current.end_local,
+                )
+        else:
+            merged.append(current)
+    return merged
+
+
+def _subtract_intervals_1d(
+    base_intervals: list[LocalInterval],
+    busy_intervals: list[LocalInterval],
+) -> list[LocalInterval]:
+    """Hiệu (Difference) cắt các đoạn giờ bận khỏi danh sách khung giờ rảnh 1D trong ngày (#2)."""
+    result = _merge_intervals_1d(base_intervals)
+    for busy in _merge_intervals_1d(busy_intervals):
+        next_result: list[LocalInterval] = []
+        for iv in result:
+            if busy.end_local <= iv.start_local or busy.start_local >= iv.end_local:
+                next_result.append(iv)
+            else:
+                if iv.start_local < busy.start_local:
+                    next_result.append(
+                        LocalInterval(start_local=iv.start_local, end_local=busy.start_local)
+                    )
+                if busy.end_local < iv.end_local:
+                    next_result.append(
+                        LocalInterval(start_local=busy.end_local, end_local=iv.end_local)
+                    )
+        result = next_result
+    return result
+
+
+def _item_weekdays(item: ExtractedFreeWindowSchema) -> list[int]:
+    result: list[int] = []
+    if item.weekdays:
+        for w in item.weekdays:
+            if 1 <= w <= 7 and w not in result:
+                result.append(w)
+    if item.weekday is not None and 1 <= item.weekday <= 7 and item.weekday not in result:
+        result.append(item.weekday)
+    return sorted(result)
+
+
+def _item_dates(item: ExtractedFreeWindowSchema) -> list[date]:
+    if item.date is not None:
+        return [date.fromisoformat(item.date)]
+    if item.date_from is not None and item.date_to is not None:
+        d_start = date.fromisoformat(item.date_from)
+        d_end = date.fromisoformat(item.date_to)
+        if d_start <= d_end:
+            num_days = min(180, (d_end - d_start).days + 1)
+            return [d_start + timedelta(days=i) for i in range(num_days)]
+    return []
+
+
+_UF1_QTY = r"(?:\d+|một|hai|ba|bốn|năm|sáu|bảy|tám|chín|mười)"
+_UF1_SCOPE_UNIT = (
+    r"(?:trang|slide|chương|bài|mục|đề|endpoint|biểu\s+đồ|module|service|báo\s+cáo|video|file|phần)"
+)
+
+_FIELD_EXPLICIT_EDIT_PATTERNS: dict[str, re.Pattern[str]] = {
+    "title": re.compile(
+        r"(?:đổi|sửa|chỉnh|cập\s+nhật|đặt\s+lại|thay(?:\s+đổi)?)\s+(?:lại\s+)?(?:tiêu\s+đề|tên|title)"
+        r"|tiêu\s+đề\s+mới",
+        re.IGNORECASE,
+    ),
+    "description": re.compile(
+        r"(?:đổi|sửa|chỉnh|cập\s+nhật|thay(?:\s+đổi)?)\s+(?:lại\s+)?(?:nội\s+dung|mô\s+tả|description|công\s+việc)",
+        re.IGNORECASE,
+    ),
+    "goal": re.compile(
+        r"(?:đổi|sửa|chỉnh|cập\s+nhật|thay(?:\s+đổi)?)\s+(?:lại\s+)?(?:mục\s+tiêu|goal)",
+        re.IGNORECASE,
+    ),
+    "scope": re.compile(
+        r"(?:đổi|sửa|chỉnh|cập\s+nhật|tăng|giảm|thêm|bớt|thay(?:\s+đổi)?)\s+"
+        r"(?:lại\s+|sang\s+|thành\s+|lên\s+|xuống\s+)?"
+        r"(?:phạm\s+vi|scope|đầu\s+ra|(?:số\s+)?(?:trang|slide|chương|bài|đề)"
+        r"|" + _UF1_QTY + r"\s+" + _UF1_SCOPE_UNIT + r"\b)"
+        r"|phạm\s+vi\s+(?:mới|là|thành)"
+        r"|(?:làm|viết|soạn)\s+" + _UF1_QTY + r"\s+" + _UF1_SCOPE_UNIT
+        + r"\b[^.!?\n]{0,30}\bthay\s+vì\b"
+        r"|(?:thầy|cô|sếp|nhóm)\s+yêu\s+cầu.*\b(?:trang|slide|chương|bài|đề|module|service)\b",
+        re.IGNORECASE,
+    ),
+    "time_constraint": re.compile(
+        r"(?:đổi|sửa|chỉnh|cập\s+nhật|lùi|dời|nới|gia\s+hạn|thay(?:\s+đổi)?)\s+(?:lại\s+)?(?:hạn(?:\s+chót)?|deadline|thời\s+hạn|ngày\s+nộp|giờ\s+nộp|mốc|thời\s+gian)"
+        r"|(?:lùi|dời|nới|đổi)\s+(?:lại\s+)?(?:sang|thành|tới|đến)\s+(?:\d{1,2}\s*(?:h|:|g|giờ)|ngày\s+mai|mai|mốt|thứ\s*(?:hai|ba|tư|năm|sáu|bảy|[2-7])|chủ\s*nhật|tuần\s+sau|cuối\s+tuần|(?:ngày\s+)?\d{1,2}/\d{1,2})"
+        r"|(?:hạn\s+chót|deadline|thời\s+hạn)\s+(?:mới|đổi|sang|thành|lại)",
+        re.IGNORECASE,
+    ),
+    "availability": re.compile(
+        r"(?:đổi|sửa|chỉnh|cập\s+nhật|thêm|bớt|xóa|bỏ|thay(?:\s+đổi)?|mở\s+thêm)\s+(?:lại\s+)?(?:giờ\s+rảnh|khung\s+giờ|lịch\s+rảnh|lịch\s+học|lịch\s+làm|ngoại\s+lệ)"
+        r"|\b(?:rảnh|bận)\b.*(?:\d{1,2}\s*(?:h|:|g|giờ)|cả\s+ngày|cuối\s+tuần|hằng\s+ngày|mỗi\s+ngày|thứ\s*(?:hai|ba|tư|năm|sáu|bảy|[2-7])|chủ\s*nhật)"
+        r"|(?:dùng|theo|lấy|áp\s+dụng)\s+(?:lại\s+)?(?:lịch|giờ(?:\s+rảnh)?)\s+mặc\s+định",
+        re.IGNORECASE,
+    ),
+}
+
+_DEFAULT_AVAIL_REQUEST_RE = re.compile(
+    r"(?:dùng|sử\s+dụng|lấy|áp\s+dụng|theo|giống)\s+(?:lại\s+)?(?:khung\s+)?(?:lịch|giờ(?:\s+rảnh)?)\s+mặc\s+định"
+    r"|(?:lịch|giờ(?:\s+rảnh)?)\s+mặc\s+định\s+(?:của\s+mình|đã\s+lưu|nhé|nha|đi)",
+    re.IGNORECASE,
+)
+_DEFAULT_AVAIL_EXCLUDE_RE = re.compile(
+    r"giữ\s+nguyên|chỉ\s+dùng\s+cho|không\s+(?:dùng|lấy|đụng|đổi).*mặc\s+định",
+    re.IGNORECASE,
+)
+
+_UF1_NEGATED_EDIT_RE = re.compile(r"\b(?:không|đừng|chưa)(?:\s+(?:cần|muốn))?\s*$", re.IGNORECASE)
+_UF1_KEEP_FIELD_RE = re.compile(r"\bgiữ\s+nguyên\s*$", re.IGNORECASE)
+_UF1_KEEP_CURRENT_RE = re.compile(
+    r"\bgiữ\s+(?:nguyên|như\s+cũ"
+    r"|lại(?:\s+(?:cái|giá\s+trị|mức|bản))?(?:\s+(?:cũ|hiện\s+tại)|(?=\s*[.!?,;\n]|$))"
+    r"|giá\s+trị\s+(?:cũ|hiện\s+tại)"
+    r"|(?:lại\s+)?(?:tiêu\s+đề|nội\s+dung|mô\s+tả|mục\s+tiêu|phạm\s+vi|đầu\s+ra|thời\s+gian|hạn(?:\s+chót)?|deadline|giờ\s+rảnh|lịch\s+rảnh|khung\s+giờ)\s+(?:cũ|hiện\s+tại))\b"
+    r"|\b(?:không|khỏi|thôi)\s+(?:(?:cần|muốn)\s+)?(?:đổi|sửa|chỉnh|cập\s+nhật|thay(?:\s+đổi)?)(?:\s+(?:nữa|lại|thêm))?\b",
+    re.IGNORECASE,
+)
+_UF1_KEEP_ALL_RE = re.compile(r"\b(?:tất\s+cả|toàn\s+bộ|cả\s+hai|hết)\b", re.IGNORECASE)
+_UF1_FIELD_MENTION_PATTERNS: dict[str, re.Pattern[str]] = {
+    "title": re.compile(r"\b(?:tiêu\s+đề|tên|title)\b", re.IGNORECASE),
+    "description": re.compile(r"\b(?:nội\s+dung|mô\s+tả|description|công\s+việc)\b", re.IGNORECASE),
+    "goal": re.compile(r"\b(?:mục\s+tiêu|goal)\b", re.IGNORECASE),
+    "scope": re.compile(r"\b(?:phạm\s+vi|scope|đầu\s+ra)\b", re.IGNORECASE),
+    "time_constraint": re.compile(
+        r"\b(?:thời\s+gian|hạn(?:\s+chót)?|deadline|thời\s+hạn|ngày\s+nộp|giờ\s+nộp)\b",
+        re.IGNORECASE,
+    ),
+    "availability": re.compile(
+        r"\b(?:giờ\s+rảnh|khung\s+giờ|lịch\s+rảnh|lịch\s+học|lịch\s+làm|ngoại\s+lệ|availability)\b",
+        re.IGNORECASE,
+    ),
+}
+_UF1_SCOPE_CHOICE_RE = re.compile(
+    r"\b(?:chưa\s+(?:chốt|quyết\s+định|chọn)(?:\s+được)?\s+(?:phạm\s+vi|đầu\s+ra)"
+    r"|(?:hai|ba|2|3|các)\s+phương\s+án\s+(?:đều\s+)?(?:đang\s+)?(?:để\s+ngỏ|chưa\s+chốt))\b",
+    re.IGNORECASE,
+)
+_UF1_SCOPE_ALTERNATIVES_RE = re.compile(r"\b(?:hoặc|hay|phương\s+án)\b", re.IGNORECASE)
+_UF1_SCOPE_UNDECIDED_RE = re.compile(
+    r"\b(?:chưa\s+(?:chốt|quyết\s+định|chọn|biết)(?:\s+được)?|phân\s+vân)\b",
+    re.IGNORECASE,
+)
+_UF1_SCOPE_ALT_DELIVERABLE_RE = re.compile(
+    r"\b" + _UF1_QTY + r"\s+" + _UF1_SCOPE_UNIT
+    + r"\b[^.!?\n]{0,25}\b(?:hoặc|hay|với|và)\b[^.!?\n]{0,25}\b"
+    + _UF1_QTY + r"\s+" + _UF1_SCOPE_UNIT + r"\b"
+    + r"|\b(?:phương\s+án|đầu\s+ra|phạm\s+vi)\b[^.!?\n]{0,40}\b(?:hoặc|hay)\b",
+    re.IGNORECASE,
+)
+_UF1_SCOPE_UNIT_RE = re.compile(r"\b" + _UF1_SCOPE_UNIT + r"\b", re.IGNORECASE)
+_UF1_SCOPE_SELECTION_RE = re.compile(
+    r"(?:^|[.!?;\n,])\s*(?:(?:tôi|mình|em|anh|chị|nhóm|chúng\s+tôi|thôi|vậy|thế|ok|oke)\s+){0,2}"
+    r"(?:chốt|chọn|quyết\s+định|lấy)\b"
+    r"|(?:^|[.!?;\n,])\s*(?:(?:thôi|vậy|mình|tôi|em|anh|chị)\s+)?(?:làm|viết|soạn|nộp)\s+"
+    r"(?:(?:báo\s+cáo|bài|bản|tài\s+liệu|bộ|đề|phần)\s+)?"
+    + _UF1_QTY + r"\s+" + _UF1_SCOPE_UNIT + r"\b"
+    r"|^\s*(?:(?:báo\s+cáo|bài|bản|tài\s+liệu|bộ)\s+)?"
+    + _UF1_QTY + r"\s+" + _UF1_SCOPE_UNIT
+    + r"(?:\s+(?:word|pdf|powerpoint|ppt|pptx|excel|docs?|thuyết\s+trình))?"
+    + r"\s*(?:(?:thôi|nhé|nha|đi|nhỉ|là\s+được|như\s+vậy)\s*)?[.!]?$"
+    r"|\bphương\s+án\s+(?:\d+|một|hai|ba|đầu(?:\s+tiên)?|thứ\s+(?:nhất|hai|ba)|sau|cuối)\b",
+    re.IGNORECASE,
+)
+_UF1_REVIEW_FIELD_LABELS = {
+    "title": "tiêu đề",
+    "description": "nội dung",
+    "goal": "mục tiêu",
+    "scope": "phạm vi",
+    "time_constraint": "thời gian",
+    "availability": "giờ rảnh",
+}
+
+
+def _user_explicitly_edits_field(text: str | None, field_name: str) -> bool:
+    """Kiểm tra người dùng có chủ động yêu cầu sửa trường đang bị khóa hay không (RISK-UF1-03)."""
+    if not text or not text.strip():
+        return False
+    pattern = _FIELD_EXPLICIT_EDIT_PATTERNS.get(field_name)
+    if pattern is None:
+        return False
+    return bool(pattern.search(text))
+
+
+def _uf1_requested_edits(text: str, summary: TaskSummary) -> tuple[str, ...]:
+    fields: list[str] = []
+    for field, pattern in _FIELD_EXPLICIT_EDIT_PATTERNS.items():
+        if getattr(summary, field) is None and not (
+            field == "availability" and summary.availability_ref is not None
+        ):
+            continue
         if any(
-            (old.kind, old.weekday, old.date, old.start_local, old.end_local) == identity
+            not _UF1_NEGATED_EDIT_RE.search(text[max(0, hit.start() - 30):hit.start()])
+            and not _UF1_KEEP_FIELD_RE.search(text[max(0, hit.start() - 30):hit.start()])
+            for hit in pattern.finditer(text)
+        ):
+            fields.append(field)
+    return tuple(fields)
+
+
+def _uf1_kept_pending_fields(
+    text: str,
+    pending_fields: tuple[str, ...],
+    requested_edits: tuple[str, ...],
+) -> set[str]:
+    if not text.strip() or not pending_fields or not _UF1_KEEP_CURRENT_RE.search(text):
+        return set()
+    candidates = [field for field in pending_fields if field not in requested_edits]
+    if not candidates:
+        return set()
+    mentioned = {
+        field
+        for field in candidates
+        if (pattern := _UF1_FIELD_MENTION_PATTERNS.get(field)) is not None and pattern.search(text)
+    }
+    if mentioned:
+        return mentioned
+    if len(candidates) == 1 or _UF1_KEEP_ALL_RE.search(text):
+        return set(candidates)
+    return set()
+
+
+def _is_scope_choice_requirement(text: str) -> bool:
+    return bool(
+        _UF1_SCOPE_CHOICE_RE.search(text)
+        or _UF1_SCOPE_ALT_DELIVERABLE_RE.search(text)
+        or (_UF1_SCOPE_ALTERNATIVES_RE.search(text) and _UF1_SCOPE_UNIT_RE.search(text))
+    )
+
+
+def _user_requests_default_availability(text: str | None) -> bool:
+    """Kiểm tra người dùng có chủ động yêu cầu dùng lịch/giờ rảnh mặc định hay không (TC-LIVE-14A / IT-2)."""
+    if not text or not text.strip():
+        return False
+    if _DEFAULT_AVAIL_EXCLUDE_RE.search(text):
+        return False
+    return bool(_DEFAULT_AVAIL_REQUEST_RE.search(text))
+
+
+def _effective_time_dates(
+    effective_time: TimeConstraint | None,
+    timezone_name: str,
+) -> list[date]:
+    if effective_time is None:
+        return []
+    end_dt = (
+        effective_time.deadline_at
+        if effective_time.kind == "deadline"
+        else effective_time.finish_by_at
+    ) or effective_time.deadline_at or effective_time.finish_by_at
+    start_dt = effective_time.start_at
+    if start_dt is None or end_dt is None:
+        return []
+    try:
+        tz = ZoneInfo(timezone_name)
+    except (ZoneInfoNotFoundError, ValueError):
+        tz = UTC
+    s_local = (start_dt if start_dt.tzinfo else start_dt.replace(tzinfo=tz)).astimezone(tz).date()
+    e_local = (end_dt if end_dt.tzinfo else end_dt.replace(tzinfo=tz)).astimezone(tz).date()
+    if s_local > e_local:
+        return []
+    num_days = min(60, (e_local - s_local).days + 1)
+    return [s_local + timedelta(days=i) for i in range(num_days)]
+
+
+def _convert_dated_interval_timezone(
+    d: date,
+    start_str: str,
+    end_str: str,
+    src_tz_name: str,
+    dst_tz_name: str,
+) -> list[tuple[date, LocalInterval]]:
+    """Quy đổi khoảng giờ địa phương của ngày d từ src_tz sang dst_tz, tự tách nếu vắt qua 00:00 (#13)."""
+    src_tz = ZoneInfo(src_tz_name)
+    dst_tz = ZoneInfo(dst_tz_name)
+    s_time = time.fromisoformat(start_str)
+    e_time = time.fromisoformat(end_str)
+    start_src = datetime.combine(d, s_time, tzinfo=src_tz)
+    end_date = d if s_time < e_time else (d + timedelta(days=1))
+    end_src = datetime.combine(end_date, e_time, tzinfo=src_tz)
+    start_dst = start_src.astimezone(dst_tz)
+    end_dst = end_src.astimezone(dst_tz)
+    if end_dst <= start_dst:
+        return []
+    if start_dst.date() == end_dst.date():
+        s_t = start_dst.time().replace(second=0, microsecond=0)
+        e_t = end_dst.time().replace(second=0, microsecond=0)
+        if s_t < e_t:
+            return [(start_dst.date(), LocalInterval(start_local=s_t, end_local=e_t))]
+        return []
+    out: list[tuple[date, LocalInterval]] = []
+    s_t = start_dst.time().replace(second=0, microsecond=0)
+    if s_t < time(23, 59):
+        out.append((start_dst.date(), LocalInterval(start_local=s_t, end_local=time(23, 59))))
+    cur_day = start_dst.date() + timedelta(days=1)
+    while cur_day < end_dst.date():
+        out.append((cur_day, LocalInterval(start_local=time(0, 0), end_local=time(23, 59))))
+        cur_day += timedelta(days=1)
+    e_t = end_dst.time().replace(second=0, microsecond=0)
+    if e_t > time(0, 0):
+        out.append((end_dst.date(), LocalInterval(start_local=time(0, 0), end_local=e_t)))
+    return out
+
+
+def _resolve_same_time_inheritance(
+    windows: list[ExtractedFreeWindowSchema],
+    *,
+    seed_start: str | None = None,
+    seed_end: str | None = None,
+) -> list[ExtractedFreeWindowSchema]:
+    """Kế thừa (start_local, end_local) từ khung giờ dương đứng trước khi dùng 'cũng giờ đó' (#6)."""
+    resolved: list[ExtractedFreeWindowSchema] = []
+    last_start = seed_start
+    last_end = seed_end
+    for item in windows:
+        phrase_low = item.raw_phrase.lower()
+        if (
+            item.start_local is None
+            and item.end_local is None
+            and not item.is_excluded
+            and item.op in ("add", "replace_day")
+            and last_start is not None
+            and last_end is not None
+            and any(tok in phrase_low for tok in _SAME_TIME_PHRASES)
+        ):
+            payload = item.model_dump()
+            payload["start_local"] = last_start
+            payload["end_local"] = last_end
+            payload["is_ambiguous"] = False
+            payload["clarification_hint"] = None
+            item = ExtractedFreeWindowSchema.model_validate(payload)
+        if (
+            item.start_local is not None
+            and item.end_local is not None
+            and not item.is_excluded
+            and item.op in ("add", "replace_day")
+        ):
+            last_start = item.start_local
+            last_end = item.end_local
+        resolved.append(item)
+    return resolved
+
+
+def _merge_free_windows(previous, incoming):
+    """Hợp nhất danh sách khung giờ rảnh qua các lượt trả lời UF1; hỗ trợ #1..#9."""
+    result: list[ExtractedFreeWindowSchema] = list(previous)
+    seed_start: str | None = None
+    seed_end: str | None = None
+    for old in result:
+        if (
+            old.start_local is not None
+            and old.end_local is not None
+            and not old.is_excluded
+            and old.op in ("add", "replace_day")
+        ):
+            seed_start = old.start_local
+            seed_end = old.end_local
+
+    processed_incoming = _resolve_same_time_inheritance(
+        list(incoming),
+        seed_start=seed_start,
+        seed_end=seed_end,
+    )
+
+    # Ghép câu trả lời Lượt 2 bổ sung giờ kết thúc cho câu hở đầu ra (#8 "sau 19h30")
+    completed_incoming: list[ExtractedFreeWindowSchema] = []
+    for item in processed_incoming:
+        if (
+            item.start_local is None
+            and item.end_local is not None
+            and not item.is_excluded
+            and item.op in ("add", "replace_day")
+        ):
+            matched_old = next(
+                (
+                    old
+                    for old in result
+                    if old.is_ambiguous
+                    and old.start_local is not None
+                    and old.end_local is None
+                    and (
+                        (item.date is not None and item.date == old.date)
+                        or (item.weekday is not None and item.weekday == old.weekday)
+                        or (item.date is None and item.weekday is None and not item.weekdays)
+                    )
+                ),
+                None,
+            )
+            if matched_old is not None:
+                payload = item.model_dump()
+                payload["kind"] = matched_old.kind
+                payload["date"] = item.date or matched_old.date
+                payload["weekday"] = item.weekday or matched_old.weekday
+                payload["weekdays"] = item.weekdays or matched_old.weekdays
+                payload["start_local"] = matched_old.start_local
+                payload["is_ambiguous"] = False
+                payload["clarification_hint"] = None
+                item = ExtractedFreeWindowSchema.model_validate(payload)
+                result = [old for old in result if old is not matched_old]
+        completed_incoming.append(item)
+
+    resolved_incoming = [
+        item
+        for item in completed_incoming
+        if not item.is_ambiguous and not item.is_excluded and item.op != "reset_override"
+    ]
+    if resolved_incoming:
+        has_concrete_anchor = any(
+            ri.kind in ("specific_date", "date_range", "daily", "weekly_rule")
+            for ri in resolved_incoming
+        )
+        cleaned_result: list[ExtractedFreeWindowSchema] = []
+        for old in result:
+            is_unanchored_ambiguous = (
+                old.is_ambiguous
+                and old.weekday is None
+                and not old.weekdays
+                and old.date is None
+                and old.date_from is None
+            )
+            if is_unanchored_ambiguous and has_concrete_anchor:
+                same_hours = (
+                    old.start_local is not None
+                    and old.end_local is not None
+                    and any(
+                        (ri.start_local, ri.end_local) == (old.start_local, old.end_local)
+                        for ri in resolved_incoming
+                    )
+                )
+                is_vague_repeat = old.kind in ("weekly_rule", "daily") or any(
+                    tok in old.raw_phrase.lower() for tok in _UNANCHORED_REPEAT_PHRASES
+                )
+                if same_hours or is_vague_repeat:
+                    continue
+            cleaned_result.append(old)
+        result = cleaned_result
+
+    for item in completed_incoming:
+        identity = (
+            item.kind,
+            item.weekday,
+            tuple(item.weekdays) if item.weekdays else None,
+            item.date,
+            item.date_from,
+            item.date_to,
+            item.start_local,
+            item.end_local,
+            item.op,
+            item.is_excluded,
+            item.window_timezone,
+        )
+        if any(
+            (
+                old.kind,
+                old.weekday,
+                tuple(old.weekdays) if old.weekdays else None,
+                old.date,
+                old.date_from,
+                old.date_to,
+                old.start_local,
+                old.end_local,
+                old.op,
+                old.is_excluded,
+                old.window_timezone,
+            )
+            == identity
             and old.is_ambiguous == item.is_ambiguous
             for old in result
         ):
             continue
-        result = [
-            old
-            for old in result
-            if not (
-                old.is_ambiguous
-                and not item.is_ambiguous
-                and (old.kind, old.weekday, old.date) == (item.kind, item.weekday, item.date)
-                and (old.start_local is None or old.start_local == item.start_local)
-                and (old.end_local is None or old.end_local == item.end_local)
-            )
-        ]
+
+        if item.op == "reset_override":
+            reset_dates = {d.isoformat() for d in _item_dates(item)}
+            if reset_dates:
+                result = [
+                    old
+                    for old in result
+                    if not (old.kind == "specific_date" and old.date in reset_dates)
+                ]
+            result.append(item)
+            continue
+
+        if not item.is_ambiguous:
+            next_filtered: list[ExtractedFreeWindowSchema] = []
+            for old in result:
+                if old.is_ambiguous:
+                    # 1. Cùng ngày/thứ hoàn thiện giờ (bao gồm câu hở đầu ra #8)
+                    same_target = (old.kind, old.weekday, old.date) == (
+                        item.kind,
+                        item.weekday,
+                        item.date,
+                    ) or (
+                        old.date is not None and old.date == item.date
+                    ) or (
+                        old.weekday is not None and old.weekday == item.weekday
+                    )
+                    if (
+                        same_target
+                        and (old.start_local is None or old.start_local == item.start_local)
+                        and (old.end_local is None or old.end_local == item.end_local)
+                    ):
+                        continue
+                    # 2. Xác nhận lại mâu thuẫn Thứ và Ngày (#7)
+                    if old.date is not None and (
+                        (
+                            item.date is not None
+                            and (
+                                item.date == old.date
+                                or (
+                                    old.clarification_hint is not None
+                                    and item.date in old.clarification_hint
+                                )
+                                or (
+                                    old.weekday is not None
+                                    and date.fromisoformat(item.date).isoweekday() == old.weekday
+                                )
+                            )
+                        )
+                        or (item.weekday is not None and item.weekday == old.weekday)
+                    ):
+                        continue
+                elif (
+                    item.op == "replace_day"
+                    and not old.is_excluded
+                    and old.op in ("add", "replace_day")
+                ):
+                    if (item.date is not None and old.date == item.date) or (
+                        item.weekday is not None
+                        and old.weekday == item.weekday
+                        and old.kind == item.kind
+                    ):
+                        continue
+                next_filtered.append(old)
+            result = next_filtered
+
         result.append(item)
     return result
 
 
-def _availability_proposal(extracted, draft, legacy, timezone_name):
-    """Trả bản giờ rảnh hợp lệ + các khung mơ hồ còn cần user làm rõ."""
+def _availability_proposal(
+    extracted,
+    draft,
+    legacy,
+    timezone_name,
+    effective_time: TimeConstraint | None = None,
+):
+    """Trả bản giờ rảnh hợp lệ (thực thi 4 lớp bất biến) + các khung mơ hồ còn cần user làm rõ."""
     context = draft.ai_context
     base = draft.summary.availability or legacy
     previous = [
@@ -515,40 +1051,259 @@ def _availability_proposal(extracted, draft, legacy, timezone_name):
     if not incoming and extracted.availability_update_mode != "replace":
         return None, None
     windows = (
-        list(incoming)
+        _resolve_same_time_inheritance(list(incoming))
         if extracted.availability_update_mode == "replace"
         else _merge_free_windows(previous, incoming)
     )
-    weekly, dates, unresolved = [], {}, []
+
+    unresolved: list[dict[str, Any]] = []
+    valid_windows: list[ExtractedFreeWindowSchema] = []
     for item in windows:
         if item.is_ambiguous:
             unresolved.append(item.model_dump(mode="json"))
-            continue
-        interval = {"start_local": item.start_local, "end_local": item.end_local}
-        try:
-            if item.kind == "weekly_rule":
-                checked = DraftAvailability(
-                    timezone=timezone_name, weekly_rules=[{**interval, "weekday": item.weekday}]
-                )
-                weekly.extend(checked.weekly_rules)
-            else:
-                checked = DraftAvailability(
-                    timezone=timezone_name,
-                    date_overrides=[{"date": item.date, "intervals": [interval]}],
-                )
-                dates.setdefault(item.date, []).extend(checked.date_overrides[0].intervals)
-        except ValidationError:
-            item.is_ambiguous = True
-            unresolved.append(item.model_dump(mode="json"))
-    # Không để AI làm mất ngoại lệ ngày không rảnh đã có chỉ vì nó không có window.
+        else:
+            valid_windows.append(item)
+
+    weekly_map: dict[int, list[LocalInterval]] = {}
+    dates: dict[str, list[LocalInterval]] = {}
+    daily_generated_dates: set[str] = set()
+
+    # Bảo toàn các ngày ngoại lệ đóng (intervals=[]) từ base trước khi chạy Lớp 3 & Lớp 4
     if base is not None and extracted.availability_update_mode != "replace":
         for override in base.date_overrides:
             if not override.intervals:
-                dates.setdefault(override.date.isoformat(), [])
+                dates[override.date.isoformat()] = []
+
+    eff_dates = _effective_time_dates(
+        effective_time or draft.summary.time_constraint,
+        timezone_name,
+    )
+
+    # ── LỚP 1: Khung nền dương (daily & weekly_rule với op in ("add", "replace_day")) ──
+    for item in valid_windows:
+        if item.is_excluded or item.op not in ("add", "replace_day"):
+            continue
+        if item.kind not in ("daily", "weekly_rule"):
+            continue
+        if item.start_local is None or item.end_local is None:
+            continue
+        try:
+            s_time = time.fromisoformat(item.start_local)
+            e_time = time.fromisoformat(item.end_local)
+            if item.kind == "daily":
+                if s_time < e_time:
+                    day_ivs = [LocalInterval(start_local=s_time, end_local=e_time)]
+                else:
+                    parts: list[LocalInterval] = []
+                    if s_time < time(23, 59):
+                        parts.append(LocalInterval(start_local=s_time, end_local=time(23, 59)))
+                    if e_time > time(0, 0):
+                        parts.append(LocalInterval(start_local=time(0, 0), end_local=e_time))
+                    day_ivs = _merge_intervals_1d(parts)
+                for w in range(1, 8):
+                    if item.op == "replace_day":
+                        weekly_map[w] = list(day_ivs)
+                    else:
+                        weekly_map[w] = _merge_intervals_1d(weekly_map.get(w, []) + day_ivs)
+                for d in eff_dates:
+                    d_key = d.isoformat()
+                    daily_generated_dates.add(d_key)
+                    if item.op == "replace_day":
+                        dates[d_key] = list(day_ivs)
+                    else:
+                        dates[d_key] = _merge_intervals_1d(dates.get(d_key, []) + day_ivs)
+            elif item.kind == "weekly_rule":
+                target_wds = _item_weekdays(item)
+                if s_time < e_time:
+                    iv = LocalInterval(start_local=s_time, end_local=e_time)
+                    for w in target_wds:
+                        if item.op == "replace_day":
+                            weekly_map[w] = [iv]
+                        else:
+                            weekly_map[w] = _merge_intervals_1d(weekly_map.get(w, []) + [iv])
+                else:
+                    for w in target_wds:
+                        if s_time < time(23, 59):
+                            iv1 = LocalInterval(start_local=s_time, end_local=time(23, 59))
+                            if item.op == "replace_day":
+                                weekly_map[w] = [iv1]
+                            else:
+                                weekly_map[w] = _merge_intervals_1d(weekly_map.get(w, []) + [iv1])
+                        next_w = (w % 7) + 1
+                        if e_time > time(0, 0):
+                            iv2 = LocalInterval(start_local=time(0, 0), end_local=e_time)
+                            weekly_map[next_w] = _merge_intervals_1d(
+                                weekly_map.get(next_w, []) + [iv2]
+                            )
+        except (ValidationError, ValueError):
+            item.is_ambiguous = True
+            unresolved.append(item.model_dump(mode="json"))
+
+    # ── LỚP 2: Loại trừ theo thứ (weekly_rule với is_excluded=True / op="exclude") ──
+    for item in valid_windows:
+        if item.kind != "weekly_rule" or not (item.is_excluded or item.op == "exclude"):
+            continue
+        target_wds = _item_weekdays(item)
+        if item.start_local is None or item.end_local is None:
+            for w in target_wds:
+                weekly_map.pop(w, None)
+                for d_key in list(daily_generated_dates):
+                    if date.fromisoformat(d_key).isoweekday() == w:
+                        dates[d_key] = []
+        else:
+            try:
+                busy_iv = LocalInterval(
+                    start_local=time.fromisoformat(item.start_local),
+                    end_local=time.fromisoformat(item.end_local),
+                )
+                for w in target_wds:
+                    if w in weekly_map:
+                        rem = _subtract_intervals_1d(weekly_map[w], [busy_iv])
+                        if rem:
+                            weekly_map[w] = rem
+                        else:
+                            weekly_map.pop(w, None)
+                    for d_key in list(daily_generated_dates):
+                        if date.fromisoformat(d_key).isoweekday() == w and d_key in dates:
+                            dates[d_key] = _subtract_intervals_1d(dates[d_key], [busy_iv])
+            except (ValidationError, ValueError):
+                item.is_ambiguous = True
+                unresolved.append(item.model_dump(mode="json"))
+
+    # ── LỚP 3: Đích danh ngày dương (specific_date / date_range với op in ("add", "replace_day")) ──
+    for item in valid_windows:
+        if item.is_excluded or item.op not in ("add", "replace_day"):
+            continue
+        if item.kind not in ("specific_date", "date_range"):
+            continue
+        if item.start_local is None or item.end_local is None:
+            continue
+        target_dates = _item_dates(item)
+        try:
+            if item.window_timezone and item.window_timezone != timezone_name:
+                replaced_days: set[str] = set()
+                for d in target_dates:
+                    converted = _convert_dated_interval_timezone(
+                        d,
+                        item.start_local,
+                        item.end_local,
+                        item.window_timezone,
+                        timezone_name,
+                    )
+                    for dst_d, iv in converted:
+                        d_key = dst_d.isoformat()
+                        if item.op == "replace_day" and d_key not in replaced_days:
+                            dates[d_key] = [iv]
+                            replaced_days.add(d_key)
+                        else:
+                            base_ivs = (
+                                dates[d_key]
+                                if d_key in dates
+                                else list(weekly_map.get(dst_d.isoweekday(), []))
+                            )
+                            dates[d_key] = _merge_intervals_1d(base_ivs + [iv])
+            else:
+                s_time = time.fromisoformat(item.start_local)
+                e_time = time.fromisoformat(item.end_local)
+                for d in target_dates:
+                    d_key = d.isoformat()
+                    if s_time < e_time:
+                        iv = LocalInterval(start_local=s_time, end_local=e_time)
+                        if item.op == "replace_day":
+                            dates[d_key] = [iv]
+                        else:
+                            base_ivs = (
+                                dates[d_key]
+                                if d_key in dates
+                                else list(weekly_map.get(d.isoweekday(), []))
+                            )
+                            dates[d_key] = _merge_intervals_1d(base_ivs + [iv])
+                    else:
+                        if s_time < time(23, 59):
+                            iv1 = LocalInterval(start_local=s_time, end_local=time(23, 59))
+                            if item.op == "replace_day":
+                                dates[d_key] = [iv1]
+                            else:
+                                base_ivs = (
+                                    dates[d_key]
+                                    if d_key in dates
+                                    else list(weekly_map.get(d.isoweekday(), []))
+                                )
+                                dates[d_key] = _merge_intervals_1d(base_ivs + [iv1])
+                        d_next = d + timedelta(days=1)
+                        d_next_key = d_next.isoformat()
+                        if e_time > time(0, 0):
+                            iv2 = LocalInterval(start_local=time(0, 0), end_local=e_time)
+                            base_next = (
+                                dates[d_next_key]
+                                if d_next_key in dates
+                                else list(weekly_map.get(d_next.isoweekday(), []))
+                            )
+                            dates[d_next_key] = _merge_intervals_1d(base_next + [iv2])
+        except (ValidationError, ValueError):
+            item.is_ambiguous = True
+            unresolved.append(item.model_dump(mode="json"))
+
+    # ── LỚP 4: Ngoại lệ ngày cụ thể & Hoàn tác (specific_date / date_range với exclude / reset_override) ──
+    for item in valid_windows:
+        if item.kind not in ("specific_date", "date_range"):
+            continue
+        if item.op == "reset_override":
+            for d in _item_dates(item):
+                dates.pop(d.isoformat(), None)
+        elif item.op == "exclude" or item.is_excluded:
+            for d in _item_dates(item):
+                d_key = d.isoformat()
+                if item.start_local is None or item.end_local is None:
+                    dates[d_key] = []
+                else:
+                    try:
+                        busy_iv = LocalInterval(
+                            start_local=time.fromisoformat(item.start_local),
+                            end_local=time.fromisoformat(item.end_local),
+                        )
+                        current_ivs = (
+                            dates[d_key]
+                            if d_key in dates
+                            else list(weekly_map.get(d.isoweekday(), []))
+                        )
+                        if current_ivs:
+                            dates[d_key] = _subtract_intervals_1d(current_ivs, [busy_iv])
+                    except (ValidationError, ValueError):
+                        item.is_ambiguous = True
+                        unresolved.append(item.model_dump(mode="json"))
+
+    weekly: list[WeeklyRule] = []
+    for w in sorted(weekly_map):
+        for iv in _merge_intervals_1d(weekly_map[w]):
+            weekly.append(
+                WeeklyRule(
+                    weekday=w,
+                    start_local=iv.start_local,
+                    end_local=iv.end_local,
+                )
+            )
+
+    has_any_positive = bool(weekly or any(vals for vals in dates.values()))
+    if not has_any_positive and not unresolved and windows:
+        # Người dùng chỉ mới báo giờ bận/loại trừ mà chưa có khung giờ rảnh nền (#2)
+        for item in windows:
+            if item.is_excluded or item.op == "exclude":
+                item.is_ambiguous = True
+                if not item.clarification_hint:
+                    item.clarification_hint = (
+                        f"Bạn đã báo khung bận '{item.raw_phrase}', nhưng chưa có khung giờ rảnh nền. "
+                        "Bạn thường rảnh vào những khung giờ nào để mình xếp lịch và trừ giờ bận này ra?"
+                    )
+                unresolved.append(item.model_dump(mode="json"))
+
     proposal = DraftAvailability(
         timezone=timezone_name,
         weekly_rules=weekly,
-        date_overrides=[{"date": day, "intervals": values} for day, values in dates.items()],
+        date_overrides=[
+            DateOverride(date=date.fromisoformat(day), intervals=_merge_intervals_1d(values))
+            for day, values in sorted(dates.items())
+        ],
     )
     # Giữ tương thích nháp cũ: AI chỉ nhắc lại giờ đã chọn không tự nâng sang nguồn mới.
     if draft.summary.availability is None and legacy is not None and not unresolved:
@@ -995,27 +1750,44 @@ async def patch_draft(
         if "availability" in summary_patch:
             # User sửa/xóa giờ riêng không có nghĩa đồng ý quay về giờ chung cũ.
             summary_patch["availability_ref"] = None
-        current_summary_dict = draft.summary.model_dump()
         updated_fields: list[str] = []
         for field_name, new_val in summary_patch.items():
             if field_name == "extra_requirements" and new_val is None:
                 new_val = []
-            if current_summary_dict.get(field_name) != new_val:
+            current_val = getattr(draft.summary, field_name, None)
+            if current_val != new_val:
                 updated_fields.append(field_name)
                 summary_changed = True
 
         # User có thể chọn giữ giá trị cũ khi trả lời câu hỏi review của AI.
-        reviewed_fields = {
-            issue.field_path
+        review_issue_roots = {
+            issue.field_path.split(".")[0]
             for issue in draft.summary.clarification_issues
             if issue.code.startswith("AI_")
-            and issue.field_path.split(".")[0] in summary_patch
             and (
-                len(payload.changes.summary.model_fields_set) == 1
-                or summary_patch[issue.field_path.split(".")[0]]
-                != current_summary_dict.get(issue.field_path.split(".")[0])
+                issue.code.endswith("_REVIEW_REQUIRED")
+                or issue.code == "AI_SCOPE_CHOICE_REQUIRED"
             )
         }
+        all_sent_fields_under_review = bool(payload.changes.summary.model_fields_set) and (
+            payload.changes.summary.model_fields_set <= review_issue_roots
+        )
+        reviewed_fields: set[str] = set()
+        for issue in draft.summary.clarification_issues:
+            if not issue.code.startswith("AI_"):
+                continue
+            root = issue.field_path.split(".")[0]
+            if root not in summary_patch:
+                continue
+            patched_val = summary_patch[root]
+            if root == "extra_requirements" and patched_val is None:
+                patched_val = []
+            if (
+                len(payload.changes.summary.model_fields_set) == 1
+                or all_sent_fields_under_review
+                or patched_val != getattr(draft.summary, root, None)
+            ):
+                reviewed_fields.add(issue.field_path)
         if reviewed_fields:
             summary_changed = True
             updated_fields.extend(
@@ -1283,6 +2055,14 @@ async def analyze_draft(
     windows = snapshot_draft.ai_context.get(
         "availability_windows", _free_windows(base) if base else []
     )
+    user_default_avail = availability or (
+        await get_user_availability(user_id, db) if db is not None else None
+    )
+    default_free_windows = (
+        windows
+        if windows
+        else (_free_windows(user_default_avail) if user_default_avail is not None else [])
+    )
     # Drafts may retain long titles; validate before building the narrower AI DTO.
     if summary.title is not None and len(summary.title) > 100:
         raise AppError(
@@ -1318,16 +2098,83 @@ async def analyze_draft(
         structured_free_windows=windows,
         summary=summary.description or "Bản nháp công việc",
     )
+    locked_fields = [
+        field_name
+        for field_name in (
+            "title",
+            "description",
+            "goal",
+            "scope",
+            "time_constraint",
+            "availability",
+        )
+        if getattr(summary, field_name) is not None
+        and (src := summary.field_sources.get(field_name)) is not None
+        and src.source in {"user_confirmed", "user_input"}
+        and src.source_ref != "raw_input"
+    ]
     if db is not None and db.in_transaction():
         await db.rollback()
     input_text = "\n".join(value for value in (payload.raw_input, payload.message) if value)
+    latest_message = (payload.message or "").strip()
+    new_raw_text = (payload.raw_input or "").strip()
+    raw_changed = new_raw_text != (snapshot_draft.raw_input or "").strip()
+    edit_text = latest_message or (new_raw_text if raw_changed else "")
+    never_analyzed = (
+        not snapshot_draft.ai_context.get("uf1_analyzed")
+        and not any(s.source == "ai_suggested" for s in summary.field_sources.values())
+        and not any(i.code.startswith("AI_") for i in summary.clarification_issues)
+    )
+    latest_text = edit_text or (
+        new_raw_text if (snapshot_draft.summary_revision == 1 or never_analyzed) else ""
+    )
+    requested_edits = _uf1_requested_edits(edit_text, summary)
+    pending_fields = tuple(
+        dict.fromkeys(
+            issue.field_path
+            for issue in summary.clarification_issues
+            if issue.code == "AI_FALLBACK_REVIEW_REQUIRED"
+        )
+    )
+    kept_pending_fields = _uf1_kept_pending_fields(edit_text, pending_fields, requested_edits)
+    active_pending_fields = set(pending_fields) - kept_pending_fields
+    reviewed_edits = set(requested_edits)
+    if pending_fields and not latest_message and new_raw_text:
+        reviewed_edits.update(_uf1_requested_edits(new_raw_text, summary))
+    scope_needs_choice = bool(
+        (
+            _UF1_SCOPE_CHOICE_RE.search(latest_text)
+            and _UF1_SCOPE_ALTERNATIVES_RE.search(latest_text)
+        )
+        or (
+            _UF1_SCOPE_UNDECIDED_RE.search(latest_text)
+            and _UF1_SCOPE_ALT_DELIVERABLE_RE.search(latest_text)
+        )
+    )
+    scope_choice_pending = any(
+        issue.code == "AI_SCOPE_CHOICE_REQUIRED" for issue in summary.clarification_issues
+    )
+    has_explicit_decision_verb = bool(
+        re.search(r"\b(?:chốt|chọn|quyết\s+định)\b", edit_text, re.IGNORECASE)
+    )
+    user_selected_scope = bool(
+        not scope_needs_choice
+        and _UF1_SCOPE_SELECTION_RE.search(edit_text)
+        and (has_explicit_decision_verb or not _UF1_SCOPE_ALT_DELIVERABLE_RE.search(edit_text))
+    )
+    needs_scope_decision = scope_needs_choice or (scope_choice_pending and not user_selected_scope)
     try:
         extracted = TaskExtractionResult.model_validate(
             await ai_service.extract_task_intent(
                 input_text,
                 timezone=timezone_name,
                 previous_draft=previous,
-                default_free_windows=windows,
+                default_free_windows=default_free_windows,
+                locked_fields=locked_fields or None,
+                followup_message=latest_message or None,
+                requested_edit_fields=tuple(sorted(reviewed_edits | active_pending_fields)),
+                needs_user_decision=needs_scope_decision,
+                retrying_fallback_edit=bool(active_pending_fields),
             )
         )
     except (TimeoutError, ValidationError) as exc:
@@ -1375,12 +2222,22 @@ async def analyze_draft(
 
     merged_updates: dict[str, object] = {}
     ai_issues: list[ClarificationIssue] = []
+    has_followup_message = bool(payload.message and payload.message.strip())
+    used_fallback = extracted.generation_tier == "tier_3_rule_based"
+    if used_fallback:
+        frozen_fields = set(pending_fields) | set(requested_edits)
+    else:
+        frozen_fields = set(kept_pending_fields)
+    if needs_scope_decision:
+        frozen_fields.add("scope")
     for field_name, proposed_val in (
         ("title", extracted.title),
         ("description", extracted.content),
         ("goal", extracted.goal),
         ("scope", extracted.scope),
     ):
+        if field_name in frozen_fields:
+            continue
         current_value = getattr(current_draft.summary, field_name)
         if proposed_val is None or proposed_val == current_value:
             continue
@@ -1390,6 +2247,12 @@ async def analyze_draft(
             and source.source in {"user_confirmed", "user_input"}
             and source.source_ref != "raw_input"
         ):
+            if (
+                has_followup_message
+                and field_name not in active_pending_fields
+                and not _user_explicitly_edits_field(payload.message, field_name)
+            ):
+                continue
             ai_issues.append(
                 ClarificationIssue(
                     code="AI_FIELD_REVIEW_REQUIRED",
@@ -1413,7 +2276,17 @@ async def analyze_draft(
         )
     requirements = list(current_draft.summary.extra_requirements)
     seen_requirements = {item.strip() for item in requirements}
-    for item in extracted.extra_requirements:
+    if used_fallback and frozen_fields:
+        accepted_requirements: tuple[str, ...] | list[str] = ()
+    elif needs_scope_decision:
+        accepted_requirements = [
+            item
+            for item in extracted.extra_requirements
+            if not _is_scope_choice_requirement(item)
+        ]
+    else:
+        accepted_requirements = extracted.extra_requirements
+    for item in accepted_requirements:
         cleaned = item.strip()
         if cleaned and cleaned not in seen_requirements:
             requirements.append(cleaned)
@@ -1425,63 +2298,16 @@ async def analyze_draft(
             source_ref=f"summary_revision:{next_summary_rev}",
         )
     context = dict(current_draft.ai_context)
-    proposed_availability, availability_state = _availability_proposal(
-        extracted, current_draft, availability, timezone_name
-    )
-    if availability_state is not None:
-        proposal_windows, unresolved = availability_state
-        old_availability = current_draft.summary.availability
-        source = current_draft.summary.field_sources.get("availability")
-        protected = source is not None and source.source in {"user_input", "user_confirmed"}
-        if proposed_availability != old_availability and protected:
-            context["availability_proposal"] = proposed_availability.model_dump(mode="json")
-            proposed_label = "; ".join(
-                w["raw_phrase"] for w in _free_windows(proposed_availability)
-            )
-            proposed_label = proposed_label or "không còn khung giờ rảnh"
-            ai_issues.append(
-                ClarificationIssue(
-                    code="AI_AVAILABILITY_REVIEW_REQUIRED",
-                    field_path="availability",
-                    message="AI đề xuất giờ rảnh khác giá trị bạn đã nhập; giờ cũ được giữ nguyên.",
-                    question=f"Bạn muốn giữ giờ rảnh hiện tại hay sửa thành {proposed_label} "
-                    f"({proposed_availability.timezone})? "
-                    + extracted.field_review_notes.get("availability", ""),
-                    blocking=True,
-                )
-            )
-        else:
-            context["availability_windows"] = [
-                item.model_dump(mode="json") for item in proposal_windows
-            ]
-            if unresolved:
-                phrases = "; ".join(item["raw_phrase"] for item in unresolved)
-                ai_issues.append(
-                    ClarificationIssue(
-                        code="AI_AVAILABILITY_INCOMPLETE",
-                        field_path="availability",
-                        message="Một số khung giờ rảnh chưa đủ ngày/giờ hợp lệ.",
-                        question=f"Bạn làm rõ ngày và giờ bắt đầu–kết thúc cho: {phrases}",
-                        blocking=True,
-                    )
-                )
-            else:
-                context.pop("availability_windows", None)
-            if proposed_availability != old_availability:
-                merged_updates["availability"] = proposed_availability
-                merged_updates["availability_ref"] = None
-                new_field_sources["availability"] = FieldSource(
-                    source="ai_suggested", source_ref=f"summary_revision:{next_summary_rev}"
-                )
-    else:
-        unresolved = []
+    time_ai_issues: list[ClarificationIssue] = []
     complete_time: TimeConstraint | None = None
     proposed_time = extracted.time_constraint
     has_proposed_time = proposed_time is not None and any(
         getattr(proposed_time, field) is not None
         for field in ("start_at", "deadline_at", "finish_by_at")
     )
-    if has_proposed_time or extracted.deadline is not None:
+    if "time_constraint" not in frozen_fields and (
+        has_proposed_time or extracted.deadline is not None
+    ):
         old_time = current_draft.summary.time_constraint
         values = (
             old_time.model_dump(mode="json")
@@ -1548,7 +2374,7 @@ async def analyze_draft(
             complete_time = TimeConstraint.model_validate(values)
         except ValidationError:
             complete_time = None
-            ai_issues.append(
+            time_ai_issues.append(
                 ClarificationIssue(
                     code="AI_TIME_INCOMPLETE",
                     field_path="time_constraint",
@@ -1564,33 +2390,258 @@ async def analyze_draft(
                 and source
                 and source.source in {"user_input", "user_confirmed"}
             ):
-                ai_issues.append(
-                    ClarificationIssue(
-                        code="AI_TIME_REVIEW_REQUIRED",
-                        field_path="time_constraint",
-                        message="AI đề xuất thời gian khác bản bạn đã nhập; bản cũ được giữ nguyên.",
-                        question="Bạn muốn giữ thời gian cũ hay sửa theo đề xuất mới?",
-                        blocking=True,
+                if not (
+                    has_followup_message
+                    and "time_constraint" not in active_pending_fields
+                    and not _user_explicitly_edits_field(payload.message, "time_constraint")
+                ):
+                    time_ai_issues.append(
+                        ClarificationIssue(
+                            code="AI_TIME_REVIEW_REQUIRED",
+                            field_path="time_constraint",
+                            message="AI đề xuất thời gian khác bản bạn đã nhập; bản cũ được giữ nguyên.",
+                            question="Bạn muốn giữ thời gian cũ hay sửa theo đề xuất mới?",
+                            blocking=True,
+                        )
                     )
-                )
             else:
                 merged_updates["time_constraint"] = complete_time
                 new_field_sources["time_constraint"] = FieldSource(
                     source="ai_suggested", source_ref=f"summary_revision:{next_summary_rev}"
                 )
-    ai_issues.extend(
-        item.model_copy(
-            update={"code": item.code if item.code.startswith("AI_") else f"AI_{item.code}"}
+
+    effective_time = complete_time or current_draft.summary.time_constraint
+    if (
+        not extracted.structured_free_windows
+        and user_default_avail is not None
+        and _user_requests_default_availability(input_text)
+    ):
+        default_windows_objs = [
+            ExtractedFreeWindowSchema.model_validate(item)
+            for item in _free_windows(user_default_avail)
+        ]
+        if default_windows_objs:
+            extracted = extracted.model_copy(
+                update={
+                    "structured_free_windows": default_windows_objs,
+                    "free_time_slots": [w.raw_phrase for w in default_windows_objs],
+                }
+            )
+    proposed_availability, availability_state = None, None
+    if "availability" not in frozen_fields:
+        proposed_availability, availability_state = _availability_proposal(
+            extracted,
+            current_draft,
+            availability,
+            timezone_name,
+            effective_time=effective_time,
         )
-        for item in extracted.clarification_issues
+    if availability_state is not None and proposed_availability is not None:
+        proposal_windows, unresolved = availability_state
+        old_availability = current_draft.summary.availability
+        source = current_draft.summary.field_sources.get("availability")
+        protected = source is not None and source.source in {"user_input", "user_confirmed"}
+        if proposed_availability != old_availability and protected:
+            if not (
+                has_followup_message
+                and "availability" not in active_pending_fields
+                and not _user_explicitly_edits_field(payload.message, "availability")
+            ):
+                context["availability_proposal"] = proposed_availability.model_dump(mode="json")
+                proposed_label = "; ".join(
+                    w["raw_phrase"] for w in _free_windows(proposed_availability)
+                )
+                proposed_label = proposed_label or "không còn khung giờ rảnh"
+                ai_issues.append(
+                    ClarificationIssue(
+                        code="AI_AVAILABILITY_REVIEW_REQUIRED",
+                        field_path="availability",
+                        message="AI đề xuất giờ rảnh khác giá trị bạn đã nhập; giờ cũ được giữ nguyên.",
+                        question=f"Bạn muốn giữ giờ rảnh hiện tại hay sửa thành {proposed_label} "
+                        f"({proposed_availability.timezone})? "
+                        + extracted.field_review_notes.get("availability", ""),
+                        blocking=True,
+                    )
+                )
+        else:
+            context["availability_windows"] = [
+                item.model_dump(mode="json") for item in proposal_windows
+            ]
+            if unresolved:
+                hints = [
+                    str(item["clarification_hint"]).strip()
+                    for item in unresolved
+                    if item.get("clarification_hint")
+                ]
+                unhinted = [
+                    str(item["raw_phrase"])
+                    for item in unresolved
+                    if not item.get("clarification_hint")
+                ]
+                question_parts: list[str] = list(dict.fromkeys(hints))
+                if unhinted:
+                    phrases = "; ".join(unhinted)
+                    question_parts.append(
+                        f"Bạn làm rõ ngày và giờ bắt đầu–kết thúc cho: {phrases}"
+                    )
+                ai_issues.append(
+                    ClarificationIssue(
+                        code="AI_AVAILABILITY_INCOMPLETE",
+                        field_path="availability",
+                        message="Một số khung giờ rảnh chưa đủ ngày/giờ hợp lệ.",
+                        question=" ".join(question_parts),
+                        blocking=True,
+                    )
+                )
+            else:
+                context.pop("availability_windows", None)
+            if proposed_availability != old_availability:
+                merged_updates["availability"] = proposed_availability
+                merged_updates["availability_ref"] = None
+                new_field_sources["availability"] = FieldSource(
+                    source="ai_suggested", source_ref=f"summary_revision:{next_summary_rev}"
+                )
+    else:
+        unresolved = []
+
+    ai_issues.extend(time_ai_issues)
+    for field in requested_edits if used_fallback else ():
+        if field in pending_fields:
+            continue
+        label = _UF1_REVIEW_FIELD_LABELS[field]
+        ai_issues.append(
+            ClarificationIssue(
+                code="AI_FALLBACK_REVIEW_REQUIRED",
+                field_path=field,
+                message=f"Yêu cầu đổi {label} chưa được áp dụng. Bản nháp vẫn giữ giá trị hiện tại.",
+                question=f"Bạn muốn giữ {label} hiện tại hay cập nhật lại?",
+                blocking=True,
+            )
+        )
+    if scope_needs_choice:
+        ai_issues.append(
+            ClarificationIssue(
+                code="AI_SCOPE_CHOICE_REQUIRED",
+                field_path="scope",
+                message="Phạm vi còn nhiều phương án chưa chốt.",
+                question="Bạn muốn chốt phương án đầu ra nào cho việc này?",
+                blocking=True,
+            )
+        )
+
+    eff_title = merged_updates.get("title", current_draft.summary.title)
+    eff_desc = merged_updates.get("description", current_draft.summary.description)
+    eff_goal = merged_updates.get("goal", current_draft.summary.goal)
+    eff_scope = merged_updates.get("scope", current_draft.summary.scope)
+    eff_tc = merged_updates.get("time_constraint", current_draft.summary.time_constraint)
+    eff_avail = merged_updates.get("availability", current_draft.summary.availability)
+    eff_avail_ref = (
+        None
+        if "availability_ref" in merged_updates and merged_updates["availability_ref"] is None
+        else (merged_updates.get("availability_ref") or current_draft.summary.availability_ref)
     )
-    ambiguous_phrases = [w.raw_phrase for w in extracted.structured_free_windows if w.is_ambiguous]
+    has_title = isinstance(eff_title, str) and bool(eff_title.strip())
+    has_content = (isinstance(eff_desc, str) and bool(eff_desc.strip())) or (
+        isinstance(eff_goal, str) and bool(eff_goal.strip())
+    )
+    has_scope = isinstance(eff_scope, str) and bool(eff_scope.strip())
+    has_tc = eff_tc is not None
+    has_avail = eff_avail_ref is not None or (
+        isinstance(eff_avail, DraftAvailability)
+        and bool(
+            eff_avail.weekly_rules or any(ov.intervals for ov in eff_avail.date_overrides)
+        )
+    )
+
+    availability_resolved_cleanly = (
+        availability_state is not None
+        and not unresolved
+        and proposed_availability is not None
+        and bool(
+            proposed_availability.weekly_rules
+            or any(ov.intervals for ov in proposed_availability.date_overrides)
+        )
+    )
+    for item in extracted.clarification_issues:
+        normalized_code = item.code if item.code.startswith("AI_") else f"AI_{item.code}"
+        if normalized_code in {"AI_FALLBACK_REVIEW_REQUIRED", "AI_SCOPE_CHOICE_REQUIRED"}:
+            continue
+        is_avail_issue = item.field_path in {
+            "availability",
+            "availability_ref",
+        } or normalized_code in {
+            "AI_AVAILABILITY_INCOMPLETE",
+            "AI_MISSING_AVAILABILITY",
+            "AI_MISSING_FREE_TIME",
+            "AI_AMBIGUOUS_FREE_TIME",
+            "AI_AMBIGUOUS_AVAILABILITY",
+            "AI_EMPTY_AVAILABILITY",
+        }
+        if is_avail_issue and (
+            availability_resolved_cleanly
+            or any(
+                i.field_path in {"availability", "availability_ref"}
+                or i.code in {"AI_AVAILABILITY_INCOMPLETE", "AI_AVAILABILITY_REVIEW_REQUIRED"}
+                for i in ai_issues
+            )
+        ):
+            continue
+        if has_scope and normalized_code in {"AI_MISSING_SCOPE", "AI_SCOPE_REQUIRED"}:
+            continue
+        if (
+            has_tc
+            and not extracted.has_conflict
+            and not time_ai_issues
+            and (
+                item.field_path == "time_constraint"
+                or item.field_path.startswith("time_constraint.")
+                or normalized_code
+                in {
+                    "AI_MISSING_TIME_CONSTRAINT",
+                    "AI_TIME_CONSTRAINT_REQUIRED",
+                    "AI_MISSING_DEADLINE",
+                    "AI_TIME_INCOMPLETE",
+                }
+            )
+        ):
+            continue
+        if has_title and (
+            item.field_path == "title"
+            or normalized_code in {"AI_MISSING_TITLE", "AI_TITLE_REQUIRED"}
+        ):
+            continue
+        if has_content and (
+            item.field_path in {"description", "content", "goal"}
+            or normalized_code in {"AI_MISSING_CONTENT", "AI_DESCRIPTION_REQUIRED"}
+        ):
+            continue
+        if any(i.field_path == item.field_path for i in ai_issues):
+            continue
+        ai_issues.append(item.model_copy(update={"code": normalized_code}))
+
+    ambiguous_windows = [w for w in extracted.structured_free_windows if w.is_ambiguous]
+    ambiguous_phrases = [w.raw_phrase for w in ambiguous_windows]
+    unhinted_ambiguous_phrases = [
+        w.raw_phrase for w in ambiguous_windows if not w.clarification_hint
+    ]
     generated_availability_questions = {
         "Bạn thường rảnh vào những khung giờ nào để mình xếp phiên tập trung phù hợp?",
         "Khung giờ "
         + ", ".join(f"'{phrase}'" for phrase in ambiguous_phrases)
         + " bạn có thể làm từ mấy giờ đến mấy giờ cụ thể để mình xếp lịch chuẩn xác?",
+        "Khung giờ "
+        + ", ".join(f"'{phrase}'" for phrase in unhinted_ambiguous_phrases)
+        + " bạn có thể làm từ mấy giờ đến mấy giờ cụ thể để mình xếp lịch chuẩn xác?",
+    } | {w.clarification_hint for w in ambiguous_windows if w.clarification_hint}
+    default_guardrail_questions = set(UF1_FALLBACK_QUESTIONS.values()) | {
+        "Phạm vi hoặc kết quả đầu ra mong muốn của việc này là gì (ví dụ: số trang, số bài, mức độ hoàn thiện)?",
+        "Bạn thường rảnh vào những khung giờ nào để mình xếp phiên tập trung phù hợp?",
+        "Khi nào bạn cần hoàn thành xong công việc này (hạn chót)?",
     }
+    has_incomplete_avail_issue = any(
+        i.code in {"AI_AVAILABILITY_INCOMPLETE", "AI_AVAILABILITY_REVIEW_REQUIRED"}
+        for i in ai_issues
+    )
     if extracted.generation_tier == "tier_3_rule_based":
         ai_issues.append(_fallback_notice())
     for index, question in enumerate(dict.fromkeys(extracted.clarification_questions)):
@@ -1599,10 +2650,14 @@ async def analyze_draft(
         ):
             # Validator UF1 hỏi đúng trường còn thiếu sau khi đã hợp nhất bản tóm tắt.
             continue
+        if question in default_guardrail_questions:
+            continue
         if any(issue.question == question for issue in ai_issues):
             continue
         if question in generated_availability_questions:
-            if any(i.field_path == "availability" for i in ai_issues):
+            if availability_resolved_cleanly or any(
+                i.field_path == "availability" for i in ai_issues
+            ):
                 continue
             ai_issues.append(
                 ClarificationIssue(
@@ -1613,6 +2668,45 @@ async def analyze_draft(
                     blocking=True,
                 )
             )
+            continue
+        q_low = question.lower()
+        if availability_resolved_cleanly and any(
+            kw in q_low
+            for kw in ("khung giờ", "giờ rảnh", "lịch rảnh", "lịch mặc định", "rảnh vào")
+        ):
+            continue
+        if has_incomplete_avail_issue and (
+            any(phrase.lower() in q_low for phrase in ambiguous_phrases if phrase)
+            or any(
+                kw in q_low
+                for kw in ("khung giờ", "giờ rảnh", "rảnh từ", "mấy giờ", "cuộc họp", "sự kiện")
+            )
+        ):
+            continue
+        if (not has_scope or any(i.field_path == "scope" for i in ai_issues)) and any(
+            kw in q_low
+            for kw in (
+                "phạm vi",
+                "đầu ra",
+                "kết quả mong muốn",
+                "bao nhiêu trang",
+                "bao nhiêu chương",
+                "số trang",
+                "số chương",
+                "số bài",
+            )
+        ):
+            continue
+        if (
+            not has_tc
+            or any(
+                i.field_path == "time_constraint" or i.field_path.startswith("time_constraint.")
+                for i in ai_issues
+            )
+        ) and any(
+            kw in q_low
+            for kw in ("hạn chót", "deadline", "khi nào cần hoàn thành", "hoàn tất trước")
+        ):
             continue
         ai_issues.append(
             ClarificationIssue(
@@ -1633,12 +2727,64 @@ async def analyze_draft(
                 blocking=True,
             )
         )
+    summary_semantically_ready = (
+        has_title
+        and has_content
+        and has_scope
+        and has_tc
+        and has_avail
+        and not unresolved
+    )
+    effectively_complete = bool(extracted.is_complete and summary_semantically_ready)
+
     active_keys = {
         f"{i.code}|{i.field_path}|{i.question}": i
         for i in current_draft.summary.clarification_issues
         if i.code.startswith("AI_") and i.code != "AI_FALLBACK_NOTICE"
     }
     for key, issue in active_keys.items():
+        if issue.code == "AI_SCOPE_CHOICE_REQUIRED":
+            same_scope_confirmed = (
+                extracted.scope is not None
+                and current_draft.summary.scope is not None
+                and extracted.scope.strip() == current_draft.summary.scope.strip()
+            )
+            if (
+                not scope_needs_choice
+                and not used_fallback
+                and user_selected_scope
+                and (
+                    "scope" in merged_updates
+                    or same_scope_confirmed
+                    or any(
+                        current.field_path == "scope" and current.code == "AI_FIELD_REVIEW_REQUIRED"
+                        for current in ai_issues
+                    )
+                )
+            ):
+                continue
+            if issue not in ai_issues:
+                ai_issues.append(issue)
+            continue
+        if issue.code == "AI_FALLBACK_REVIEW_REQUIRED":
+            kept_by_user = (
+                issue.field_path in kept_pending_fields
+                and issue.field_path not in requested_edits
+            )
+            resolved_by_ai = not used_fallback and (
+                issue.field_path in merged_updates
+                or any(
+                    current.field_path == issue.field_path
+                    and current.code.endswith("_REVIEW_REQUIRED")
+                    and current.code != "AI_FALLBACK_REVIEW_REQUIRED"
+                    for current in ai_issues
+                )
+            )
+            if kept_by_user or resolved_by_ai:
+                continue
+            if issue not in ai_issues:
+                ai_issues.append(issue)
+            continue
         if (
             not issue.code.endswith("_REVIEW_REQUIRED")
             and (
@@ -1651,11 +2797,17 @@ async def analyze_draft(
         if (
             not issue.code.endswith("_REVIEW_REQUIRED")
             and (
-                issue.code in {"AI_AVAILABILITY_INCOMPLETE", "AI_MISSING_AVAILABILITY"}
+                issue.code
+                in {
+                    "AI_AVAILABILITY_INCOMPLETE",
+                    "AI_MISSING_AVAILABILITY",
+                    "AI_MISSING_FREE_TIME",
+                }
                 or issue.field_path == "availability"
             )
             and availability_state is not None
             and not unresolved
+            and has_avail
         ):
             continue
         if (
@@ -1666,7 +2818,7 @@ async def analyze_draft(
                 or getattr(current_draft.summary, issue.field_path, None)
             )
             and (
-                extracted.is_complete
+                effectively_complete
                 or (
                     extracted.generation_tier != "tier_3_rule_based"
                     and not any(i.field_path == issue.field_path for i in ai_issues)
@@ -1674,25 +2826,53 @@ async def analyze_draft(
             )
         ):
             continue
+        field_still_missing = (
+            (issue.field_path == "title" and not has_title)
+            or (issue.field_path in {"description", "goal"} and not has_content)
+            or (issue.field_path == "scope" and not has_scope)
+            or (
+                (
+                    issue.field_path == "time_constraint"
+                    or issue.code in {"AI_TIME_INCOMPLETE", "AI_MISSING_TIME_CONSTRAINT"}
+                )
+                and not has_tc
+            )
+            or (
+                (
+                    issue.field_path in {"availability", "availability_ref"}
+                    or issue.code
+                    in {
+                        "AI_AVAILABILITY_INCOMPLETE",
+                        "AI_MISSING_AVAILABILITY",
+                        "AI_MISSING_FREE_TIME",
+                    }
+                )
+                and (not has_avail or bool(unresolved))
+            )
+        )
         # Field-review decisions stay with the user; generic semantic resolutions
         # accept exact/short resolved keys, completion, or removal on a non-fallback AI pass.
         raw_code = issue.code.removeprefix("AI_")
-        resolved = not issue.code.endswith("_REVIEW_REQUIRED") and (
-            extracted.is_complete
-            or (
-                bool(input_text)
-                and (
-                    key in extracted.resolved_issue_keys
-                    or issue.code in extracted.resolved_issue_keys
-                    or raw_code in extracted.resolved_issue_keys
-                    or issue.field_path in extracted.resolved_issue_keys
-                    or issue.question in extracted.resolved_issue_keys
-                    or (
-                        extracted.generation_tier != "tier_3_rule_based"
-                        and issue.question not in extracted.clarification_questions
-                        and not any(
-                            i.code == issue.code and i.field_path == issue.field_path
-                            for i in ai_issues
+        resolved = (
+            not issue.code.endswith("_REVIEW_REQUIRED")
+            and not field_still_missing
+            and (
+                effectively_complete
+                or (
+                    bool(input_text)
+                    and (
+                        key in extracted.resolved_issue_keys
+                        or issue.code in extracted.resolved_issue_keys
+                        or raw_code in extracted.resolved_issue_keys
+                        or issue.field_path in extracted.resolved_issue_keys
+                        or issue.question in extracted.resolved_issue_keys
+                        or (
+                            extracted.generation_tier != "tier_3_rule_based"
+                            and issue.question not in extracted.clarification_questions
+                            and not any(
+                                i.code == issue.code and i.field_path == issue.field_path
+                                for i in ai_issues
+                            )
                         )
                     )
                 )
@@ -1715,6 +2895,40 @@ async def analyze_draft(
         }
     )
     issues, can_plan = await _evaluate_summary_for_user(merged_summary, user_id, db)
+    ai_field_paths = {i.field_path for i in ai_issues}
+    has_ai_avail = bool(ai_field_paths & {"availability", "availability_ref"}) or any(
+        i.code in {"AI_AVAILABILITY_INCOMPLETE", "AI_AVAILABILITY_REVIEW_REQUIRED"}
+        for i in ai_issues
+    )
+    has_ai_tc = "time_constraint" in ai_field_paths or any(
+        i.field_path.startswith("time_constraint.") for i in ai_issues
+    )
+    filtered_issues: list[ClarificationIssue] = []
+    for iss in issues:
+        if has_ai_avail and (
+            iss.field_path in {"availability", "availability_ref"}
+            or iss.code
+            in {
+                "EMPTY_AVAILABILITY",
+                "MISSING_AVAILABILITY",
+                "AVAILABILITY_REQUIRED",
+                "AVAILABILITY_OUTSIDE_TIME_CONSTRAINT",
+            }
+        ):
+            continue
+        if "scope" in ai_field_paths and iss.code in {"MISSING_SCOPE", "SCOPE_REQUIRED"}:
+            continue
+        if has_ai_tc and iss.code in {"MISSING_TIME_CONSTRAINT", "TIME_CONSTRAINT_REQUIRED"}:
+            continue
+        if "title" in ai_field_paths and iss.code == "MISSING_TITLE":
+            continue
+        if (ai_field_paths & {"description", "content", "goal"}) and iss.code in {
+            "MISSING_CONTENT",
+            "DESCRIPTION_REQUIRED",
+        }:
+            continue
+        filtered_issues.append(iss)
+    issues = filtered_issues
     issues.extend(ai_issues)
     can_plan = can_plan and not any(issue.blocking for issue in ai_issues)
     final_summary = merged_summary.model_copy(
@@ -1727,6 +2941,7 @@ async def analyze_draft(
     if payload.message is not None:
         new_raw_input = "\n".join(value for value in (new_raw_input, payload.message) if value)
 
+    context["uf1_analyzed"] = True
     updated_draft = current_draft.model_copy(
         update={
             "raw_input": new_raw_input,
