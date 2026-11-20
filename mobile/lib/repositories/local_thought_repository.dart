@@ -21,7 +21,7 @@ abstract class LocalThoughtRepository {
   Future<int> purgeTombstone(String id);
 
   /// Đánh dấu bản ghi đã đồng bộ thành công lên máy chủ (state = 'synced').
-  Future<void> markSynced(String id, {DateTime? asOf});
+  Future<void> markSynced(String id, {String? serverThoughtId, DateTime? asOf});
 
   /// Lấy danh sách toàn bộ ID đang bị đánh dấu tombstone của một người dùng.
   Future<List<String>> getTombstoneIds(String ownerId);
@@ -85,8 +85,8 @@ class SqliteThoughtRepository extends LocalThoughtRepository {
         'state': LocalThoughtState.tombstone,
         'updated_at': nowUtc,
       },
-      where: 'id = ?',
-      whereArgs: [id],
+      where: 'id = ? OR server_thought_id = ?',
+      whereArgs: [id, id],
     );
     if (count == 0) {
       final resolvedOwner = ownerId ??
@@ -114,23 +114,27 @@ class SqliteThoughtRepository extends LocalThoughtRepository {
     final db = await _getDb();
     return await db.delete(
       'local_thoughts',
-      where: 'id = ? AND state = ?',
-      whereArgs: [id, LocalThoughtState.tombstone],
+      where: '(id = ? OR server_thought_id = ?) AND state = ?',
+      whereArgs: [id, id, LocalThoughtState.tombstone],
     );
   }
 
   @override
-  Future<void> markSynced(String id, {DateTime? asOf}) async {
+  Future<void> markSynced(String id, {String? serverThoughtId, DateTime? asOf}) async {
     final db = await _getDb();
     final nowUtc = (asOf ?? DateTime.now()).toUtc().toIso8601String();
+    final values = <String, dynamic>{
+      'state': LocalThoughtState.synced,
+      'updated_at': nowUtc,
+    };
+    if (serverThoughtId != null) {
+      values['server_thought_id'] = serverThoughtId;
+    }
     await db.update(
       'local_thoughts',
-      {
-        'state': LocalThoughtState.synced,
-        'updated_at': nowUtc,
-      },
-      where: 'id = ?',
-      whereArgs: [id],
+      values,
+      where: 'id = ? OR server_thought_id = ?',
+      whereArgs: [id, id],
     );
   }
 
@@ -139,11 +143,18 @@ class SqliteThoughtRepository extends LocalThoughtRepository {
     final db = await _getDb();
     final rows = await db.query(
       'local_thoughts',
-      columns: ['id'],
+      columns: ['id', 'server_thought_id'],
       where: 'owner_id = ? AND state = ?',
       whereArgs: [ownerId, LocalThoughtState.tombstone],
     );
-    return rows.map((r) => r['id'] as String).toList();
+    final ids = <String>[];
+    for (final r in rows) {
+      final id = r['id'] as String?;
+      if (id != null && id.isNotEmpty) ids.add(id);
+      final srvId = r['server_thought_id'] as String?;
+      if (srvId != null && srvId.isNotEmpty) ids.add(srvId);
+    }
+    return ids;
   }
 
   @override
@@ -157,9 +168,11 @@ class SqliteThoughtRepository extends LocalThoughtRepository {
     return serverItems.where((item) {
       final thoughtId = item['thought_id']?.toString();
       final clientId = item['client_thought_id']?.toString();
+      final serverThoughtId = item['server_thought_id']?.toString();
       final id = item['id']?.toString();
       if (thoughtId != null && tombstoneIds.contains(thoughtId)) return false;
       if (clientId != null && tombstoneIds.contains(clientId)) return false;
+      if (serverThoughtId != null && tombstoneIds.contains(serverThoughtId)) return false;
       if (id != null && tombstoneIds.contains(id)) return false;
       return true;
     }).toList();
@@ -170,8 +183,8 @@ class SqliteThoughtRepository extends LocalThoughtRepository {
     final db = await _getDb();
     final rows = await db.query(
       'local_thoughts',
-      where: 'id = ?',
-      whereArgs: [id],
+      where: 'id = ? OR server_thought_id = ?',
+      whereArgs: [id, id],
       limit: 1,
     );
     if (rows.isEmpty) return null;
@@ -211,10 +224,19 @@ class InMemoryThoughtRepository extends LocalThoughtRepository {
 
   @override
   Future<void> markTombstone(String id, {DateTime? asOf, String? ownerId}) async {
-    final existing = _thoughts[id];
+    var existingKey = id;
+    if (!_thoughts.containsKey(id)) {
+      for (final entry in _thoughts.entries) {
+        if (entry.value.serverThoughtId == id) {
+          existingKey = entry.key;
+          break;
+        }
+      }
+    }
+    final existing = _thoughts[existingKey];
     final nowUtc = (asOf ?? DateTime.now()).toUtc();
     if (existing != null) {
-      _thoughts[id] = existing.copyWith(
+      _thoughts[existingKey] = existing.copyWith(
         state: LocalThoughtState.tombstone,
         updatedAt: nowUtc,
       );
@@ -232,21 +254,35 @@ class InMemoryThoughtRepository extends LocalThoughtRepository {
 
   @override
   Future<int> purgeTombstone(String id) async {
-    final existing = _thoughts[id];
-    if (existing != null && existing.state == LocalThoughtState.tombstone) {
-      _thoughts.remove(id);
-      return 1;
+    final toRemove = _thoughts.entries
+        .where((e) =>
+            (e.key == id || e.value.serverThoughtId == id) &&
+            e.value.state == LocalThoughtState.tombstone)
+        .map((e) => e.key)
+        .toList();
+    for (final key in toRemove) {
+      _thoughts.remove(key);
     }
-    return 0;
+    return toRemove.length;
   }
 
   @override
-  Future<void> markSynced(String id, {DateTime? asOf}) async {
-    final existing = _thoughts[id];
+  Future<void> markSynced(String id, {String? serverThoughtId, DateTime? asOf}) async {
+    var existingKey = id;
+    if (!_thoughts.containsKey(id)) {
+      for (final entry in _thoughts.entries) {
+        if (entry.value.serverThoughtId == id) {
+          existingKey = entry.key;
+          break;
+        }
+      }
+    }
+    final existing = _thoughts[existingKey];
     if (existing != null) {
       final nowUtc = (asOf ?? DateTime.now()).toUtc();
-      _thoughts[id] = existing.copyWith(
+      _thoughts[existingKey] = existing.copyWith(
         state: LocalThoughtState.synced,
+        serverThoughtId: serverThoughtId ?? existing.serverThoughtId,
         updatedAt: nowUtc,
       );
     }
@@ -254,10 +290,16 @@ class InMemoryThoughtRepository extends LocalThoughtRepository {
 
   @override
   Future<List<String>> getTombstoneIds(String ownerId) async {
-    return _thoughts.values
-        .where((t) => t.ownerId == ownerId && t.state == LocalThoughtState.tombstone)
-        .map((t) => t.id)
-        .toList();
+    final ids = <String>[];
+    for (final t in _thoughts.values) {
+      if (t.ownerId == ownerId && t.state == LocalThoughtState.tombstone) {
+        ids.add(t.id);
+        if (t.serverThoughtId != null && t.serverThoughtId!.isNotEmpty) {
+          ids.add(t.serverThoughtId!);
+        }
+      }
+    }
+    return ids;
   }
 
   @override
@@ -271,9 +313,11 @@ class InMemoryThoughtRepository extends LocalThoughtRepository {
     return serverItems.where((item) {
       final thoughtId = item['thought_id']?.toString();
       final clientId = item['client_thought_id']?.toString();
+      final serverThoughtId = item['server_thought_id']?.toString();
       final id = item['id']?.toString();
       if (thoughtId != null && tombstoneIds.contains(thoughtId)) return false;
       if (clientId != null && tombstoneIds.contains(clientId)) return false;
+      if (serverThoughtId != null && tombstoneIds.contains(serverThoughtId)) return false;
       if (id != null && tombstoneIds.contains(id)) return false;
       return true;
     }).toList();
@@ -281,7 +325,11 @@ class InMemoryThoughtRepository extends LocalThoughtRepository {
 
   @override
   Future<LocalThought?> getThought(String id) async {
-    return _thoughts[id];
+    if (_thoughts.containsKey(id)) return _thoughts[id];
+    for (final t in _thoughts.values) {
+      if (t.serverThoughtId == id) return t;
+    }
+    return null;
   }
 
   @override

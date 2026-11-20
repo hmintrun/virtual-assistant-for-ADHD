@@ -827,6 +827,25 @@ class FocusProvider extends ChangeNotifier {
               'start_${session.sessionId}', request.toString()),
         );
       } on ApiException catch (error) {
+        if (error.statusCode == 409 || error.code == 'ACTIVE_RUN_EXISTS') {
+          try {
+            final activeRunData = await _api.getData('/runs/active');
+            if (activeRunData['session_id'] == session.sessionId) {
+              _serverRun = activeRunData;
+              if (activeRunData['planned_ends_at'] != null) {
+                _runEndsAt = DateTime.parse(activeRunData['planned_ends_at'] as String).toUtc();
+              }
+              _startRequest = null;
+              await _beginLocalRun();
+              if (activeRunData['planned_ends_at'] != null) {
+                _runEndsAt = DateTime.parse(activeRunData['planned_ends_at'] as String).toUtc();
+              }
+              return;
+            }
+          } catch (_) {
+            // Nếu gọi active run thất bại, giữ nguyên xử lý lỗi cũ
+          }
+        }
         if (error.statusCode != null) {
           _startRequest = null;
           rethrow;
@@ -861,7 +880,7 @@ class FocusProvider extends ChangeNotifier {
       final totalSeconds = _segments
           .skip(_firstWorkIndex)
           .fold<int>(0, (total, segment) => total + segment.durationSeconds);
-      _runEndsAt = _clock.now().add(Duration(seconds: totalSeconds));
+      _runEndsAt ??= _clock.now().add(Duration(seconds: totalSeconds));
       try {
         try {
           await AlarmService.instance.requestPermissions();
@@ -887,7 +906,7 @@ class FocusProvider extends ChangeNotifier {
       final totalSeconds = _segments
           .skip(_firstWorkIndex)
           .fold<int>(0, (total, segment) => total + segment.durationSeconds);
-      _runEndsAt = _clock.now().add(Duration(seconds: totalSeconds));
+      _runEndsAt ??= _clock.now().add(Duration(seconds: totalSeconds));
       _dndApplied = false;
       try {
         await WakelockPlus.enable();
@@ -1463,13 +1482,13 @@ class FocusProvider extends ChangeNotifier {
     _deleteUndoExpiry = null;
     _pendingDeletedThought = null;
     _undoneThoughtIds.remove(thought.clientThoughtId);
-    _thoughts.insert(0, thought);
-    await _repository.queueThought(thought);
 
     // Khôi phục trạng thái cũ trong SQLite nếu người dùng bấm Undo trong 5s
+    String? restoredServerId = thought.serverThoughtId;
     if (_thoughtRepository != null) {
       final existing = await _thoughtRepository.getThought(thought.clientThoughtId);
       if (existing != null) {
+        restoredServerId ??= existing.serverThoughtId;
         await _thoughtRepository.insertThought(
           existing.copyWith(
             state: thought.isPendingSync
@@ -1489,12 +1508,19 @@ class FocusProvider extends ChangeNotifier {
             state: thought.isPendingSync
                 ? LocalThoughtState.rawSaved
                 : LocalThoughtState.synced,
+            serverThoughtId: thought.serverThoughtId,
             createdAt: thought.createdAt.toUtc(),
             updatedAt: _clock.now().toUtc(),
           ),
         );
       }
     }
+
+    final restoredThought = restoredServerId != null && thought.serverThoughtId == null
+        ? thought.copyWith(serverThoughtId: restoredServerId)
+        : thought;
+    _thoughts.insert(0, restoredThought);
+    await _repository.queueThought(restoredThought);
 
     _scheduleOutboxFlush();
     _notify();
@@ -1506,40 +1532,51 @@ class FocusProvider extends ChangeNotifier {
     _deleteUndoExpiry?.cancel();
     _deleteUndoExpiry = null;
     if (thought == null) return;
-    await _repository.deleteThought(thought.clientThoughtId);
-    if (_outboxRepository != null) {
-      // Nếu có yêu cầu POST tạo thought đang chờ trong outbox chưa gửi, hủy nó đi
-      await _outboxRepository.cancelOutboxRecord(thought.clientThoughtId);
+    try {
+      await _repository.deleteThought(thought.clientThoughtId);
+      if (_outboxRepository != null) {
+        // Nếu có yêu cầu POST tạo thought đang chờ trong outbox chưa gửi, hủy nó đi
+        await _outboxRepository.cancelOutboxRecord(thought.clientThoughtId, force: true);
 
-      // Đẩy yêu cầu DELETE /api/v1/thoughts/{id} vào hàng đợi Outbox
-      // Dòng tombstone trong local_thoughts vẫn ĐƯỢC GIỮ NGUYÊN để chống hiện thẻ ma khi GET /thoughts
-      // Cho đến khi OutboxReplayWorker gửi thành công nhận HTTP 200 OK mới purge.
-      final delEventId = ApiClient.stableIdempotencyKey(
-        'del_thought',
-        thought.clientThoughtId,
-      );
-      final deleteTargetId = thought.serverThoughtId ?? thought.clientThoughtId;
-      await _outboxRepository.enqueueOutboxRecord(
-        OutboxRecord(
-          clientEventId: delEventId,
-          eventType: OutboxEventType.thoughtDelete,
-          targetResourceId: thought.clientThoughtId,
-          endpoint: '/thoughts/$deleteTargetId',
-          httpMethod: 'DELETE',
-          payload: {'expected_thought_revision': 1},
-          occurredAt: _clock.now().toUtc(),
-          holdUntil: _clock.now().toUtc(),
-        ),
-      );
-      _outboxWorker?.triggerReplay();
+        // Đẩy yêu cầu DELETE /api/v1/thoughts/{id} vào hàng đợi Outbox
+        // Dòng tombstone trong local_thoughts vẫn ĐƯỢC GIỮ NGUYÊN để chống hiện thẻ ma khi GET /thoughts
+        // Cho đến khi OutboxReplayWorker gửi thành công nhận HTTP 200 OK mới purge.
+        final delEventId = ApiClient.stableIdempotencyKey(
+          'del_thought',
+          thought.clientThoughtId,
+        );
+        var deleteTargetId = thought.serverThoughtId;
+        if (deleteTargetId == null && _thoughtRepository != null) {
+          final localThought = await _thoughtRepository.getThought(thought.clientThoughtId);
+          if (localThought?.serverThoughtId != null && localThought!.serverThoughtId!.isNotEmpty) {
+            deleteTargetId = localThought.serverThoughtId;
+          }
+        }
+        deleteTargetId ??= thought.clientThoughtId;
+        await _outboxRepository.enqueueOutboxRecord(
+          OutboxRecord(
+            clientEventId: delEventId,
+            eventType: OutboxEventType.thoughtDelete,
+            targetResourceId: deleteTargetId,
+            endpoint: '/thoughts/$deleteTargetId',
+            httpMethod: 'DELETE',
+            payload: {'expected_thought_revision': 1},
+            occurredAt: _clock.now().toUtc(),
+            holdUntil: _clock.now().toUtc(),
+          ),
+        );
+        _outboxWorker?.triggerReplay();
+      }
+      if (thought.localAudioPath != null) {
+        try {
+          await recorder.deleteRecording(thought.localAudioPath!);
+        } catch (_) {}
+      }
+      _scheduleOutboxFlush();
+      _notify();
+    } catch (_) {
+      // Bẫy lỗi an toàn khi database đang đóng hoặc đã đóng trong quá trình logout / dispose
     }
-    if (thought.localAudioPath != null) {
-      try {
-        await recorder.deleteRecording(thought.localAudioPath!);
-      } catch (_) {}
-    }
-    _scheduleOutboxFlush();
-    _notify();
   }
 
   void _scheduleOutboxFlush() {
@@ -1597,6 +1634,7 @@ class FocusProvider extends ChangeNotifier {
               inputType: lt.audioPath.isNotEmpty ? 'audio' : 'text',
               captureState: lt.state == LocalThoughtState.rawSaved ? 'saved' : 'synced',
               isPendingSync: lt.state == LocalThoughtState.rawSaved,
+              serverThoughtId: lt.serverThoughtId,
             ),
           );
         }
@@ -1608,14 +1646,17 @@ class FocusProvider extends ChangeNotifier {
         final allThoughts = await _thoughtRepository.getAllThoughts(_ownerId);
         final tombstones = allThoughts.where((t) => t.state == LocalThoughtState.tombstone);
         for (final tb in tombstones) {
-          await _outboxRepository.cancelOutboxRecord(tb.id);
+          await _outboxRepository.cancelOutboxRecord(tb.id, force: true);
           final delEventId = ApiClient.stableIdempotencyKey('del_thought', tb.id);
+          final existing = await _outboxRepository.getRecord(delEventId);
+          if (existing != null) continue;
+          final deleteTargetId = tb.serverThoughtId ?? tb.id;
           await _outboxRepository.enqueueOutboxRecord(
             OutboxRecord(
               clientEventId: delEventId,
               eventType: OutboxEventType.thoughtDelete,
-              targetResourceId: tb.id,
-              endpoint: '/thoughts/${tb.id}',
+              targetResourceId: deleteTargetId,
+              endpoint: '/thoughts/$deleteTargetId',
               httpMethod: 'DELETE',
               payload: {'expected_thought_revision': 1},
               occurredAt: tb.updatedAt,
@@ -1669,6 +1710,10 @@ class FocusProvider extends ChangeNotifier {
           if (serverId is! String || serverId.isEmpty) continue;
           await _repository.markThoughtSynced(
               thought.clientThoughtId, serverId);
+          if (_thoughtRepository != null) {
+            await _thoughtRepository.markSynced(thought.clientThoughtId,
+                serverThoughtId: serverId);
+          }
           final index = _thoughts
               .indexWhere((t) => t.clientThoughtId == thought.clientThoughtId);
           if (index >= 0) {
@@ -1887,7 +1932,9 @@ class FocusProvider extends ChangeNotifier {
   void dispose() {
     _disposed = true;
     if (_pendingDeletedThought != null) {
-      unawaited(_finalizePendingThoughtDeletion());
+      try {
+        unawaited(_finalizePendingThoughtDeletion().catchError((_) {}));
+      } catch (_) {}
     }
     _skipSendTimer?.cancel();
     _checkInDeadline?.cancel();

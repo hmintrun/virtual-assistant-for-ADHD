@@ -72,7 +72,7 @@ class LocalDatabaseManager {
       _db = await factory.openDatabase(
         dbPath,
         options: OpenDatabaseOptions(
-          version: 2,
+          version: 3,
           onCreate: _onCreate,
           onUpgrade: _onUpgrade,
         ),
@@ -224,6 +224,7 @@ class LocalDatabaseManager {
         audio_path TEXT NOT NULL,
         source_run_id TEXT,
         state TEXT NOT NULL,
+        server_thought_id TEXT,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
@@ -255,6 +256,9 @@ class LocalDatabaseManager {
         CREATE INDEX IF NOT EXISTS idx_local_thoughts_owner_state
         ON local_thoughts(owner_id, state);
       ''');
+    }
+    if (oldVersion < 3) {
+      await db.execute('ALTER TABLE local_thoughts ADD COLUMN server_thought_id TEXT;');
     }
   }
 }

@@ -13,7 +13,7 @@ abstract class LocalOutboxRepository {
     Duration holdDuration = Duration.zero,
   });
 
-  Future<bool> cancelOutboxRecord(String clientEventId, {DateTime? asOf});
+  Future<bool> cancelOutboxRecord(String clientEventId, {DateTime? asOf, bool force = false});
 
   Future<List<OutboxRecord>> fetchPendingBatch({
     int limit = 20,
@@ -76,7 +76,7 @@ class SqliteOutboxRepository extends LocalOutboxRepository {
   }
 
   @override
-  Future<bool> cancelOutboxRecord(String clientEventId, {DateTime? asOf}) async {
+  Future<bool> cancelOutboxRecord(String clientEventId, {DateTime? asOf, bool force = false}) async {
     final db = await _getDb();
     final results = await db.query(
       'local_outbox',
@@ -88,7 +88,7 @@ class SqliteOutboxRepository extends LocalOutboxRepository {
     if (results.isEmpty) return false;
     final record = OutboxRecord.fromMap(results.first);
 
-    if (record.isCancellable(asOf: asOf)) {
+    if (force || record.isCancellable(asOf: asOf)) {
       await db.delete(
         'local_outbox',
         where: 'client_event_id = ?',
@@ -252,10 +252,10 @@ class InMemoryOutboxRepository extends LocalOutboxRepository {
   }
 
   @override
-  Future<bool> cancelOutboxRecord(String clientEventId, {DateTime? asOf}) async {
+  Future<bool> cancelOutboxRecord(String clientEventId, {DateTime? asOf, bool force = false}) async {
     final record = _storage[clientEventId];
     if (record == null) return false;
-    if (record.isCancellable(asOf: asOf)) {
+    if (force || record.isCancellable(asOf: asOf)) {
       _storage.remove(clientEventId);
       return true;
     }

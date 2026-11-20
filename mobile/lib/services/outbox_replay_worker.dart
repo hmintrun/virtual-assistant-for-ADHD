@@ -118,16 +118,16 @@ class OutboxReplayWorker {
       for (final record in batch) {
         // Kiểm tra xem session có đổi chủ không
         final session = ApiSession.current;
-        if (session != null && !session.active) {
+        if (session == null || !session.active) {
           _isPausedAuth = true;
           break;
         }
 
         try {
-          await _sendRecord(record);
+          final response = await _sendRecord(record);
           await _repository.markSynced(record.clientEventId);
           syncedIds.add(record.clientEventId);
-          await _handleThoughtLifecycle(record);
+          await _handleThoughtLifecycle(record, response);
         } on DioException catch (dioError) {
           final statusCode = dioError.response?.statusCode;
           final errorMessage = dioError.message ?? dioError.toString();
@@ -139,9 +139,10 @@ class OutboxReplayWorker {
           if (statusCode == 401) {
             _isPausedAuth = true;
             // Kích hoạt renew token nhưng không tăng retry count của bản ghi
-            final renewed = await session?.renew?.call() ?? false;
+            final currentSession = ApiSession.current;
+            final renewed = await currentSession?.renew?.call() ?? false;
             if (!renewed) {
-              session?.onUnauthorized?.call();
+              currentSession?.onUnauthorized?.call();
             }
             break; // Tạm dừng lô hiện tại chờ token mới
           } else if (dioError.type == DioExceptionType.cancel) {
@@ -213,9 +214,10 @@ class OutboxReplayWorker {
           final errorMessage = apiError.message;
           if (statusCode == 401) {
             _isPausedAuth = true;
-            final renewed = await session?.renew?.call() ?? false;
+            final currentSession = ApiSession.current;
+            final renewed = await currentSession?.renew?.call() ?? false;
             if (!renewed) {
-              session?.onUnauthorized?.call();
+              currentSession?.onUnauthorized?.call();
             }
             break;
           } else if (statusCode == 409) {
@@ -343,8 +345,8 @@ class OutboxReplayWorker {
 
   /// Xử lý cập nhật trạng thái Thought sau khi replay thành công:
   /// - DELETE 200 OK: Purge vĩnh viễn dòng tombstone khỏi SQLite.
-  /// - POST 200/201: Đánh dấu Thought là synced.
-  Future<void> _handleThoughtLifecycle(OutboxRecord record) async {
+  /// - POST 200/201: Đánh dấu Thought là synced kèm server_thought_id nếu có.
+  Future<void> _handleThoughtLifecycle(OutboxRecord record, [Response<dynamic>? response]) async {
     final thoughtRepo = _thoughtRepository;
     if (thoughtRepo == null) return;
 
@@ -364,7 +366,14 @@ class OutboxReplayWorker {
             record.eventType == OutboxEventType.thoughtCapture)) {
       final targetId = record.targetResourceId ?? record.clientEventId;
       if (targetId.isNotEmpty) {
-        await thoughtRepo.markSynced(targetId);
+        String? serverThoughtId;
+        final resData = response?.data;
+        if (resData is Map) {
+          final srv = resData['thought_id'] ??
+              (resData['data'] is Map ? (resData['data'] as Map)['thought_id'] : null);
+          serverThoughtId = srv?.toString();
+        }
+        await thoughtRepo.markSynced(targetId, serverThoughtId: serverThoughtId);
       }
     }
   }

@@ -14,6 +14,7 @@ class LocalThought {
     required this.audioPath,
     this.sourceRunId,
     required this.state,
+    this.serverThoughtId,
     required this.createdAt,
     required this.updatedAt,
   });
@@ -24,6 +25,7 @@ class LocalThought {
   final String audioPath;
   final String? sourceRunId;
   final String state;
+  final String? serverThoughtId;
   final DateTime createdAt;
   final DateTime updatedAt;
 
@@ -38,6 +40,7 @@ class LocalThought {
     String? audioPath,
     String? sourceRunId,
     String? state,
+    String? serverThoughtId,
     DateTime? createdAt,
     DateTime? updatedAt,
   }) {
@@ -48,6 +51,7 @@ class LocalThought {
       audioPath: audioPath ?? this.audioPath,
       sourceRunId: sourceRunId ?? this.sourceRunId,
       state: state ?? this.state,
+      serverThoughtId: serverThoughtId ?? this.serverThoughtId,
       createdAt: createdAt ?? this.createdAt,
       updatedAt: updatedAt ?? this.updatedAt,
     );
@@ -60,6 +64,7 @@ class LocalThought {
         'audio_path': audioPath,
         'source_run_id': sourceRunId,
         'state': state,
+        'server_thought_id': serverThoughtId,
         'created_at': createdAt.toUtc().toIso8601String(),
         'updated_at': updatedAt.toUtc().toIso8601String(),
       };
@@ -71,11 +76,12 @@ class LocalThought {
         audioPath: map['audio_path'] as String? ?? '',
         sourceRunId: map['source_run_id'] as String?,
         state: map['state'] as String,
+        serverThoughtId: map['server_thought_id'] as String?,
         createdAt: DateTime.parse(map['created_at'] as String).toUtc(),
         updatedAt: DateTime.parse(map['updated_at'] as String).toUtc(),
       );
 
   @override
   String toString() =>
-      'LocalThought(id: $id, ownerId: $ownerId, state: $state, audioPath: $audioPath)';
+      'LocalThought(id: $id, ownerId: $ownerId, state: $state, serverThoughtId: $serverThoughtId, audioPath: $audioPath)';
 }
