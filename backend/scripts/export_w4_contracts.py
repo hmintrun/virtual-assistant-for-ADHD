@@ -65,11 +65,11 @@ def fixture_sets():
         case("calendar_reconnect", "GET", f"/api/v1/calendar/connections/{CONNECTION}/calendars", 401,
              error("CALENDAR_AUTH_REQUIRED", "Cần kết nối lại Google Calendar.", "reconnect_google_calendar")),
         *[case(name, "POST", "/api/v1/auth/logout", 200,
-               {"data": {"logged_out": True, "revoked": revoked}, "meta": META},
-               request={"refresh_token": "example-old-refresh-token"}, scope="target_be03")
+               success(auth.LogoutData, {"logged_out": True, "revoked": revoked}),
+               request={"refresh_token": "example-old-refresh-token"})
           for name, revoked in [("logout_first", True), ("logout_retry", False)]],
         case("refresh_reuse", "POST", "/api/v1/auth/refresh", 401, unauthenticated,
-             request={"refresh_token": "example-old-refresh-token"}, scope="target_be03",
+             request={"refresh_token": "example-old-refresh-token"},
              headers={"WWW-Authenticate": "Bearer"}),
     ]
     pref = {"revision": 5, "effective_revision": 3, "requested_revision": None,
@@ -256,15 +256,15 @@ def auth_target_spec(runtime):
 
 GUIDE = """## 15. W4-02 — Bộ bàn giao OpenAPI và JSON fixtures
 
-Nguồn runtime: `origin/backend@23e856b`; contract Auth do VQH chốt tại `ba16055` (mục 14.1). Mã và thời gian trong fixture là dữ liệu giả, không chứa token thật. `scope=runtime` mô tả code hiện tại; `target_be03` là yêu cầu đã chốt cho BE-03 nhưng chưa có đủ route trong runtime. Contract tests đối chiếu OpenAPI runtime và validate DTO/fixtures.
+Nguồn runtime: `backend` (đã tích hợp `23e856b`, `37c4491` và `BE-03`); contract Auth do VQH chốt tại `ba16055` (mục 14.1). Mã và thời gian trong fixture là dữ liệu giả, không chứa token thật. `scope=runtime` mô tả code hiện tại (đã bao gồm `BE-03`: refresh rotation/reuse detection và `POST /api/v1/auth/logout`). Contract tests đối chiếu OpenAPI runtime và validate DTO/fixtures.
 
-- [openapi.json](openapi.json): xuất trực tiếp `app.openapi()` của code đang tích hợp.
-- [openapi-auth-target.json](openapi-auth-target.json): OpenAPI riêng cho refresh rotation/logout Option 1 đã chốt, gắn `target_be03`. Dùng để mock Mobile trước khi BE-03 hoàn thành.
-- Năm bộ JSON dưới đây cũng có file riêng trong [fixtures/w4-02/](fixtures/w4-02/). `scope=runtime` là contract của code hiện tại; `target_be03` là đích BE-03 đã chốt; `google_upstream` là phản hồi từ Google tới worker.
+- [openapi.json](openapi.json): xuất trực tiếp `app.openapi()` của code đang tích hợp (đã có `POST /api/v1/auth/logout` và `LogoutData`).
+- [openapi-auth-target.json](openapi-auth-target.json): bản OpenAPI tham chiếu lịch sử cho Auth BE-03 Option 1 (gắn nhãn `target_be03`), giữ lại cho tương thích kiểm thử hợp đồng sau khi `BE-03` đã vào `openapi.json` runtime.
+- Năm bộ JSON dưới đây cũng có file riêng trong [fixtures/w4-02/](fixtures/w4-02/). `scope=runtime` là contract của code hiện tại; `google_upstream` là phản hồi từ Google tới worker.
 
-### Quy tắc client và các chỗ chưa khớp code
+### Quy tắc client và trạng thái đồng bộ code
 
-1. Auth: đọc `body.error.code`. `401 CALENDAR_AUTH_REQUIRED` chỉ yêu cầu nối lại Calendar. Logout target public nhận `refresh_token`, trả `logged_out=true` và `revoked=true/false` (retry idempotent); reuse refresh thu hồi family và trả `401 UNAUTHENTICATED` có `WWW-Authenticate: Bearer`. Migration refresh token đã có trên backend, route logout/service rotation chưa có; kiểm tra fixture target không đồng nghĩa BE-03 đã đạt.
+1. Auth: đọc `body.error.code`. `401 CALENDAR_AUTH_REQUIRED` chỉ yêu cầu nối lại Calendar. `BE-03` đã hoàn thành trong runtime: `POST /api/v1/auth/logout` (public theo `refresh_token`) trả `logged_out=true` và `revoked=true/false` (retry idempotent `200`), không cần header `Authorization` hay `Idempotency-Key`; `POST /api/v1/auth/refresh` xoay `jti` có lưu vết `refresh_tokens` và khi phát hiện reuse sẽ thu hồi toàn bộ family cùng `401 UNAUTHENTICATED` kèm header `WWW-Authenticate: Bearer`.
 2. Settings: gửi `effective_revision` vào `expected_preferences_revision`; suggestion dùng tên **số ít** `expected_preference_revision`. Hủy dùng `change_request_id` + `request_revision` từ response save. Sau reopen hoặc accept suggestion, response hiện chưa cung cấp đủ request revision để hủy: không tự lấy preference revision thay thế. `409` tải lại cấu hình. Chính sách client `buffer_multiplier ∈ [1.0, 2.0]`: runtime đã chặn cả dưới `1.0` và trên `2.0` (`422 VALIDATION_ERROR` ở `scope=runtime`).
 3. Calendar: runtime preview đã trả `preview_revision` (và `base_connection_revision`) trong response; client gửi lại giá trị này vào trường `expected_preview_revision` khi gọi `/confirm` (lệch revision trả `409 REVISION_CONFLICT` kèm `current_revisions.preview_revision`, thiếu trả `422`). JSON `412` là lỗi Google upstream; client đọc job `200` với `job_state=conflict`, `last_error_code=ETAG_CONFLICT_412`, không retry mù.
 4. Run: Start chống lặp bằng `Idempotency-Key` (body Start không có `event_id`); fixture ghi cả request gốc và retry cùng key, kèm receipt. End có cả key và `event_id`. Khi mất phản hồi, đối soát `/commands/{command_id}`/Run trước retry. Clock-skew Start được kiểm bằng giờ server, giới hạn `300s`; fixture vượt `301s` trả `422 VALIDATION_ERROR` trên `requested_start_at`. `offline_start_supported=false`. Thought giữ `source_run_id`, metadata audio không chứa transcript/path local; thử audio tối đa 3 lần. Chỉ sau phiên: `/voice/transcriptions` với `purpose=thought_to_draft`, rồi `/thoughts/{id}/draft`.

@@ -1,5 +1,6 @@
 """Public authentication DTOs; Google identity and app claims stay internal."""
 
+from datetime import datetime
 from typing import Literal
 from uuid import UUID
 
@@ -43,6 +44,11 @@ class GoogleLoginData(TokenBundle):
     user: CurrentUser
 
 
+class LogoutData(ApiModel):
+    logged_out: Literal[True] = True
+    revoked: bool
+
+
 class AppAccessClaims(ApiModel):
     user_id: UUID
 
@@ -50,6 +56,8 @@ class AppAccessClaims(ApiModel):
 class AppRefreshClaims(ApiModel):
     user_id: UUID
     jti: str
+    issued_at: datetime
+    expires_at: datetime
 
 
 class VerifiedGoogleIdentity(ApiModel):

@@ -16,7 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import get_current_user
 from app.core.config import settings
 from app.core.database import Base, get_db, make_engine, session_factory
-from app.core.security import issue_app_access_token
+from app.core.security import decode_app_refresh_token, issue_app_access_token
 from app.main import app
 from app.models.calendar import (
     CalendarAuthorization,
@@ -32,7 +32,7 @@ from app.models.settings import AdaptationSuggestion as AdaptationSuggestionRow
 from app.models.settings import Availability as AvailabilityRow
 from app.models.step import Step as StepRow
 from app.models.task import Task as TaskRow
-from app.models.user import User
+from app.models.user import RefreshToken, User
 from app.models.user import UserPreference as UserPreferenceRow
 from app.schemas.availability import DraftAvailability, WeeklyRule
 from app.schemas.common import TimeConstraint, TimeInterval
@@ -1313,6 +1313,20 @@ async def test_adv_p2_refresh_token_security_traps(monkeypatch: pytest.MonkeyPat
         bundle = issue_app_access_token(active_uid)
         assert bundle.refresh_token is not None
         assert bundle.refresh_expires_in == settings.REFRESH_TOKEN_TTL_SECONDS == 30 * 86400
+        unregistered_bundle = issue_app_access_token(active_uid)
+        assert unregistered_bundle.refresh_token is not None
+        bundle_claims = decode_app_refresh_token(bundle.refresh_token)
+        async with factory() as db:
+            db.add(
+                RefreshToken(
+                    user_id=active_uid,
+                    jti=bundle_claims.jti,
+                    family_id=uuid4(),
+                    issued_at=bundle_claims.issued_at,
+                    expires_at=bundle_claims.expires_at,
+                )
+            )
+            await db.commit()
 
         now_ts = int(datetime.now(UTC).timestamp())
         base_claims = {
@@ -1380,6 +1394,12 @@ async def test_adv_p2_refresh_token_security_traps(monkeypatch: pytest.MonkeyPat
             # 10. User đã bị xóa -> 401
             r = await client.post("/api/v1/auth/refresh", json={"refresh_token": deleted_bundle.refresh_token})
             assert r.status_code == 401
+
+            # 10b. Refresh token chưa đăng ký trong DB (dù chữ ký hợp lệ cho active user) -> 401
+            r_unreg = await client.post(
+                "/api/v1/auth/refresh", json={"refresh_token": unregistered_bundle.refresh_token}
+            )
+            assert r_unreg.status_code == 401
 
             # 11. Refresh token hợp lệ -> 200 & cấp cặp token mới
             r_ok = await client.post("/api/v1/auth/refresh", json={"refresh_token": bundle.refresh_token})

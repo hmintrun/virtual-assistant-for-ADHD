@@ -167,6 +167,78 @@
         }
       }
     },
+    "/api/v1/auth/logout": {
+      "post": {
+        "tags": [
+          "Authentication"
+        ],
+        "summary": "Đăng xuất phiên làm việc",
+        "description": "Public theo refresh_token; nếu token còn hiệu lực sẽ thu hồi chuỗi token của phiên và trả revoked=true; nếu jti đã thu hồi/rotated trước đó sẽ trả 200 idempotent với revoked=false.",
+        "operationId": "logout_endpoint_api_v1_auth_logout_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RefreshTokenRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SuccessEnvelope_LogoutData_"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Unprocessable Entity",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service Unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/auth/me": {
       "get": {
         "tags": [
@@ -8749,6 +8821,26 @@
         ],
         "title": "LocalInterval"
       },
+      "LogoutData": {
+        "properties": {
+          "logged_out": {
+            "type": "boolean",
+            "const": true,
+            "title": "Logged Out",
+            "default": true
+          },
+          "revoked": {
+            "type": "boolean",
+            "title": "Revoked"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "revoked"
+        ],
+        "title": "LogoutData"
+      },
       "ManualBusyInterval": {
         "properties": {
           "client_interval_id": {
@@ -12035,6 +12127,23 @@
           "meta"
         ],
         "title": "SuccessEnvelope[GoogleLoginData]"
+      },
+      "SuccessEnvelope_LogoutData_": {
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/LogoutData"
+          },
+          "meta": {
+            "$ref": "#/components/schemas/ResponseMeta"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "data",
+          "meta"
+        ],
+        "title": "SuccessEnvelope[LogoutData]"
       },
       "SuccessEnvelope_PlanCandidate_": {
         "properties": {

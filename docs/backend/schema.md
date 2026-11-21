@@ -1122,9 +1122,9 @@ Bản nền phục vụ bắt đầu phát triển, chưa phải nghiệm thu gi
 
 ## 14. Đồng bộ Contract Bổ sung cho W4-02 (Auth Refresh/Logout Option 1, Voice TTS/UF5 Prompt, Delete Draft & Health) — 18/11/2026
 
-Mục này bổ sung đầy đủ contract các endpoint đã có trong code (`backend/app/api/v1/*.py`) nhưng chưa có trong `schema.md`, đồng thời chốt thiết kế target cho `BE-03` (`POST /api/v1/auth/logout` — **Phương án 1**) để đồng bộ OpenAPI, bộ fixture JSON và contract tests (`W4-02`).
+Mục này bổ sung đầy đủ contract các endpoint đã có trong code (`backend/app/api/v1/*.py`) nhưng chưa có trong `schema.md`, đồng thời ghi nhận thiết kế `BE-03` (`POST /api/v1/auth/logout` — **Phương án 1** và stateful refresh rotation/reuse detection) để đồng bộ OpenAPI, bộ fixture JSON và contract tests (`W4-02`).
 
-> **Phân biệt trạng thái triển khai:** Các mục gắn `[Đã có trong code]` đang chạy trên router/schema hiện tại; các mục gắn `[Target BE-03 — Option 1 đã chốt]` là đặc tả mục tiêu đã thống nhất, **chưa triển khai trong router Python/ORM** cho tới khi hoàn tất migration `jti` (`tn`) và service `BE-03`.
+> **Trạng thái triển khai:** Toàn bộ mục gắn `[Đã có trong code]` dưới đây (bao gồm `BE-03` trên `POST /api/v1/auth/refresh` và `POST /api/v1/auth/logout` với bảng `refresh_tokens` ở migration `20261118_01`) đã được triển khai đầy đủ trên router, service và ORM hiện tại.
 
 ### 14.1. Nhóm Authentication (`/api/v1/auth/*`)
 
@@ -1133,10 +1133,10 @@ Mục này bổ sung đầy đủ contract các endpoint đã có trong code (`b
 | Schema | Trường & ràng buộc | Ghi chú |
 | --- | --- | --- |
 | `GoogleLoginRequest` | `id_token: string` (`min=1`, `max=16384`, `extra=forbid`, không blank/padded) | Dùng cho `POST /api/v1/auth/google`. |
-| `RefreshTokenRequest` | `refresh_token: string` (`min=1`, `max=16384`, `extra=forbid`, không blank/padded) | Dùng cho `POST /api/v1/auth/refresh` (và làm cấu trúc body chuẩn cho `POST /api/v1/auth/logout` theo Option 1). |
+| `RefreshTokenRequest` | `refresh_token: string` (`min=1`, `max=16384`, `extra=forbid`, không blank/padded) | Dùng cho `POST /api/v1/auth/refresh` và `POST /api/v1/auth/logout` (Option 1). |
 | `TokenBundle` | `access_token: string`, `token_type: "bearer"`, `expires_in: integer` (default `3600`, range `60..86400`), `refresh_token: string \| null` (default `null`), `refresh_expires_in: integer \| null` (default `null`, mặc định cấp `2592000` = 30 ngày, range `300..7776000`) | Khi `issue_app_access_token()` cấp token mới, cả `refresh_token` (JWT HS256 có `token_type="refresh"` và `jti: UUIDv4`) và `refresh_expires_in` đều được gán giá trị. |
 | `GoogleLoginData` | Kế thừa toàn bộ `TokenBundle` + `user: CurrentUser` | `CurrentUser`: `user_id: string`, `email: string \| null`, `display_name: string \| null`, `is_active: bool` (default `true`). |
-| `LogoutData` *(Target BE-03)* | `logged_out: boolean` (`true`), `revoked: boolean` | `revoked=true` ở lần thu hồi đầu tiên; `revoked=false` khi `jti` đã revoked trước đó (idempotent `200`). |
+| `LogoutData` | `logged_out: boolean` (`true`), `revoked: boolean` | `[Đã có trong code]` — `revoked=true` ở lần thu hồi đầu tiên; `revoked=false` khi `jti` đã revoked trước đó (idempotent `200`). |
 
 #### a) `POST /api/v1/auth/google` `[Đã có trong code]`
 
@@ -1145,7 +1145,7 @@ Mục này bổ sung đầy đủ contract các endpoint đã có trong code (`b
 - **Response `200 OK`:** `SuccessEnvelope[GoogleLoginData]`.
 - **Errors (`Auth`):** `401 INVALID_GOOGLE_ID_TOKEN` / `UNAUTHENTICATED` (`next_action="authenticate"`, `retryable=false`), `403 ACCOUNT_DISABLED` (`next_action="contact_support"`, `retryable=false`), `409 ACCOUNT_LINK_CONFLICT` (`next_action="review_account_link"`, `retryable=false`), `422 VALIDATION_ERROR` (`fix_fields`) / `GOOGLE_PROFILE_INCOMPLETE` (`review_google_profile`), `503 AUTH_PROVIDER_UNAVAILABLE` (`next_action="retry_login"`, `retryable=true`).
 
-#### b) `POST /api/v1/auth/refresh` `[Đã có trong code — mở rộng stateful rotation ở BE-03]`
+#### b) `POST /api/v1/auth/refresh` `[Đã có trong code — stateful rotation BE-03]`
 
 - **Auth:** Public (xác thực trực tiếp bằng `refresh_token` HS256 trong body, không yêu cầu `access_token` còn hạn).
 - **Request JSON (`RefreshTokenRequest`):**
@@ -1170,13 +1170,13 @@ Mục này bổ sung đầy đủ contract các endpoint đã có trong code (`b
     }
   }
   ```
-- **Hành vi hiện tại trong code (`auth_service.refresh_app_tokens`):** Giải mã & kiểm tra `token_type="refresh"`, bắt buộc có `sub` (UUID) và `jti` (string non-blank), kiểm tra `User.is_active` qua `load_current_user`, sau đó cấp `TokenBundle` mới. Chưa lưu/check bảng `jti` trong DB.
-- **Quy tắc Target `BE-03` (Refresh Token Rotation & Reuse Detection):**
-  - Mỗi lần `/auth/refresh` thành công phải đánh dấu `jti` cũ đã rotated/revoked và lưu `jti` mới gắn cùng `user_id` (+ `family_id` / `replaced_by_jti`).
-  - Nếu client gửi lại `refresh_token` có `jti` đã bị thu hồi hoặc đã xoay (`revoked`/`rotated` reuse), server **bắt buộc thu hồi toàn bộ chuỗi token còn hiệu lực của phiên/family đó** và trả **`401 UNAUTHENTICATED`** (`next_action="authenticate"`, `retryable=false`, header `WWW-Authenticate: Bearer`).
+- **Hành vi hiện tại trong code (`auth_service.refresh_app_tokens` — `[Đã có trong code]`):** Giải mã & kiểm tra `token_type="refresh"`, bắt buộc có `sub` (UUID) và `jti` (string non-blank), khóa dòng `RefreshToken` theo `jti` (`with_for_update()`), kiểm tra `user_id`, trạng thái `revoked_at` / `replaced_by_jti`, `User.is_active` và hạn `expires_at`, sau đó xoay `jti` mới và lưu vào bảng `refresh_tokens`.
+- **Quy tắc `BE-03` (Refresh Token Rotation & Reuse Detection — `[Đã có trong code]`):**
+  - Mỗi lần `/auth/refresh` thành công đánh dấu `jti` cũ `revoked_reason="rotated"`, `replaced_by_jti=<new_jti>`, và lưu `jti` mới gắn cùng `user_id` và `family_id`.
+  - Nếu client gửi lại `refresh_token` có `jti` đã bị thu hồi hoặc đã xoay (`revoked_at` hoặc `replaced_by_jti` khác `None`), server **thu hồi toàn bộ chuỗi token còn hiệu lực trong cùng `family_id`** (`revoked_reason="reuse_detected"`), commit trạng thái thu hồi vào DB, rồi trả **`401 UNAUTHENTICATED`** (`next_action="authenticate"`, `retryable=false`, header `WWW-Authenticate: Bearer`).
 - **Errors:** `401 UNAUTHENTICATED` (`authenticate`, `retryable=false`, có header `WWW-Authenticate: Bearer`), `403 ACCOUNT_DISABLED` (`contact_support`, `retryable=false`), `422 VALIDATION_ERROR` (`fix_fields`, `retryable=false`), `503 AUTH_PROVIDER_UNAVAILABLE` (`retry_login`, `retryable=true`).
 
-#### c) `POST /api/v1/auth/logout` `[Target BE-03 — Phương án 1 đã chốt, chưa code]`
+#### c) `POST /api/v1/auth/logout` `[Đã có trong code — BE-03 Phương án 1]`
 
 - **Quyết định thiết kế (Option 1):** Endpoint Public xác thực **bằng chính `refresh_token` trong JSON body** (giống `/api/v1/auth/refresh`), **KHÔNG** yêu cầu header `Authorization: Bearer <access_token>` còn hạn, giúp Mobile đăng xuất sạch cả khi `access_token` vừa hết hạn hoặc đang offline-recover. Không yêu cầu header `Idempotency-Key`.
 - **Request JSON (`LogoutRequest` / `RefreshTokenRequest`, `extra="forbid"`):**
@@ -1388,15 +1388,15 @@ Endpoint Dòng 8 trong Sheet (`multipart/form-data`: `purpose` ∈ `{"uf1_input"
 
 ## 15. W4-02 — Bộ bàn giao OpenAPI và JSON fixtures
 
-Nguồn runtime: `origin/backend@23e856b`; contract Auth do VQH chốt tại `ba16055` (mục 14.1). Mã và thời gian trong fixture là dữ liệu giả, không chứa token thật. `scope=runtime` mô tả code hiện tại; `target_be03` là yêu cầu đã chốt cho BE-03 nhưng chưa có đủ route trong runtime. Contract tests đối chiếu OpenAPI runtime và validate DTO/fixtures.
+Nguồn runtime: `backend` (đã tích hợp `23e856b`, `37c4491` và `BE-03`); contract Auth do VQH chốt tại `ba16055` (mục 14.1). Mã và thời gian trong fixture là dữ liệu giả, không chứa token thật. `scope=runtime` mô tả code hiện tại (đã bao gồm `BE-03`: refresh rotation/reuse detection và `POST /api/v1/auth/logout`). Contract tests đối chiếu OpenAPI runtime và validate DTO/fixtures.
 
-- [openapi.json](openapi.json): xuất trực tiếp `app.openapi()` của code đang tích hợp.
-- [openapi-auth-target.json](openapi-auth-target.json): OpenAPI riêng cho refresh rotation/logout Option 1 đã chốt, gắn `target_be03`. Dùng để mock Mobile trước khi BE-03 hoàn thành.
-- Năm bộ JSON dưới đây cũng có file riêng trong [fixtures/w4-02/](fixtures/w4-02/). `scope=runtime` là contract của code hiện tại; `target_be03` là đích BE-03 đã chốt; `google_upstream` là phản hồi từ Google tới worker.
+- [openapi.json](openapi.json): xuất trực tiếp `app.openapi()` của code đang tích hợp (đã có `POST /api/v1/auth/logout` và `LogoutData`).
+- [openapi-auth-target.json](openapi-auth-target.json): bản OpenAPI tham chiếu lịch sử cho Auth BE-03 Option 1 (gắn nhãn `target_be03`), giữ lại cho tương thích kiểm thử hợp đồng sau khi `BE-03` đã vào `openapi.json` runtime.
+- Năm bộ JSON dưới đây cũng có file riêng trong [fixtures/w4-02/](fixtures/w4-02/). `scope=runtime` là contract của code hiện tại; `google_upstream` là phản hồi từ Google tới worker.
 
-### Quy tắc client và các chỗ chưa khớp code
+### Quy tắc client và trạng thái đồng bộ code
 
-1. Auth: đọc `body.error.code`. `401 CALENDAR_AUTH_REQUIRED` chỉ yêu cầu nối lại Calendar. Logout target public nhận `refresh_token`, trả `logged_out=true` và `revoked=true/false` (retry idempotent); reuse refresh thu hồi family và trả `401 UNAUTHENTICATED` có `WWW-Authenticate: Bearer`. Migration refresh token đã có trên backend, route logout/service rotation chưa có; kiểm tra fixture target không đồng nghĩa BE-03 đã đạt.
+1. Auth: đọc `body.error.code`. `401 CALENDAR_AUTH_REQUIRED` chỉ yêu cầu nối lại Calendar. `BE-03` đã hoàn thành trong runtime: `POST /api/v1/auth/logout` (public theo `refresh_token`) trả `logged_out=true` và `revoked=true/false` (retry idempotent `200`), không cần header `Authorization` hay `Idempotency-Key`; `POST /api/v1/auth/refresh` xoay `jti` có lưu vết `refresh_tokens` và khi phát hiện reuse sẽ thu hồi toàn bộ family cùng `401 UNAUTHENTICATED` kèm header `WWW-Authenticate: Bearer`.
 2. Settings: gửi `effective_revision` vào `expected_preferences_revision`; suggestion dùng tên **số ít** `expected_preference_revision`. Hủy dùng `change_request_id` + `request_revision` từ response save. Sau reopen hoặc accept suggestion, response hiện chưa cung cấp đủ request revision để hủy: không tự lấy preference revision thay thế. `409` tải lại cấu hình. Chính sách client `buffer_multiplier ∈ [1.0, 2.0]`: runtime đã chặn cả dưới `1.0` và trên `2.0` (`422 VALIDATION_ERROR` ở `scope=runtime`).
 3. Calendar: runtime preview đã trả `preview_revision` (và `base_connection_revision`) trong response; client gửi lại giá trị này vào trường `expected_preview_revision` khi gọi `/confirm` (lệch revision trả `409 REVISION_CONFLICT` kèm `current_revisions.preview_revision`, thiếu trả `422`). JSON `412` là lỗi Google upstream; client đọc job `200` với `job_state=conflict`, `last_error_code=ETAG_CONFLICT_412`, không retry mù.
 4. Run: Start chống lặp bằng `Idempotency-Key` (body Start không có `event_id`); fixture ghi cả request gốc và retry cùng key, kèm receipt. End có cả key và `event_id`. Khi mất phản hồi, đối soát `/commands/{command_id}`/Run trước retry. Clock-skew Start được kiểm bằng giờ server, giới hạn `300s`; fixture vượt `301s` trả `422 VALIDATION_ERROR` trên `requested_start_at`. `offline_start_supported=false`. Thought giữ `source_run_id`, metadata audio không chứa transcript/path local; thử audio tối đa 3 lần. Chỉ sau phiên: `/voice/transcriptions` với `purpose=thought_to_draft`, rồi `/thoughts/{id}/draft`.
@@ -1501,7 +1501,7 @@ Chưa có xác nhận các thành viên đã nhận fixture; người thực hi�
     },
     {
       "name": "logout_first",
-      "scope": "target_be03",
+      "scope": "runtime",
       "method": "POST",
       "path": "/api/v1/auth/logout",
       "response": {
@@ -1523,7 +1523,7 @@ Chưa có xác nhận các thành viên đã nhận fixture; người thực hi�
     },
     {
       "name": "logout_retry",
-      "scope": "target_be03",
+      "scope": "runtime",
       "method": "POST",
       "path": "/api/v1/auth/logout",
       "response": {
@@ -1545,7 +1545,7 @@ Chưa có xác nhận các thành viên đã nhận fixture; người thực hi�
     },
     {
       "name": "refresh_reuse",
-      "scope": "target_be03",
+      "scope": "runtime",
       "method": "POST",
       "path": "/api/v1/auth/refresh",
       "response": {

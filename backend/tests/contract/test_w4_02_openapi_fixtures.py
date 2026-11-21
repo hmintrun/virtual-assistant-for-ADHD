@@ -8,7 +8,7 @@ from pydantic import ValidationError
 
 from app.main import app
 from app.schemas import calendar, common, execution
-from app.schemas.auth import RefreshTokenRequest, TokenBundle
+from app.schemas.auth import LogoutData, RefreshTokenRequest, TokenBundle
 from app.schemas.reschedule import ProposalData
 from app.schemas.schedule import UF5CheckInPromptData
 from app.schemas.settings import SettingsChangeRequest, UserPreference
@@ -24,7 +24,8 @@ def test_runtime_openapi_snapshot_matches_application():
     snapshot = json.loads((DOCS / "openapi.json").read_text(encoding="utf-8"))
     assert snapshot == app.openapi()
     assert "/api/v1/auth/refresh" in snapshot["paths"]
-    assert "/api/v1/auth/logout" not in snapshot["paths"]
+    assert "/api/v1/auth/logout" in snapshot["paths"]
+    assert not snapshot["paths"]["/api/v1/auth/logout"]["post"].get("security")
     assert "/api/v1/voice/transcriptions" in snapshot["paths"]
     assert "/api/v1/voice/tts" in snapshot["paths"]
     assert "/api/v1/voice/uf5-checkin-prompt" in snapshot["paths"]
@@ -74,6 +75,11 @@ def test_five_fixture_sets_validate_envelopes_and_dtos():
 
     TokenBundle.model_validate(CASES["refresh_success"]["response"]["body"]["data"])
     RefreshTokenRequest.model_validate(CASES["logout_first"]["request"])
+    LogoutData.model_validate(CASES["logout_first"]["response"]["body"]["data"])
+    LogoutData.model_validate(CASES["logout_retry"]["response"]["body"]["data"])
+    assert CASES["logout_first"]["scope"] == "runtime"
+    assert CASES["logout_retry"]["scope"] == "runtime"
+    assert CASES["refresh_reuse"]["scope"] == "runtime"
     UserPreference.model_validate(CASES["preferences_after_reject"]["response"]["body"]["data"])
     calendar.CalendarConfigurationPreviewResponse.model_validate(CASES["configuration_preview"]["response"]["body"]["data"])
     calendar.CalendarConfigurationPreviewResponse.model_validate(CASES["configuration_preview_dynamic_revision"]["response"]["body"]["data"])
