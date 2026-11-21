@@ -123,7 +123,7 @@ async def test_mw1_request_id_security_headers_cors_and_error_envelopes(auth_con
         headers = {
             "Authorization": f"Bearer {issue_app_access_token(uid).access_token}",
             "X-Request-ID": "mobile-trace_01.ok",
-            "Origin": "http://localhost:3000",
+            "Origin": "http://localhost:8080",
         }
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
             # 1. Non-auth route: RequestId, SecurityHeaders, CORS expose_headers, no cache-control: no-store
@@ -596,7 +596,7 @@ def _assert_security_and_cors_headers(resp, *, expect_no_store: bool) -> None:
     assert resp.headers["x-content-type-options"] == "nosniff"
     assert resp.headers["x-frame-options"] == "DENY"
     assert resp.headers["referrer-policy"] == "no-referrer"
-    assert resp.headers.get("access-control-allow-origin") in {"*", "http://localhost:3000"}
+    assert resp.headers.get("access-control-allow-origin") in {"*", "http://localhost:8080"}
     assert "x-request-id" in resp.headers.get("access-control-expose-headers", "").lower()
     if expect_no_store:
         assert resp.headers.get("cache-control") == "no-store"
@@ -613,7 +613,7 @@ async def test_mw_lifo_413_early_rejection_preserves_headers_cors_and_observatio
             content=oversized,
             headers={
                 "Content-Type": "application/json",
-                "Origin": "http://localhost:3000",
+                "Origin": "http://localhost:8080",
                 "X-Request-ID": "lifo-413-auth",
             },
         )
@@ -628,7 +628,7 @@ async def test_mw_lifo_413_early_rejection_preserves_headers_cors_and_observatio
             content=oversized,
             headers={
                 "Content-Type": "application/json",
-                "Origin": "http://localhost:3000",
+                "Origin": "http://localhost:8080",
                 "X-Request-ID": "lifo-413-nonauth",
             },
         )
@@ -736,7 +736,7 @@ async def test_mw2_real_app_voice_transcriptions_audio_vs_multipart_limits(auth_
         base_headers = {
             "Authorization": f"Bearer {token}",
             "Content-Type": f"multipart/form-data; boundary={boundary}",
-            "Origin": "http://localhost:3000",
+            "Origin": "http://localhost:8080",
         }
 
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
@@ -941,7 +941,7 @@ async def test_gap06_capabilities_and_security_cache_control_headers(auth_config
         state_token = parse_qs(urlparse(auth_url).query)["state"][0]
 
         token = issue_app_access_token(uid).access_token
-        auth_headers = {"Authorization": f"Bearer {token}", "Origin": "http://localhost:3000"}
+        auth_headers = {"Authorization": f"Bearer {token}", "Origin": "http://localhost:8080"}
 
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
             # GAP-06 dynamic capabilities update
@@ -953,7 +953,7 @@ async def test_gap06_capabilities_and_security_cache_control_headers(auth_config
 
             # Public health routes: no Cache-Control header
             for health_path in ("/api/v1/health", "/health"):
-                r_h = await client.get(health_path, headers={"Origin": "http://localhost:3000"})
+                r_h = await client.get(health_path, headers={"Origin": "http://localhost:8080"})
                 assert r_h.status_code == 200
                 _assert_security_and_cors_headers(r_h, expect_no_store=False)
 
@@ -965,7 +965,7 @@ async def test_gap06_capabilities_and_security_cache_control_headers(auth_config
             r_google = await client.post(
                 "/api/v1/auth/google",
                 json={},
-                headers={"Origin": "http://localhost:3000"},
+                headers={"Origin": "http://localhost:8080"},
             )
             assert r_google.status_code == 422
             _assert_security_and_cors_headers(r_google, expect_no_store=True)
@@ -973,7 +973,7 @@ async def test_gap06_capabilities_and_security_cache_control_headers(auth_config
             r_refresh = await client.post(
                 "/api/v1/auth/refresh",
                 json={"refresh_token": "bad"},
-                headers={"Origin": "http://localhost:3000"},
+                headers={"Origin": "http://localhost:8080"},
             )
             assert r_refresh.status_code == 401
             _assert_security_and_cors_headers(r_refresh, expect_no_store=True)
@@ -981,14 +981,14 @@ async def test_gap06_capabilities_and_security_cache_control_headers(auth_config
             # /api/v1/calendar/oauth/callback (both 401 error and 302 redirect) -> Cache-Control: no-store
             r_cb_err = await client.get(
                 "/api/v1/calendar/oauth/callback?code=c&state=missing",
-                headers={"Origin": "http://localhost:3000"},
+                headers={"Origin": "http://localhost:8080"},
             )
             assert r_cb_err.status_code == 401
             _assert_security_and_cors_headers(r_cb_err, expect_no_store=True)
 
             r_cb_redir = await client.get(
                 f"/api/v1/calendar/oauth/callback?state={state_token}&error=access_denied",
-                headers={"Origin": "http://localhost:3000"},
+                headers={"Origin": "http://localhost:8080"},
                 follow_redirects=False,
             )
             assert r_cb_redir.status_code == 302
@@ -1084,7 +1084,7 @@ async def test_mw4a_unhandled_500_preserves_security_cors_and_request_id_headers
                 "/api/v1/auth/google",
                 json={"id_token": "any"},
                 headers={
-                    "Origin": "http://localhost:3000",
+                    "Origin": "http://localhost:8080",
                     "X-Request-ID": "mw4a-500-trace",
                 },
             )
@@ -1124,7 +1124,7 @@ async def test_mw4a_unhandled_500_preserves_security_cors_and_request_id_headers
     async with AsyncClient(transport=ASGITransport(app=test_app), base_url="http://test") as client:
         r_non_auth = await client.get(
             "/api/v1/boom-non-auth",
-            headers={"Origin": "http://localhost:3000", "X-Request-ID": "mw4a-nonauth-500"},
+            headers={"Origin": "http://localhost:8080", "X-Request-ID": "mw4a-nonauth-500"},
         )
     assert r_non_auth.status_code == 500
     assert r_non_auth.headers["x-request-id"] == "mw4a-nonauth-500"
@@ -1366,7 +1366,7 @@ async def test_mw4b_500_non_auth_real_app_cors_preflight_and_snapshot_isolation(
                 pre = await client.options(
                     path,
                     headers={
-                        "Origin": "http://localhost:3000",
+                        "Origin": "http://localhost:8080",
                         "Access-Control-Request-Method": method,
                         "Access-Control-Request-Headers": "Authorization, Content-Type, X-Request-ID",
                     },
@@ -1374,7 +1374,7 @@ async def test_mw4b_500_non_auth_real_app_cors_preflight_and_snapshot_isolation(
                 assert pre.status_code == 200
                 assert pre.headers.get("access-control-allow-origin") in {
                     "*",
-                    "http://localhost:3000",
+                    "http://localhost:8080",
                 }
                 assert method in pre.headers.get("access-control-allow-methods", "")
 
@@ -1383,7 +1383,7 @@ async def test_mw4b_500_non_auth_real_app_cors_preflight_and_snapshot_isolation(
                 f"/api/v1/tasks/{uuid4()}",
                 headers={
                     "Authorization": f"Bearer {token}",
-                    "Origin": "http://localhost:3000",
+                    "Origin": "http://localhost:8080",
                     "X-Request-ID": "mw4b-nonauth-500",
                 },
             )

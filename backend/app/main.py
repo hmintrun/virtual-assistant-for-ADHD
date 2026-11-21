@@ -69,7 +69,7 @@ app.add_middleware(RequestIdMiddleware)
 app.add_middleware(SecurityHeadersMiddleware)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=settings.browser_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from typing import Annotated
-from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
+from urllib.parse import parse_qsl, urlencode, urlparse, urlsplit, urlunparse
 from uuid import UUID
 
 from fastapi import APIRouter, Query, status
@@ -24,6 +24,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
 from app.api.deps import CurrentUserDep, DbSessionDep
+from app.core.config import settings
 from app.core.errors import AppError
 from app.models.calendar import CalendarConnection, CalendarPreview, CalendarSyncJob
 from app.schemas.calendar import (
@@ -158,6 +159,26 @@ async def get_authorization_url(
     return SuccessEnvelope(data=OAuthAuthUrlResponse(auth_url=auth_url), meta=build_response_meta())
 
 
+MOBILE_RETURN_TARGET = "proplan://calendar/connected"
+
+
+def _allowed_return_target(target: str | None) -> str | None:
+    """Chỉ nhận deep link của app hoặc route Calendar trên origin Web đã cấu hình."""
+    if not target or any(ord(char) <= 32 or ord(char) == 127 or char == "\\" for char in target):
+        return None
+    try:
+        parsed = urlsplit(target)
+    except ValueError:
+        return None
+    base = parsed._replace(query="", fragment="").geturl()
+    if base == MOBILE_RETURN_TARGET:
+        return target
+    web_target = parsed.geturl()
+    if any(web_target == f"{origin}/#/google-calendar" for origin in settings.browser_origins):
+        return target
+    return None
+
+
 def _append_query_params(url: str, params: dict[str, str | None]) -> str:
     """Nối các tham số query vào deep-link/redirect URL mà vẫn giữ nguyên query cũ."""
     parsed = urlparse(url)
@@ -187,7 +208,7 @@ async def oauth_callback(
             return_target = await service.handle_oauth_error(state=state)
         except CalendarAuthError as exc:
             raise _calendar_auth_error(exc) from exc
-        base_target = return_target or "proplan://calendar/connected"
+        base_target = _allowed_return_target(return_target) or MOBILE_RETURN_TARGET
         target_url = _append_query_params(
             base_target,
             {"error": error or "missing_code", "error_description": error_description},
@@ -205,7 +226,10 @@ async def oauth_callback(
     except CalendarClientError as exc:
         raise _calendar_client_error(exc) from exc
 
-    target_url = return_target or f"proplan://calendar/connected?connection_id={conn.id}"
+    # Các yêu cầu OAuth đã lưu trước khi triển khai vẫn phải qua allowlist.
+    target_url = _allowed_return_target(return_target) or _append_query_params(
+        MOBILE_RETURN_TARGET, {"connection_id": str(conn.id)}
+    )
     return RedirectResponse(url=target_url, status_code=302)
 
 
