@@ -627,6 +627,7 @@ async def test_device_migration_preserves_populated_database(sqlite_migration):
         AssertionError, match="C01 downgrade requires an explicit snapshot/data recovery plan"
     ):
         alembic("downgrade", "base")
+    alembic("upgrade", "head")
     reopened = make_engine(url)
     try:
         await assert_migrated_schema(reopened)
@@ -669,6 +670,7 @@ async def test_merge_preserves_existing_device_branch(sqlite_migration):
         AssertionError, match="C01 downgrade requires an explicit snapshot/data recovery plan"
     ):
         alembic("downgrade", "base")
+    alembic("upgrade", "head")
     reopened = make_engine(url)
     try:
         await assert_migrated_schema(reopened)

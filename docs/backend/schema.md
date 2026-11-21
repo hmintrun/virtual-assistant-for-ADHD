@@ -989,6 +989,14 @@ Bảng này là chỉ mục, không thay request validation. Các trường dư�
 | 62 | GET `/api/v1/planning-contexts/{context_id}` | path: context_id; body: null |
 | 63 | GET `/api/v1/commands/{command_id}` | path: command_id; body: null |
 | 64 | GET `/api/v1/runs/{run_id}/upcoming-schedule-context` | path: run_id; query: from, to, cursor, limit; body: null |
+| Bổ sung (O00) | POST `/api/v1/auth/google` | body: id_token (public; trả `GoogleLoginData` gồm `access_token`, `refresh_token`, `user`) |
+| Bổ sung (O00) | POST `/api/v1/auth/refresh` | body: refresh_token (public; trả `TokenBundle`; `[Target BE-03]` rotate `jti` + chặn reuse) |
+| Bổ sung (BE-03 Target) | POST `/api/v1/auth/logout` | body: refresh_token (**Option 1 đã chốt — chưa code**: public theo `refresh_token`, revoke `jti` idempotent) |
+| Bổ sung (O00) | GET `/api/v1/auth/me` | body: null (yêu cầu `AppBearer`; trả `CurrentUser`) |
+| Bổ sung (UF1) | DELETE `/api/v1/drafts/{draft_id}` | path: draft_id; body: null (xóa Draft chưa confirm; đã có Task/confirmed trả `409 INVALID_STATE_TRANSITION`) |
+| Bổ sung (Voice TTS) | POST `/api/v1/voice/tts` | body: text, voice (tổng hợp Edge-TTS trả `TtsSynthesisData`; lỗi trả `422`/`503`/`504` + `next_action="use_on_device_tts"`) |
+| Bổ sung (UF5 Voice) | POST `/api/v1/voice/uf5-checkin-prompt` | body: kind, is_final_session_of_step, expected_output, session_outcome, include_audio, voice (luôn `200`, soft-fallback `fallback_to_device_tts`) |
+| Bổ sung (System) | GET `/api/v1/health` | body: null (public; alias `GET /health` ẩn schema; trả `{"status":"ok","database":"ok"}` hoặc `503 DATABASE_UNAVAILABLE`) |
 
 ## 6. Quy tắc nghiệp vụ tác động đến schema
 
@@ -1033,9 +1041,9 @@ Auth contract triển khai: [AUTH_GUIDE.md](AUTH_GUIDE.md). PR17 bàn giao Backe
 | is_active | DB false →403 ACCOUNT_DISABLED; User đã xóa →401 |
 | preferences | tạo đúng một UserPreference theo defaults khi tạo User; không reset khi login lại |
 
-Login200 dùng SuccessEnvelope[GoogleLoginData]: access_token, token_type=bearer, expires_in=3600, user=CurrentUser. Me200 dùng SuccessEnvelope[CurrentUser]. Request GoogleLoginRequest chỉ id_token, extra=forbid, không blank/padded, dài1–16384. Login không cần Idempotency-Key hoặc app Bearer. Chi tiết JSON/lỗi/next_action ở Auth guide và Sheet `api!A65:J66`; không renumber routes cũ.
+Login200 dùng SuccessEnvelope[GoogleLoginData]: access_token, token_type=bearer, expires_in=3600, refresh_token, refresh_expires_in=2592000, user=CurrentUser. Me200 dùng SuccessEnvelope[CurrentUser]. Request GoogleLoginRequest chỉ id_token, extra=forbid, không blank/padded, dài 1–16384. Login không cần Idempotency-Key hoặc app Bearer. Chi tiết JSON/lỗi/next_action ở mục 14 và Sheet `api!A65:J66`; không renumber routes cũ.
 
-JWT app HS256 allowlist, JWT_SECRET_KEY riêng khỏi SECRET_KEY Calendar; required sub(UUID), exp/iat(integer), iss/aud chính xác, token_type=access. TTL3600s, skew mặc định0 (0–60). Chưa app refresh token/revoke: re-exchange Google ID token; logout local không vô hiệu JWT trước exp. Startup staging/production cấm dev_user; seed/create_all chỉ development/testing và AUTH_MODE=dev_user. Không thêm schema migration vì unique google_sub/email/preferences đã có.
+JWT app HS256 allowlist, JWT_SECRET_KEY riêng khỏi SECRET_KEY Calendar; required sub(UUID), exp/iat(integer), iss/aud chính xác, token_type (`access` | `refresh`). Access TTL 3600s, Refresh TTL 2592000s (kèm `jti` UUIDv4), skew mặc định 0 (0–60). Code hiện tại đã có `POST /api/v1/auth/refresh` (stateless); contract `POST /api/v1/auth/logout` (Option 1 — body `refresh_token`) và refresh token rotation (`jti` revocation) là target `BE-03` được chốt ở mục 14. Startup staging/production cấm dev_user; seed/create_all chỉ development/testing và AUTH_MODE=dev_user. Không tự thêm migration nếu chưa qua kế hoạch DB (`tn`).
 
 Auth errors:422 VALIDATION_ERROR/fix_fields;401 INVALID_GOOGLE_ID_TOKEN hoặc UNAUTHENTICATED/authenticate;403 ACCOUNT_DISABLED/contact_support;409 ACCOUNT_LINK_CONFLICT/review_account_link;422 GOOGLE_PROFILE_INCOMPLETE/review_google_profile;503 AUTH_PROVIDER_UNAVAILABLE/retry_login (retryable=true). Các lỗi khác retryable=false. ErrorEnvelope giữ field_errors/current_revisions/meta; mọi Auth401 có WWW-Authenticate: Bearer. Đây là contract delta, không phải tuyên bố Google thật/Tester598cases đã đạt.
 
@@ -1111,3 +1119,269 @@ Bản nền phục vụ bắt đầu phát triển, chưa phải nghiệm thu gi
   - `POST /api/v1/settings/change-requests/{change_request_id}/cancel` (Dòng 42) trả `CancelSettingsChangeResult`, hủy đồng bộ proposal chờ tương ứng mà không làm mất hiệu lực cấu hình hiện hành.
   - `GET /api/v1/suggestions/current` trả `AdaptationSuggestionData | null`; `POST /api/v1/suggestions/{suggestion_id}/response` trả `SuggestionResponseResult` (không tự áp buffer khi chưa được user `accept`/`edit` và tạo pending change request/proposal nếu ảnh hưởng lịch tương lai).
 - **OpenAPI / Swagger UI:** Bổ sung `summary` và `responses` (`ErrorEnvelope` cho `401`/`404`/`409`/`422`/`503`) trên các route UF5 CheckIn (`checkin.py`), UF6 Proposals (`reschedule.py`), Row 64 (`focus.py`) và UF7 Settings/Suggestions (`settings.py`).
+
+## 14. Đồng bộ Contract Bổ sung cho W4-02 (Auth Refresh/Logout Option 1, Voice TTS/UF5 Prompt, Delete Draft & Health) — 18/11/2026
+
+Mục này bổ sung đầy đủ contract các endpoint đã có trong code (`backend/app/api/v1/*.py`) nhưng chưa có trong `schema.md`, đồng thời chốt thiết kế target cho `BE-03` (`POST /api/v1/auth/logout` — **Phương án 1**) để đồng bộ OpenAPI, bộ fixture JSON và contract tests (`W4-02`).
+
+> **Phân biệt trạng thái triển khai:** Các mục gắn `[Đã có trong code]` đang chạy trên router/schema hiện tại; các mục gắn `[Target BE-03 — Option 1 đã chốt]` là đặc tả mục tiêu đã thống nhất, **chưa triển khai trong router Python/ORM** cho tới khi hoàn tất migration `jti` (`tn`) và service `BE-03`.
+
+### 14.1. Nhóm Authentication (`/api/v1/auth/*`)
+
+#### Tổng quan DTO dùng chung (`backend/app/schemas/auth.py` — `[Đã có trong code]`)
+
+| Schema | Trường & ràng buộc | Ghi chú |
+| --- | --- | --- |
+| `GoogleLoginRequest` | `id_token: string` (`min=1`, `max=16384`, `extra=forbid`, không blank/padded) | Dùng cho `POST /api/v1/auth/google`. |
+| `RefreshTokenRequest` | `refresh_token: string` (`min=1`, `max=16384`, `extra=forbid`, không blank/padded) | Dùng cho `POST /api/v1/auth/refresh` (và làm cấu trúc body chuẩn cho `POST /api/v1/auth/logout` theo Option 1). |
+| `TokenBundle` | `access_token: string`, `token_type: "bearer"`, `expires_in: integer` (default `3600`, range `60..86400`), `refresh_token: string \| null` (default `null`), `refresh_expires_in: integer \| null` (default `null`, mặc định cấp `2592000` = 30 ngày, range `300..7776000`) | Khi `issue_app_access_token()` cấp token mới, cả `refresh_token` (JWT HS256 có `token_type="refresh"` và `jti: UUIDv4`) và `refresh_expires_in` đều được gán giá trị. |
+| `GoogleLoginData` | Kế thừa toàn bộ `TokenBundle` + `user: CurrentUser` | `CurrentUser`: `user_id: string`, `email: string \| null`, `display_name: string \| null`, `is_active: bool` (default `true`). |
+| `LogoutData` *(Target BE-03)* | `logged_out: boolean` (`true`), `revoked: boolean` | `revoked=true` ở lần thu hồi đầu tiên; `revoked=false` khi `jti` đã revoked trước đó (idempotent `200`). |
+
+#### a) `POST /api/v1/auth/google` `[Đã có trong code]`
+
+- **Auth:** Public (không yêu cầu `AppBearer`, không cần `Idempotency-Key`).
+- **Request JSON:** `{"id_token": "<google_id_token>"}` (`GoogleLoginRequest`).
+- **Response `200 OK`:** `SuccessEnvelope[GoogleLoginData]`.
+- **Errors (`Auth`):** `401 INVALID_GOOGLE_ID_TOKEN` / `UNAUTHENTICATED` (`next_action="authenticate"`, `retryable=false`), `403 ACCOUNT_DISABLED` (`next_action="contact_support"`, `retryable=false`), `409 ACCOUNT_LINK_CONFLICT` (`next_action="review_account_link"`, `retryable=false`), `422 VALIDATION_ERROR` (`fix_fields`) / `GOOGLE_PROFILE_INCOMPLETE` (`review_google_profile`), `503 AUTH_PROVIDER_UNAVAILABLE` (`next_action="retry_login"`, `retryable=true`).
+
+#### b) `POST /api/v1/auth/refresh` `[Đã có trong code — mở rộng stateful rotation ở BE-03]`
+
+- **Auth:** Public (xác thực trực tiếp bằng `refresh_token` HS256 trong body, không yêu cầu `access_token` còn hạn).
+- **Request JSON (`RefreshTokenRequest`):**
+  ```json
+  {
+    "refresh_token": "<app_refresh_jwt>"
+  }
+  ```
+- **Response `200 OK` (`SuccessEnvelope[TokenBundle]`):**
+  ```json
+  {
+    "data": {
+      "access_token": "<new_app_access_jwt>",
+      "token_type": "bearer",
+      "expires_in": 3600,
+      "refresh_token": "<new_app_refresh_jwt>",
+      "refresh_expires_in": 2592000
+    },
+    "meta": {
+      "request_id": "req_01J...",
+      "server_time": "2026-11-18T10:00:00Z"
+    }
+  }
+  ```
+- **Hành vi hiện tại trong code (`auth_service.refresh_app_tokens`):** Giải mã & kiểm tra `token_type="refresh"`, bắt buộc có `sub` (UUID) và `jti` (string non-blank), kiểm tra `User.is_active` qua `load_current_user`, sau đó cấp `TokenBundle` mới. Chưa lưu/check bảng `jti` trong DB.
+- **Quy tắc Target `BE-03` (Refresh Token Rotation & Reuse Detection):**
+  - Mỗi lần `/auth/refresh` thành công phải đánh dấu `jti` cũ đã rotated/revoked và lưu `jti` mới gắn cùng `user_id` (+ `family_id` / `replaced_by_jti`).
+  - Nếu client gửi lại `refresh_token` có `jti` đã bị thu hồi hoặc đã xoay (`revoked`/`rotated` reuse), server **bắt buộc thu hồi toàn bộ chuỗi token còn hiệu lực của phiên/family đó** và trả **`401 UNAUTHENTICATED`** (`next_action="authenticate"`, `retryable=false`, header `WWW-Authenticate: Bearer`).
+- **Errors:** `401 UNAUTHENTICATED` (`authenticate`, `retryable=false`, có header `WWW-Authenticate: Bearer`), `403 ACCOUNT_DISABLED` (`contact_support`, `retryable=false`), `422 VALIDATION_ERROR` (`fix_fields`, `retryable=false`), `503 AUTH_PROVIDER_UNAVAILABLE` (`retry_login`, `retryable=true`).
+
+#### c) `POST /api/v1/auth/logout` `[Target BE-03 — Phương án 1 đã chốt, chưa code]`
+
+- **Quyết định thiết kế (Option 1):** Endpoint Public xác thực **bằng chính `refresh_token` trong JSON body** (giống `/api/v1/auth/refresh`), **KHÔNG** yêu cầu header `Authorization: Bearer <access_token>` còn hạn, giúp Mobile đăng xuất sạch cả khi `access_token` vừa hết hạn hoặc đang offline-recover. Không yêu cầu header `Idempotency-Key`.
+- **Request JSON (`LogoutRequest` / `RefreshTokenRequest`, `extra="forbid"`):**
+  ```json
+  {
+    "refresh_token": "<app_refresh_jwt>"
+  }
+  ```
+- **Response `200 OK` (`SuccessEnvelope[LogoutData]`):**
+  - Lần đầu thu hồi `jti` đang còn hiệu lực:
+    ```json
+    {
+      "data": {
+        "logged_out": true,
+        "revoked": true
+      },
+      "meta": {
+        "request_id": "req_01J...",
+        "server_time": "2026-11-18T10:01:00Z"
+      }
+    }
+    ```
+  - Lần gọi lại với cùng `refresh_token` (tình huống retry mạng / `jti` đã thu hồi trước đó): vẫn trả **`200 OK`** idempotent với `{"logged_out": true, "revoked": false}`.
+  - Sau khi logout, dùng lại `refresh_token` đó ở `/auth/refresh` phải bị từ chối `401 UNAUTHENTICATED`.
+- **Errors:**
+  - `401 UNAUTHENTICATED` (`next_action="authenticate"`, `retryable=false`, header `WWW-Authenticate: Bearer`): sai chữ ký/hết hạn JWT refresh, thiếu/rỗng `jti`, sai `token_type != "refresh"`, hoặc `user` không tồn tại.
+  - `403 ACCOUNT_DISABLED` (`next_action="contact_support"`, `retryable=false`): user sở hữu token đã bị vô hiệu hóa (`is_active=false`).
+  - `422 VALIDATION_ERROR` (`next_action="fix_fields"`, `retryable=false`): thiếu `refresh_token`, blank/padded, vượt `16384` ký tự hoặc có field thừa (`extra="forbid"`).
+  - `503 AUTH_PROVIDER_UNAVAILABLE` (`next_action="retry_login"`, `retryable=true`): thiếu cấu hình JWT signing (`validate_auth_configuration` / `validate_app_signing_configuration` lỗi).
+
+#### d) `GET /api/v1/auth/me` `[Đã có trong code]`
+
+- **Auth:** Bắt buộc `AppBearer` (trong dev/testing khi `AUTH_MODE=dev_user` và thiếu header `Authorization` sẽ fallback sang `SEED_USER_A`).
+- **Response `200 OK` (`SuccessEnvelope[CurrentUser]`):** `{"user_id": "...", "email": "...", "display_name": "...", "is_active": true}`.
+- **Errors:** `401 UNAUTHENTICATED` (header `WWW-Authenticate: Bearer`), `403 ACCOUNT_DISABLED`, `503 AUTH_PROVIDER_UNAVAILABLE`.
+
+---
+
+### 14.2. Nhóm Giọng nói STT Error Map & TTS (`/api/v1/voice/*`) `[Đã có trong code]`
+
+#### a) Bổ sung bảng lỗi `POST /api/v1/voice/transcriptions` (STT)
+
+Endpoint Dòng 8 trong Sheet (`multipart/form-data`: `purpose` ∈ `{"uf1_input", "thought_to_draft", "uf5_checkin"}`, `device_id`, `file`, `thought_id` bắt buộc khi `purpose="thought_to_draft"`; header `Idempotency-Key`) trả về `200 SuccessEnvelope[TranscriptionData]` (`text`, `input_source: "voice" | "thought"`, `thought_id: string | null`). Các mã lỗi ánh xạ từ `_STT_ERROR_MAP` (`backend/app/api/v1/voice.py`):
+
+| HTTP | `error.code` | `retryable` | `error.next_action` | Điều kiện |
+| --- | --- | --- | --- | --- |
+| `422` | `VALIDATION_ERROR` | `false` | `fix_fields` | Thiếu `thought_id` khi `purpose="thought_to_draft"`, hoặc file âm thanh rỗng (`field_path="thought_id"` / `"file"`). |
+| `422` | `NO_SPEECH_DETECTED` | `false` | `record_again_or_type` | Audio không có tiếng nói / provider trả chuỗi rỗng. |
+| `422` | `UNSUPPORTED_AUDIO` | `false` | `record_again_or_type` | Định dạng audio không hỗ trợ hoặc file hỏng. |
+| `413` | `AUDIO_TOO_LARGE` | `false` | `record_again_or_type` | Kích thước file vượt `VOICE_MAX_AUDIO_BYTES` (mặc định `10 MiB`). |
+| `404` | `RESOURCE_NOT_FOUND` | `false` | `reload` | Không tìm thấy `thought_id` hoặc phiên nguồn `source_run_id`. |
+| `409` | `SESSION_STILL_RUNNING` | `false` | `wait_for_session_end` | Chặn chuyển chữ UF4→UF1 khi Run nguồn (`ended_at=null`) chưa kết thúc. |
+| `409` | `IDEMPOTENCY_KEY_REUSED` | `false` | `use_original_payload_or_new_command` | Trùng `Idempotency-Key` với nội dung audio/metadata khác. |
+| `503` | `STT_UNAVAILABLE` | `false` | `use_on_device_stt_or_type` | Provider STT chưa cấu hình key hoặc bị từ chối quyền. |
+| `503` | `STT_RATE_LIMITED` | `true` | `use_on_device_stt_or_type` | Provider STT bị HTTP 429. |
+| `503` | `STT_PROVIDER_ERROR` | `true` | `use_on_device_stt_or_type` | Lỗi mạng / 5xx từ Groq Whisper. |
+| `504` | `STT_TIMEOUT` | `true` | `use_on_device_stt_or_type` | Quá thời gian chờ STT. |
+
+#### b) `POST /api/v1/voice/tts` `[Đã có trong code]`
+
+- **Mục đích:** Tổng hợp giọng nói tiếng Việt qua Edge-TTS (server-side) trả về Base64 audio. Khi lỗi, trả mã lỗi chuẩn hướng dẫn Mobile chuyển về `flutter_tts` trên thiết bị (`use_on_device_tts`).
+- **Auth:** Bắt buộc `AppBearer`. Không dùng `Idempotency-Key`.
+- **Request JSON (`TtsSynthesizeRequest`, `extra="forbid"`):**
+  ```json
+  {
+    "text": "Đã đến giờ bắt đầu phiên tập trung 25 phút rồi nhé.",
+    "voice": "vi-VN-HoaiMyNeural"
+  }
+  ```
+  - `text`: `string`, bắt buộc (`min_length=1`, `max_length=2000`; trong service cũng kiểm giới hạn `VOICE_TTS_MAX_CHARS`, mặc định `600`, vượt ngưỡng sẽ raise `TtsErrorCode.TEXT_TOO_LONG`).
+  - `voice`: `string | null` (`min_length=1`, `max_length=80`), mặc định `null` (server dùng `VOICE_TTS_DEFAULT_VOICE = "vi-VN-HoaiMyNeural"`).
+- **Response `200 OK` (`SuccessEnvelope[TtsSynthesisData]`):**
+  ```json
+  {
+    "data": {
+      "audio_base64": "SUQzBAAAAAA...",
+      "mime_type": "audio/mpeg",
+      "provider": "edge_tts",
+      "voice": "vi-VN-HoaiMyNeural",
+      "cached": false,
+      "duration_ms": 420
+    },
+    "meta": {
+      "request_id": "req_01J...",
+      "server_time": "2026-11-18T10:02:00Z"
+    }
+  }
+  ```
+- **Bảng lỗi `_TTS_ERROR_MAP` (tất cả lỗi TTS đều có `next_action = "use_on_device_tts"`):**
+
+| HTTP | `error.code` | `retryable` | `error.next_action` | Nguyên nhân |
+| --- | --- | --- | --- | --- |
+| `401` | `UNAUTHENTICATED` | `false` | `authenticate` | Thiếu hoặc sai `AppBearer` JWT. |
+| `422` | `VALIDATION_ERROR` | `false` | `fix_fields` | Sai schema Pydantic (ví dụ `text` rỗng, >2000 ký tự, hoặc field lạ `extra="forbid"`). |
+| `422` | `TTS_INVALID_INPUT` | `false` | `use_on_device_tts` | `text` toàn khoảng trắng sau `strip()`. |
+| `422` | `TTS_TEXT_TOO_LONG` | `false` | `use_on_device_tts` | `text` vượt giới hạn `VOICE_TTS_MAX_CHARS` (mặc định `600`). |
+| `503` | `TTS_EMPTY_AUDIO` | `false` | `use_on_device_tts` | Provider trả buffer âm thanh rỗng. |
+| `503` | `TTS_UNAVAILABLE` | `true` | `use_on_device_tts` | Edge-TTS không khả dụng / thiếu dependency/môi trường. |
+| `503` | `TTS_PROVIDER_ERROR` | `true` | `use_on_device_tts` | Lỗi kết nối / runtime từ Edge-TTS. |
+| `504` | `TTS_TIMEOUT` | `true` | `use_on_device_tts` | Hết thời gian chờ Edge-TTS (`VOICE_TTS_TIMEOUT_SECONDS = 10.0s`). |
+
+#### c) `POST /api/v1/voice/uf5-checkin-prompt` `[Đã có trong code]`
+
+- **Mục đích:** Sinh câu hỏi Voice Check-in 2 chiều không phán xét cho UF5 (tách biệt xác nhận kết quả Phiên vs kết quả Bước), trả kèm **3 chip Bỏ qua + Undo 5 giây** (W3C COGA) và audio TTS tùy chọn với cơ chế **soft-fallback** (không ném `503`/`504` ra HTTP nếu TTS lỗi).
+- **Auth:** Bắt buộc `AppBearer`. Không dùng `Idempotency-Key`.
+- **Request JSON (`UF5VoiceCheckInPromptRequest`, `extra="forbid"`):**
+  ```json
+  {
+    "kind": "final",
+    "is_final_session_of_step": true,
+    "expected_output": "Hoàn thành dàn ý chương 1",
+    "session_outcome": "completed",
+    "include_audio": true,
+    "voice": "vi-VN-HoaiMyNeural"
+  }
+  ```
+  - Defaults: `kind="final"` (`"mid" | "final"`), `is_final_session_of_step=false`, `expected_output=null` (`max=500`), `session_outcome=null` (`max=64`), `include_audio=true`, `voice=null` (`1..80`).
+- **Response `200 OK` (Thành công cả TTS):** `SuccessEnvelope[UF5VoiceCheckInPromptResponse]`:
+  - `prompt: UF5CheckInPromptData`:
+    - `kind`: `"mid" | "final"`
+    - `prompt_text`: `string` (`asks_step_completion=true` khi `kind=="final"` & `is_final_session_of_step==true` & `session_outcome` ∈ `{null, "completed", "partial"}`)
+    - `asks_step_completion`: `boolean`
+    - `skip_chips`: luôn đúng 3 phần tử `UF5SkipChipSchema` (`skip_scope`: `"postpone_session"` | `"skip_session"` | `"skip_step"`, `label`, `description`)
+    - `undo_notice`: `string`
+    - `undo_timeout_seconds`: `integer` (mặc định `5`, `>= 1`)
+  - `audio_base64: string | null`
+  - `audio_mime_type: string | null`
+  - `tts_provider: string | null`
+  - `fallback_to_device_tts: boolean` (`false` khi sinh được audio hoặc khi client đặt `include_audio=false`)
+- **Response `200 OK` (Soft-fallback khi Edge-TTS lỗi / `TtsError`):** Vẫn trả HTTP **`200 OK`** với `prompt` đầy đủ, đồng thời:
+  ```json
+  {
+    "data": {
+      "prompt": {
+        "kind": "final",
+        "prompt_text": "Bạn đã xong phiên cuối của bước này. Sau khi xác nhận kết quả phiên, bạn kiểm tra riêng giúp mình xem đầu ra của bước ('Hoàn thành dàn ý chương 1') đã hoàn thành chưa nhé?",
+        "asks_step_completion": true,
+        "skip_chips": [
+          {
+            "skip_scope": "postpone_session",
+            "label": "Hoãn phiên này làm sau",
+            "description": "Giữ nguyên bước hiện tại và chuyển phiên này sang khung giờ rảnh khác qua UF6."
+          },
+          {
+            "skip_scope": "skip_session",
+            "label": "Bỏ qua phiên này",
+            "description": "Bỏ qua riêng phiên hiện tại mà không tự động bỏ các phiên hay bước khác."
+          },
+          {
+            "skip_scope": "skip_step",
+            "label": "Bỏ toàn bộ bước này",
+            "description": "Bỏ phần còn lại của bước hiện tại và chuyển qua UF6 để cập nhật lịch tương lai."
+          }
+        ],
+        "undo_notice": "Đã ghi nhận thao tác bỏ qua. Bạn có thể bấm Hoàn tác trong 5 giây nếu muốn đổi ý.",
+        "undo_timeout_seconds": 5
+      },
+      "audio_base64": null,
+      "audio_mime_type": null,
+      "tts_provider": null,
+      "fallback_to_device_tts": true
+    },
+    "meta": {
+      "request_id": "req_01J...",
+      "server_time": "2026-11-18T10:03:00Z"
+    }
+  }
+  ```
+- **Errors:** Chỉ trả `401 UNAUTHENTICATED` hoặc `422 VALIDATION_ERROR` (sai `kind`, vượt độ dài `expected_output`/`session_outcome`/`voice`, hoặc field lạ).
+
+---
+
+### 14.3. Xóa Bản nháp UF1 & Health Check `[Đã có trong code]`
+
+#### a) `DELETE /api/v1/drafts/{draft_id}` `[Đã có trong code]`
+
+- **Auth:** Bắt buộc `AppBearer`. Path param `draft_id: string` (`min_length=1`). Không yêu cầu `expected_summary_revision` hay `Idempotency-Key`.
+- **Hành vi:** Chỉ xóa vĩnh viễn bản nháp UF1 thuộc owner chưa chốt thành công việc chính thức (xóa kèm `PlanningContext` và `PlanCandidate` liên kết với Draft đó).
+- **Response `200 OK` (`SuccessEnvelope`):**
+  ```json
+  {
+    "data": {
+      "draft_id": "draft_1",
+      "deleted": true
+    },
+    "meta": {
+      "request_id": "req_01J...",
+      "server_time": "2026-11-18T10:04:00Z"
+    }
+  }
+  ```
+- **Errors:**
+  - `401 UNAUTHENTICATED` (`authenticate`)
+  - `404 RESOURCE_NOT_FOUND` (`reload`): không tìm thấy `draft_id` thuộc user hiện tại.
+  - `409 INVALID_STATE_TRANSITION` (`reload_and_review`): bản nháp đã ở `stage="confirmed"`, có `confirmed_task_id`, hoặc đã tồn tại `Task` tham chiếu `source_draft_id`.
+  - `422 VALIDATION_ERROR` (`fix_fields`)
+
+#### b) `GET /api/v1/health` (và alias `GET /health` ẩn khỏi OpenAPI) `[Đã có trong code]`
+
+- **Auth:** Public (không yêu cầu `AppBearer`).
+- **Response `200 OK`:** Trả object JSON phẳng (không bọc `SuccessEnvelope`):
+  ```json
+  {
+    "status": "ok",
+    "database": "ok"
+  }
+  ```
+- **Errors:** `503 DATABASE_UNAVAILABLE` (`retryable=true`, `next_action="retry_later"`, trả theo chuẩn `ErrorEnvelope`) khi truy vấn kiểm tra `SELECT 1` xuống DB thất bại.

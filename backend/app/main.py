@@ -5,13 +5,21 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import PlainTextResponse
 
 from app.api.deps import DbSessionDep
 from app.api.v1.router import api_router
-from app.api.v1.system import health_check
+from app.api.v1.system import health_check, metrics_endpoint
 from app.core.config import settings
 from app.core.database import get_engine, session_factory
 from app.core.errors import register_exception_handlers
+from app.core.middleware import (
+    BodySizeLimitMiddleware,
+    ObservabilityMiddleware,
+    RequestIdMiddleware,
+    SecurityHeadersMiddleware,
+    install_access_log_redaction_filter,
+)
 from app.core.security import validate_auth_configuration
 from app.services.calendar_sync_worker import process_calendar_sync_jobs
 
@@ -49,14 +57,21 @@ async def lifespan(app: FastAPI):
                 pass
 
 
+install_access_log_redaction_filter()
+
 app = FastAPI(title=settings.PROJECT_NAME, lifespan=lifespan)
 
+app.add_middleware(BodySizeLimitMiddleware)
+app.add_middleware(ObservabilityMiddleware)
+app.add_middleware(RequestIdMiddleware)
+app.add_middleware(SecurityHeadersMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["X-Request-ID"],
 )
 
 register_exception_handlers(app)
@@ -66,3 +81,8 @@ app.include_router(api_router)
 @app.get("/health", include_in_schema=False)
 async def root_health_check(db: DbSessionDep) -> dict[str, str]:
     return await health_check(db=db)
+
+
+@app.get("/metrics", include_in_schema=False, response_class=PlainTextResponse)
+async def root_metrics(db: DbSessionDep) -> PlainTextResponse:
+    return await metrics_endpoint(db=db)

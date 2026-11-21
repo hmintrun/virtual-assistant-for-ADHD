@@ -17,7 +17,7 @@ from datetime import UTC, date, datetime, time, timedelta
 from typing import Any, Literal, cast
 from uuid import UUID, uuid4
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import AppError
@@ -687,24 +687,39 @@ def _compute_max_extension_without_borrow(
     else:
         # Tính latest_start của phiên movable đầu tiên trước rào chắn cố định gần nhất
         first_sess = movable_sessions[0]
-        if earliest_locked is not None and earliest_locked > first_sess.scheduled_start:
+        if earliest_locked is not None and earliest_locked <= first_sess.scheduled_start:
+            avail_secs = int((earliest_locked - continuation_start).total_seconds())
+            max_ext = max(0, min(3600, avail_secs - STANDARD_INTER_SESSION_GAP_SECONDS))
+        elif earliest_locked is not None and earliest_locked > first_sess.scheduled_start:
             # Các phiên movable nằm trước earliest_locked
             squeezed = [
                 s for s in movable_sessions if s.scheduled_start < earliest_locked
             ]
             total_squeezed_dur = sum(s.duration_seconds for s in squeezed)
-            inter_gaps = max(0, len(squeezed) - 1) * STANDARD_INTER_SESSION_GAP_SECONDS
-            first_latest_start = earliest_locked - timedelta(seconds=total_squeezed_dur + inter_gaps)
+            required_gaps = max(0, len(squeezed) - 1) * STANDARD_INTER_SESSION_GAP_SECONDS
+            first_latest_start = min(
+                first_sess.scheduled_start + timedelta(seconds=3600),
+                earliest_locked - timedelta(seconds=total_squeezed_dur + required_gaps),
+            )
+            avail_before_first = int((first_latest_start - continuation_start).total_seconds())
+            max_ext = max(0, min(3600, avail_before_first - STANDARD_INTER_SESSION_GAP_SECONDS))
         else:
             # Nếu không bị chặn bởi sự kiện cố định gần đó, cho phép dịch tối đa 60 phút
             first_latest_start = first_sess.scheduled_start + timedelta(seconds=3600)
-
-        avail_before_first = int((first_latest_start - continuation_start).total_seconds())
-        max_ext = max(0, min(3600, avail_before_first - STANDARD_INTER_SESSION_GAP_SECONDS))
+            avail_before_first = int((first_latest_start - continuation_start).total_seconds())
+            max_ext = max(0, min(3600, avail_before_first - STANDARD_INTER_SESSION_GAP_SECONDS))
 
     hard_caps: list[int] = []
+    if earliest_locked is not None:
+        hard_caps.append(
+            max(0, int((earliest_locked - continuation_start).total_seconds()) - STANDARD_INTER_SESSION_GAP_SECONDS)
+        )
     if deadline_at is not None:
-        hard_caps.append(max(0, int((_ensure_aware(deadline_at) - continuation_start).total_seconds())))
+        dl_aware = _ensure_aware(deadline_at)
+        total_movable_dur = sum(s.duration_seconds for s in movable_sessions)
+        total_movable_gaps = len(movable_sessions) * STANDARD_INTER_SESSION_GAP_SECONDS
+        avail_for_cont = int((dl_aware - continuation_start).total_seconds()) - total_movable_dur - total_movable_gaps
+        hard_caps.append(max(0, avail_for_cont))
     if availability_end is not None:
         hard_caps.append(
             max(0, int((_ensure_aware(availability_end) - continuation_start).total_seconds()))
@@ -863,7 +878,7 @@ async def get_upcoming_schedule_context(
                 scheduled_end=_ensure_aware(r.scheduled_end),
                 duration_seconds=r.duration_seconds,
                 status=r.status,
-                is_movable=(r.status == "scheduled"),
+                is_movable=(r.status == "scheduled" and tk is not None and tk.id == task_row.id),
             )
         )
 
@@ -904,10 +919,75 @@ async def get_upcoming_schedule_context(
         availability_end = (
             matching_iv.end_at.astimezone(UTC) if matching_iv is not None else continuation_start
         )
+    # Độc lập hoàn toàn với cửa sổ phân trang UI: truy vấn toàn khung [continuation_start, continuation_start + 24h)
+    calc_window_from = continuation_start
+    calc_window_to = continuation_start + timedelta(hours=24)
+    if window_from <= calc_window_from and window_to >= calc_window_to:
+        calc_session_items = session_items
+        calc_busy_items = busy_items
+    else:
+        calc_rows = (
+            await db.scalars(
+                select(SessionRow)
+                .where(
+                    SessionRow.user_id == owner,
+                    SessionRow.id != run.session_id,
+                    SessionRow.status.in_(("scheduled", "in_progress")),
+                    SessionRow.scheduled_end > calc_window_from,
+                    SessionRow.scheduled_start < calc_window_to,
+                )
+                .order_by(SessionRow.scheduled_start.asc())
+            )
+        ).all()
+        calc_step_ids = list({r.step_id for r in calc_rows})
+        calc_steps_map: dict[UUID, StepRow] = dict(steps_map)
+        missing_step_ids = [sid for sid in calc_step_ids if sid not in calc_steps_map]
+        if missing_step_ids:
+            s_rows = (
+                await db.scalars(
+                    select(StepRow).where(StepRow.user_id == owner, StepRow.id.in_(missing_step_ids))
+                )
+            ).all()
+            for s in s_rows:
+                calc_steps_map[s.id] = s
+        calc_t_ids = list({s.task_id for s in calc_steps_map.values() if s.task_id not in tasks_map})
+        calc_tasks_map: dict[UUID, TaskRow] = dict(tasks_map)
+        if calc_t_ids:
+            t_rows = (
+                await db.scalars(
+                    select(TaskRow).where(TaskRow.user_id == owner, TaskRow.id.in_(calc_t_ids))
+                )
+            ).all()
+            for t in t_rows:
+                calc_tasks_map[t.id] = t
+
+        calc_session_items = []
+        for r in calc_rows:
+            st = calc_steps_map.get(r.step_id)
+            tk = calc_tasks_map.get(st.task_id) if st is not None else None
+            calc_session_items.append(
+                TimelineSessionItem(
+                    kind="session",
+                    session_id=str(r.id),
+                    task_id=str(tk.id) if tk is not None else str(task_row.id),
+                    task_title=tk.title if tk is not None else task_row.title,
+                    step_id=str(r.step_id),
+                    step_title=st.title if st is not None else step_row.title,
+                    scheduled_start=_ensure_aware(r.scheduled_start),
+                    scheduled_end=_ensure_aware(r.scheduled_end),
+                    duration_seconds=r.duration_seconds,
+                    status=r.status,
+                    is_movable=(r.status == "scheduled" and tk is not None and tk.id == task_row.id),
+                )
+            )
+        calc_busy_items, _, _ = await _load_google_busy_items(
+            db, owner, calc_window_from, calc_window_to
+        )
+
     max_ext, rec_ext = _compute_max_extension_without_borrow(
         continuation_start,
-        session_items,
-        busy_items,
+        calc_session_items,
+        calc_busy_items,
         deadline_at=task_deadline,
         availability_end=availability_end,
     )
@@ -1713,6 +1793,39 @@ async def _build_continuation_plan(
     )
 
 
+async def _get_unscheduled_pending_steps(
+    db: AsyncSession, owner: UUID, task_id: UUID
+) -> list[StepRow]:
+    """Lấy các Step của task vẫn đang pending, còn khối lượng và chưa có phiên hoạt động."""
+    steps = (
+        await db.scalars(
+            select(StepRow)
+            .where(
+                StepRow.user_id == owner,
+                StepRow.task_id == task_id,
+                StepRow.status == "pending",
+                StepRow.remaining_base_seconds > 0,
+            )
+            .order_by(StepRow.order_index.asc())
+        )
+    ).all()
+    if not steps:
+        return []
+    step_ids = [st.id for st in steps]
+    active_step_ids = set(
+        (
+            await db.scalars(
+                select(SessionRow.step_id).where(
+                    SessionRow.user_id == owner,
+                    SessionRow.step_id.in_(step_ids),
+                    SessionRow.status.notin_(("cancelled", "skipped")),
+                )
+            )
+        ).all()
+    )
+    return [st for st in steps if st.id not in active_step_ids]
+
+
 async def _build_normal_proposal_plan(
     db: AsyncSession,
     owner: UUID,
@@ -1741,6 +1854,7 @@ async def _build_normal_proposal_plan(
                 next_action="reload",
             )
 
+    pending_unscheduled_steps: list[StepRow] = []
     if trigger_reason == "expand_next_horizon":
         if target_row is None:
             candidate_tasks = (
@@ -1749,20 +1863,30 @@ async def _build_normal_proposal_plan(
                     .where(
                         TaskRow.user_id == owner,
                         TaskRow.status.not_in(("completed", "cancelled")),
-                        TaskRow.unexpanded_scope.is_not(None),
                     )
                     .order_by(TaskRow.created_at.asc())
                 )
             ).all()
             for cand_t in candidate_tasks:
-                if cand_t.unexpanded_scope and cand_t.unexpanded_scope.strip():
-                    if not allowed_task_ids or str(cand_t.id) in allowed_task_ids:
-                        target_row = cand_t
-                        target_uuid = cand_t.id
-                        break
-        if target_row is None or not (
-            target_row.unexpanded_scope and target_row.unexpanded_scope.strip()
-        ):
+                if allowed_task_ids and str(cand_t.id) not in allowed_task_ids:
+                    continue
+                cand_unexpanded = bool(cand_t.unexpanded_scope and cand_t.unexpanded_scope.strip())
+                cand_pending = await _get_unscheduled_pending_steps(db, owner, cand_t.id)
+                if cand_unexpanded or cand_pending:
+                    target_row = cand_t
+                    target_uuid = cand_t.id
+                    pending_unscheduled_steps = cand_pending
+                    break
+        else:
+            pending_unscheduled_steps = await _get_unscheduled_pending_steps(
+                db, owner, target_row.id
+            )
+        has_unexpanded = bool(
+            target_row is not None
+            and target_row.unexpanded_scope
+            and target_row.unexpanded_scope.strip()
+        )
+        if target_row is None or (not pending_unscheduled_steps and not has_unexpanded):
             raise AppError(
                 status_code=409,
                 code="INVALID_STATE_TRANSITION",
@@ -1890,6 +2014,11 @@ async def _build_normal_proposal_plan(
 
     horizon_days = 21 if trigger_reason != "expand_next_horizon" else 14
     horizon_end = calc_now + timedelta(days=horizon_days)
+    if trigger_reason == "expand_next_horizon":
+        for sess in all_scheduled:
+            s_task_id = str(step_to_task.get(sess.step_id, target_uuid or ""))
+            if allow_all_tasks or s_task_id in effective_allowed:
+                horizon_end = max(horizon_end, _ensure_aware(sess.scheduled_end))
     busy_items, _, _ = await _load_google_busy_items(db, owner, calc_now, horizon_end)
 
     movable_sessions: list[SessionRow] = []
@@ -1915,10 +2044,17 @@ async def _build_normal_proposal_plan(
         initial_cursor = max(initial_cursor, local_tomorrow_9am.astimezone(UTC))
     task_cursors: dict[UUID | None, datetime] = {}
 
-    def _task_free_windows(task_obj: TaskRow | None) -> tuple[list[tuple[datetime, datetime]], datetime | None]:
+    def _task_free_windows(
+        task_obj: TaskRow | None,
+        *,
+        window_start_override: datetime | None = None,
+        window_end_override: datetime | None = None,
+    ) -> tuple[list[tuple[datetime, datetime]], datetime | None]:
         t_start_bound, t_deadline = _extract_task_time_bounds(task_obj)
-        w_start = max(calc_now, t_start_bound) if t_start_bound is not None else calc_now
-        w_end = min(horizon_end, t_deadline) if t_deadline is not None else horizon_end
+        base_start = window_start_override if window_start_override is not None else calc_now
+        base_end = window_end_override if window_end_override is not None else horizon_end
+        w_start = max(base_start, t_start_bound) if t_start_bound is not None else base_start
+        w_end = min(base_end, t_deadline) if t_deadline is not None else base_end
         if w_start >= w_end:
             return [], t_deadline
         t_avail = _resolve_task_availability(
@@ -2231,90 +2367,37 @@ async def _build_normal_proposal_plan(
                 candidate_end + timedelta(seconds=STANDARD_INTER_SESSION_GAP_SECONDS),
             )
 
+    horizon_from_dt: datetime | None = calc_now if trigger_reason == "expand_next_horizon" else None
+    horizon_to_dt: datetime | None = (
+        (calc_now + timedelta(days=14)) if trigger_reason == "expand_next_horizon" else None
+    )
+    expanded_steps_count = 0
+
     if trigger_reason == "expand_next_horizon" and target_row is not None:
-        existing_task_steps = (
-            await db.scalars(
-                select(StepRow)
-                .where(StepRow.user_id == owner, StepRow.task_id == target_row.id)
-                .order_by(StepRow.order_index.asc())
-            )
-        ).all()
-        next_order_idx = (
-            max((st.order_index for st in existing_task_steps), default=-1) + 1
-        )
-        raw_unexpanded = (target_row.unexpanded_scope or "").strip()
-        raw_parts = [
-            seg.strip(" -•\t")
-            for line in raw_unexpanded.splitlines()
-            for seg in line.split(";")
-            if seg.strip(" -•\t")
-        ]
-        if not raw_parts:
-            raw_parts = [raw_unexpanded]
-        raw_parts = raw_parts[:6]
-
-        base_est_per_step = max(300, round(new_work_int / max(new_buffer, 1.0)))
-        for idx, part_title in enumerate(raw_parts):
-            steps_to_add.append(
-                ProposedStepItem(
-                    step_id=str(uuid4()),
-                    task_id=str(target_row.id),
-                    title=part_title[:200],
-                    order_index=next_order_idx + idx,
-                    estimated_base_seconds=base_est_per_step,
-                )
-            )
-
-        task_free, t_deadline = _task_free_windows(target_row)
+        target_row_id = target_row.id
         horizon_sess_counter = 0
-        for st_item in steps_to_add:
-            target_work = calculate_buffered_work(
-                st_item.estimated_base_seconds, new_buffer
-            )
-            micro_text = f"Mở tài liệu và bắt đầu 2 phút cho: {st_item.title[:80]}"
-            micro_secs = new_micro_sec if new_micro_sec > 0 else 120
-            avail_slots = _subtract_blocked_from_free(task_free, fixed_intervals)
-            rem_work = target_work
-            step_cursor = task_cursors.get(target_row.id, initial_cursor)
-            planned_horizon: list[
+
+        def _append_horizon_sessions(
+            step_id_str: str,
+            micro_text: str,
+            micro_secs: int,
+            planned_sessions: list[
                 tuple[datetime, datetime, int, int, int, list[SessionSegment]]
-            ] = []
-            for slot_s, slot_e in avail_slots:
-                if rem_work <= 0:
-                    break
-                left = max(slot_s, step_cursor)
-                cap = int((slot_e - left).total_seconds())
-                if cap <= 0:
-                    continue
-                segs, work, rest, dur = fit_session_to_slot(
-                    rem_work, cap, new_work_int, new_rest_int
-                )
-                if work <= 0:
-                    continue
-                if work < rem_work and work < min(300, new_work_int):
-                    continue
-                right = left + timedelta(seconds=dur)
-                planned_horizon.append((left, right, work, rest, dur, segs))
-                rem_work -= work
-                step_cursor = right + timedelta(
-                    seconds=STANDARD_INTER_SESSION_GAP_SECONDS
-                )
-            if rem_work > 0:
-                _record_blocking(t_deadline, step_cursor, rem_work, task_free)
-            for p_idx, (p_s, p_e, p_work, p_rest, p_dur, p_segs) in enumerate(
-                planned_horizon
-            ):
+            ],
+        ) -> None:
+            nonlocal horizon_sess_counter
+            for p_idx, (p_s, p_e, p_work, p_rest, p_dur, p_segs) in enumerate(planned_sessions):
                 horizon_sess_counter += 1
                 adds.append(
                     ProposedSessionAddItem(
                         temp_session_id=f"temp_horizon_{horizon_sess_counter}",
                         action="create_session",
-                        task_id=str(target_row.id),
-                        step_id=st_item.step_id,
+                        task_id=str(target_row_id),
+                        step_id=step_id_str,
                         source_run_id=None,
                         before=None,
                         after=ProposedSessionAddAfter(
-                            step_id=st_item.step_id,
+                            step_id=step_id_str,
                             start=p_s,
                             end=p_e,
                             work_seconds=p_work,
@@ -2328,11 +2411,160 @@ async def _build_normal_proposal_plan(
                     )
                 )
                 fixed_intervals.append((p_s, p_e, f"horizon:{horizon_sess_counter}"))
-                cur_cursor = task_cursors.get(target_row.id, initial_cursor)
-                task_cursors[target_row.id] = max(
+                cur_cursor = task_cursors.get(target_row_id, initial_cursor)
+                task_cursors[target_row_id] = max(
                     cur_cursor,
                     p_e + timedelta(seconds=STANDARD_INTER_SESSION_GAP_SECONDS),
                 )
+
+        if pending_unscheduled_steps:
+            next_start = max(initial_cursor, task_cursors.get(target_row.id, initial_cursor))
+            latest_task_sess_end = await db.scalar(
+                select(func.max(SessionRow.scheduled_end))
+                .join(StepRow, StepRow.id == SessionRow.step_id)
+                .where(
+                    StepRow.user_id == owner,
+                    StepRow.task_id == target_row.id,
+                    SessionRow.status.notin_(("cancelled", "skipped")),
+                )
+            )
+            if latest_task_sess_end is not None:
+                next_start = max(
+                    next_start,
+                    _ensure_aware(latest_task_sess_end)
+                    + timedelta(seconds=STANDARD_INTER_SESSION_GAP_SECONDS),
+                )
+            _, t_deadline = _extract_task_time_bounds(target_row)
+            window_limit = next_start + timedelta(days=14)
+            next_end = min(t_deadline, window_limit) if t_deadline is not None else window_limit
+            horizon_from_dt = next_start
+            horizon_to_dt = next_end
+            if next_end > horizon_end:
+                extra_busy, _, _ = await _load_google_busy_items(db, owner, horizon_end, next_end)
+                for b in extra_busy:
+                    fixed_intervals.append((b.start, b.end, f"busy:{b.event_id}"))
+            task_free, t_deadline = _task_free_windows(
+                target_row,
+                window_start_override=next_start,
+                window_end_override=next_end,
+            )
+            step_cursor = next_start
+            for st_row in pending_unscheduled_steps:
+                eff_st_buf = (
+                    float(st_row.buffer_multiplier)
+                    if st_row.buffer_multiplier and st_row.buffer_multiplier > 0
+                    else new_buffer
+                )
+                target_work = calculate_buffered_work(
+                    st_row.remaining_base_seconds, eff_st_buf
+                )
+                micro_text = f"Mở tài liệu và bắt đầu 2 phút cho: {st_row.title[:80]}"
+                micro_secs = new_micro_sec if new_micro_sec > 0 else 120
+                avail_slots = _subtract_blocked_from_free(task_free, fixed_intervals)
+                rem_work = target_work
+                planned_horizon: list[
+                    tuple[datetime, datetime, int, int, int, list[SessionSegment]]
+                ] = []
+                step_end_cursor = step_cursor
+                for slot_s, slot_e in avail_slots:
+                    if rem_work <= 0:
+                        break
+                    left = max(slot_s, step_end_cursor)
+                    cap = int((slot_e - left).total_seconds())
+                    if cap <= 0:
+                        continue
+                    segs, work, rest, dur = fit_session_to_slot(
+                        rem_work, cap, new_work_int, new_rest_int
+                    )
+                    if work <= 0:
+                        continue
+                    if work < rem_work and work < min(300, new_work_int):
+                        continue
+                    right = left + timedelta(seconds=dur)
+                    planned_horizon.append((left, right, work, rest, dur, segs))
+                    rem_work -= work
+                    step_end_cursor = right + timedelta(
+                        seconds=STANDARD_INTER_SESSION_GAP_SECONDS
+                    )
+                if rem_work > 0:
+                    if (t_deadline is None or window_limit < t_deadline) and expanded_steps_count > 0:
+                        break
+                    _record_blocking(t_deadline, step_end_cursor, rem_work, task_free)
+                    break
+                expanded_steps_count += 1
+                step_cursor = step_end_cursor
+                _append_horizon_sessions(str(st_row.id), micro_text, micro_secs, planned_horizon)
+        else:
+            existing_task_steps = (
+                await db.scalars(
+                    select(StepRow)
+                    .where(StepRow.user_id == owner, StepRow.task_id == target_row.id)
+                    .order_by(StepRow.order_index.asc())
+                )
+            ).all()
+            next_order_idx = (
+                max((st.order_index for st in existing_task_steps), default=-1) + 1
+            )
+            raw_unexpanded = (target_row.unexpanded_scope or "").strip()
+            raw_parts = [
+                seg.strip(" -•\t")
+                for line in raw_unexpanded.splitlines()
+                for seg in line.split(";")
+                if seg.strip(" -•\t")
+            ]
+            if not raw_parts:
+                raw_parts = [raw_unexpanded]
+            raw_parts = raw_parts[:6]
+
+            base_est_per_step = max(300, round(new_work_int / max(new_buffer, 1.0)))
+            for idx, part_title in enumerate(raw_parts):
+                steps_to_add.append(
+                    ProposedStepItem(
+                        step_id=str(uuid4()),
+                        task_id=str(target_row.id),
+                        title=part_title[:200],
+                        order_index=next_order_idx + idx,
+                        estimated_base_seconds=base_est_per_step,
+                    )
+                )
+
+            task_free, t_deadline = _task_free_windows(target_row)
+            for st_item in steps_to_add:
+                target_work = calculate_buffered_work(
+                    st_item.estimated_base_seconds, new_buffer
+                )
+                micro_text = f"Mở tài liệu và bắt đầu 2 phút cho: {st_item.title[:80]}"
+                micro_secs = new_micro_sec if new_micro_sec > 0 else 120
+                avail_slots = _subtract_blocked_from_free(task_free, fixed_intervals)
+                rem_work = target_work
+                step_cursor = task_cursors.get(target_row.id, initial_cursor)
+                planned_horizon = []
+                for slot_s, slot_e in avail_slots:
+                    if rem_work <= 0:
+                        break
+                    left = max(slot_s, step_cursor)
+                    cap = int((slot_e - left).total_seconds())
+                    if cap <= 0:
+                        continue
+                    segs, work, rest, dur = fit_session_to_slot(
+                        rem_work, cap, new_work_int, new_rest_int
+                    )
+                    if work <= 0:
+                        continue
+                    if work < rem_work and work < min(300, new_work_int):
+                        continue
+                    right = left + timedelta(seconds=dur)
+                    planned_horizon.append((left, right, work, rest, dur, segs))
+                    rem_work -= work
+                    step_cursor = right + timedelta(
+                        seconds=STANDARD_INTER_SESSION_GAP_SECONDS
+                    )
+                if rem_work > 0:
+                    _record_blocking(t_deadline, step_cursor, rem_work, task_free)
+                _append_horizon_sessions(
+                    st_item.step_id, micro_text, micro_secs, planned_horizon
+                )
+            expanded_steps_count = len(steps_to_add)
         if str(target_row.id) not in affected_tasks:
             affected_tasks.append(str(target_row.id))
 
@@ -2348,14 +2580,12 @@ async def _build_normal_proposal_plan(
         sessions_to_add=adds,
         sessions_to_cancel=cancels,
         steps_to_add=steps_to_add,
-        next_horizon_from=calc_now if trigger_reason == "expand_next_horizon" else None,
-        next_horizon_to=(calc_now + timedelta(days=14))
-        if trigger_reason == "expand_next_horizon"
-        else None,
+        next_horizon_from=horizon_from_dt,
+        next_horizon_to=horizon_to_dt,
     )
     horizon_preview = (
         {
-            "expanded_steps_count": len(steps_to_add),
+            "expanded_steps_count": expanded_steps_count,
             "added_sessions_count": len(adds),
             "unexpanded_scope": None,
         }
@@ -3417,8 +3647,11 @@ async def approve_proposal(
                 select(TaskRow).where(TaskRow.id == exp_tid, TaskRow.user_id == owner)
             )
             if exp_task is not None:
-                exp_task.unexpanded_scope = None
-                exp_task.decomposition_state = "complete"
+                if changes.steps_to_add or not (
+                    exp_task.unexpanded_scope and exp_task.unexpanded_scope.strip()
+                ):
+                    exp_task.unexpanded_scope = None
+                    exp_task.decomposition_state = "complete"
                 exp_task.revision += 1
                 exp_task.updated_at = approve_now
     await db.flush()
@@ -3441,7 +3674,7 @@ async def approve_proposal(
                     select(Reminder).where(
                         Reminder.user_id == owner,
                         Reminder.session_id == s_row.id,
-                        Reminder.delivery_state == "scheduled",
+                        Reminder.delivery_state.in_(("scheduled", "snoozed")),
                     )
                 )
             ).all()
@@ -3506,6 +3739,24 @@ async def approve_proposal(
                 )
     await db.flush()
 
+    applied_ids: dict[str, str] = {}
+    for a_item, new_sess in zip(changes.sessions_to_add, added_rows, strict=False):
+        ref = (
+            getattr(a_item, "temp_session_id", None)
+            or getattr(a_item, "session_ref", None)
+            or getattr(a_item, "id", None)
+        )
+        if ref:
+            applied_ids[str(ref)] = str(new_sess.id)
+    if applied_ids:
+        changes_dict = (
+            dict(row.proposed_changes)
+            if isinstance(row.proposed_changes, dict)
+            else {}
+        )
+        changes_dict["applied_session_ids"] = applied_ids
+        row.proposed_changes = changes_dict
+
     # 4. Áp dụng sessions_to_move
     moved_rows: list[SessionRow] = []
     min_break_after_cont = (
@@ -3554,7 +3805,7 @@ async def approve_proposal(
                 select(Reminder).where(
                     Reminder.user_id == owner,
                     Reminder.session_id == s_row.id,
-                    Reminder.delivery_state == "scheduled",
+                    Reminder.delivery_state.in_(("scheduled", "snoozed")),
                 )
             )
         ).all()

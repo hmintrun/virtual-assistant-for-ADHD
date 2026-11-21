@@ -4,6 +4,7 @@ from typing import Literal, cast
 from uuid import UUID, uuid4
 
 from sqlalchemy import and_, or_, select, update
+from sqlalchemy.exc import MultipleResultsFound
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import AppError
@@ -163,6 +164,81 @@ async def get_thought_detail(db: AsyncSession, *, user_id: str, thought_id: str)
     return _data(row, links.get(row.id))
 
 
+async def ensure_thought_eligible_for_draft_conversion(
+    db: AsyncSession,
+    owner: UUID,
+    thought_id: UUID,
+    current_draft_id: UUID | None = None,
+) -> Thought:
+    """Xác thực Thought đủ điều kiện chuyển thành chữ/nháp (UF4 Zero-AI Guard)."""
+    thought = await thought_repository.get_thought(db, owner, thought_id)
+    if thought is None:
+        raise AppError(
+            status_code=404,
+            code="RESOURCE_NOT_FOUND",
+            message="Không tìm thấy Thought.",
+            next_action="reload",
+        )
+
+    # 1. Trạng thái thu âm phải hoàn tất thành công
+    if thought.capture_state != "saved":
+        raise AppError(
+            status_code=409,
+            code="THOUGHT_CAPTURE_NOT_SAVED",
+            message="Chỉ chuyển chữ hoặc tạo nháp khi ghi chú đã lưu hoàn tất (capture_state='saved').",
+            next_action="wait_for_capture_saved",
+        )
+
+    # 2. Chưa từng được liên kết với Draft khác
+    try:
+        links = await thought_repository.get_links(db, owner, [thought.id])
+    except MultipleResultsFound:
+        raise AppError(
+            status_code=409,
+            code="SOURCE_CHANGED",
+            message="Dữ liệu cũ có nhiều nháp cùng nguồn suy nghĩ; cần đối soát liên kết.",
+            next_action="reload_and_review",
+        ) from None
+    linked = links.get(thought.id)
+    if linked is not None and (current_draft_id is None or linked.draft.id != current_draft_id):
+        raise AppError(
+            status_code=409,
+            code="THOUGHT_ALREADY_LINKED",
+            message="Suy nghĩ đã có bản nháp liên kết.",
+            next_action="open_linked_draft",
+        )
+
+    # 3. Zero AI Guard: Không có bất kỳ phiên nào đang chạy (kể cả khi source_run_id=None)
+    live_run = await run_repository.get_live_run(db, owner)
+    if live_run is not None:
+        raise AppError(
+            status_code=409,
+            code="SESSION_STILL_RUNNING",
+            message="Chỉ chuyển chữ hoặc tạo nháp sau khi phiên tập trung kết thúc.",
+            next_action="wait_for_session_end",
+        )
+
+    # 4. Nếu có phiên nguồn, phiên nguồn phải đã kết thúc hợp lệ
+    if thought.source_run_id is not None:
+        source_run = await run_repository.get_run(db, owner, thought.source_run_id)
+        if source_run is None:
+            raise AppError(
+                status_code=404,
+                code="RESOURCE_NOT_FOUND",
+                message="Không tìm thấy phiên nguồn.",
+                next_action="reload",
+            )
+        if source_run.ended_at is None or source_run.run_state in ("running", "paused"):
+            raise AppError(
+                status_code=409,
+                code="SESSION_STILL_RUNNING",
+                message="Chỉ tạo nháp sau khi phiên đã dừng.",
+                next_action="wait_for_session_end",
+            )
+
+    return thought
+
+
 @command_service.durable_command(
     "convert_thought_to_draft", ThoughtToDraftResult, resource_arg="thought_id"
 )
@@ -174,17 +250,8 @@ async def convert_thought_to_draft(
     idempotency_key: str,
     payload: ThoughtToDraftRequest,
 ) -> ThoughtToDraftResult:
-    row = await _get(db, user_id, thought_id)
     owner = command_service.owner_uuid(user_id)
-    if row.source_run_id is not None:
-        run = await run_repository.get_run(db, owner, row.source_run_id)
-        if run is None:
-            raise _error("RESOURCE_NOT_FOUND", "Không tìm thấy phiên nguồn.", status=404)
-        if run.ended_at is None:
-            raise _error("SESSION_STILL_RUNNING", "Chỉ tạo nháp sau khi phiên đã dừng.", status=409)
-    links = await thought_repository.get_links(db, owner, [row.id])
-    if row.id in links:
-        raise _error("THOUGHT_ALREADY_LINKED", "Suy nghĩ đã có bản nháp liên kết.", status=409)
+    row = await ensure_thought_eligible_for_draft_conversion(db, owner, _uuid(thought_id))
     if payload.expected_thought_revision != row.revision:
         raise _error(
             "REVISION_CONFLICT", "Suy nghĩ đã thay đổi.", status=409, revision=row.revision

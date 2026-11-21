@@ -106,6 +106,8 @@ class Settings(BaseSettings):
     # Đo thực tế ~8-9s/clip ngắn (gồm ~2,5s upload) nên timeout rộng hơn luồng LLM.
     VOICE_STT_TIMEOUT_SECONDS: float = Field(default=20.0, gt=0.0, le=120.0)
     VOICE_MAX_AUDIO_BYTES: int = Field(default=10 * 1024 * 1024, gt=0)
+    MAX_JSON_BODY_BYTES: int = Field(default=1 * 1024 * 1024, gt=0)
+    VOICE_MULTIPART_OVERHEAD_BYTES: int = Field(default=1 * 1024 * 1024, gt=0)
 
     # Voice TTS (W3-09) — ưu tiên Edge-TTS trên Backend, fallback sang flutter_tts on-device.
     VOICE_TTS_PROVIDER: Literal["edge_tts", "fake"] = "edge_tts"
@@ -114,8 +116,10 @@ class Settings(BaseSettings):
     VOICE_TTS_MAX_CHARS: int = Field(default=600, gt=0, le=2000)
     VOICE_TTS_CACHE_SIZE: int = Field(default=64, ge=0, le=512)
 
-    # UF1: Flash-Lite MINIMAL từ đầu; chuyển Qwen khi lỗi trong ngưỡng còn đủ thời gian dưới trần.
+    # UF1: trần cơ sở, ưu tiên Gemini và mốc hedge là ba giới hạn riêng.
     AI_UF1_TIMEOUT_SECONDS: float = Field(default=6.0, gt=0.0, le=15.0)
+    AI_UF1_ADAPTIVE_TIMEOUT_ENABLED: bool = True
+    AI_UF1_PRIMARY_PRIORITY_SECONDS: float = Field(default=4.5, ge=0.0, le=15.0)
     AI_UF1_GROQ_FAST_FAIL_SECONDS: float = Field(default=3.5, ge=0.0, le=15.0)
 
     # Khung thời gian A — Chỉnh kế hoạch bằng ngôn ngữ tự nhiên và UF6:
