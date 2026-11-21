@@ -1,4 +1,4 @@
-"""Probe Script: Kiểm thử Voice STT (Gemini 3.5 Transcribe) & AI Task Extraction (UF1)
+"""Probe Script: Kiểm thử Voice STT (Gemini 3.5 Flash-Lite inline / Groq Whisper) & AI Task Extraction (UF1)
 trên 3 file audio thực tế tại C:\\test1.m4a, C:\\test2.m4a, C:\\test3.m4a.
 
 Đáp ứng đầy đủ 4 yêu cầu của QA Lead:
@@ -153,7 +153,11 @@ async def main() -> None:
     print("=" * 80)
     print("PROPLAN VA BACKEND - QA PROBE: VOICE STT & AI TASK EXTRACTION (UF1)")
     print(f"Timestamp: {datetime.now(UTC).isoformat()}")
-    print(f"STT Provider: {settings.VOICE_STT_PROVIDER} ({settings.GEMINI_STT_MODEL})")
+    print(
+        f"STT Provider: {settings.VOICE_STT_PROVIDER} "
+        f"(gemini={settings.GEMINI_STT_MODEL}, transport={settings.GEMINI_STT_TRANSPORT}, "
+        f"groq={settings.GROQ_STT_MODEL})"
+    )
     print(f"Primary LLM: {settings.GEMINI_FLASH_MODEL}")
     print(f"Backup LLM: {settings.GEMINI_BACKUP_MODEL}")
     print("=" * 80)
