@@ -11,6 +11,8 @@ uv run --frozen alembic current
 
 Snapshot Backend `4ae869e` dùng revision `20261111_01`. SQLite và PostgreSQL 16.15 đều đã áp migration này từ DB sạch.
 
+> **Cập nhật sau merge `BE-03`:** Snapshot nhánh `backend` hiện tại đã nâng Alembic head lên `20261118_01` (bổ sung bảng `refresh_tokens` phục vụ xoay vòng/thu hồi refresh token của `BE-03`).
+
 ## Đăng nhập và seed
 
 1. Khởi động Backend QA với `AUTH_MODE=google`, `GOOGLE_SIGN_IN_AUDIENCES` khớp client ID dùng trong bản QA và `JWT_SECRET_KEY` riêng cho môi trường. Cấu hình Google Sign-In theo [AUTH_GUIDE.md](AUTH_GUIDE.md).
