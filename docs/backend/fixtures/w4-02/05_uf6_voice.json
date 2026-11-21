@@ -1,5 +1,5 @@
 {
-  "contract_source": "schema.md sections 14–15; backend bce1fb4; auth target ba16055",
+  "contract_source": "schema.md sections 14–15; backend 23e856b; auth target ba16055",
   "cases": [
     {
       "name": "proposal_deficit",

@@ -5698,6 +5698,22 @@
             "type": "string",
             "title": "Status",
             "default": "pending"
+          },
+          "preview_revision": {
+            "type": "integer",
+            "title": "Preview Revision",
+            "default": 1
+          },
+          "base_connection_revision": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Base Connection Revision"
           }
         },
         "additionalProperties": false,
@@ -8198,6 +8214,22 @@
             "additionalProperties": true,
             "type": "object",
             "title": "Payload"
+          },
+          "preview_revision": {
+            "type": "integer",
+            "title": "Preview Revision",
+            "default": 1
+          },
+          "base_connection_revision": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Base Connection Revision"
           }
         },
         "additionalProperties": false,
@@ -9133,7 +9165,7 @@
             "anyOf": [
               {
                 "type": "integer",
-                "minimum": 0.0
+                "exclusiveMinimum": 0.0
               },
               {
                 "type": "null"
@@ -9174,7 +9206,8 @@
             "anyOf": [
               {
                 "type": "number",
-                "exclusiveMinimum": 0.0
+                "maximum": 2.0,
+                "minimum": 1.0
               },
               {
                 "type": "null"
@@ -11309,7 +11342,16 @@
             "title": "Effective Availability Revision"
           },
           "requested_changes": {
-            "$ref": "#/components/schemas/SettingsChanges"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SettingsChanges"
+              },
+              {
+                "additionalProperties": true,
+                "type": "object"
+              }
+            ],
+            "title": "Requested Changes"
           },
           "pending_proposal_id": {
             "anyOf": [
@@ -13842,6 +13884,11 @@
               }
             ],
             "title": "Thought Id"
+          },
+          "low_confidence": {
+            "type": "boolean",
+            "title": "Low Confidence",
+            "default": false
           }
         },
         "additionalProperties": false,
@@ -14389,12 +14436,14 @@
           "requested_changes": {
             "anyOf": [
               {
-                "$ref": "#/components/schemas/PreferenceChanges"
+                "additionalProperties": true,
+                "type": "object"
               },
               {
                 "type": "null"
               }
-            ]
+            ],
+            "title": "Requested Changes"
           },
           "pending_proposal_id": {
             "anyOf": [

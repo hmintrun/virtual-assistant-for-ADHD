@@ -1388,17 +1388,17 @@ Endpoint Dòng 8 trong Sheet (`multipart/form-data`: `purpose` ∈ `{"uf1_input"
 
 ## 15. W4-02 — Bộ bàn giao OpenAPI và JSON fixtures
 
-Nguồn runtime: `origin/backend@bce1fb4`; contract Auth do VQH chốt tại `ba16055` (mục 14.1). Mã và thời gian trong fixture là dữ liệu giả, không chứa token thật. `scope=runtime` mô tả code hiện tại; `target_be03` và `target_contract` là yêu cầu đã chốt nhưng chưa có đủ hỗ trợ trong runtime. Contract tests đối chiếu OpenAPI runtime và validate DTO/fixtures.
+Nguồn runtime: `origin/backend@23e856b`; contract Auth do VQH chốt tại `ba16055` (mục 14.1). Mã và thời gian trong fixture là dữ liệu giả, không chứa token thật. `scope=runtime` mô tả code hiện tại; `target_be03` là yêu cầu đã chốt cho BE-03 nhưng chưa có đủ route trong runtime. Contract tests đối chiếu OpenAPI runtime và validate DTO/fixtures.
 
 - [openapi.json](openapi.json): xuất trực tiếp `app.openapi()` của code đang tích hợp.
 - [openapi-auth-target.json](openapi-auth-target.json): OpenAPI riêng cho refresh rotation/logout Option 1 đã chốt, gắn `target_be03`. Dùng để mock Mobile trước khi BE-03 hoàn thành.
-- Năm bộ JSON dưới đây cũng có file riêng trong [fixtures/w4-02/](fixtures/w4-02/). `scope=runtime` là contract của code hiện tại; `target_be03`/`target_contract` là đích đã chốt; `google_upstream` là phản hồi từ Google tới worker.
+- Năm bộ JSON dưới đây cũng có file riêng trong [fixtures/w4-02/](fixtures/w4-02/). `scope=runtime` là contract của code hiện tại; `target_be03` là đích BE-03 đã chốt; `google_upstream` là phản hồi từ Google tới worker.
 
 ### Quy tắc client và các chỗ chưa khớp code
 
 1. Auth: đọc `body.error.code`. `401 CALENDAR_AUTH_REQUIRED` chỉ yêu cầu nối lại Calendar. Logout target public nhận `refresh_token`, trả `logged_out=true` và `revoked=true/false` (retry idempotent); reuse refresh thu hồi family và trả `401 UNAUTHENTICATED` có `WWW-Authenticate: Bearer`. Migration refresh token đã có trên backend, route logout/service rotation chưa có; kiểm tra fixture target không đồng nghĩa BE-03 đã đạt.
-2. Settings: gửi `effective_revision` vào `expected_preferences_revision`; suggestion dùng tên **số ít** `expected_preference_revision`. Hủy dùng `change_request_id` + `request_revision` từ response save. Sau reopen hoặc accept suggestion, response hiện chưa cung cấp đủ request revision để hủy: không tự lấy preference revision thay thế. `409` tải lại cấu hình. Chính sách client `buffer_multiplier ∈ [1.0, 2.0]`: runtime chặn dưới `1.0` nhưng change-request chưa chặn trên `2.0`; fixture `settings_buffer_high` thuộc `target_contract` và ghi nhận gap.
-3. Calendar: runtime preview hiện **không trả revision**; contract target yêu cầu response có `expected_preview_revision` động và client gửi lại khi confirm. Không tự dựng revision từ connection khi dùng runtime hiện tại. JSON `412` là lỗi Google upstream; client đọc job `200` với `job_state=conflict`, `last_error_code=ETAG_CONFLICT_412`, không retry mù.
+2. Settings: gửi `effective_revision` vào `expected_preferences_revision`; suggestion dùng tên **số ít** `expected_preference_revision`. Hủy dùng `change_request_id` + `request_revision` từ response save. Sau reopen hoặc accept suggestion, response hiện chưa cung cấp đủ request revision để hủy: không tự lấy preference revision thay thế. `409` tải lại cấu hình. Chính sách client `buffer_multiplier ∈ [1.0, 2.0]`: runtime đã chặn cả dưới `1.0` và trên `2.0` (`422 VALIDATION_ERROR` ở `scope=runtime`).
+3. Calendar: runtime preview đã trả `preview_revision` (và `base_connection_revision`) trong response; client gửi lại giá trị này vào trường `expected_preview_revision` khi gọi `/confirm` (lệch revision trả `409 REVISION_CONFLICT` kèm `current_revisions.preview_revision`, thiếu trả `422`). JSON `412` là lỗi Google upstream; client đọc job `200` với `job_state=conflict`, `last_error_code=ETAG_CONFLICT_412`, không retry mù.
 4. Run: Start chống lặp bằng `Idempotency-Key` (body Start không có `event_id`); fixture ghi cả request gốc và retry cùng key, kèm receipt. End có cả key và `event_id`. Khi mất phản hồi, đối soát `/commands/{command_id}`/Run trước retry. Clock-skew Start được kiểm bằng giờ server, giới hạn `300s`; fixture vượt `301s` trả `422 VALIDATION_ERROR` trên `requested_start_at`. `offline_start_supported=false`. Thought giữ `source_run_id`, metadata audio không chứa transcript/path local; thử audio tối đa 3 lần. Chỉ sau phiên: `/voice/transcriptions` với `purpose=thought_to_draft`, rồi `/thoughts/{id}/draft`.
 5. UF6: giữ `steps_to_add`, `pending_notification_state`, `feasibility.next_horizon_preview` (nullable). Hiển thị mã `resegmented_by_settings_change` thành **“Chia lại phiên theo cài đặt mới”**; không đổi enum wire. `deficit_seconds>0` hoặc `confirmable=false` hiển thị hai lựa chọn mở giờ rảnh/lùi hạn chót. Approve `409` tải lại và cho user duyệt lại. Voice: STT timeout phía client ít nhất `45s`; fixture STT/TTS có nhánh `504`; TTS `503` chuyển `flutter_tts`; UF5 trả `200` với `fallback_to_device_tts=true` khi TTS lỗi.
 
@@ -1423,7 +1423,7 @@ Chưa có xác nhận các thành viên đã nhận fixture; người thực hi�
 
 ```json
 {
-  "contract_source": "schema.md sections 14–15; backend bce1fb4; auth target ba16055",
+  "contract_source": "schema.md sections 14–15; backend 23e856b; auth target ba16055",
   "cases": [
     {
       "name": "refresh_success",
@@ -1587,7 +1587,7 @@ Chưa có xác nhận các thành viên đã nhận fixture; người thực hi�
 
 ```json
 {
-  "contract_source": "schema.md sections 14–15; backend bce1fb4; auth target ba16055",
+  "contract_source": "schema.md sections 14–15; backend 23e856b; auth target ba16055",
   "cases": [
     {
       "name": "preferences_after_reject",
@@ -1828,7 +1828,7 @@ Chưa có xác nhận các thành viên đã nhận fixture; người thực hi�
     },
     {
       "name": "settings_buffer_high",
-      "scope": "target_contract",
+      "scope": "runtime",
       "method": "POST",
       "path": "/api/v1/settings/change-requests",
       "response": {
@@ -1928,7 +1928,7 @@ Chưa có xác nhận các thành viên đã nhận fixture; người thực hi�
 
 ```json
 {
-  "contract_source": "schema.md sections 14–15; backend bce1fb4; auth target ba16055",
+  "contract_source": "schema.md sections 14–15; backend 23e856b; auth target ba16055",
   "cases": [
     {
       "name": "configuration_preview",
@@ -1946,7 +1946,9 @@ Chưa có xác nhận các thành viên đã nhận fixture; người thực hi�
             ],
             "write_calendar_id": "primary",
             "existing_event_action": "keep",
-            "status": "pending"
+            "status": "pending",
+            "preview_revision": 1,
+            "base_connection_revision": 2
           },
           "meta": {
             "request_id": "w4-example",
@@ -1964,7 +1966,7 @@ Chưa có xác nhận các thành viên đã nhận fixture; người thực hi�
     },
     {
       "name": "configuration_preview_dynamic_revision",
-      "scope": "target_contract",
+      "scope": "runtime",
       "method": "POST",
       "path": "/api/v1/calendar/connections/22222222-2222-4222-8222-222222222222/configuration-previews",
       "response": {
@@ -1973,13 +1975,14 @@ Chưa có xác nhận các thành viên đã nhận fixture; người thực hi�
           "data": {
             "preview_id": "33333333-3333-4333-8333-333333333333",
             "connection_id": "22222222-2222-4222-8222-222222222222",
-            "expected_preview_revision": 7,
             "read_calendar_ids": [
               "primary"
             ],
             "write_calendar_id": "primary",
             "existing_event_action": "keep",
-            "status": "pending"
+            "status": "pending",
+            "preview_revision": 7,
+            "base_connection_revision": 2
           },
           "meta": {
             "request_id": "w4-example",
@@ -2019,7 +2022,9 @@ Chưa có xác nhận các thành viên đã nhận fixture; người thực hi�
               "recurrence_scope": "single",
               "google_event_id": "event-1",
               "expected_google_etag": "\"etag-v1\""
-            }
+            },
+            "preview_revision": 1,
+            "base_connection_revision": 2
           },
           "meta": {
             "request_id": "w4-example",
@@ -2041,7 +2046,7 @@ Chưa có xác nhận các thành viên đã nhận fixture; người thực hi�
     },
     {
       "name": "event_preview_dynamic_revision",
-      "scope": "target_contract",
+      "scope": "runtime",
       "method": "POST",
       "path": "/api/v1/calendar/event-change-previews",
       "response": {
@@ -2050,7 +2055,6 @@ Chưa có xác nhận các thành viên đã nhận fixture; người thực hi�
           "data": {
             "preview_id": "33333333-3333-4333-8333-333333333333",
             "connection_id": "22222222-2222-4222-8222-222222222222",
-            "expected_preview_revision": 7,
             "kind": "event_change",
             "operation": "update",
             "status": "pending",
@@ -2064,7 +2068,9 @@ Chưa có xác nhận các thành viên đã nhận fixture; người thực hi�
               "recurrence_scope": "single",
               "google_event_id": "event-1",
               "expected_google_etag": "\"etag-v1\""
-            }
+            },
+            "preview_revision": 7,
+            "base_connection_revision": 2
           },
           "meta": {
             "request_id": "w4-example",
@@ -2086,7 +2092,7 @@ Chưa có xác nhận các thành viên đã nhận fixture; người thực hi�
     },
     {
       "name": "preview_conflict",
-      "scope": "target_contract",
+      "scope": "runtime",
       "method": "POST",
       "path": "/api/v1/calendar/event-change-previews/33333333-3333-4333-8333-333333333333/confirm",
       "response": {
@@ -2097,7 +2103,9 @@ Chưa có xác nhận các thành viên đã nhận fixture; người thực hi�
             "message": "Phiên bản bản xem trước không khớp (đã bị cập nhật).",
             "field_errors": [],
             "retryable": false,
-            "current_revisions": {},
+            "current_revisions": {
+              "preview_revision": 2
+            },
             "next_action": "reload_and_review"
           },
           "meta": {
@@ -2167,7 +2175,7 @@ Chưa có xác nhận các thành viên đã nhận fixture; người thực hi�
 
 ```json
 {
-  "contract_source": "schema.md sections 14–15; backend bce1fb4; auth target ba16055",
+  "contract_source": "schema.md sections 14–15; backend 23e856b; auth target ba16055",
   "cases": [
     {
       "name": "start_idempotent",
@@ -2459,7 +2467,7 @@ Chưa có xác nhận các thành viên đã nhận fixture; người thực hi�
 
 ```json
 {
-  "contract_source": "schema.md sections 14–15; backend bce1fb4; auth target ba16055",
+  "contract_source": "schema.md sections 14–15; backend 23e856b; auth target ba16055",
   "cases": [
     {
       "name": "proposal_deficit",

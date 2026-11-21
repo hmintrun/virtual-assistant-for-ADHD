@@ -3,12 +3,15 @@
 import json
 from pathlib import Path
 
+import pytest
+from pydantic import ValidationError
+
 from app.main import app
 from app.schemas import calendar, common, execution
 from app.schemas.auth import RefreshTokenRequest, TokenBundle
 from app.schemas.reschedule import ProposalData
 from app.schemas.schedule import UF5CheckInPromptData
-from app.schemas.settings import UserPreference
+from app.schemas.settings import SettingsChangeRequest, UserPreference
 from app.schemas.thought import ThoughtCreateRequest, ThoughtData
 from app.schemas.voice import UF5VoiceCheckInPromptResponse
 
@@ -36,7 +39,16 @@ def test_runtime_openapi_snapshot_matches_application():
         envelope = snapshot["components"]["schemas"][schema_ref.rsplit("/", 1)[-1]]
         data_ref = envelope["properties"]["data"]["$ref"].rsplit("/", 1)[-1]
         data_schema = snapshot["components"]["schemas"][data_ref]
+        assert "preview_revision" in data_schema.get("properties", {})
+        assert "base_connection_revision" in data_schema.get("properties", {})
         assert "expected_preview_revision" not in data_schema.get("properties", {})
+    for confirm_path in (
+        "/api/v1/calendar/configuration-previews/{preview_id}/confirm",
+        "/api/v1/calendar/event-change-previews/{preview_id}/confirm",
+    ):
+        req_ref = snapshot["paths"][confirm_path]["post"]["requestBody"]["content"]["application/json"]["schema"]["$ref"]
+        req_schema = snapshot["components"]["schemas"][req_ref.rsplit("/", 1)[-1]]
+        assert "expected_preview_revision" in req_schema.get("properties", {})
 
 
 def test_auth_target_openapi_is_separate_and_marked_unimplemented():
@@ -64,7 +76,10 @@ def test_five_fixture_sets_validate_envelopes_and_dtos():
     RefreshTokenRequest.model_validate(CASES["logout_first"]["request"])
     UserPreference.model_validate(CASES["preferences_after_reject"]["response"]["body"]["data"])
     calendar.CalendarConfigurationPreviewResponse.model_validate(CASES["configuration_preview"]["response"]["body"]["data"])
+    calendar.CalendarConfigurationPreviewResponse.model_validate(CASES["configuration_preview_dynamic_revision"]["response"]["body"]["data"])
     calendar.EventChangePreviewResponse.model_validate(CASES["event_preview"]["response"]["body"]["data"])
+    calendar.EventChangePreviewResponse.model_validate(CASES["event_preview_dynamic_revision"]["response"]["body"]["data"])
+    calendar.EventChangeConfirmRequest.model_validate(CASES["preview_conflict"]["request"])
     execution.SessionRunData.model_validate(CASES["start_idempotent"]["response"]["body"]["data"])
     ThoughtCreateRequest.model_validate(CASES["thought_capture"]["request"])
     ThoughtData.model_validate(CASES["thought_capture"]["response"]["body"]["data"])
@@ -75,14 +90,18 @@ def test_five_fixture_sets_validate_envelopes_and_dtos():
     assert CASES["stt_timeout"]["client_expectations"]["receive_timeout_seconds_min"] >= 45
 
 
-def test_target_contract_fixtures_capture_runtime_gaps():
-    assert CASES["configuration_preview_dynamic_revision"]["scope"] == "target_contract"
-    assert CASES["configuration_preview_dynamic_revision"]["response"]["body"]["data"]["expected_preview_revision"] == 7
-    assert CASES["event_preview_dynamic_revision"]["scope"] == "target_contract"
-    assert CASES["event_preview_dynamic_revision"]["response"]["body"]["data"]["expected_preview_revision"] == 7
-    assert CASES["preview_conflict"]["scope"] == "target_contract"
-    assert CASES["settings_buffer_high"]["scope"] == "target_contract"
+def test_runtime_preview_revision_and_buffer_upper_bound_contracts():
+    assert CASES["configuration_preview_dynamic_revision"]["scope"] == "runtime"
+    assert CASES["configuration_preview_dynamic_revision"]["response"]["body"]["data"]["preview_revision"] == 7
+    assert CASES["event_preview_dynamic_revision"]["scope"] == "runtime"
+    assert CASES["event_preview_dynamic_revision"]["response"]["body"]["data"]["preview_revision"] == 7
+    assert CASES["preview_conflict"]["scope"] == "runtime"
+    assert CASES["preview_conflict"]["request"]["expected_preview_revision"] == 7
+    assert CASES["preview_conflict"]["response"]["body"]["error"]["current_revisions"]["preview_revision"] == 2
+    assert CASES["settings_buffer_high"]["scope"] == "runtime"
     assert CASES["settings_buffer_high"]["request"]["changes"]["preferences"]["buffer_multiplier"] == 2.01
+    with pytest.raises(ValidationError):
+        SettingsChangeRequest.model_validate(CASES["settings_buffer_high"]["request"])
 
 
 def test_start_idempotency_and_receipt_fixtures_are_linked():

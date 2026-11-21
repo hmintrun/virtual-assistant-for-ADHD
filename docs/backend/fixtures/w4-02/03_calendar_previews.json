@@ -1,5 +1,5 @@
 {
-  "contract_source": "schema.md sections 14–15; backend bce1fb4; auth target ba16055",
+  "contract_source": "schema.md sections 14–15; backend 23e856b; auth target ba16055",
   "cases": [
     {
       "name": "configuration_preview",
@@ -17,7 +17,9 @@
             ],
             "write_calendar_id": "primary",
             "existing_event_action": "keep",
-            "status": "pending"
+            "status": "pending",
+            "preview_revision": 1,
+            "base_connection_revision": 2
           },
           "meta": {
             "request_id": "w4-example",
@@ -35,7 +37,7 @@
     },
     {
       "name": "configuration_preview_dynamic_revision",
-      "scope": "target_contract",
+      "scope": "runtime",
       "method": "POST",
       "path": "/api/v1/calendar/connections/22222222-2222-4222-8222-222222222222/configuration-previews",
       "response": {
@@ -44,13 +46,14 @@
           "data": {
             "preview_id": "33333333-3333-4333-8333-333333333333",
             "connection_id": "22222222-2222-4222-8222-222222222222",
-            "expected_preview_revision": 7,
             "read_calendar_ids": [
               "primary"
             ],
             "write_calendar_id": "primary",
             "existing_event_action": "keep",
-            "status": "pending"
+            "status": "pending",
+            "preview_revision": 7,
+            "base_connection_revision": 2
           },
           "meta": {
             "request_id": "w4-example",
@@ -90,7 +93,9 @@
               "recurrence_scope": "single",
               "google_event_id": "event-1",
               "expected_google_etag": "\"etag-v1\""
-            }
+            },
+            "preview_revision": 1,
+            "base_connection_revision": 2
           },
           "meta": {
             "request_id": "w4-example",
@@ -112,7 +117,7 @@
     },
     {
       "name": "event_preview_dynamic_revision",
-      "scope": "target_contract",
+      "scope": "runtime",
       "method": "POST",
       "path": "/api/v1/calendar/event-change-previews",
       "response": {
@@ -121,7 +126,6 @@
           "data": {
             "preview_id": "33333333-3333-4333-8333-333333333333",
             "connection_id": "22222222-2222-4222-8222-222222222222",
-            "expected_preview_revision": 7,
             "kind": "event_change",
             "operation": "update",
             "status": "pending",
@@ -135,7 +139,9 @@
               "recurrence_scope": "single",
               "google_event_id": "event-1",
               "expected_google_etag": "\"etag-v1\""
-            }
+            },
+            "preview_revision": 7,
+            "base_connection_revision": 2
           },
           "meta": {
             "request_id": "w4-example",
@@ -157,7 +163,7 @@
     },
     {
       "name": "preview_conflict",
-      "scope": "target_contract",
+      "scope": "runtime",
       "method": "POST",
       "path": "/api/v1/calendar/event-change-previews/33333333-3333-4333-8333-333333333333/confirm",
       "response": {
@@ -168,7 +174,9 @@
             "message": "Phiên bản bản xem trước không khớp (đã bị cập nhật).",
             "field_errors": [],
             "retryable": false,
-            "current_revisions": {},
+            "current_revisions": {
+              "preview_revision": 2
+            },
             "next_action": "reload_and_review"
           },
           "meta": {
