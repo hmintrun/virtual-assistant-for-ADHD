@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
@@ -83,6 +85,10 @@ class _SetupFlowScreenState extends State<SetupFlowScreen>
   bool _breakReminder = true;
   bool _requestingPermission = false;
   bool _savingPreferences = false;
+  bool _loadingPreferences = true;
+  bool _preferencesLoaded = false;
+  String? _preferencesError;
+  Map<String, dynamic>? _serverPreferences;
   final _api = ApiClient();
   bool _waitingForDndSettings = false;
 
@@ -94,6 +100,7 @@ class _SetupFlowScreenState extends State<SetupFlowScreen>
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _appearance = context.read<ThemeProvider>().appearance;
+    unawaited(_restoreSetup());
   }
 
   @override
@@ -155,6 +162,86 @@ class _SetupFlowScreenState extends State<SetupFlowScreen>
   Future<void> _selectAppearance(String value) async {
     setState(() => _appearance = value);
     await context.read<ThemeProvider>().setAppearance(value);
+    _persistProgress();
+  }
+
+  Future<void> _restoreSetup() async {
+    final auth = context.read<AuthService>();
+    final savedProgress = await auth.loadOnboardingProgress();
+    try {
+      final preferences = await _api.getData('/preferences');
+      if (!mounted) return;
+      _serverPreferences = preferences;
+      if (savedProgress == null) {
+        final work = preferences['work_interval_seconds'];
+        final rest = preferences['rest_interval_seconds'];
+        if (work is num && work > 0) _focusMinutes = (work / 60).round();
+        if (rest is num && rest >= 0) _breakMinutes = (rest / 60).round();
+        final offsets = preferences['reminder_offsets'];
+        if (offsets is List) {
+          _reminderFrequency = offsets.length <= 1
+              ? 'Ít'
+              : offsets.length >= 3
+                  ? 'Nhiều'
+                  : 'Vừa';
+        }
+        final microTask = preferences['micro_task_seconds'];
+        if (microTask is num) _microTask = microTask > 0;
+        if (preferences['reminder_style'] == 'encouraging') {
+          _reminderStyle = 'Nhắc khích lệ';
+        } else if (preferences['reminder_style'] == 'gentle') {
+          _reminderStyle = 'Hỏi tiến độ';
+        }
+      }
+      _preferencesLoaded = true;
+      _preferencesError = null;
+    } on ApiException catch (error) {
+      _preferencesError = error.message;
+    } catch (_) {
+      _preferencesError = 'Chưa tải được cài đặt đã lưu.';
+    }
+
+    if (!mounted) return;
+    if (savedProgress != null) {
+      final step = savedProgress['step'];
+      final focus = savedProgress['focus_minutes'];
+      final rest = savedProgress['break_minutes'];
+      if (step is num) _step = step.toInt().clamp(0, 6).toInt();
+      if (focus is num) _focusMinutes = focus.toInt();
+      if (rest is num) _breakMinutes = rest.toInt();
+      if (savedProgress['appearance'] is String) {
+        _appearance = savedProgress['appearance'] as String;
+      }
+      if (savedProgress['reminder_frequency'] is String) {
+        _reminderFrequency = savedProgress['reminder_frequency'] as String;
+      }
+      if (savedProgress['reminder_style'] is String) {
+        _reminderStyle = savedProgress['reminder_style'] as String;
+      }
+      _microTask = savedProgress['micro_task'] as bool? ?? _microTask;
+      _voiceReadout = savedProgress['voice_readout'] as bool? ?? _voiceReadout;
+      _breakReminder =
+          savedProgress['break_reminder'] as bool? ?? _breakReminder;
+      if (_appearance != context.read<ThemeProvider>().appearance) {
+        await context.read<ThemeProvider>().setAppearance(_appearance);
+      }
+    }
+    if (!mounted) return;
+    setState(() => _loadingPreferences = false);
+  }
+
+  void _persistProgress() {
+    unawaited(context.read<AuthService>().saveOnboardingProgress({
+      'step': _step,
+      'appearance': _appearance,
+      'focus_minutes': _focusMinutes,
+      'break_minutes': _breakMinutes,
+      'reminder_frequency': _reminderFrequency,
+      'reminder_style': _reminderStyle,
+      'micro_task': _microTask,
+      'voice_readout': _voiceReadout,
+      'break_reminder': _breakReminder,
+    }));
   }
 
   static const _permissionTitles = [
@@ -176,8 +263,9 @@ class _SetupFlowScreenState extends State<SetupFlowScreen>
   void _next() {
     if (_step < 6) {
       setState(() => _step++);
+      _persistProgress();
     } else {
-      _openHome();
+      unawaited(_openHome());
     }
   }
 
@@ -186,39 +274,65 @@ class _SetupFlowScreenState extends State<SetupFlowScreen>
       Navigator.maybePop(context);
     } else {
       setState(() => _step--);
+      _persistProgress();
     }
   }
 
   Future<void> _openHome() async {
-    if (_savingPreferences) return;
+    if (_savingPreferences || _loadingPreferences) return;
+    final auth = context.read<AuthService>();
     setState(() => _savingPreferences = true);
     try {
-      final preferences = await _api.getData('/preferences');
-      if (!mounted) return;
-      final revision =
-          preferences['effective_revision'] ?? preferences['revision'];
+      if (!_preferencesLoaded || _serverPreferences == null) {
+        await _restoreSetup();
+      }
+      if (!mounted || !_preferencesLoaded || _serverPreferences == null) {
+        if (mounted) {
+          _showPermissionMessage(
+              'Chưa tải được cài đặt đã lưu. Hãy thử tải lại trước khi tiếp tục.');
+        }
+        return;
+      }
+      final preferences = _serverPreferences!;
+      final revision = preferences['effective_revision'] ??
+          preferences['revision'];
       final offsets = switch (_reminderFrequency) {
         'Ít' => [300],
         'Nhiều' => [900, 600, 300],
         _ => [600, 300],
       };
-      final payload = {
-        'expected_preferences_revision': revision,
-        'changes': {
-          'preferences': {
-            'work_interval_seconds': _focusMinutes * 60,
-            'rest_interval_seconds': _breakMinutes * 60,
-            'reminder_offsets': offsets,
-          },
-        },
-      };
-      await _api.postData(
-        '/settings/change-requests',
-        data: payload,
-        idempotencyKey: ApiClient.stableIdempotencyKey(
-            'onboarding_preferences', payload.toString()),
-      );
+      final preferenceChanges = <String, dynamic>{};
+      if (preferences['work_interval_seconds'] != _focusMinutes * 60) {
+        preferenceChanges['work_interval_seconds'] = _focusMinutes * 60;
+      }
+      if (preferences['rest_interval_seconds'] != _breakMinutes * 60) {
+        preferenceChanges['rest_interval_seconds'] = _breakMinutes * 60;
+      }
+      final currentOffsets = preferences['reminder_offsets'];
+      if (currentOffsets is! List || !listEquals(currentOffsets, offsets)) {
+        preferenceChanges['reminder_offsets'] = offsets;
+      }
+      final desiredStyle = _reminderStyle == 'Nhắc khích lệ'
+          ? 'encouraging'
+          : 'gentle';
+      if (preferences['reminder_style'] != desiredStyle) {
+        preferenceChanges['reminder_style'] = desiredStyle;
+      }
+      if (preferenceChanges.isNotEmpty) {
+        final payload = {
+          'expected_preferences_revision': revision,
+          'changes': {'preferences': preferenceChanges},
+        };
+        await _api.postData(
+          '/settings/change-requests',
+          data: payload,
+          idempotencyKey: ApiClient.stableIdempotencyKey(
+              'onboarding_preferences', payload.toString()),
+        );
+      }
+      await auth.completeOnboarding();
     } on ApiException catch (error) {
+      if (error.code == 'REVISION_CONFLICT') unawaited(_restoreSetup());
       if (mounted)
         _showPermissionMessage('Chưa lưu thiết lập: ${error.message}');
       return;
@@ -248,6 +362,20 @@ class _SetupFlowScreenState extends State<SetupFlowScreen>
           onBack: _requestingPermission ? () {} : _back),
       body: Column(
         children: [
+          if (_loadingPreferences) const LinearProgressIndicator(),
+          if (!_loadingPreferences && !_preferencesLoaded)
+            ListTile(
+              leading: const Icon(Icons.cloud_off_outlined),
+              title: const Text('Chưa tải được cài đặt đã lưu'),
+              subtitle: Text(_preferencesError ??
+                  'Tải lại để giữ nguyên thiết lập tài khoản.'),
+              trailing: TextButton(
+                onPressed: _savingPreferences
+                    ? null
+                    : () => unawaited(_restoreSetup()),
+                child: const Text('Thử lại'),
+              ),
+            ),
           if (_step >= 4)
             Padding(
               padding: const EdgeInsets.fromLTRB(24, 8, 24, 0),
@@ -382,8 +510,10 @@ class _SetupFlowScreenState extends State<SetupFlowScreen>
                 .map((minutes) => ChoiceChip(
                       label: Text('$minutes phút'),
                       selected: _focusMinutes == minutes,
-                      onSelected: (_) =>
-                          setState(() => _focusMinutes = minutes),
+                      onSelected: (_) {
+                        setState(() => _focusMinutes = minutes);
+                        _persistProgress();
+                      },
                     ))
                 .toList(),
           ),
@@ -397,8 +527,10 @@ class _SetupFlowScreenState extends State<SetupFlowScreen>
                 .map((minutes) => ChoiceChip(
                       label: Text('$minutes phút'),
                       selected: _breakMinutes == minutes,
-                      onSelected: (_) =>
-                          setState(() => _breakMinutes = minutes),
+                      onSelected: (_) {
+                        setState(() => _breakMinutes = minutes);
+                        _persistProgress();
+                      },
                     ))
                 .toList(),
           ),
@@ -420,8 +552,10 @@ class _SetupFlowScreenState extends State<SetupFlowScreen>
                 .map((label) => ChoiceChip(
                       label: Text(label),
                       selected: _reminderFrequency == label,
-                      onSelected: (_) =>
-                          setState(() => _reminderFrequency = label),
+                      onSelected: (_) {
+                        setState(() => _reminderFrequency = label);
+                        _persistProgress();
+                      },
                     ))
                 .toList(),
           ),
@@ -433,7 +567,10 @@ class _SetupFlowScreenState extends State<SetupFlowScreen>
                 .map((style) => ChoiceChip(
                       label: Text(style),
                       selected: _reminderStyle == style,
-                      onSelected: (_) => setState(() => _reminderStyle = style),
+                      onSelected: (_) {
+                        setState(() => _reminderStyle = style);
+                        _persistProgress();
+                      },
                     ))
                 .toList(),
           ),
@@ -441,17 +578,26 @@ class _SetupFlowScreenState extends State<SetupFlowScreen>
           Text('Bộ đệm tâm lý', style: Theme.of(context).textTheme.titleMedium),
           SwitchListTile(
             value: _microTask,
-            onChanged: (value) => setState(() => _microTask = value),
+            onChanged: (value) {
+              setState(() => _microTask = value);
+              _persistProgress();
+            },
             title: const Text('Khởi động 2 phút'),
           ),
           SwitchListTile(
             value: _voiceReadout,
-            onChanged: (value) => setState(() => _voiceReadout = value),
+            onChanged: (value) {
+              setState(() => _voiceReadout = value);
+              _persistProgress();
+            },
             title: const Text('Đọc bằng giọng nói'),
           ),
           SwitchListTile(
             value: _breakReminder,
-            onChanged: (value) => setState(() => _breakReminder = value),
+            onChanged: (value) {
+              setState(() => _breakReminder = value);
+              _persistProgress();
+            },
             title: const Text('Nhắc nghỉ giải lao'),
           ),
           const _NoticeCard(

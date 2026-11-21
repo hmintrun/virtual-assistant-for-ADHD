@@ -7,6 +7,7 @@ import 'package:google_sign_in/google_sign_in.dart';
 
 import '../core/api_client.dart';
 import '../core/api_session.dart';
+import '../repositories/local_database_manager.dart';
 
 class AuthService extends ChangeNotifier {
   static const isDev = String.fromEnvironment('AUTH_MODE') == 'dev_user';
@@ -14,6 +15,8 @@ class AuthService extends ChangeNotifier {
   static const _serverClientId =
       String.fromEnvironment('GOOGLE_SERVER_CLIENT_ID');
   static const _sessionKey = 'proplan.auth.session.v1';
+  static const _onboardingKeyPrefix = 'proplan.onboarding.v1.';
+  static const _onboardingProgressKeyPrefix = 'proplan.onboarding.progress.v1.';
 
   final _storage = const FlutterSecureStorage();
   final _publicApi = ApiClient(bindSession: false);
@@ -29,6 +32,7 @@ class AuthService extends ChangeNotifier {
   bool loading = true;
   bool busy = false;
   bool needsSignIn = false;
+  bool onboardingRequired = false;
   String? error;
 
   bool get configured => kIsWeb
@@ -57,6 +61,7 @@ class AuthService extends ChangeNotifier {
     try {
       if (isDev) {
         _bind(ApiSession('dev_user'), null);
+        onboardingRequired = !await _isOnboardingComplete('dev_user');
         return;
       }
       final raw = await _storage.read(key: _sessionKey);
@@ -69,6 +74,7 @@ class AuthService extends ChangeNotifier {
       _refreshExpiresAt =
           DateTime.tryParse(saved['refresh_expires_at'] as String? ?? '');
       _bind(bound, profile);
+      onboardingRequired = !await _isOnboardingComplete(owner);
       try {
         final verified = await ApiClient().getData('/auth/me');
         if (verified['user_id'] != owner) {
@@ -192,6 +198,7 @@ class AuthService extends ChangeNotifier {
     }
     await _saveTokens(data, profile);
     if (previous == null) {
+      onboardingRequired = !await _isOnboardingComplete(owner);
       _bind(ApiSession(owner, token: token), profile);
     } else {
       previous.token = token;
@@ -241,6 +248,21 @@ class AuthService extends ChangeNotifier {
     notifyListeners();
     try {
       await _renewing;
+      // Logout is a public refresh-token operation. Keep local sign-out
+      // available when the server is offline or still lacks the target route.
+      final refreshToken = _refreshToken;
+      if (!isDev && refreshToken != null) {
+        try {
+          await _publicApi.postData(
+            '/auth/logout',
+            data: {'refresh_token': refreshToken},
+            idempotent: false,
+          );
+        } catch (_) {}
+      }
+      try {
+        await LocalDatabaseManager.instance.closeCurrentDatabase();
+      } catch (_) {}
       await _storage.delete(key: _sessionKey);
       _refreshToken = null;
       _refreshExpiresAt = null;
@@ -250,6 +272,7 @@ class AuthService extends ChangeNotifier {
       user = null;
       error = null;
       needsSignIn = false;
+      onboardingRequired = false;
       if (_googleInitialization != null) {
         try {
           await _googleInitialization;
@@ -264,6 +287,54 @@ class AuthService extends ChangeNotifier {
       busy = false;
       notifyListeners();
     }
+  }
+
+  Future<bool> _isOnboardingComplete(String ownerId) async {
+    try {
+      return await _storage.read(key: '$_onboardingKeyPrefix$ownerId') ==
+          'complete';
+    } catch (_) {
+      return false;
+    }
+  }
+
+  Future<Map<String, dynamic>?> loadOnboardingProgress() async {
+    final ownerId = session?.ownerId;
+    if (ownerId == null) return null;
+    try {
+      final raw = await _storage.read(
+          key: '$_onboardingProgressKeyPrefix$ownerId');
+      return raw == null
+          ? null
+          : jsonDecode(raw) as Map<String, dynamic>;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<void> saveOnboardingProgress(Map<String, dynamic> progress) async {
+    final ownerId = session?.ownerId;
+    if (ownerId == null) return;
+    try {
+      await _storage.write(
+        key: '$_onboardingProgressKeyPrefix$ownerId',
+        value: jsonEncode(progress),
+      );
+    } catch (_) {}
+  }
+
+  Future<void> completeOnboarding() async {
+    final ownerId = session?.ownerId;
+    if (ownerId == null) return;
+    await _storage.write(
+      key: '$_onboardingKeyPrefix$ownerId',
+      value: 'complete',
+    );
+    onboardingRequired = false;
+    notifyListeners();
+    try {
+      await _storage.delete(key: '$_onboardingProgressKeyPrefix$ownerId');
+    } catch (_) {}
   }
 
   @override

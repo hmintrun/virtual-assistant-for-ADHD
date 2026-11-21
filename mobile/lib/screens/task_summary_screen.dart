@@ -11,7 +11,9 @@ import 'drafts_screen.dart';
 import 'candidate_review_screen.dart';
 
 class TaskSummaryScreen extends StatefulWidget {
-  const TaskSummaryScreen({super.key});
+  const TaskSummaryScreen({super.key, this.returnToReview = false});
+
+  final bool returnToReview;
 
   @override
   State<TaskSummaryScreen> createState() => _TaskSummaryScreenState();
@@ -135,6 +137,7 @@ class _TaskSummaryScreenState extends State<TaskSummaryScreen> {
         (task.title.trim() != draft.title.trim() ||
             scope != draft.scope ||
             task.availability != null ||
+            task.availabilityCleared ||
             task.deadline != _initialDeadline);
     task.setScope(scope);
     setState(() => _isSubmitting = true);
@@ -184,6 +187,10 @@ class _TaskSummaryScreenState extends State<TaskSummaryScreen> {
       await task.confirmDraftSummaryOnBackend();
       await task.generateCandidateOnBackend();
       if (!mounted) return;
+      if (widget.returnToReview) {
+        Navigator.pop(context, true);
+        return;
+      }
       await Navigator.push(
           context,
           MaterialPageRoute<void>(
@@ -381,6 +388,33 @@ class _TaskSummaryScreenState extends State<TaskSummaryScreen> {
                         ? null
                         : () => _pickAvailability(task),
                   ),
+                  if (task.hasAvailability)
+                    Align(
+                      alignment: Alignment.centerLeft,
+                      child: TextButton.icon(
+                        onPressed: _isSubmitting || task.isApiBusy
+                            ? null
+                            : () {
+                                final previous = task.clearAvailability();
+                                if (previous == null &&
+                                    !task.availabilityCleared) return;
+                                ScaffoldMessenger.of(context)
+                                  ..hideCurrentSnackBar()
+                                  ..showSnackBar(SnackBar(
+                                    content:
+                                        const Text('Đã xóa giờ rảnh khỏi bản nháp.'),
+                                    duration: const Duration(seconds: 5),
+                                    action: SnackBarAction(
+                                      label: 'Hoàn tác',
+                                      onPressed: () =>
+                                          task.undoClearAvailability(previous),
+                                    ),
+                                  ));
+                              },
+                        icon: const Icon(Icons.delete_outline),
+                        label: const Text('Xóa giờ rảnh'),
+                      ),
+                    ),
                   ListTile(
                     contentPadding: EdgeInsets.zero,
                     leading: const Icon(Icons.schedule_outlined),

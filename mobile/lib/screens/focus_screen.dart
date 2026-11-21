@@ -12,6 +12,7 @@ import '../models/focus_session_model.dart';
 import '../models/task_model.dart';
 import '../providers/focus_provider.dart';
 import '../providers/task_provider.dart';
+import '../services/checkin_voice_service.dart';
 import 'task_entry_screen.dart';
 import '../widgets/melbel_ui.dart';
 import 'focus_review_screens.dart';
@@ -27,6 +28,8 @@ class FocusScreen extends StatefulWidget {
 
 class _FocusScreenState extends State<FocusScreen> with WidgetsBindingObserver {
   final TextEditingController _thoughtText = TextEditingController();
+  final CheckInVoiceService _checkInVoice = CheckInVoiceService();
+  String? _spokenCheckInRunId;
 
   @override
   void initState() {
@@ -55,6 +58,7 @@ class _FocusScreenState extends State<FocusScreen> with WidgetsBindingObserver {
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _thoughtText.dispose();
+    unawaited(_checkInVoice.dispose());
     super.dispose();
   }
 
@@ -62,6 +66,19 @@ class _FocusScreenState extends State<FocusScreen> with WidgetsBindingObserver {
   Widget build(BuildContext context) {
     final focus = context.watch<FocusProvider>();
     final session = focus.session;
+    final runId = focus.serverRunId;
+    if (focus.stage == FocusStage.ended &&
+        focus.hasOpenCheckIn &&
+        focus.canAnswerCheckIn &&
+        runId != null &&
+        runId != _spokenCheckInRunId) {
+      _spokenCheckInRunId = runId;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted && context.read<FocusProvider>().canAnswerCheckIn) {
+          unawaited(_checkInVoice.speakFinalPrompt(runId));
+        }
+      });
+    }
     if (session == null) {
       return const Scaffold(
         appBar: MelbelAppBar(title: 'Phiên tập trung', showBack: true),
@@ -960,7 +977,9 @@ class _FocusScreenState extends State<FocusScreen> with WidgetsBindingObserver {
       if (!mounted || stepCompleted == null) return;
     }
     await focus.answerCheckIn(outcome,
-        remainingNote: note, stepCompleted: stepCompleted);
+        remainingNote: note,
+        stepCompleted: stepCompleted,
+        preserveFocusMode: outcome == 'completed');
     if (!mounted || focus.canAnswerCheckIn || focus.runError != null) return;
     await Navigator.of(context).push(MaterialPageRoute<void>(
       builder: (_) => outcome == 'completed'

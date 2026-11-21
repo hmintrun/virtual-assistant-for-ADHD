@@ -70,6 +70,28 @@ class AdaptationApi {
   Future<Map<String, dynamic>> updateProposal(
     String action,
     Map<String, dynamic> proposal,
+  ) async {
+    try {
+      return await _updateProposal(action, proposal);
+    } on ApiException catch (error) {
+      // An approval is bound to the exact version the user reviewed. Let the
+      // screen reload it and ask for confirmation instead of approving a new
+      // schedule silently.
+      if (action == 'approve' ||
+          error.statusCode != 409 ||
+          error.code != 'REVISION_CONFLICT') {
+        rethrow;
+      }
+      final id = proposal['proposal_id'] as String;
+      final latest = await this.proposal(id);
+      if (latest['status'] != 'pending') rethrow;
+      return _updateProposal(action, latest);
+    }
+  }
+
+  Future<Map<String, dynamic>> _updateProposal(
+    String action,
+    Map<String, dynamic> proposal,
   ) =>
       _command(
           '/proposals/${Uri.encodeComponent(proposal['proposal_id'] as String)}/$action',

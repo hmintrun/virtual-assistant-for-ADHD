@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
@@ -26,6 +28,9 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   bool _showSuggestion = false;
   Future<List<Map<String, dynamic>>>? _sessions;
   Object? _confirmedTask;
+  FocusProvider? _observedFocus;
+  bool _openingRecoveredCheckIn = false;
+  String? _expiredNoticeRunId;
 
   @override
   void initState() {
@@ -35,14 +40,74 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   }
 
   @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final focus = context.read<FocusProvider>();
+    if (!identical(_observedFocus, focus)) {
+      _observedFocus?.removeListener(_onFocusChanged);
+      _observedFocus = focus..addListener(_onFocusChanged);
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _handleRecoveredCheckIn(focus);
+      });
+    }
+  }
+
+  @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _observedFocus?.removeListener(_onFocusChanged);
     super.dispose();
   }
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.resumed) _refreshAdaptation();
+    if (state == AppLifecycleState.resumed) {
+      _refreshAdaptation();
+      final focus = _observedFocus;
+      if (focus != null) unawaited(_refreshCheckInAfterResume(focus));
+    }
+  }
+
+  void _onFocusChanged() {
+    final focus = _observedFocus;
+    if (focus == null) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _handleRecoveredCheckIn(focus);
+    });
+  }
+
+  Future<void> _refreshCheckInAfterResume(FocusProvider focus) async {
+    if (focus.stage == FocusStage.ended && focus.serverRunId != null) {
+      await focus.refreshRunCheckIn();
+    }
+    if (mounted) _handleRecoveredCheckIn(focus);
+  }
+
+  void _handleRecoveredCheckIn(FocusProvider focus) {
+    final noticeRunId = focus.serverRunId ?? focus.session?.sessionId;
+    if (focus.checkInExpired &&
+        noticeRunId != null &&
+        _expiredNoticeRunId != noticeRunId) {
+      _expiredNoticeRunId = noticeRunId;
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+        content: Text(
+          'Phiên check-in đã hết hạn. Lịch hiện tại vẫn được giữ nguyên.',
+        ),
+        duration: Duration(seconds: 5),
+      ));
+      focus.clearCheckInExpiredBanner();
+      return;
+    }
+    if (!focus.awaitingCheckIn || _openingRecoveredCheckIn) return;
+    _openingRecoveredCheckIn = true;
+    unawaited(Navigator.of(context)
+        .push(MaterialPageRoute<void>(
+          builder: (_) => const FocusScreen(),
+        ))
+        .whenComplete(() {
+          _openingRecoveredCheckIn = false;
+          if (mounted) _refreshSchedule();
+        }));
   }
 
   Future<bool> _hasCurrent(

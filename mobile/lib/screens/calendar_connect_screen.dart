@@ -178,9 +178,15 @@ class _CalendarConnectScreenState extends State<CalendarConnectScreen>
         _busyEvents = const [];
       });
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Đã ngắt Google Calendar. ProPlan sẽ xếp theo giờ '
-              'rảnh bạn nhập. Bấm Kết nối lại khi cần.'),
+        SnackBar(
+          duration: const Duration(seconds: 5),
+          content: const Text(
+            'Đã ngắt Google Calendar. Hoàn tác sẽ mở Google để cấp lại quyền.',
+          ),
+          action: SnackBarAction(
+            label: 'Hoàn tác',
+            onPressed: _undoDisconnect,
+          ),
         ),
       );
     } on ApiException catch (e) {
@@ -188,6 +194,10 @@ class _CalendarConnectScreenState extends State<CalendarConnectScreen>
     } finally {
       if (mounted) setState(() => _working = false);
     }
+  }
+
+  void _undoDisconnect() {
+    unawaited(_connect());
   }
 
   /// Lịch ghi phiên Focus sau khi duyệt: giữ lựa chọn cũ nếu có, không thì
