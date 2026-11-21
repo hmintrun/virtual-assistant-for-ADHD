@@ -1,0 +1,152 @@
+{
+  "contract_source": "schema.md sections 14–15; backend bce1fb4; auth target ba16055",
+  "cases": [
+    {
+      "name": "refresh_success",
+      "scope": "runtime",
+      "method": "POST",
+      "path": "/api/v1/auth/refresh",
+      "response": {
+        "status": 200,
+        "body": {
+          "data": {
+            "access_token": "example-access-token",
+            "token_type": "bearer",
+            "expires_in": 3600,
+            "refresh_token": "example-new-refresh-token",
+            "refresh_expires_in": 2592000
+          },
+          "meta": {
+            "request_id": "w4-example",
+            "server_time": "2026-11-20T03:00:00Z"
+          }
+        }
+      },
+      "request": {
+        "refresh_token": "example-old-refresh-token"
+      }
+    },
+    {
+      "name": "app_unauthenticated",
+      "scope": "runtime",
+      "method": "GET",
+      "path": "/api/v1/auth/me",
+      "response": {
+        "status": 401,
+        "body": {
+          "error": {
+            "code": "UNAUTHENTICATED",
+            "message": "Phiên đăng nhập không hợp lệ hoặc đã hết hạn.",
+            "field_errors": [],
+            "retryable": false,
+            "current_revisions": {},
+            "next_action": "authenticate"
+          },
+          "meta": {
+            "request_id": "w4-example",
+            "server_time": "2026-11-20T03:00:00Z"
+          }
+        },
+        "headers": {
+          "WWW-Authenticate": "Bearer"
+        }
+      }
+    },
+    {
+      "name": "calendar_reconnect",
+      "scope": "runtime",
+      "method": "GET",
+      "path": "/api/v1/calendar/connections/22222222-2222-4222-8222-222222222222/calendars",
+      "response": {
+        "status": 401,
+        "body": {
+          "error": {
+            "code": "CALENDAR_AUTH_REQUIRED",
+            "message": "Cần kết nối lại Google Calendar.",
+            "field_errors": [],
+            "retryable": false,
+            "current_revisions": {},
+            "next_action": "reconnect_google_calendar"
+          },
+          "meta": {
+            "request_id": "w4-example",
+            "server_time": "2026-11-20T03:00:00Z"
+          }
+        }
+      }
+    },
+    {
+      "name": "logout_first",
+      "scope": "target_be03",
+      "method": "POST",
+      "path": "/api/v1/auth/logout",
+      "response": {
+        "status": 200,
+        "body": {
+          "data": {
+            "logged_out": true,
+            "revoked": true
+          },
+          "meta": {
+            "request_id": "w4-example",
+            "server_time": "2026-11-20T03:00:00Z"
+          }
+        }
+      },
+      "request": {
+        "refresh_token": "example-old-refresh-token"
+      }
+    },
+    {
+      "name": "logout_retry",
+      "scope": "target_be03",
+      "method": "POST",
+      "path": "/api/v1/auth/logout",
+      "response": {
+        "status": 200,
+        "body": {
+          "data": {
+            "logged_out": true,
+            "revoked": false
+          },
+          "meta": {
+            "request_id": "w4-example",
+            "server_time": "2026-11-20T03:00:00Z"
+          }
+        }
+      },
+      "request": {
+        "refresh_token": "example-old-refresh-token"
+      }
+    },
+    {
+      "name": "refresh_reuse",
+      "scope": "target_be03",
+      "method": "POST",
+      "path": "/api/v1/auth/refresh",
+      "response": {
+        "status": 401,
+        "body": {
+          "error": {
+            "code": "UNAUTHENTICATED",
+            "message": "Phiên đăng nhập không hợp lệ hoặc đã hết hạn.",
+            "field_errors": [],
+            "retryable": false,
+            "current_revisions": {},
+            "next_action": "authenticate"
+          },
+          "meta": {
+            "request_id": "w4-example",
+            "server_time": "2026-11-20T03:00:00Z"
+          }
+        },
+        "headers": {
+          "WWW-Authenticate": "Bearer"
+        }
+      },
+      "request": {
+        "refresh_token": "example-old-refresh-token"
+      }
+    }
+  ]
+}

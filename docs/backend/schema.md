@@ -1385,3 +1385,1303 @@ Endpoint Dòng 8 trong Sheet (`multipart/form-data`: `purpose` ∈ `{"uf1_input"
   }
   ```
 - **Errors:** `503 DATABASE_UNAVAILABLE` (`retryable=true`, `next_action="retry_later"`, trả theo chuẩn `ErrorEnvelope`) khi truy vấn kiểm tra `SELECT 1` xuống DB thất bại.
+
+## 15. W4-02 — Bộ bàn giao OpenAPI và JSON fixtures
+
+Nguồn runtime: `origin/backend@bce1fb4`; contract Auth do VQH chốt tại `ba16055` (mục 14.1). Mã và thời gian trong fixture là dữ liệu giả, không chứa token thật. `scope=runtime` mô tả code hiện tại; `target_be03` và `target_contract` là yêu cầu đã chốt nhưng chưa có đủ hỗ trợ trong runtime. Contract tests đối chiếu OpenAPI runtime và validate DTO/fixtures.
+
+- [openapi.json](openapi.json): xuất trực tiếp `app.openapi()` của code đang tích hợp.
+- [openapi-auth-target.json](openapi-auth-target.json): OpenAPI riêng cho refresh rotation/logout Option 1 đã chốt, gắn `target_be03`. Dùng để mock Mobile trước khi BE-03 hoàn thành.
+- Năm bộ JSON dưới đây cũng có file riêng trong [fixtures/w4-02/](fixtures/w4-02/). `scope=runtime` là contract của code hiện tại; `target_be03`/`target_contract` là đích đã chốt; `google_upstream` là phản hồi từ Google tới worker.
+
+### Quy tắc client và các chỗ chưa khớp code
+
+1. Auth: đọc `body.error.code`. `401 CALENDAR_AUTH_REQUIRED` chỉ yêu cầu nối lại Calendar. Logout target public nhận `refresh_token`, trả `logged_out=true` và `revoked=true/false` (retry idempotent); reuse refresh thu hồi family và trả `401 UNAUTHENTICATED` có `WWW-Authenticate: Bearer`. Migration refresh token đã có trên backend, route logout/service rotation chưa có; kiểm tra fixture target không đồng nghĩa BE-03 đã đạt.
+2. Settings: gửi `effective_revision` vào `expected_preferences_revision`; suggestion dùng tên **số ít** `expected_preference_revision`. Hủy dùng `change_request_id` + `request_revision` từ response save. Sau reopen hoặc accept suggestion, response hiện chưa cung cấp đủ request revision để hủy: không tự lấy preference revision thay thế. `409` tải lại cấu hình. Chính sách client `buffer_multiplier ∈ [1.0, 2.0]`: runtime chặn dưới `1.0` nhưng change-request chưa chặn trên `2.0`; fixture `settings_buffer_high` thuộc `target_contract` và ghi nhận gap.
+3. Calendar: runtime preview hiện **không trả revision**; contract target yêu cầu response có `expected_preview_revision` động và client gửi lại khi confirm. Không tự dựng revision từ connection khi dùng runtime hiện tại. JSON `412` là lỗi Google upstream; client đọc job `200` với `job_state=conflict`, `last_error_code=ETAG_CONFLICT_412`, không retry mù.
+4. Run: Start chống lặp bằng `Idempotency-Key` (body Start không có `event_id`); fixture ghi cả request gốc và retry cùng key, kèm receipt. End có cả key và `event_id`. Khi mất phản hồi, đối soát `/commands/{command_id}`/Run trước retry. Clock-skew Start được kiểm bằng giờ server, giới hạn `300s`; fixture vượt `301s` trả `422 VALIDATION_ERROR` trên `requested_start_at`. `offline_start_supported=false`. Thought giữ `source_run_id`, metadata audio không chứa transcript/path local; thử audio tối đa 3 lần. Chỉ sau phiên: `/voice/transcriptions` với `purpose=thought_to_draft`, rồi `/thoughts/{id}/draft`.
+5. UF6: giữ `steps_to_add`, `pending_notification_state`, `feasibility.next_horizon_preview` (nullable). Hiển thị mã `resegmented_by_settings_change` thành **“Chia lại phiên theo cài đặt mới”**; không đổi enum wire. `deficit_seconds>0` hoặc `confirmable=false` hiển thị hai lựa chọn mở giờ rảnh/lùi hạn chót. Approve `409` tải lại và cho user duyệt lại. Voice: STT timeout phía client ít nhất `45s`; fixture STT/TTS có nhánh `504`; TTS `503` chuyển `flutter_tts`; UF5 trả `200` với `fallback_to_device_tts=true` khi TTS lỗi.
+
+### Tái tạo và kiểm tra
+
+Chạy từ `backend/`:
+
+```powershell
+.\.venv\Scripts\python.exe -m scripts.export_w4_contracts
+.\.venv\Scripts\python.exe -m scripts.export_w4_contracts --check
+.\.venv\Scripts\python.exe -m pytest tests/contract/test_w4_02_openapi_fixtures.py -q
+```
+
+Chưa có xác nhận các thành viên đã nhận fixture; người thực hiện bàn giao chỉ đánh dấu DoD này sau khi team xác nhận.
+
+### Fixture 1 — 01_auth_calendar
+
+[JSON riêng](fixtures/w4-02/01_auth_calendar.json)
+
+<details>
+<summary>Xem JSON request/response</summary>
+
+```json
+{
+  "contract_source": "schema.md sections 14–15; backend bce1fb4; auth target ba16055",
+  "cases": [
+    {
+      "name": "refresh_success",
+      "scope": "runtime",
+      "method": "POST",
+      "path": "/api/v1/auth/refresh",
+      "response": {
+        "status": 200,
+        "body": {
+          "data": {
+            "access_token": "example-access-token",
+            "token_type": "bearer",
+            "expires_in": 3600,
+            "refresh_token": "example-new-refresh-token",
+            "refresh_expires_in": 2592000
+          },
+          "meta": {
+            "request_id": "w4-example",
+            "server_time": "2026-11-20T03:00:00Z"
+          }
+        }
+      },
+      "request": {
+        "refresh_token": "example-old-refresh-token"
+      }
+    },
+    {
+      "name": "app_unauthenticated",
+      "scope": "runtime",
+      "method": "GET",
+      "path": "/api/v1/auth/me",
+      "response": {
+        "status": 401,
+        "body": {
+          "error": {
+            "code": "UNAUTHENTICATED",
+            "message": "Phiên đăng nhập không hợp lệ hoặc đã hết hạn.",
+            "field_errors": [],
+            "retryable": false,
+            "current_revisions": {},
+            "next_action": "authenticate"
+          },
+          "meta": {
+            "request_id": "w4-example",
+            "server_time": "2026-11-20T03:00:00Z"
+          }
+        },
+        "headers": {
+          "WWW-Authenticate": "Bearer"
+        }
+      }
+    },
+    {
+      "name": "calendar_reconnect",
+      "scope": "runtime",
+      "method": "GET",
+      "path": "/api/v1/calendar/connections/22222222-2222-4222-8222-222222222222/calendars",
+      "response": {
+        "status": 401,
+        "body": {
+          "error": {
+            "code": "CALENDAR_AUTH_REQUIRED",
+            "message": "Cần kết nối lại Google Calendar.",
+            "field_errors": [],
+            "retryable": false,
+            "current_revisions": {},
+            "next_action": "reconnect_google_calendar"
+          },
+          "meta": {
+            "request_id": "w4-example",
+            "server_time": "2026-11-20T03:00:00Z"
+          }
+        }
+      }
+    },
+    {
+      "name": "logout_first",
+      "scope": "target_be03",
+      "method": "POST",
+      "path": "/api/v1/auth/logout",
+      "response": {
+        "status": 200,
+        "body": {
+          "data": {
+            "logged_out": true,
+            "revoked": true
+          },
+          "meta": {
+            "request_id": "w4-example",
+            "server_time": "2026-11-20T03:00:00Z"
+          }
+        }
+      },
+      "request": {
+        "refresh_token": "example-old-refresh-token"
+      }
+    },
+    {
+      "name": "logout_retry",
+      "scope": "target_be03",
+      "method": "POST",
+      "path": "/api/v1/auth/logout",
+      "response": {
+        "status": 200,
+        "body": {
+          "data": {
+            "logged_out": true,
+            "revoked": false
+          },
+          "meta": {
+            "request_id": "w4-example",
+            "server_time": "2026-11-20T03:00:00Z"
+          }
+        }
+      },
+      "request": {
+        "refresh_token": "example-old-refresh-token"
+      }
+    },
+    {
+      "name": "refresh_reuse",
+      "scope": "target_be03",
+      "method": "POST",
+      "path": "/api/v1/auth/refresh",
+      "response": {
+        "status": 401,
+        "body": {
+          "error": {
+            "code": "UNAUTHENTICATED",
+            "message": "Phiên đăng nhập không hợp lệ hoặc đã hết hạn.",
+            "field_errors": [],
+            "retryable": false,
+            "current_revisions": {},
+            "next_action": "authenticate"
+          },
+          "meta": {
+            "request_id": "w4-example",
+            "server_time": "2026-11-20T03:00:00Z"
+          }
+        },
+        "headers": {
+          "WWW-Authenticate": "Bearer"
+        }
+      },
+      "request": {
+        "refresh_token": "example-old-refresh-token"
+      }
+    }
+  ]
+}
+```
+
+</details>
+
+### Fixture 2 — 02_settings
+
+[JSON riêng](fixtures/w4-02/02_settings.json)
+
+<details>
+<summary>Xem JSON request/response</summary>
+
+```json
+{
+  "contract_source": "schema.md sections 14–15; backend bce1fb4; auth target ba16055",
+  "cases": [
+    {
+      "name": "preferences_after_reject",
+      "scope": "runtime",
+      "method": "GET",
+      "path": "/api/v1/preferences",
+      "response": {
+        "status": 200,
+        "body": {
+          "data": {
+            "revision": 5,
+            "effective_revision": 3,
+            "requested_revision": null,
+            "work_interval_seconds": 1500,
+            "rest_interval_seconds": 300,
+            "micro_task_seconds": 120,
+            "reminder_offsets": [
+              900,
+              600,
+              300
+            ],
+            "buffer_multiplier": 1.2,
+            "reminder_style": "gentle",
+            "requested_changes": null,
+            "pending_proposal_id": null
+          },
+          "meta": {
+            "request_id": "w4-example",
+            "server_time": "2026-11-20T03:00:00Z"
+          }
+        }
+      }
+    },
+    {
+      "name": "settings_pending",
+      "scope": "runtime",
+      "method": "POST",
+      "path": "/api/v1/settings/change-requests",
+      "response": {
+        "status": 200,
+        "body": {
+          "data": {
+            "change_request_id": "change-1",
+            "request_revision": 1,
+            "application_state": "pending_review",
+            "requested_revision": 4,
+            "effective_revision": 3,
+            "requested_availability_revision": null,
+            "effective_availability_revision": null,
+            "requested_changes": {
+              "availability": null,
+              "preferences": {
+                "work_interval_seconds": null,
+                "rest_interval_seconds": null,
+                "reminder_offsets": null,
+                "buffer_multiplier": 1.5,
+                "reminder_style": null
+              }
+            },
+            "pending_proposal_id": "proposal-1",
+            "target_draft_id": null,
+            "target_task_id": null,
+            "summary_revision": null,
+            "planning_input_revision": null
+          },
+          "meta": {
+            "request_id": "w4-example",
+            "server_time": "2026-11-20T03:00:00Z"
+          }
+        }
+      },
+      "request": {
+        "expected_preferences_revision": 3,
+        "changes": {
+          "preferences": {
+            "buffer_multiplier": 1.5
+          }
+        }
+      }
+    },
+    {
+      "name": "settings_conflict",
+      "scope": "runtime",
+      "method": "POST",
+      "path": "/api/v1/settings/change-requests",
+      "response": {
+        "status": 409,
+        "body": {
+          "error": {
+            "code": "REVISION_CONFLICT",
+            "message": "Cấu hình đã thay đổi.",
+            "field_errors": [],
+            "retryable": false,
+            "current_revisions": {
+              "preferences": 3
+            },
+            "next_action": "reload_and_review"
+          },
+          "meta": {
+            "request_id": "w4-example",
+            "server_time": "2026-11-20T03:00:00Z"
+          }
+        }
+      },
+      "request": {
+        "expected_preferences_revision": 5,
+        "changes": {
+          "preferences": {
+            "buffer_multiplier": 1.5
+          }
+        }
+      }
+    },
+    {
+      "name": "settings_buffer_low",
+      "scope": "runtime",
+      "method": "POST",
+      "path": "/api/v1/settings/change-requests",
+      "response": {
+        "status": 422,
+        "body": {
+          "error": {
+            "code": "VALIDATION_ERROR",
+            "message": "Cấu hình không hợp lệ.",
+            "field_errors": [],
+            "retryable": false,
+            "current_revisions": {},
+            "next_action": "fix_fields"
+          },
+          "meta": {
+            "request_id": "w4-example",
+            "server_time": "2026-11-20T03:00:00Z"
+          }
+        }
+      },
+      "request": {
+        "expected_preferences_revision": 3,
+        "changes": {
+          "preferences": {
+            "buffer_multiplier": 0.5
+          }
+        }
+      }
+    },
+    {
+      "name": "settings_buffer_boundary_1",
+      "scope": "runtime",
+      "method": "POST",
+      "path": "/api/v1/settings/change-requests",
+      "response": {
+        "status": 200,
+        "body": {
+          "data": {
+            "change_request_id": "change-1",
+            "request_revision": 1,
+            "application_state": "pending_review",
+            "requested_revision": 4,
+            "effective_revision": 3,
+            "requested_availability_revision": null,
+            "effective_availability_revision": null,
+            "requested_changes": {
+              "availability": null,
+              "preferences": {
+                "work_interval_seconds": null,
+                "rest_interval_seconds": null,
+                "reminder_offsets": null,
+                "buffer_multiplier": 1.0,
+                "reminder_style": null
+              }
+            },
+            "pending_proposal_id": "proposal-1",
+            "target_draft_id": null,
+            "target_task_id": null,
+            "summary_revision": null,
+            "planning_input_revision": null
+          },
+          "meta": {
+            "request_id": "w4-example",
+            "server_time": "2026-11-20T03:00:00Z"
+          }
+        }
+      },
+      "request": {
+        "expected_preferences_revision": 3,
+        "changes": {
+          "preferences": {
+            "buffer_multiplier": 1.0
+          }
+        }
+      }
+    },
+    {
+      "name": "settings_buffer_boundary_2",
+      "scope": "runtime",
+      "method": "POST",
+      "path": "/api/v1/settings/change-requests",
+      "response": {
+        "status": 200,
+        "body": {
+          "data": {
+            "change_request_id": "change-1",
+            "request_revision": 1,
+            "application_state": "pending_review",
+            "requested_revision": 4,
+            "effective_revision": 3,
+            "requested_availability_revision": null,
+            "effective_availability_revision": null,
+            "requested_changes": {
+              "availability": null,
+              "preferences": {
+                "work_interval_seconds": null,
+                "rest_interval_seconds": null,
+                "reminder_offsets": null,
+                "buffer_multiplier": 2.0,
+                "reminder_style": null
+              }
+            },
+            "pending_proposal_id": "proposal-1",
+            "target_draft_id": null,
+            "target_task_id": null,
+            "summary_revision": null,
+            "planning_input_revision": null
+          },
+          "meta": {
+            "request_id": "w4-example",
+            "server_time": "2026-11-20T03:00:00Z"
+          }
+        }
+      },
+      "request": {
+        "expected_preferences_revision": 3,
+        "changes": {
+          "preferences": {
+            "buffer_multiplier": 2.0
+          }
+        }
+      }
+    },
+    {
+      "name": "settings_buffer_high",
+      "scope": "target_contract",
+      "method": "POST",
+      "path": "/api/v1/settings/change-requests",
+      "response": {
+        "status": 422,
+        "body": {
+          "error": {
+            "code": "VALIDATION_ERROR",
+            "message": "Cấu hình không hợp lệ.",
+            "field_errors": [],
+            "retryable": false,
+            "current_revisions": {},
+            "next_action": "fix_fields"
+          },
+          "meta": {
+            "request_id": "w4-example",
+            "server_time": "2026-11-20T03:00:00Z"
+          }
+        }
+      },
+      "request": {
+        "expected_preferences_revision": 3,
+        "changes": {
+          "preferences": {
+            "buffer_multiplier": 2.01
+          }
+        }
+      }
+    },
+    {
+      "name": "settings_cancel",
+      "scope": "runtime",
+      "method": "POST",
+      "path": "/api/v1/settings/change-requests/change-1/cancel",
+      "response": {
+        "status": 200,
+        "body": {
+          "data": {
+            "change_request_id": "change-1",
+            "application_state": "cancelled",
+            "effective_revision": 3
+          },
+          "meta": {
+            "request_id": "w4-example",
+            "server_time": "2026-11-20T03:00:00Z"
+          }
+        }
+      },
+      "request": {
+        "expected_request_revision": 1
+      }
+    },
+    {
+      "name": "suggestion_accept",
+      "scope": "runtime",
+      "method": "POST",
+      "path": "/api/v1/suggestions/suggestion-1/response",
+      "response": {
+        "status": 200,
+        "body": {
+          "data": {
+            "suggestion_id": "suggestion-1",
+            "suggestion_revision": 2,
+            "kind": "buffer_multiplier",
+            "action": "accept",
+            "status": "accepted",
+            "accepted_value": 1.5,
+            "application_state": "pending_review",
+            "effective_revision": 3,
+            "requested_revision": 4,
+            "change_request_id": "change-1",
+            "pending_proposal_id": "proposal-1"
+          },
+          "meta": {
+            "request_id": "w4-example",
+            "server_time": "2026-11-20T03:00:00Z"
+          }
+        }
+      },
+      "request": {
+        "expected_suggestion_revision": 1,
+        "expected_preference_revision": 3,
+        "action": "accept"
+      }
+    }
+  ]
+}
+```
+
+</details>
+
+### Fixture 3 — 03_calendar_previews
+
+[JSON riêng](fixtures/w4-02/03_calendar_previews.json)
+
+<details>
+<summary>Xem JSON request/response</summary>
+
+```json
+{
+  "contract_source": "schema.md sections 14–15; backend bce1fb4; auth target ba16055",
+  "cases": [
+    {
+      "name": "configuration_preview",
+      "scope": "runtime",
+      "method": "POST",
+      "path": "/api/v1/calendar/connections/22222222-2222-4222-8222-222222222222/configuration-previews",
+      "response": {
+        "status": 200,
+        "body": {
+          "data": {
+            "preview_id": "33333333-3333-4333-8333-333333333333",
+            "connection_id": "22222222-2222-4222-8222-222222222222",
+            "read_calendar_ids": [
+              "primary"
+            ],
+            "write_calendar_id": "primary",
+            "existing_event_action": "keep",
+            "status": "pending"
+          },
+          "meta": {
+            "request_id": "w4-example",
+            "server_time": "2026-11-20T03:00:00Z"
+          }
+        }
+      },
+      "request": {
+        "read_calendar_ids": [
+          "primary"
+        ],
+        "write_calendar_id": "primary",
+        "existing_event_action": "keep"
+      }
+    },
+    {
+      "name": "configuration_preview_dynamic_revision",
+      "scope": "target_contract",
+      "method": "POST",
+      "path": "/api/v1/calendar/connections/22222222-2222-4222-8222-222222222222/configuration-previews",
+      "response": {
+        "status": 200,
+        "body": {
+          "data": {
+            "preview_id": "33333333-3333-4333-8333-333333333333",
+            "connection_id": "22222222-2222-4222-8222-222222222222",
+            "expected_preview_revision": 7,
+            "read_calendar_ids": [
+              "primary"
+            ],
+            "write_calendar_id": "primary",
+            "existing_event_action": "keep",
+            "status": "pending"
+          },
+          "meta": {
+            "request_id": "w4-example",
+            "server_time": "2026-11-20T03:00:00Z"
+          }
+        }
+      },
+      "request": {
+        "read_calendar_ids": [
+          "primary"
+        ],
+        "write_calendar_id": "primary",
+        "existing_event_action": "keep"
+      }
+    },
+    {
+      "name": "event_preview",
+      "scope": "runtime",
+      "method": "POST",
+      "path": "/api/v1/calendar/event-change-previews",
+      "response": {
+        "status": 200,
+        "body": {
+          "data": {
+            "preview_id": "33333333-3333-4333-8333-333333333333",
+            "connection_id": "22222222-2222-4222-8222-222222222222",
+            "kind": "event_change",
+            "operation": "update",
+            "status": "pending",
+            "payload": {
+              "operation": "update",
+              "connection_id": "22222222-2222-4222-8222-222222222222",
+              "google_calendar_id": "primary",
+              "payload": {
+                "summary": "Họp nhóm"
+              },
+              "recurrence_scope": "single",
+              "google_event_id": "event-1",
+              "expected_google_etag": "\"etag-v1\""
+            }
+          },
+          "meta": {
+            "request_id": "w4-example",
+            "server_time": "2026-11-20T03:00:00Z"
+          }
+        }
+      },
+      "request": {
+        "operation": "update",
+        "connection_id": "22222222-2222-4222-8222-222222222222",
+        "google_calendar_id": "primary",
+        "payload": {
+          "summary": "Họp nhóm"
+        },
+        "recurrence_scope": "single",
+        "google_event_id": "event-1",
+        "expected_google_etag": "\"etag-v1\""
+      }
+    },
+    {
+      "name": "event_preview_dynamic_revision",
+      "scope": "target_contract",
+      "method": "POST",
+      "path": "/api/v1/calendar/event-change-previews",
+      "response": {
+        "status": 200,
+        "body": {
+          "data": {
+            "preview_id": "33333333-3333-4333-8333-333333333333",
+            "connection_id": "22222222-2222-4222-8222-222222222222",
+            "expected_preview_revision": 7,
+            "kind": "event_change",
+            "operation": "update",
+            "status": "pending",
+            "payload": {
+              "operation": "update",
+              "connection_id": "22222222-2222-4222-8222-222222222222",
+              "google_calendar_id": "primary",
+              "payload": {
+                "summary": "Họp nhóm"
+              },
+              "recurrence_scope": "single",
+              "google_event_id": "event-1",
+              "expected_google_etag": "\"etag-v1\""
+            }
+          },
+          "meta": {
+            "request_id": "w4-example",
+            "server_time": "2026-11-20T03:00:00Z"
+          }
+        }
+      },
+      "request": {
+        "operation": "update",
+        "connection_id": "22222222-2222-4222-8222-222222222222",
+        "google_calendar_id": "primary",
+        "payload": {
+          "summary": "Họp nhóm"
+        },
+        "recurrence_scope": "single",
+        "google_event_id": "event-1",
+        "expected_google_etag": "\"etag-v1\""
+      }
+    },
+    {
+      "name": "preview_conflict",
+      "scope": "target_contract",
+      "method": "POST",
+      "path": "/api/v1/calendar/event-change-previews/33333333-3333-4333-8333-333333333333/confirm",
+      "response": {
+        "status": 409,
+        "body": {
+          "error": {
+            "code": "REVISION_CONFLICT",
+            "message": "Phiên bản bản xem trước không khớp (đã bị cập nhật).",
+            "field_errors": [],
+            "retryable": false,
+            "current_revisions": {},
+            "next_action": "reload_and_review"
+          },
+          "meta": {
+            "request_id": "w4-example",
+            "server_time": "2026-11-20T03:00:00Z"
+          }
+        }
+      },
+      "request": {
+        "expected_preview_revision": 7,
+        "source_revisions": {}
+      }
+    },
+    {
+      "name": "google_etag_412",
+      "scope": "google_upstream",
+      "method": "PUT",
+      "path": "/calendar/v3/calendars/primary/events/event-1",
+      "response": {
+        "status": 412,
+        "body": {
+          "error": {
+            "code": 412,
+            "message": "Precondition Failed"
+          }
+        }
+      }
+    },
+    {
+      "name": "sync_job_after_412",
+      "scope": "runtime",
+      "method": "GET",
+      "path": "/api/v1/calendar/sync-jobs/job-1",
+      "response": {
+        "status": 200,
+        "body": {
+          "data": {
+            "job_id": "job-1",
+            "connection_id": "22222222-2222-4222-8222-222222222222",
+            "target_kind": "external_event",
+            "target_ref": "33333333-3333-4333-8333-333333333333",
+            "operation": "update",
+            "job_state": "conflict",
+            "attempt_count": 1,
+            "next_retry_at": null,
+            "last_error_code": "ETAG_CONFLICT_412"
+          },
+          "meta": {
+            "request_id": "w4-example",
+            "server_time": "2026-11-20T03:00:00Z"
+          }
+        }
+      }
+    }
+  ]
+}
+```
+
+</details>
+
+### Fixture 4 — 04_run_thought
+
+[JSON riêng](fixtures/w4-02/04_run_thought.json)
+
+<details>
+<summary>Xem JSON request/response</summary>
+
+```json
+{
+  "contract_source": "schema.md sections 14–15; backend bce1fb4; auth target ba16055",
+  "cases": [
+    {
+      "name": "start_idempotent",
+      "scope": "runtime",
+      "method": "POST",
+      "path": "/api/v1/sessions/55555555-5555-4555-8555-555555555555/start",
+      "response": {
+        "status": 201,
+        "body": {
+          "data": {
+            "run_id": "44444444-4444-4444-8444-444444444444",
+            "session_id": "55555555-5555-4555-8555-555555555555",
+            "device_id": "device-1",
+            "run_revision": 1,
+            "started_at": "2026-11-20T03:00:00Z",
+            "ended_at": null,
+            "run_state": "running",
+            "active_phase": "work",
+            "segment_index": 0,
+            "work_elapsed_seconds": null,
+            "rest_elapsed_seconds": null,
+            "actual_work_seconds": null,
+            "actual_source": null,
+            "outcome": "unknown",
+            "checkin_timeout_at": null,
+            "settings_snapshot": {
+              "effective_revision": 3,
+              "session": {
+                "session_id": "55555555-5555-4555-8555-555555555555",
+                "step_id": "step-1",
+                "scheduled_start": "2026-11-20T03:00:00Z",
+                "scheduled_end": "2026-11-20T03:30:00Z",
+                "micro_task_text": null,
+                "micro_task_seconds": null,
+                "work_seconds": 1500,
+                "rest_seconds": 300,
+                "segments": [
+                  {
+                    "order_index": 0,
+                    "kind": "work",
+                    "duration_seconds": 1500
+                  },
+                  {
+                    "order_index": 1,
+                    "kind": "rest",
+                    "duration_seconds": 300
+                  }
+                ],
+                "duration_seconds": 1800,
+                "schedule_revision": 8,
+                "status": "in_progress",
+                "calendar_event_link_id": null,
+                "start_state": "started",
+                "start_decision_due_at": "2026-11-20T03:05:00Z"
+              }
+            },
+            "check_in": null,
+            "dnd_release_at": null,
+            "total_planned_seconds": null,
+            "segments": [],
+            "continuation_of_run_id": null
+          },
+          "meta": {
+            "request_id": "w4-example",
+            "server_time": "2026-11-20T03:00:00Z"
+          }
+        }
+      },
+      "request": {
+        "expected_schedule_revision": 8,
+        "device_id": "device-1",
+        "requested_start_at": "2026-11-20T03:00:00Z"
+      },
+      "request_headers": {
+        "Idempotency-Key": "w4-start-1"
+      }
+    },
+    {
+      "name": "start_idempotent_replay",
+      "scope": "runtime",
+      "method": "POST",
+      "path": "/api/v1/sessions/55555555-5555-4555-8555-555555555555/start",
+      "response": {
+        "status": 201,
+        "body": {
+          "data": {
+            "run_id": "44444444-4444-4444-8444-444444444444",
+            "session_id": "55555555-5555-4555-8555-555555555555",
+            "device_id": "device-1",
+            "run_revision": 1,
+            "started_at": "2026-11-20T03:00:00Z",
+            "ended_at": null,
+            "run_state": "running",
+            "active_phase": "work",
+            "segment_index": 0,
+            "work_elapsed_seconds": null,
+            "rest_elapsed_seconds": null,
+            "actual_work_seconds": null,
+            "actual_source": null,
+            "outcome": "unknown",
+            "checkin_timeout_at": null,
+            "settings_snapshot": {
+              "effective_revision": 3,
+              "session": {
+                "session_id": "55555555-5555-4555-8555-555555555555",
+                "step_id": "step-1",
+                "scheduled_start": "2026-11-20T03:00:00Z",
+                "scheduled_end": "2026-11-20T03:30:00Z",
+                "micro_task_text": null,
+                "micro_task_seconds": null,
+                "work_seconds": 1500,
+                "rest_seconds": 300,
+                "segments": [
+                  {
+                    "order_index": 0,
+                    "kind": "work",
+                    "duration_seconds": 1500
+                  },
+                  {
+                    "order_index": 1,
+                    "kind": "rest",
+                    "duration_seconds": 300
+                  }
+                ],
+                "duration_seconds": 1800,
+                "schedule_revision": 8,
+                "status": "in_progress",
+                "calendar_event_link_id": null,
+                "start_state": "started",
+                "start_decision_due_at": "2026-11-20T03:05:00Z"
+              }
+            },
+            "check_in": null,
+            "dnd_release_at": null,
+            "total_planned_seconds": null,
+            "segments": [],
+            "continuation_of_run_id": null
+          },
+          "meta": {
+            "request_id": "w4-example",
+            "server_time": "2026-11-20T03:00:00Z"
+          }
+        }
+      },
+      "request": {
+        "expected_schedule_revision": 8,
+        "device_id": "device-1",
+        "requested_start_at": "2026-11-20T03:00:00Z"
+      },
+      "request_headers": {
+        "Idempotency-Key": "w4-start-1"
+      },
+      "client_expectations": {
+        "replay_returns_same_run": true
+      }
+    },
+    {
+      "name": "command_receipt",
+      "scope": "runtime",
+      "method": "GET",
+      "path": "/api/v1/commands/start-1",
+      "response": {
+        "status": 200,
+        "body": {
+          "data": {
+            "command_id": "start-1",
+            "command_type": "start_session_run",
+            "state": "applied",
+            "result_reference": {
+              "run_id": "44444444-4444-4444-8444-444444444444"
+            },
+            "applied_at": "2026-11-20T03:00:00Z"
+          },
+          "meta": {
+            "request_id": "w4-example",
+            "server_time": "2026-11-20T03:00:00Z"
+          }
+        }
+      }
+    },
+    {
+      "name": "start_clock_skew",
+      "scope": "runtime",
+      "method": "POST",
+      "path": "/api/v1/sessions/55555555-5555-4555-8555-555555555555/start",
+      "response": {
+        "status": 422,
+        "body": {
+          "error": {
+            "code": "VALIDATION_ERROR",
+            "message": "Thiếu mã thiết bị hoặc thời điểm bắt đầu hợp lệ.",
+            "field_errors": [
+              {
+                "field_path": "requested_start_at",
+                "message": "Thiếu mã thiết bị hoặc thời điểm bắt đầu hợp lệ.",
+                "code": null
+              }
+            ],
+            "retryable": false,
+            "current_revisions": {},
+            "next_action": "fix_fields"
+          },
+          "meta": {
+            "request_id": "w4-example",
+            "server_time": "2026-11-20T03:00:00Z"
+          }
+        }
+      },
+      "request": {
+        "expected_schedule_revision": 8,
+        "device_id": "device-1",
+        "requested_start_at": "2026-11-20T03:05:01Z"
+      },
+      "request_headers": {
+        "Idempotency-Key": "w4-start-clock-skew"
+      }
+    },
+    {
+      "name": "thought_capture",
+      "scope": "runtime",
+      "method": "POST",
+      "path": "/api/v1/thoughts",
+      "response": {
+        "status": 201,
+        "body": {
+          "data": {
+            "client_thought_id": "client-thought-1",
+            "source_run_id": "44444444-4444-4444-8444-444444444444",
+            "input_type": "audio",
+            "capture_state": "raw_saved",
+            "attempt_count": 1,
+            "text_content": null,
+            "thought_id": "66666666-6666-4666-8666-666666666666",
+            "thought_revision": 1,
+            "linked_draft_id": null,
+            "converted_task_id": null,
+            "retention_expires_at": null
+          },
+          "meta": {
+            "request_id": "w4-example",
+            "server_time": "2026-11-20T03:00:00Z"
+          }
+        }
+      },
+      "request": {
+        "client_thought_id": "client-thought-1",
+        "source_run_id": "44444444-4444-4444-8444-444444444444",
+        "input_type": "audio",
+        "capture_state": "raw_saved",
+        "attempt_count": 1,
+        "text_content": null
+      }
+    },
+    {
+      "name": "thought_delete",
+      "scope": "runtime",
+      "method": "DELETE",
+      "path": "/api/v1/thoughts/66666666-6666-4666-8666-666666666666",
+      "response": {
+        "status": 200,
+        "body": {
+          "data": {
+            "thought_id": "66666666-6666-4666-8666-666666666666",
+            "deleted": true,
+            "local_cleanup_required": true
+          },
+          "meta": {
+            "request_id": "w4-example",
+            "server_time": "2026-11-20T03:00:00Z"
+          }
+        }
+      },
+      "request": {
+        "expected_thought_revision": 1
+      }
+    }
+  ]
+}
+```
+
+</details>
+
+### Fixture 5 — 05_uf6_voice
+
+[JSON riêng](fixtures/w4-02/05_uf6_voice.json)
+
+<details>
+<summary>Xem JSON request/response</summary>
+
+```json
+{
+  "contract_source": "schema.md sections 14–15; backend bce1fb4; auth target ba16055",
+  "cases": [
+    {
+      "name": "proposal_deficit",
+      "scope": "runtime",
+      "method": "GET",
+      "path": "/api/v1/proposals/current",
+      "response": {
+        "status": 200,
+        "body": {
+          "data": {
+            "proposal_id": "proposal-1",
+            "status": "pending",
+            "trigger_reason": "settings_change",
+            "target_task_id": "task-1",
+            "allowed_task_ids": [
+              "task-1"
+            ],
+            "affected_task_ids": [
+              "task-1"
+            ],
+            "base_schedule_revision": 8,
+            "source_revisions": {
+              "task": 2,
+              "schedule": 8,
+              "availability": 1,
+              "settings": 3,
+              "calendar": 1
+            },
+            "proposal_revision": 1,
+            "supersedes_proposal_id": null,
+            "calculated_at": null,
+            "continuation_request": null,
+            "proposed_changes": {
+              "sessions_to_move": [],
+              "sessions_to_add": [],
+              "sessions_to_cancel": [
+                {
+                  "session_id": "55555555-5555-4555-8555-555555555555",
+                  "task_id": null,
+                  "step_id": null,
+                  "reason": "resegmented_by_settings_change"
+                }
+              ],
+              "steps_to_add": [
+                {
+                  "step_id": "step-2",
+                  "task_id": "task-1",
+                  "order_index": 2,
+                  "title": "Hoàn thiện bản nháp",
+                  "estimated_base_seconds": 3600
+                }
+              ],
+              "next_horizon_from": "2026-11-20T03:00:00Z",
+              "next_horizon_to": "2026-12-04T03:00:00Z"
+            },
+            "gap_exceptions": [],
+            "start_window": null,
+            "approval_envelope": null,
+            "feasibility": {
+              "status": "deficit",
+              "confirmable": false,
+              "deficit_seconds": 3600,
+              "blocking_reasons": [
+                {
+                  "code": "INSUFFICIENT_FREE_TIME",
+                  "message": "Còn thiếu 60 phút trước hạn."
+                }
+              ],
+              "next_horizon_preview": null
+            },
+            "explanation": "Bạn có thể mở thêm giờ rảnh hoặc lùi hạn chót để tính lại phương án.",
+            "generation_tier": "python_fallback",
+            "stale": false,
+            "pending_notification_state": "not_sent",
+            "pending_notification_sent_at": null,
+            "created_at": "2026-11-20T03:00:00Z",
+            "updated_at": "2026-11-20T03:00:00Z"
+          },
+          "meta": {
+            "request_id": "w4-example",
+            "server_time": "2026-11-20T03:00:00Z"
+          }
+        }
+      }
+    },
+    {
+      "name": "tts_empty_audio",
+      "scope": "runtime",
+      "method": "POST",
+      "path": "/api/v1/voice/tts",
+      "response": {
+        "status": 503,
+        "body": {
+          "error": {
+            "code": "TTS_EMPTY_AUDIO",
+            "message": "Không tạo được âm thanh lúc này. Ứng dụng sẽ dùng giọng đọc trên máy.",
+            "field_errors": [],
+            "retryable": false,
+            "current_revisions": {},
+            "next_action": "use_on_device_tts"
+          },
+          "meta": {
+            "request_id": "w4-example",
+            "server_time": "2026-11-20T03:00:00Z"
+          }
+        }
+      },
+      "request": {
+        "text": "Đến giờ kiểm tra tiến độ."
+      }
+    },
+    {
+      "name": "tts_timeout",
+      "scope": "runtime",
+      "method": "POST",
+      "path": "/api/v1/voice/tts",
+      "response": {
+        "status": 504,
+        "body": {
+          "error": {
+            "code": "TTS_TIMEOUT",
+            "message": "Tổng hợp giọng nói mất nhiều thời gian hơn dự kiến.",
+            "field_errors": [],
+            "retryable": true,
+            "current_revisions": {},
+            "next_action": "use_on_device_tts"
+          },
+          "meta": {
+            "request_id": "w4-example",
+            "server_time": "2026-11-20T03:00:00Z"
+          }
+        }
+      },
+      "request": {
+        "text": "Đến giờ kiểm tra tiến độ."
+      }
+    },
+    {
+      "name": "stt_timeout",
+      "scope": "runtime",
+      "method": "POST",
+      "path": "/api/v1/voice/transcriptions",
+      "response": {
+        "status": 504,
+        "body": {
+          "error": {
+            "code": "STT_TIMEOUT",
+            "message": "Nhận giọng nói mất nhiều thời gian hơn dự kiến.",
+            "field_errors": [],
+            "retryable": true,
+            "current_revisions": {},
+            "next_action": "use_on_device_stt_or_type"
+          },
+          "meta": {
+            "request_id": "w4-example",
+            "server_time": "2026-11-20T03:00:00Z"
+          }
+        }
+      },
+      "request": {
+        "purpose": "uf1_input",
+        "device_id": "device-1",
+        "file": "sample.m4a"
+      },
+      "request_headers": {
+        "Idempotency-Key": "w4-stt-timeout"
+      },
+      "client_expectations": {
+        "receive_timeout_seconds_min": 45
+      }
+    },
+    {
+      "name": "uf5_tts_fallback",
+      "scope": "runtime",
+      "method": "POST",
+      "path": "/api/v1/voice/uf5-checkin-prompt",
+      "response": {
+        "status": 200,
+        "body": {
+          "data": {
+            "prompt": {
+              "kind": "final",
+              "prompt_text": "Phiên tập trung đã kết thúc. Bạn có thể chọn nghỉ ngay hoặc xác nhận kết quả riêng cho phiên này (hoàn thành phiên, làm được một phần, chưa xong, báo bận hoặc bỏ qua).",
+              "asks_step_completion": false,
+              "skip_chips": [
+                {
+                  "skip_scope": "postpone_session",
+                  "label": "Hoãn phiên này làm sau",
+                  "description": "Giữ nguyên bước hiện tại và chuyển phiên này sang khung giờ rảnh khác qua UF6."
+                },
+                {
+                  "skip_scope": "skip_session",
+                  "label": "Bỏ qua phiên này",
+                  "description": "Bỏ qua riêng phiên hiện tại mà không tự động bỏ các phiên hay bước khác."
+                },
+                {
+                  "skip_scope": "skip_step",
+                  "label": "Bỏ toàn bộ bước này",
+                  "description": "Bỏ phần còn lại của bước hiện tại và chuyển qua UF6 để cập nhật lịch tương lai."
+                }
+              ],
+              "undo_notice": "Đã ghi nhận thao tác bỏ qua. Bạn có thể bấm Hoàn tác trong 5 giây nếu muốn đổi ý.",
+              "undo_timeout_seconds": 5
+            },
+            "audio_base64": null,
+            "audio_mime_type": null,
+            "tts_provider": null,
+            "fallback_to_device_tts": true
+          },
+          "meta": {
+            "request_id": "w4-example",
+            "server_time": "2026-11-20T03:00:00Z"
+          }
+        }
+      },
+      "request": {
+        "kind": "final",
+        "include_audio": true
+      }
+    }
+  ]
+}
+```
+
+</details>
