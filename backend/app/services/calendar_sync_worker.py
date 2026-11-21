@@ -10,12 +10,16 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import UTC, datetime, timedelta
+from typing import Any
 from uuid import UUID
 
-from sqlalchemy import or_, select
+from sqlalchemy import case, exists, or_, select, update
+from sqlalchemy import inspect as sa_inspect
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from app.models.calendar import CalendarConnection, CalendarEventLink, CalendarSyncJob
 from app.services.calendar_service import CalendarService, _resolve_uuid
@@ -23,18 +27,128 @@ from app.services.google_calendar_client import CalendarAuthError, CalendarConfl
 
 logger = logging.getLogger(__name__)
 
+_CONNECTION_SYNC_LOCKS: dict[tuple[int, str], asyncio.Lock] = {}
 
-async def _reload_sync_entities(
+
+def get_connection_sync_lock(connection_id: UUID | str) -> asyncio.Lock:
+    """Trả về asyncio.Lock theo cặp (event_loop_id, connection_id) để tuần tự hóa đồng bộ theo từng kết nối."""
+    loop = asyncio.get_running_loop()
+    key = (id(loop), str(_resolve_uuid(connection_id)))
+    lock = _CONNECTION_SYNC_LOCKS.get(key)
+    if lock is None:
+        lock = asyncio.Lock()
+        _CONNECTION_SYNC_LOCKS[key] = lock
+    return lock
+
+
+def _busy_connection_ids_for_current_loop() -> list[UUID]:
+    """Liệt kê các connection_id đang giữ sync lock trên event loop hiện tại."""
+    loop_id = id(asyncio.get_running_loop())
+    busy: list[UUID] = []
+    for (entry_loop_id, conn_id_str), lock in list(_CONNECTION_SYNC_LOCKS.items()):
+        if entry_loop_id == loop_id and lock.locked():
+            try:
+                busy.append(UUID(conn_id_str))
+            except ValueError:
+                continue
+    return busy
+
+
+async def _sync_identity_map(
+    db: AsyncSession,
+    *,
+    job_id: UUID | None = None,
+    conn_id: UUID | None = None,
+    link_id: UUID | None = None,
+) -> None:
+    """Đồng bộ lại các ORM entity trong identity map sau Core SQL update (tránh stale/expired attribute)."""
+    if job_id is not None:
+        (
+            await db.execute(
+                select(CalendarSyncJob)
+                .where(CalendarSyncJob.id == job_id)
+                .execution_options(populate_existing=True)
+            )
+        ).scalar_one_or_none()
+    if conn_id is not None:
+        (
+            await db.execute(
+                select(CalendarConnection)
+                .where(CalendarConnection.id == conn_id)
+                .execution_options(populate_existing=True)
+            )
+        ).scalar_one_or_none()
+    if link_id is not None:
+        (
+            await db.execute(
+                select(CalendarEventLink)
+                .where(CalendarEventLink.id == link_id)
+                .execution_options(populate_existing=True)
+            )
+        ).scalar_one_or_none()
+
+
+async def _update_sync_job_core(
     db: AsyncSession,
     job_id: UUID,
-    conn_id: UUID,
-    link_id: UUID | None,
-) -> tuple[CalendarSyncJob | None, CalendarConnection | None, CalendarEventLink | None]:
-    """Tải lại các ORM entity sau rollback để tránh MissingGreenlet khi đọc thuộc tính đã hết hạn."""
-    job = await db.get(CalendarSyncJob, job_id)
-    conn = await db.get(CalendarConnection, conn_id)
-    link = await db.get(CalendarEventLink, link_id) if link_id else None
-    return job, conn, link
+    *,
+    values: dict[str, Any],
+) -> None:
+    """Cập nhật CalendarSyncJob bằng Core SQL nguyên tử để tránh StaleDataError."""
+    await db.execute(
+        update(CalendarSyncJob)
+        .where(CalendarSyncJob.id == job_id)
+        .values(**values, revision=CalendarSyncJob.revision + 1)
+        .execution_options(synchronize_session="fetch")
+    )
+    await _sync_identity_map(db, job_id=job_id)
+
+
+async def _mark_job_retry_or_failed(
+    db: AsyncSession,
+    job_id: UUID,
+    exc: Exception,
+    now_utc: datetime,
+) -> None:
+    """Ghi nhận retry backoff hoặc đánh dấu failed bằng Core SQL sau khi đã rollback."""
+    job_row = (
+        await db.execute(
+            select(CalendarSyncJob)
+            .where(CalendarSyncJob.id == job_id)
+            .execution_options(populate_existing=True)
+        )
+    ).scalar_one_or_none()
+    if job_row is None:
+        logger.warning("[CalendarWorker] Error processing job %s: %s", job_id, exc)
+        return
+
+    next_attempt = int(job_row.attempt_count or 0) + 1
+    err_code = str(exc)[:120]
+    logger.warning(
+        "[CalendarWorker] Error processing job %s (attempt %d): %s",
+        job_id,
+        next_attempt,
+        exc,
+    )
+    if next_attempt >= 5:
+        values: dict[str, Any] = {
+            "attempt_count": next_attempt,
+            "job_state": "failed",
+            "last_error_code": err_code,
+            "lease_expires_at": None,
+            "updated_at": now_utc,
+        }
+    else:
+        values = {
+            "attempt_count": next_attempt,
+            "job_state": "queued",
+            "next_retry_at": now_utc + timedelta(seconds=2**next_attempt),
+            "last_error_code": err_code,
+            "lease_expires_at": None,
+            "updated_at": now_utc,
+        }
+    await _update_sync_job_core(db, job_id, values=values)
+    await db.commit()
 
 
 async def process_sync_job(
@@ -45,23 +159,56 @@ async def process_sync_job(
     """Xử lý một CalendarSyncJob đơn lẻ."""
     now_utc = datetime.now(UTC)
     client = cal_service.client
-    job_id = job.id
-    conn_id = job.connection_id
-    link_id = job.event_link_id
+    insp = sa_inspect(job)
+    identity = insp.identity if insp is not None else None
+    job_id: UUID = identity[0] if identity else job.id
+    fresh_job = (
+        await db.execute(
+            select(CalendarSyncJob)
+            .where(CalendarSyncJob.id == job_id)
+            .execution_options(populate_existing=True)
+        )
+    ).scalar_one_or_none()
+    if fresh_job is None:
+        return "failed"
+    conn_id = fresh_job.connection_id
+    link_id = fresh_job.event_link_id
 
-    # 1. Kiểm tra CalendarConnection
-    conn = await db.get(CalendarConnection, conn_id)
+    # 1. Kiểm tra CalendarConnection (nạp tươi từ DB)
+    conn = (
+        await db.execute(
+            select(CalendarConnection)
+            .where(CalendarConnection.id == conn_id)
+            .execution_options(populate_existing=True)
+        )
+    ).scalar_one_or_none()
     if not conn or conn.connection_state != "connected":
-        job.job_state = "failed"
-        job.last_error_code = "CONNECTION_NOT_ACTIVE"
-        job.attempt_count = 5  # Đánh dấu không retry nữa
+        await _update_sync_job_core(
+            db,
+            job_id,
+            values={
+                "job_state": "failed",
+                "last_error_code": "CONNECTION_NOT_ACTIVE",
+                "attempt_count": 5,
+                "lease_expires_at": None,
+                "updated_at": now_utc,
+            },
+        )
         await db.commit()
         return "failed"
 
     if not conn.write_calendar_id:
-        job.job_state = "failed"
-        job.last_error_code = "NO_WRITE_CALENDAR"
-        job.attempt_count = 5  # Đánh dấu không retry nữa
+        await _update_sync_job_core(
+            db,
+            job_id,
+            values={
+                "job_state": "failed",
+                "last_error_code": "NO_WRITE_CALENDAR",
+                "attempt_count": 5,
+                "lease_expires_at": None,
+                "updated_at": now_utc,
+            },
+        )
         await db.commit()
         return "failed"
     write_calendar_id: str = conn.write_calendar_id
@@ -72,139 +219,313 @@ async def process_sync_job(
     except CalendarAuthError as exc:
         await db.rollback()
         logger.warning("Permanent token acquisition failed for job %s: %s", job_id, exc)
-        job_row = await db.get(CalendarSyncJob, job_id)
-        if job_row:
-            job_row.job_state = "failed"
-            job_row.last_error_code = "AUTH_FAILED"
-            job_row.attempt_count = 5
-            await db.commit()
+        await _update_sync_job_core(
+            db,
+            job_id,
+            values={
+                "job_state": "failed",
+                "last_error_code": "AUTH_FAILED",
+                "attempt_count": 5,
+                "lease_expires_at": None,
+                "updated_at": now_utc,
+            },
+        )
+        await db.commit()
         return "failed"
     except Exception as exc:
         # ISSUE-A: Lỗi mạng tạm thời khi refresh token -> rollback transaction trước khi ghi retry backoff
         await db.rollback()
         logger.warning("Transient token acquisition error for job %s: %s", job_id, exc)
-        job_row = await db.get(CalendarSyncJob, job_id)
-        if job_row:
-            job_row.attempt_count += 1
-            if job_row.attempt_count >= 5:
-                job_row.job_state = "failed"
-                job_row.last_error_code = str(exc)[:120]
-            else:
-                job_row.job_state = "queued"
-                job_row.next_retry_at = now_utc + timedelta(seconds=2 ** job_row.attempt_count)
-                job_row.last_error_code = str(exc)[:120]
-                job_row.lease_expires_at = None
-            await db.commit()
+        await _mark_job_retry_or_failed(db, job_id, exc, now_utc)
         return "retry"
 
-    # 3. Lấy Event Link tương ứng (làm mới lại phòng trường hợp get_valid_access_token vừa commit)
-    job = await db.get(CalendarSyncJob, job_id) or job
-    conn = await db.get(CalendarConnection, conn_id) or conn
-    if conn.write_calendar_id:
-        write_calendar_id = conn.write_calendar_id
+    # 3. Tải lại Job / Connection / Event Link với populate_existing=True trước khi gọi Google API
+    job_row = (
+        await db.execute(
+            select(CalendarSyncJob)
+            .where(CalendarSyncJob.id == job_id)
+            .execution_options(populate_existing=True)
+        )
+    ).scalar_one_or_none()
+    if job_row is None:
+        return "failed"
+
+    conn_row = (
+        await db.execute(
+            select(CalendarConnection)
+            .where(CalendarConnection.id == conn_id)
+            .execution_options(populate_existing=True)
+        )
+    ).scalar_one_or_none()
+    if conn_row and conn_row.write_calendar_id:
+        write_calendar_id = conn_row.write_calendar_id
+
     link: CalendarEventLink | None = None
     if link_id:
-        link = await db.get(CalendarEventLink, link_id)
+        link = (
+            await db.execute(
+                select(CalendarEventLink)
+                .where(CalendarEventLink.id == link_id)
+                .execution_options(populate_existing=True)
+            )
+        ).scalar_one_or_none()
 
-    # 4. Thực thi theo loại operation
+    operation = job_row.operation
+    target_kind = job_row.target_kind
+    target_ref = job_row.target_ref
+    target_schedule_revision = job_row.target_schedule_revision
+    expected_google_etag = job_row.expected_google_etag
+    payload_snapshot = job_row.payload_snapshot
+    link_google_calendar_id = link.google_calendar_id if link is not None else None
+    link_google_event_id = link.google_event_id if link is not None else None
+    link_google_etag = link.google_etag if link is not None else None
+
+    payload_cal_id = (
+        payload_snapshot.get("google_calendar_id")
+        if isinstance(payload_snapshot, dict)
+        else None
+    )
+    target_calendar_id = (
+        (link_google_calendar_id if link_google_calendar_id else None)
+        or (str(payload_cal_id) if payload_cal_id else None)
+        or write_calendar_id
+    )
+    effective_etag = (
+        link_google_etag
+        if (link is not None and link_google_etag)
+        else expected_google_etag
+    )
+
+    # 4. Thực thi theo loại operation (persist kết quả bằng Core SQL để không bao giờ mất ETag do StaleDataError)
     try:
-        if job.operation == "create":
+        if operation == "create":
             try:
                 res = await client.create_event(
                     access_token=access_token,
-                    calendar_id=write_calendar_id,
-                    event_payload=job.payload_snapshot,
+                    calendar_id=target_calendar_id,
+                    event_payload=payload_snapshot,
                 )
             except CalendarConflictError:
-                existing_id = (job.payload_snapshot or {}).get("id")
+                existing_id = (payload_snapshot or {}).get("id")
                 if not existing_id:
                     raise
                 existing_event = await client.get_event(
                     access_token=access_token,
-                    calendar_id=write_calendar_id,
+                    calendar_id=target_calendar_id,
                     event_id=str(existing_id),
                 )
                 if existing_event is None:
                     raise
                 res = existing_event
-            created_event_id = res.get("id")
-            if link:
-                link.google_event_id = created_event_id
-                link.google_etag = res.get("etag")
-                link.synced_schedule_revision = job.target_schedule_revision
-                link.sync_state = "synced"
-                link.last_synced_at = now_utc
-            elif job.target_kind == "event" and created_event_id:
-                job.target_ref = created_event_id
 
-            job.job_state = "completed"
-            conn.last_successful_sync_at = now_utc
+            now_done = datetime.now(UTC)
+            created_event_id = res.get("id")
+            if link_id is not None:
+                sync_state_expr: Any = (
+                    case(
+                        (
+                            CalendarEventLink.desired_schedule_revision
+                            <= target_schedule_revision,
+                            "synced",
+                        ),
+                        else_=CalendarEventLink.sync_state,
+                    )
+                    if target_schedule_revision is not None
+                    else "synced"
+                )
+                await db.execute(
+                    update(CalendarEventLink)
+                    .where(CalendarEventLink.id == link_id)
+                    .values(
+                        google_event_id=created_event_id,
+                        google_etag=res.get("etag"),
+                        synced_schedule_revision=target_schedule_revision,
+                        sync_state=sync_state_expr,
+                        last_synced_at=now_done,
+                        updated_at=now_done,
+                        revision=CalendarEventLink.revision + 1,
+                    )
+                    .execution_options(synchronize_session="fetch")
+                )
+
+            job_values: dict[str, Any] = {
+                "job_state": "completed",
+                "lease_expires_at": None,
+                "last_error_code": None,
+                "updated_at": now_done,
+            }
+            if link_id is None and target_kind == "event" and created_event_id:
+                job_values["target_ref"] = created_event_id
+
+            await db.execute(
+                update(CalendarSyncJob)
+                .where(CalendarSyncJob.id == job_id)
+                .values(**job_values, revision=CalendarSyncJob.revision + 1)
+                .execution_options(synchronize_session="fetch")
+            )
+            await db.execute(
+                update(CalendarConnection)
+                .where(CalendarConnection.id == conn_id)
+                .values(last_successful_sync_at=now_done, updated_at=now_done)
+                .execution_options(synchronize_session="fetch")
+            )
+            await _sync_identity_map(db, job_id=job_id, conn_id=conn_id, link_id=link_id)
             await db.commit()
             return "completed"
 
-        elif job.operation == "update":
+        elif operation == "update":
             target_google_event_id = (
-                link.google_event_id
-                if link
-                else (job.target_ref if job.target_kind == "event" else None)
+                link_google_event_id
+                if link is not None
+                else (target_ref if target_kind == "event" else None)
             )
             if not target_google_event_id:
-                job.job_state = "failed"
-                job.last_error_code = "EVENT_ID_NOT_FOUND"
-                job.attempt_count = 5
+                await _update_sync_job_core(
+                    db,
+                    job_id,
+                    values={
+                        "job_state": "failed",
+                        "last_error_code": "EVENT_ID_NOT_FOUND",
+                        "attempt_count": 5,
+                        "lease_expires_at": None,
+                        "updated_at": now_utc,
+                    },
+                )
                 await db.commit()
                 return "failed"
 
             res = await client.update_event(
                 access_token=access_token,
-                calendar_id=write_calendar_id,
+                calendar_id=target_calendar_id,
                 event_id=target_google_event_id,
-                event_payload=job.payload_snapshot,
-                expected_etag=job.expected_google_etag,
+                event_payload=payload_snapshot,
+                expected_etag=effective_etag,
             )
-            if link:
-                link.google_etag = res.get("etag")
-                link.synced_schedule_revision = job.target_schedule_revision
-                link.sync_state = "synced"
-                link.last_synced_at = now_utc
+            now_done = datetime.now(UTC)
+            if link_id is not None:
+                sync_state_expr = (
+                    case(
+                        (
+                            CalendarEventLink.desired_schedule_revision
+                            <= target_schedule_revision,
+                            "synced",
+                        ),
+                        else_=CalendarEventLink.sync_state,
+                    )
+                    if target_schedule_revision is not None
+                    else "synced"
+                )
+                await db.execute(
+                    update(CalendarEventLink)
+                    .where(CalendarEventLink.id == link_id)
+                    .values(
+                        google_etag=res.get("etag"),
+                        synced_schedule_revision=target_schedule_revision,
+                        sync_state=sync_state_expr,
+                        last_synced_at=now_done,
+                        updated_at=now_done,
+                        revision=CalendarEventLink.revision + 1,
+                    )
+                    .execution_options(synchronize_session="fetch")
+                )
 
-            job.job_state = "completed"
-            conn.last_successful_sync_at = now_utc
+            await db.execute(
+                update(CalendarSyncJob)
+                .where(CalendarSyncJob.id == job_id)
+                .values(
+                    job_state="completed",
+                    lease_expires_at=None,
+                    last_error_code=None,
+                    updated_at=now_done,
+                    revision=CalendarSyncJob.revision + 1,
+                )
+                .execution_options(synchronize_session="fetch")
+            )
+            await db.execute(
+                update(CalendarConnection)
+                .where(CalendarConnection.id == conn_id)
+                .values(last_successful_sync_at=now_done, updated_at=now_done)
+                .execution_options(synchronize_session="fetch")
+            )
+            await _sync_identity_map(db, job_id=job_id, conn_id=conn_id, link_id=link_id)
             await db.commit()
             return "completed"
 
-        elif job.operation == "delete":
+        elif operation == "delete":
             target_google_event_id = (
-                link.google_event_id
-                if link
-                else (job.target_ref if job.target_kind == "event" else None)
+                link_google_event_id
+                if link is not None
+                else (target_ref if target_kind == "event" else None)
             )
             if not target_google_event_id:
-                job.job_state = "failed"
-                job.last_error_code = "EVENT_ID_NOT_FOUND"
-                job.attempt_count = 5
+                await _update_sync_job_core(
+                    db,
+                    job_id,
+                    values={
+                        "job_state": "failed",
+                        "last_error_code": "EVENT_ID_NOT_FOUND",
+                        "attempt_count": 5,
+                        "lease_expires_at": None,
+                        "updated_at": now_utc,
+                    },
+                )
                 await db.commit()
                 return "failed"
 
             await client.delete_event(
                 access_token=access_token,
-                calendar_id=write_calendar_id,
+                calendar_id=target_calendar_id,
                 event_id=target_google_event_id,
-                expected_etag=job.expected_google_etag,
+                expected_etag=effective_etag,
             )
-            if link:
-                link.is_current = False
-                link.sync_state = "deleted"
-                link.last_synced_at = now_utc
+            now_done = datetime.now(UTC)
+            if link_id is not None:
+                await db.execute(
+                    update(CalendarEventLink)
+                    .where(CalendarEventLink.id == link_id)
+                    .values(
+                        is_current=False,
+                        sync_state="deleted",
+                        last_synced_at=now_done,
+                        updated_at=now_done,
+                        revision=CalendarEventLink.revision + 1,
+                    )
+                    .execution_options(synchronize_session="fetch")
+                )
 
-            job.job_state = "completed"
-            conn.last_successful_sync_at = now_utc
+            await db.execute(
+                update(CalendarSyncJob)
+                .where(CalendarSyncJob.id == job_id)
+                .values(
+                    job_state="completed",
+                    lease_expires_at=None,
+                    last_error_code=None,
+                    updated_at=now_done,
+                    revision=CalendarSyncJob.revision + 1,
+                )
+                .execution_options(synchronize_session="fetch")
+            )
+            await db.execute(
+                update(CalendarConnection)
+                .where(CalendarConnection.id == conn_id)
+                .values(last_successful_sync_at=now_done, updated_at=now_done)
+                .execution_options(synchronize_session="fetch")
+            )
+            await _sync_identity_map(db, job_id=job_id, conn_id=conn_id, link_id=link_id)
             await db.commit()
             return "completed"
 
         else:
-            job.job_state = "failed"
-            job.last_error_code = f"UNKNOWN_OPERATION_{job.operation}"
+            await _update_sync_job_core(
+                db,
+                job_id,
+                values={
+                    "job_state": "failed",
+                    "last_error_code": f"UNKNOWN_OPERATION_{operation}",
+                    "lease_expires_at": None,
+                    "updated_at": now_utc,
+                },
+            )
             await db.commit()
             return "failed"
 
@@ -213,13 +534,31 @@ async def process_sync_job(
         await db.rollback()
         # Xung đột phiên bản (412 Precondition Failed / Etag mismatch)
         logger.warning("[CalendarWorker] 412 Conflict on job %s: %s", job_id, exc)
-        job_row, _, link_row = await _reload_sync_entities(db, job_id, conn_id, link_id)
-        if job_row:
-            job_row.job_state = "conflict"
-            job_row.last_error_code = "ETAG_CONFLICT_412"
-            job_row.lease_expires_at = None
-        if link_row:
-            link_row.sync_state = "conflict"
+        now_err = datetime.now(UTC)
+        await db.execute(
+            update(CalendarSyncJob)
+            .where(CalendarSyncJob.id == job_id)
+            .values(
+                job_state="conflict",
+                last_error_code="ETAG_CONFLICT_412",
+                lease_expires_at=None,
+                updated_at=now_err,
+                revision=CalendarSyncJob.revision + 1,
+            )
+            .execution_options(synchronize_session="fetch")
+        )
+        if link_id is not None:
+            await db.execute(
+                update(CalendarEventLink)
+                .where(CalendarEventLink.id == link_id)
+                .values(
+                    sync_state="conflict",
+                    updated_at=now_err,
+                    revision=CalendarEventLink.revision + 1,
+                )
+                .execution_options(synchronize_session="fetch")
+            )
+        await _sync_identity_map(db, job_id=job_id, conn_id=conn_id, link_id=link_id)
         await db.commit()
         return "conflict"
 
@@ -227,14 +566,31 @@ async def process_sync_job(
         # BUG-15 & BUG-17 & RISK-I05: Token hết hạn/thu hồi -> cần kết nối lại, dừng retry vô ích
         await db.rollback()
         logger.warning("[CalendarWorker] Auth failure on job %s: %s", job_id, exc)
-        job_row, conn_row, _ = await _reload_sync_entities(db, job_id, conn_id, None)
-        if conn_row:
-            conn_row.connection_state = "needs_reconnect"
-        if job_row:
-            job_row.job_state = "failed"
-            job_row.last_error_code = "AUTH_EXPIRED"
-            job_row.attempt_count = 5
-            job_row.lease_expires_at = None
+        now_err = datetime.now(UTC)
+        await db.execute(
+            update(CalendarConnection)
+            .where(CalendarConnection.id == conn_id)
+            .values(
+                connection_state="needs_reconnect",
+                revision=CalendarConnection.revision + 1,
+                updated_at=now_err,
+            )
+            .execution_options(synchronize_session="fetch")
+        )
+        await db.execute(
+            update(CalendarSyncJob)
+            .where(CalendarSyncJob.id == job_id)
+            .values(
+                job_state="failed",
+                last_error_code="AUTH_EXPIRED",
+                attempt_count=5,
+                lease_expires_at=None,
+                updated_at=now_err,
+                revision=CalendarSyncJob.revision + 1,
+            )
+            .execution_options(synchronize_session="fetch")
+        )
+        await _sync_identity_map(db, job_id=job_id, conn_id=conn_id)
         await db.commit()
         return "failed"
 
@@ -242,26 +598,7 @@ async def process_sync_job(
         # BUG-17: Rollback any failed partial session state before updating job metadata
         await db.rollback()
         # Lỗi mạng hoặc lỗi tạm thời -> tăng attempt_count và retry backoff
-        job_row, _, _ = await _reload_sync_entities(db, job_id, conn_id, None)
-        if job_row:
-            job_row.attempt_count += 1
-            logger.warning(
-                "[CalendarWorker] Error processing job %s (attempt %d): %s",
-                job_id,
-                job_row.attempt_count,
-                exc,
-            )
-            if job_row.attempt_count >= 5:
-                job_row.job_state = "failed"
-                job_row.last_error_code = str(exc)[:120]
-            else:
-                job_row.job_state = "queued"
-                job_row.next_retry_at = now_utc + timedelta(seconds=2 ** job_row.attempt_count)
-                job_row.last_error_code = str(exc)[:120]
-                job_row.lease_expires_at = None
-            await db.commit()
-        else:
-            logger.warning("[CalendarWorker] Error processing job %s: %s", job_id, exc)
+        await _mark_job_retry_or_failed(db, job_id, exc, datetime.now(UTC))
         return "retry"
 
 
@@ -269,29 +606,53 @@ async def process_calendar_sync_jobs(
     db: AsyncSession,
     user_id: UUID | str | None = None,
     limit: int = 10,
+    *,
+    connection_id: UUID | str | None = None,
+    skip_busy_connections: bool = False,
+    connection_lock_held: bool = False,
 ) -> int:
     """Quét và xử lý các sync jobs đang chờ trong hàng đợi."""
     now_utc = datetime.now(UTC)
-    stmt = (
-        select(CalendarSyncJob)
-        .where(
-            CalendarSyncJob.job_state == "queued",
-            CalendarSyncJob.attempt_count < 5,
-            or_(
-                CalendarSyncJob.next_retry_at.is_(None),
-                CalendarSyncJob.next_retry_at <= now_utc,
-            ),
-            or_(
-                CalendarSyncJob.lease_expires_at.is_(None),
-                CalendarSyncJob.lease_expires_at <= now_utc,
-            ),
+    other_job = aliased(CalendarSyncJob)
+    active_same_link_exists = exists(
+        select(1).where(
+            other_job.id != CalendarSyncJob.id,
+            other_job.event_link_id == CalendarSyncJob.event_link_id,
+            other_job.job_state == "queued",
+            other_job.lease_expires_at.is_not(None),
+            other_job.lease_expires_at > now_utc,
         )
     )
-    if user_id:
+    stmt = select(CalendarSyncJob).where(
+        CalendarSyncJob.job_state == "queued",
+        CalendarSyncJob.attempt_count < 5,
+        or_(
+            CalendarSyncJob.next_retry_at.is_(None),
+            CalendarSyncJob.next_retry_at <= now_utc,
+        ),
+        or_(
+            CalendarSyncJob.lease_expires_at.is_(None),
+            CalendarSyncJob.lease_expires_at <= now_utc,
+        ),
+        or_(
+            CalendarSyncJob.event_link_id.is_(None),
+            ~active_same_link_exists,
+        ),
+    )
+    if user_id is not None:
         uid = _resolve_uuid(user_id)
         stmt = stmt.where(CalendarSyncJob.user_id == uid)
+    if connection_id is not None:
+        cid = _resolve_uuid(connection_id)
+        stmt = stmt.where(CalendarSyncJob.connection_id == cid)
+    if skip_busy_connections:
+        busy_conn_ids = _busy_connection_ids_for_current_loop()
+        if busy_conn_ids:
+            stmt = stmt.where(CalendarSyncJob.connection_id.notin_(busy_conn_ids))
 
-    stmt = stmt.order_by(CalendarSyncJob.created_at.asc()).limit(limit)
+    stmt = stmt.order_by(CalendarSyncJob.created_at.asc(), CalendarSyncJob.id.asc()).limit(
+        limit
+    )
     dialect_name = db.bind.dialect.name if getattr(db, "bind", None) else ""
     if dialect_name == "postgresql":
         stmt = stmt.with_for_update(skip_locked=True)
@@ -300,22 +661,69 @@ async def process_calendar_sync_jobs(
     if not jobs:
         return 0
 
-    # Claim toàn bộ batch ngay lập tức để tránh tranh chấp / duplicate execution
-    job_ids: list[UUID] = []
+    # Claim toàn bộ batch ngay lập tức bằng Core SQL để tránh tranh chấp / duplicate execution / StaleDataError
+    claimed_by_conn: dict[UUID, list[UUID]] = {}
+    claimed_order: list[tuple[UUID, UUID]] = []
     for job in jobs:
-        job.claimed_at = now_utc
-        job.lease_expires_at = now_utc + timedelta(minutes=2)
-        job_ids.append(job.id)
+        job_id = job.id
+        job_conn_id = job.connection_id
+        claim_res = await db.execute(
+            update(CalendarSyncJob)
+            .where(
+                CalendarSyncJob.id == job_id,
+                CalendarSyncJob.job_state == "queued",
+                or_(
+                    CalendarSyncJob.lease_expires_at.is_(None),
+                    CalendarSyncJob.lease_expires_at <= now_utc,
+                ),
+            )
+            .values(
+                claimed_at=now_utc,
+                lease_expires_at=now_utc + timedelta(minutes=2),
+                updated_at=now_utc,
+                revision=CalendarSyncJob.revision + 1,
+            )
+            .execution_options(synchronize_session=False)
+        )
+        if (getattr(claim_res, "rowcount", 0) or 0) > 0:
+            claimed_by_conn.setdefault(job_conn_id, []).append(job_id)
+            claimed_order.append((job_id, job_conn_id))
     await db.commit()
+
+    if not claimed_order:
+        return 0
 
     cal_service = CalendarService(db)
     processed_count = 0
 
-    for jid in job_ids:
-        current_job = await db.get(CalendarSyncJob, jid)
-        if current_job is None:
-            continue
-        await process_sync_job(db, current_job, cal_service)
-        processed_count += 1
+    if connection_lock_held:
+        for jid, _ in claimed_order:
+            current_job = (
+                await db.execute(
+                    select(CalendarSyncJob)
+                    .where(CalendarSyncJob.id == jid)
+                    .execution_options(populate_existing=True)
+                )
+            ).scalar_one_or_none()
+            if current_job is None or current_job.job_state != "queued":
+                continue
+            await process_sync_job(db, current_job, cal_service)
+            processed_count += 1
+        return processed_count
+
+    for conn_id_key, conn_job_ids in claimed_by_conn.items():
+        async with get_connection_sync_lock(conn_id_key):
+            for jid in conn_job_ids:
+                current_job = (
+                    await db.execute(
+                        select(CalendarSyncJob)
+                        .where(CalendarSyncJob.id == jid)
+                        .execution_options(populate_existing=True)
+                    )
+                ).scalar_one_or_none()
+                if current_job is None or current_job.job_state != "queued":
+                    continue
+                await process_sync_job(db, current_job, cal_service)
+                processed_count += 1
 
     return processed_count

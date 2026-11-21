@@ -1,5 +1,6 @@
 """Fixtures riêng cho C01: SQLite tạm, hai user, AI giả; không dùng DB app."""
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
@@ -16,9 +17,15 @@ from app.core.errors import register_exception_handlers
 from app.models import Base, Session, Task
 from app.models.planning import PlanCandidate as CandidateRow
 from app.models.user import User, UserPreference
-from app.schemas.task import LLMCandidateAdjustmentPayload, LLMTaskExtractionPayload
+from app.schemas.draft import DraftAnalyzeRequest
+from app.schemas.task import (
+    ExtractedFreeWindowSchema,
+    ExtractedTimeConstraint,
+    LLMCandidateAdjustmentPayload,
+    LLMTaskExtractionPayload,
+)
 from app.schemas.user import CurrentUser
-from app.services import plan_service
+from app.services import draft_service, plan_service
 from app.services.ai_service import ai_service
 
 
@@ -1212,3 +1219,541 @@ async def test_legacy_availability_revision_supports_model_and_dictionary(
                 assert reloaded.summary_confirmed_revision == 1
     finally:
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_p1_round2_duration_minutes_completes_open_ended_window(env, monkeypatch):
+    client = env["client"]
+    now_utc = datetime.now(UTC)
+    tomorrow = (now_utc + timedelta(days=1)).date()
+    day_after_tomorrow = tomorrow + timedelta(days=1)
+    deadline = datetime(
+        (tomorrow + timedelta(days=2)).year,
+        (tomorrow + timedelta(days=2)).month,
+        (tomorrow + timedelta(days=2)).day,
+        23,
+        59,
+        tzinfo=UTC,
+    )
+    tc = ExtractedTimeConstraint(
+        kind="deadline",
+        start_at=now_utc,
+        deadline_at=deadline,
+        input_timezone="UTC",
+    )
+
+    def _override_map(availability: dict | None) -> dict[str, list[tuple[str, str]]]:
+        assert availability is not None
+        return {
+            item["date"]: [(iv["start_local"][:5], iv["end_local"][:5]) for iv in item["intervals"]]
+            for item in availability["date_overrides"]
+        }
+
+    # Case 1: AI returns duration_minutes=90 with start_local=None, end_local=None on Turn 2.
+    # Case 2: AI returns structured_free_windows=[] on Turn 2 ("làm được tiếng rưỡi") -> Turn-2 synthesis.
+    # Case 3: Overnight wrap ("tối mai ... rảnh sau 23h" + "làm được 2 tiếng") -> 23:00-23:59 & 00:00-01:00.
+    scenarios = [
+        (
+            "ai-duration-field",
+            "tối mai viết báo cáo rảnh sau 19h30",
+            "19:30",
+            "làm được 90 phút",
+            [
+                ExtractedFreeWindowSchema(
+                    kind="specific_date",
+                    date=tomorrow.isoformat(),
+                    start_local=None,
+                    end_local=None,
+                    duration_minutes=90,
+                    raw_phrase="làm được 90 phút",
+                )
+            ],
+            {tomorrow.isoformat(): [("19:30", "21:00")]},
+        ),
+        (
+            "turn2-synthesis-empty-windows",
+            "tối mai viết báo cáo rảnh sau 19h30",
+            "19:30",
+            "làm được tiếng rưỡi",
+            [],
+            {tomorrow.isoformat(): [("19:30", "21:00")]},
+        ),
+        (
+            "overnight-wrap-synthesis",
+            "tối mai viết báo cáo rảnh sau 23h",
+            "23:00",
+            "làm được 2 tiếng",
+            [],
+            {
+                tomorrow.isoformat(): [("23:00", "23:59")],
+                day_after_tomorrow.isoformat(): [("00:00", "01:00")],
+            },
+        ),
+    ]
+
+    for case_id, raw_text, start_hhmm, turn2_msg, turn2_windows, expected_map in scenarios:
+        created = await client.post(
+            "/api/v1/drafts",
+            headers=headers(),
+            json={
+                "client_draft_id": f"{case_id}-{uuid4().hex}",
+                "input_source": "text",
+                "raw_input": raw_text,
+            },
+        )
+        assert created.status_code == 201, created.text
+        draft = created.json()["data"]
+        url = f"/api/v1/drafts/{draft['draft_id']}"
+
+        turns = iter(
+            [
+                LLMTaskExtractionPayload(
+                    title="Viết báo cáo",
+                    content="Viết báo cáo tiến độ",
+                    scope="Báo cáo hai trang",
+                    time_constraint=tc,
+                    deadline=deadline,
+                    structured_free_windows=[
+                        ExtractedFreeWindowSchema(
+                            kind="specific_date",
+                            date=tomorrow.isoformat(),
+                            start_local=start_hhmm,
+                            end_local=None,
+                            raw_phrase=raw_text,
+                        )
+                    ],
+                    is_complete=False,
+                    summary=f"Chờ giờ kết thúc từ {start_hhmm}.",
+                ),
+                LLMTaskExtractionPayload(
+                    title="Viết báo cáo",
+                    content="Viết báo cáo tiến độ",
+                    scope="Báo cáo hai trang",
+                    time_constraint=tc,
+                    deadline=deadline,
+                    structured_free_windows=turn2_windows,
+                    is_complete=True,
+                    summary="Đã bổ sung thời lượng.",
+                ),
+            ]
+        )
+
+        async def provider(_turns=turns, **kwargs):
+            return next(_turns), "tier_1_gemini"
+
+        monkeypatch.setattr(ai_service, "_execute_hedged_structured", provider)
+
+        r1 = await client.post(
+            f"{url}/analyze",
+            headers=headers(),
+            json={
+                "expected_summary_revision": draft["summary_revision"],
+                "expected_planning_input_revision": draft["planning_input_revision"],
+                "raw_input": raw_text,
+            },
+        )
+        assert r1.status_code == 200, r1.text
+        draft = r1.json()["data"]
+        assert draft["summary"]["can_plan"] is False
+        assert any(
+            i["code"] == "AI_AVAILABILITY_INCOMPLETE" and start_hhmm in i["question"]
+            for i in draft["summary"]["clarification_issues"]
+        )
+
+        r2 = await client.post(
+            f"{url}/analyze",
+            headers=headers(),
+            json={
+                "expected_summary_revision": draft["summary_revision"],
+                "expected_planning_input_revision": draft["planning_input_revision"],
+                "message": turn2_msg,
+            },
+        )
+        assert r2.status_code == 200, r2.text
+        draft = r2.json()["data"]
+        assert draft["summary"]["can_plan"] is True
+        assert not any(i["blocking"] for i in draft["summary"]["clarification_issues"])
+        assert _override_map(draft["summary"]["availability"]) == expected_map
+
+
+@pytest.mark.asyncio
+async def test_p1_round2_duration_edge_cases_and_clock_time_guards(env, monkeypatch):
+    # 1. Clock-time expressions must NOT be misparsed as durations; explicit duration phrases still extract.
+    for clock_phrase in (
+        "10 giờ rưỡi",
+        "tầm 9 giờ rưỡi nghỉ",
+        "rảnh 8 giờ",
+        "làm 9 giờ",
+        "19 giờ",
+        "19h30",
+        "7 giờ tối",
+    ):
+        assert draft_service._extract_explicit_duration_minutes(clock_phrase) is None, clock_phrase
+
+    assert draft_service._extract_explicit_duration_minutes("tiếng rưỡi") == 90
+    assert draft_service._extract_explicit_duration_minutes("làm được 1 giờ rưỡi") == 90
+    assert draft_service._extract_explicit_duration_minutes("làm được 2 giờ") == 120
+    assert draft_service._extract_explicit_duration_minutes("2 giờ đồng hồ") == 120
+
+    client = env["client"]
+    now_utc = datetime.now(UTC)
+    tomorrow = (now_utc + timedelta(days=1)).date()
+    deadline = datetime(
+        (tomorrow + timedelta(days=2)).year,
+        (tomorrow + timedelta(days=2)).month,
+        (tomorrow + timedelta(days=2)).day,
+        23,
+        59,
+        tzinfo=UTC,
+    )
+    tc = ExtractedTimeConstraint(
+        kind="deadline",
+        start_at=now_utc,
+        deadline_at=deadline,
+        input_timezone="UTC",
+    )
+
+    async def _start_open_ended_draft(raw_text: str):
+        created = await client.post(
+            "/api/v1/drafts",
+            headers=headers(),
+            json={
+                "client_draft_id": uuid4().hex,
+                "input_source": "text",
+                "raw_input": raw_text,
+            },
+        )
+        assert created.status_code == 201, created.text
+        draft = created.json()["data"]
+        url = f"/api/v1/drafts/{draft['draft_id']}"
+        t1 = LLMTaskExtractionPayload(
+            title="Viết báo cáo",
+            content="Viết báo cáo tiến độ",
+            scope="Báo cáo hai trang",
+            time_constraint=tc,
+            deadline=deadline,
+            structured_free_windows=[
+                ExtractedFreeWindowSchema(
+                    kind="specific_date",
+                    date=tomorrow.isoformat(),
+                    start_local="19:30",
+                    end_local=None,
+                    raw_phrase=raw_text,
+                )
+            ],
+            is_complete=False,
+            summary="Chờ giờ kết thúc từ 19:30.",
+        )
+
+        async def provider_t1(**kwargs):
+            return t1, "tier_1_gemini"
+
+        monkeypatch.setattr(ai_service, "_execute_hedged_structured", provider_t1)
+        r1 = await client.post(
+            f"{url}/analyze",
+            headers=headers(),
+            json={
+                "expected_summary_revision": draft["summary_revision"],
+                "expected_planning_input_revision": draft["planning_input_revision"],
+                "raw_input": raw_text,
+            },
+        )
+        assert r1.status_code == 200, r1.text
+        data = r1.json()["data"]
+        assert data["summary"]["can_plan"] is False
+        return url, data
+
+    # 2. exclude / reset_override / replace must NOT trigger Turn-2 duration synthesis.
+    for mode_label, turn2_msg, update_mode, turn2_windows in (
+        (
+            "exclude",
+            "bỏ lịch mai dù còn 90 phút",
+            "merge",
+            [
+                ExtractedFreeWindowSchema(
+                    kind="specific_date",
+                    date=tomorrow.isoformat(),
+                    op="exclude",
+                    is_excluded=True,
+                    raw_phrase="bỏ lịch mai",
+                )
+            ],
+        ),
+        (
+            "reset_override",
+            "xóa ngoại lệ mai 90 phút",
+            "merge",
+            [
+                ExtractedFreeWindowSchema(
+                    kind="specific_date",
+                    date=tomorrow.isoformat(),
+                    op="reset_override",
+                    raw_phrase="xóa ngoại lệ mai",
+                )
+            ],
+        ),
+        (
+            "replace",
+            "đổi lịch khác 90 phút",
+            "replace",
+            [],
+        ),
+    ):
+        url, draft = await _start_open_ended_draft("tối mai rảnh sau 19h30")
+
+        async def provider_non_synth(
+            _label=mode_label, _mode=update_mode, _wins=turn2_windows, **kwargs
+        ):
+            return LLMTaskExtractionPayload(
+                title="Viết báo cáo",
+                content="Viết báo cáo tiến độ",
+                scope="Báo cáo hai trang",
+                time_constraint=tc,
+                deadline=deadline,
+                availability_update_mode=_mode,
+                structured_free_windows=_wins,
+                is_complete=False,
+                summary=f"Cập nhật {_label}.",
+            ), "tier_1_gemini"
+
+        monkeypatch.setattr(ai_service, "_execute_hedged_structured", provider_non_synth)
+        r2 = await client.post(
+            f"{url}/analyze",
+            headers=headers(),
+            json={
+                "expected_summary_revision": draft["summary_revision"],
+                "expected_planning_input_revision": draft["planning_input_revision"],
+                "message": turn2_msg,
+            },
+        )
+        assert r2.status_code == 200, r2.text
+        after = r2.json()["data"]
+        assert after["summary"]["can_plan"] is False, mode_label
+        overrides = (after["summary"]["availability"] or {}).get("date_overrides") or []
+        assert all(
+            (iv["start_local"][:5], iv["end_local"][:5]) != ("19:30", "21:00")
+            for item in overrides
+            for iv in item["intervals"]
+        ), mode_label
+
+    # 3. Clock-time Turn-2 reply ("tầm 9 giờ rưỡi nghỉ") with empty windows must NOT synthesize duration.
+    url, draft = await _start_open_ended_draft("tối mai rảnh sau 19h30")
+
+    async def provider_clock(**kwargs):
+        return LLMTaskExtractionPayload(
+            title="Viết báo cáo",
+            content="Viết báo cáo tiến độ",
+            scope="Báo cáo hai trang",
+            time_constraint=tc,
+            deadline=deadline,
+            structured_free_windows=[],
+            is_complete=False,
+            summary="Chờ xác nhận.",
+        ), "tier_1_gemini"
+
+    monkeypatch.setattr(ai_service, "_execute_hedged_structured", provider_clock)
+    r_clock = await client.post(
+        f"{url}/analyze",
+        headers=headers(),
+        json={
+            "expected_summary_revision": draft["summary_revision"],
+            "expected_planning_input_revision": draft["planning_input_revision"],
+            "message": "tầm 9 giờ rưỡi nghỉ",
+        },
+    )
+    assert r_clock.status_code == 200, r_clock.text
+    assert r_clock.json()["data"]["summary"]["can_plan"] is False
+
+    # 4. >200-char Turn-2 message with empty windows synthesizes safely without ValidationError.
+    long_turn2_msg = "làm được 90 phút " + ("chi tiết rà soát tài liệu và kiểm thử " * 6)
+    assert len(long_turn2_msg) > 200
+    url, draft = await _start_open_ended_draft("tối mai rảnh sau 19h30")
+    monkeypatch.setattr(ai_service, "_execute_hedged_structured", provider_clock)
+    r_long = await client.post(
+        f"{url}/analyze",
+        headers=headers(),
+        json={
+            "expected_summary_revision": draft["summary_revision"],
+            "expected_planning_input_revision": draft["planning_input_revision"],
+            "message": long_turn2_msg,
+        },
+    )
+    assert r_long.status_code == 200, r_long.text
+    long_data = r_long.json()["data"]
+    assert long_data["summary"]["can_plan"] is True
+    assert long_data["summary"]["availability"]["weekly_rules"] == []
+    assert {
+        item["date"]: [(iv["start_local"][:5], iv["end_local"][:5]) for iv in item["intervals"]]
+        for item in long_data["summary"]["availability"]["date_overrides"]
+    } == {tomorrow.isoformat(): [("19:30", "21:00")]}
+
+    # 5. Unanchored kind="daily" Turn-2 window preserves Turn-1 specific_date instead of leaking weekly_rules.
+    url, draft = await _start_open_ended_draft("tối mai rảnh sau 19h30")
+
+    async def provider_unanchored_daily(**kwargs):
+        return LLMTaskExtractionPayload(
+            title="Viết báo cáo",
+            content="Viết báo cáo tiến độ",
+            scope="Báo cáo hai trang",
+            time_constraint=tc,
+            deadline=deadline,
+            structured_free_windows=[
+                ExtractedFreeWindowSchema(
+                    kind="daily",
+                    date=None,
+                    weekday=None,
+                    weekdays=[],
+                    start_local=None,
+                    end_local=None,
+                    duration_minutes=90,
+                    raw_phrase="làm được 90 phút",
+                )
+            ],
+            is_complete=True,
+            summary="Đã bổ sung 90 phút.",
+        ), "tier_1_gemini"
+
+    monkeypatch.setattr(ai_service, "_execute_hedged_structured", provider_unanchored_daily)
+    r_daily = await client.post(
+        f"{url}/analyze",
+        headers=headers(),
+        json={
+            "expected_summary_revision": draft["summary_revision"],
+            "expected_planning_input_revision": draft["planning_input_revision"],
+            "message": "làm được 90 phút",
+        },
+    )
+    assert r_daily.status_code == 200, r_daily.text
+    daily_data = r_daily.json()["data"]
+    assert daily_data["summary"]["can_plan"] is True
+    assert daily_data["summary"]["availability"]["weekly_rules"] == []
+    assert {
+        item["date"]: [(iv["start_local"][:5], iv["end_local"][:5]) for iv in item["intervals"]]
+        for item in daily_data["summary"]["availability"]["date_overrides"]
+    } == {tomorrow.isoformat(): [("19:30", "21:00")]}
+
+
+@pytest.mark.asyncio
+async def test_p1_long_existing_title_over_100_chars_reanalyzes_without_422_or_500(
+    env, payload, monkeypatch
+):
+    client = env["client"]
+    long_title = (
+        "Báo cáo tổng kết kết quả nghiên cứu và đánh giá chi tiết hiệu năng hệ thống lập kế hoạch "
+        "thông minh cho người dùng ADHD giai đoạn 2026"
+    )
+    assert len(long_title) > 100
+
+    long_payload = {
+        **payload,
+        "client_draft_id": uuid4().hex,
+        "summary": {
+            **payload["summary"],
+            "title": long_title,
+        },
+    }
+    created = await client.post("/api/v1/drafts", json=long_payload, headers=headers())
+    assert created.status_code == 201, created.text
+    draft = created.json()["data"]
+    assert draft["summary"]["title"] == long_title
+    assert draft["summary"]["field_sources"]["title"]["source"] == "user_input"
+
+    captured_previous_titles: list[str | None] = []
+
+    async def provider(**kwargs):
+        return LLMTaskExtractionPayload(
+            title="Báo cáo tổng kết hiệu năng hệ thống 2026",
+            content=payload["summary"]["description"],
+            scope=payload["summary"]["scope"],
+            summary="Đã rút gọn tiêu đề hợp lệ.",
+        ), "tier_1_gemini"
+
+    real_extract = ai_service.extract_task_intent
+
+    async def spy_extract(*args, **kwargs):
+        prev = kwargs.get("previous_draft")
+        captured_previous_titles.append(prev.title if prev is not None else None)
+        return await real_extract(*args, **kwargs)
+
+    monkeypatch.setattr(ai_service, "_execute_hedged_structured", provider)
+    monkeypatch.setattr(ai_service, "extract_task_intent", spy_extract)
+
+    analyzed = await client.post(
+        f"/api/v1/drafts/{draft['draft_id']}/analyze",
+        headers=headers(),
+        json={
+            "expected_summary_revision": draft["summary_revision"],
+            "expected_planning_input_revision": draft["planning_input_revision"],
+            "message": "Giữ nguyên phạm vi và rút gọn tiêu đề giúp mình",
+        },
+    )
+    assert analyzed.status_code == 200, analyzed.text
+    updated = analyzed.json()["data"]
+    assert len(captured_previous_titles) == 1
+    assert captured_previous_titles[0] is not None
+    assert len(captured_previous_titles[0]) <= 100
+    assert updated["summary"]["title"] is not None
+    assert len(updated["summary"]["title"]) <= 100
+    assert updated["summary"]["title"] == "Báo cáo tổng kết hiệu năng hệ thống 2026"
+    assert not any(
+        i["code"] == "AI_FIELD_REVIEW_REQUIRED" and i["field_path"] == "title"
+        for i in updated["summary"]["clarification_issues"]
+    )
+    assert updated["summary"]["can_plan"] is True
+
+
+@pytest.mark.asyncio
+async def test_p1_concurrent_analyze_same_idempotency_key_invokes_llm_once(
+    env, payload, monkeypatch
+):
+    client = env["client"]
+    created = await client.post("/api/v1/drafts", json=payload, headers=headers())
+    assert created.status_code == 201, created.text
+    draft = created.json()["data"]
+
+    extract_calls = 0
+    real_extract = ai_service.extract_task_intent
+
+    async def provider(**kwargs):
+        return LLMTaskExtractionPayload(
+            title=payload["summary"]["title"],
+            content=payload["summary"]["description"],
+            scope=payload["summary"]["scope"],
+            extra_requirements=["Kiểm tra song song"],
+            summary="Phân tích hoàn tất.",
+        ), "tier_1_gemini"
+
+    async def spy_extract(*args, **kwargs):
+        nonlocal extract_calls
+        extract_calls += 1
+        await asyncio.sleep(0.05)
+        return await real_extract(*args, **kwargs)
+
+    monkeypatch.setattr(ai_service, "_execute_hedged_structured", provider)
+    monkeypatch.setattr(ai_service, "extract_task_intent", spy_extract)
+
+    user_id = str(env["owner"])
+    draft_id = draft["draft_id"]
+    idem_key = f"p1-concurrent-{uuid4().hex}"
+    req = DraftAnalyzeRequest(
+        expected_summary_revision=draft["summary_revision"],
+        expected_planning_input_revision=draft["planning_input_revision"],
+        message="Thêm yêu cầu kiểm tra song song",
+    )
+
+    async def invoke_once():
+        async with env["db"]() as db:
+            return await draft_service.analyze_draft(
+                user_id=user_id,
+                draft_id=draft_id,
+                idempotency_key=idem_key,
+                payload=req,
+                db=db,
+            )
+
+    res1, res2 = await asyncio.gather(invoke_once(), invoke_once())
+    assert extract_calls == 1
+    assert res1.model_dump(mode="json") == res2.model_dump(mode="json")
+    assert res1.summary_revision == draft["summary_revision"] + 1
+    assert "Kiểm tra song song" in res1.summary.extra_requirements
+    assert (user_id, draft_id, idem_key) not in draft_service._INFLIGHT_ANALYZE_LOCKS

@@ -1151,7 +1151,7 @@ class TestAIService(unittest.TestCase):
             VOICE_STT_PROVIDER="auto",
         )
         auto_svc = build_voice_service(auto_cfg)
-        self.assertEqual(auto_svc.provider_name, "groq->gemini")
+        self.assertEqual(auto_svc.provider_name, "gemini->groq")
 
     def test_tts_service_fake_edge_mock_cache_and_validation(self) -> None:
         """Kiểm tra TtsService: FakeTtsProvider, EdgeTtsProvider mock, LRU cache và validate input."""

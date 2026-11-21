@@ -97,14 +97,19 @@ class Settings(BaseSettings):
     ENABLE_CALENDAR_SYNC_WORKER: bool = True
     TESTING: bool = False
 
-    # Voice STT (V01 & A21) — hỗ trợ Gemini Transcribe và Groq Whisper (whisper-large-v3-turbo).
+    # Voice STT (V01 & A21) — hỗ trợ Gemini 3.5 Flash-Lite inline audio (chính) và Groq Whisper.
+    # Mode "auto": ưu tiên Gemini -> Groq; riêng purpose="uf5_checkin" đảo sang Groq -> Gemini khi bật cờ.
     # Dự phòng khi Backend lỗi/mất mạng nằm ở Mobile (speech_to_text on-device).
-    VOICE_STT_PROVIDER: Literal["gemini", "groq", "auto", "fake"] = "gemini"
-    GEMINI_STT_MODEL: str = "gemini-3.5-transcribe"
+    VOICE_STT_PROVIDER: Literal["gemini", "groq", "auto", "fake"] = "auto"
+    GEMINI_STT_MODEL: str = "gemini-3.5-flash-lite"
+    GEMINI_STT_TRANSPORT: Literal["auto", "inline", "transcribe_api"] = "auto"
     GEMINI_STT_MODE: Literal["smart", "verbatim"] = "smart"
     VOICE_STT_LANGUAGE: str = "vi-VN"
-    # Đo thực tế ~8-9s/clip ngắn (gồm ~2,5s upload) nên timeout rộng hơn luồng LLM.
-    VOICE_STT_TIMEOUT_SECONDS: float = Field(default=20.0, gt=0.0, le=120.0)
+    VOICE_STT_UF5_PREFER_GROQ: bool = True
+    # Ngưỡng timeout nhánh chính để còn quỹ thời gian dự phòng sang nhánh phụ trong tổng ngân sách 12s.
+    VOICE_STT_PRIMARY_TIMEOUT_SECONDS: float = Field(default=8.0, gt=0.0, le=60.0)
+    # Gemini 3.5 Flash-Lite inline audio ~1.5-4s; tổng ngân sách 12s đủ cả nhánh chính lẫn fallback Groq.
+    VOICE_STT_TIMEOUT_SECONDS: float = Field(default=12.0, gt=0.0, le=120.0)
     VOICE_MAX_AUDIO_BYTES: int = Field(default=10 * 1024 * 1024, gt=0)
     MAX_JSON_BODY_BYTES: int = Field(default=1 * 1024 * 1024, gt=0)
     VOICE_MULTIPART_OVERHEAD_BYTES: int = Field(default=1 * 1024 * 1024, gt=0)

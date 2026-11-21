@@ -32,7 +32,9 @@ async def _calendar_sync_background_loop():
     while True:
         try:
             async with session_maker() as session:
-                await process_calendar_sync_jobs(session, limit=10)
+                await process_calendar_sync_jobs(
+                    session, limit=10, skip_busy_connections=True
+                )
         except asyncio.CancelledError:
             break
         except Exception as exc:

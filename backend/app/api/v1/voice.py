@@ -2,10 +2,11 @@
 import asyncio
 import base64
 import hashlib
+import inspect
 import json
 import time
 from collections import OrderedDict
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, File, Form, Header, UploadFile
@@ -93,6 +94,46 @@ def _stt_error_to_app_error(exc: SttError) -> AppError:
         message=message,
         next_action=next_action,
         retryable=exc.retryable,
+    )
+
+
+def _accepts_purpose_kwarg(func: Any) -> bool:
+    """Kiểm tra callable có chấp nhận tham số keyword ``purpose`` hoặc ``**kwargs`` hay không."""
+    try:
+        sig = inspect.signature(func)
+    except (TypeError, ValueError):
+        return False
+    for param in sig.parameters.values():
+        if param.kind == inspect.Parameter.VAR_KEYWORD:
+            return True
+        if param.name == "purpose" and param.kind in (
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            inspect.Parameter.KEYWORD_ONLY,
+        ):
+            return True
+    return False
+
+
+async def _call_transcribe(
+    service: Any,
+    audio_bytes: bytes,
+    *,
+    content_type: str | None,
+    filename: str | None,
+    purpose: str,
+) -> Any:
+    """Gọi ``service.transcribe`` và chỉ truyền ``purpose=`` khi tương thích chữ ký (giữ an toàn cho mock cũ)."""
+    if _accepts_purpose_kwarg(service.transcribe):
+        return await service.transcribe(
+            audio_bytes,
+            content_type=content_type,
+            filename=filename,
+            purpose=purpose,
+        )
+    return await service.transcribe(
+        audio_bytes,
+        content_type=content_type,
+        filename=filename,
     )
 
 
@@ -386,10 +427,12 @@ async def create_transcription(
 
             # V01/A21 (Role Voice): chuyển audio thành chữ qua voice_service; lỗi đổi sang Error Envelope.
             try:
-                stt_result = await get_voice_service().transcribe(
+                stt_result = await _call_transcribe(
+                    get_voice_service(),
                     audio_bytes,
                     content_type=file.content_type,
                     filename=file.filename,
+                    purpose=purpose,
                 )
             except SttError as exc:
                 raise _stt_error_to_app_error(exc) from exc
@@ -400,6 +443,7 @@ async def create_transcription(
                 text=stt_result.text,
                 input_source="thought" if purpose == "thought_to_draft" else "voice",
                 thought_id=thought_id if purpose == "thought_to_draft" else None,
+                low_confidence=bool(getattr(stt_result, "low_confidence", False)),
             )
             saved = await command_service.replay(db, current_user.user_id, idempotency_key, digest)
             if saved is not None:

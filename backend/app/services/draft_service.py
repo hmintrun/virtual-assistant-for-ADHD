@@ -1,4 +1,5 @@
 # Tầng Service điều phối nghiệp vụ cho bản nháp công việc UF1 (PlanningDraft)
+import asyncio
 import re
 from datetime import UTC, date, datetime, time, timedelta
 from typing import Any, Literal, cast
@@ -54,6 +55,7 @@ from app.schemas.task import (
 from app.services.ai_service import UF1_FALLBACK_NOTICE, UF1_FALLBACK_QUESTIONS, ai_service
 from app.services.command_service import durable_command, lock_owner
 from app.services.scheduler_engine import validate_planning_prerequisites
+from app.utils.vietnamese_itn import normalize_vietnamese_transcript
 
 
 def _build_seed_draft(draft_id: str, client_draft_id: str) -> PlanningDraft:
@@ -837,6 +839,109 @@ def _resolve_same_time_inheritance(
     return resolved
 
 
+_VN_DURATION_WORD_TO_INT: dict[str, int] = {
+    "một": 1,
+    "hai": 2,
+    "ba": 3,
+    "bốn": 4,
+    "tư": 4,
+    "năm": 5,
+    "sáu": 6,
+    "bảy": 7,
+    "tám": 8,
+    "chín": 9,
+    "mười": 10,
+    "mười một": 11,
+    "mười hai": 12,
+}
+
+_VN_NUM_TOKEN_PATTERN = r"\d+|mười\s+một|mười\s+hai|một|hai|ba|bốn|tư|năm|sáu|bảy|tám|chín|mười"
+
+
+def _parse_vn_duration_number(token: str) -> int | None:
+    cleaned = re.sub(r"\s+", " ", token.strip().lower())
+    if cleaned.isdigit():
+        return int(cleaned)
+    return _VN_DURATION_WORD_TO_INT.get(cleaned)
+
+
+def _extract_explicit_duration_minutes(text: str | None) -> int | None:
+    """Trích xuất thời lượng tường minh bằng tiếng Việt (1..960 phút) cho câu trả lời Lượt 2 (#8, T4.3)."""
+    if not text or not text.strip():
+        return None
+    text_low = text.strip().lower()
+    minutes: int | None = None
+
+    if re.search(r"\bnửa\s+(?:tiếng|giờ)\b", text_low):
+        minutes = 30
+    elif m_dec := re.search(
+        r"(?<!\d)(\d+)[.,](\d+)\s*(?:tiếng(?:\s+đồng\s+hồ)?|giờ\s+đồng\s+hồ)\b",
+        text_low,
+    ):
+        minutes = int(round(float(f"{m_dec.group(1)}.{m_dec.group(2)}") * 60))
+    elif m_half_hr := re.search(
+        rf"\b(?:(?P<num>{_VN_NUM_TOKEN_PATTERN})\s+)?tiếng\s+rưỡi\b",
+        text_low,
+    ):
+        raw_num = m_half_hr.group("num")
+        n_val = _parse_vn_duration_number(raw_num) if raw_num else 1
+        if n_val is not None:
+            minutes = n_val * 60 + 30
+    elif m_gio_ruoi := re.search(
+        r"(?:\b(?:làm\s+được|rảnh\s+được|kéo\s+dài|trong\s+vòng)\s+"
+        rf"(?P<num>{_VN_NUM_TOKEN_PATTERN})\s*giờ\s+rưỡi\b"
+        rf"|\b(?P<num_dh>{_VN_NUM_TOKEN_PATTERN})\s*giờ\s+rưỡi\s+đồng\s+hồ\b)"
+        r"(?!\s*(?:sáng|trưa|chiều|tối|đêm)\b)",
+        text_low,
+    ):
+        raw_num = m_gio_ruoi.group("num") or m_gio_ruoi.group("num_dh")
+        n_val = _parse_vn_duration_number(raw_num) if raw_num else None
+        if n_val is not None:
+            minutes = n_val * 60 + 30
+    elif m_tieng := re.search(
+        rf"\b(?P<num>{_VN_NUM_TOKEN_PATTERN})\s*tiếng(?:\s+đồng\s+hồ)?"
+        r"(?:\s*(?P<mins>\d+)\s*(?:phút|p)\b)?(?!\s*rưỡi\b)",
+        text_low,
+    ):
+        n_val = _parse_vn_duration_number(m_tieng.group("num"))
+        if n_val is not None:
+            extra_m = int(m_tieng.group("mins")) if m_tieng.group("mins") else 0
+            minutes = n_val * 60 + extra_m
+    elif m_gio_dh := re.search(
+        rf"\b(?P<num>{_VN_NUM_TOKEN_PATTERN})\s*giờ\s+đồng\s+hồ"
+        r"(?:\s*(?P<mins>\d+)\s*(?:phút|p)\b)?",
+        text_low,
+    ):
+        n_val = _parse_vn_duration_number(m_gio_dh.group("num"))
+        if n_val is not None:
+            extra_m = int(m_gio_dh.group("mins")) if m_gio_dh.group("mins") else 0
+            minutes = n_val * 60 + extra_m
+    elif m_gio_ctx := re.search(
+        r"\b(?:làm\s+được|rảnh\s+được|kéo\s+dài|trong\s+vòng)\s+"
+        rf"(?P<num>{_VN_NUM_TOKEN_PATTERN})\s*giờ\b"
+        r"(?:\s*(?P<mins>\d+)\s*(?:phút|p)\b)?"
+        r"(?!\s*(?:\d|h|p|phút|rưỡi|sáng|trưa|chiều|tối|đêm|kém|hơn)\b)",
+        text_low,
+    ):
+        n_val = _parse_vn_duration_number(m_gio_ctx.group("num"))
+        if n_val is not None:
+            extra_m = int(m_gio_ctx.group("mins")) if m_gio_ctx.group("mins") else 0
+            minutes = n_val * 60 + extra_m
+    else:
+        clock_prefix_re = re.compile(
+            rf"(?:{_VN_NUM_TOKEN_PATTERN})\s*(?:giờ|h|g|:)\s*$"
+        )
+        for m_min in re.finditer(r"(?<!\d)(\d+)\s*(?:phút|p)\b", text_low):
+            if clock_prefix_re.search(text_low[: m_min.start()]):
+                continue
+            minutes = int(m_min.group(1))
+            break
+
+    if minutes is not None and 1 <= minutes <= 960:
+        return minutes
+    return None
+
+
 def _merge_free_windows(previous, incoming):
     """Hợp nhất danh sách khung giờ rảnh qua các lượt trả lời UF1; hỗ trợ #1..#9."""
     result: list[ExtractedFreeWindowSchema] = list(previous)
@@ -858,14 +963,19 @@ def _merge_free_windows(previous, incoming):
         seed_end=seed_end,
     )
 
-    # Ghép câu trả lời Lượt 2 bổ sung giờ kết thúc cho câu hở đầu ra (#8 "sau 19h30")
+    # Ghép câu trả lời Lượt 2 bổ sung giờ kết thúc hoặc thời lượng cho câu hở đầu ra (#8 "sau 19h30")
     completed_incoming: list[ExtractedFreeWindowSchema] = []
     for item in processed_incoming:
+        inferred_duration = (
+            item.duration_minutes
+            if item.duration_minutes is not None
+            else _extract_explicit_duration_minutes(item.raw_phrase)
+        )
         if (
             item.start_local is None
-            and item.end_local is not None
             and not item.is_excluded
             and item.op in ("add", "replace_day")
+            and (item.end_local is not None or inferred_duration is not None)
         ):
             matched_old = next(
                 (
@@ -877,18 +987,43 @@ def _merge_free_windows(previous, incoming):
                     and (
                         (item.date is not None and item.date == old.date)
                         or (item.weekday is not None and item.weekday == old.weekday)
-                        or (item.date is None and item.weekday is None and not item.weekdays)
+                        or (item.weekdays and item.weekdays == old.weekdays)
+                        or (
+                            item.date_from is not None
+                            and item.date_from == old.date_from
+                            and item.date_to == old.date_to
+                        )
+                        or (
+                            item.date is None
+                            and item.weekday is None
+                            and not item.weekdays
+                            and item.date_from is None
+                        )
                     )
                 ),
                 None,
             )
             if matched_old is not None:
+                item_is_unanchored = (
+                    item.date is None
+                    and item.weekday is None
+                    and not item.weekdays
+                    and item.date_from is None
+                )
                 payload = item.model_dump()
-                payload["kind"] = matched_old.kind
+                payload["kind"] = (
+                    matched_old.kind
+                    if item_is_unanchored or item.kind == "weekly_rule"
+                    else (item.kind or matched_old.kind)
+                )
                 payload["date"] = item.date or matched_old.date
                 payload["weekday"] = item.weekday or matched_old.weekday
                 payload["weekdays"] = item.weekdays or matched_old.weekdays
+                payload["date_from"] = item.date_from or matched_old.date_from
+                payload["date_to"] = item.date_to or matched_old.date_to
                 payload["start_local"] = matched_old.start_local
+                if item.end_local is None:
+                    payload["duration_minutes"] = inferred_duration
                 payload["is_ambiguous"] = False
                 payload["clarification_hint"] = None
                 item = ExtractedFreeWindowSchema.model_validate(payload)
@@ -2002,8 +2137,19 @@ async def confirm_draft_summary(
     return result
 
 
+class _AnalyzeFlightLock:
+    """Khóa single-flight theo (user_id, draft_id, idempotency_key) chống gọi trùng lặp đồng thời (T4.2)."""
+
+    def __init__(self) -> None:
+        self.lock = asyncio.Lock()
+        self.ref_count = 0
+
+
+_INFLIGHT_ANALYZE_LOCKS: dict[tuple[str, str, str], _AnalyzeFlightLock] = {}
+
+
 @durable_command("analyze_draft", PlanningDraft)
-async def analyze_draft(
+async def _analyze_draft_impl(
     *,
     user_id: str,
     draft_id: str,
@@ -2011,7 +2157,7 @@ async def analyze_draft(
     payload: DraftAnalyzeRequest,
     db: AsyncSession | None = None,
 ) -> PlanningDraft:
-    """Dòng 5 (POST /api/v1/drafts/{draft_id}/analyze): Gọi AI trích xuất & làm rõ 1 vòng (I01, A01/A02.1, T03, T18)."""
+    """Thực thi nội bộ cho POST /api/v1/drafts/{draft_id}/analyze có gắn durable_command (I01, A01/A02.1, T03, T18)."""
     # Pha 1: Đọc snapshot hiện tại và kiểm tra cả 2 revision trước khi gọi AI
     snapshot_draft = await get_draft_by_id(user_id=user_id, draft_id=draft_id, db=db)
     if (
@@ -2063,23 +2209,9 @@ async def analyze_draft(
         if windows
         else (_free_windows(user_default_avail) if user_default_avail is not None else [])
     )
-    # Drafts may retain long titles; validate before building the narrower AI DTO.
-    if summary.title is not None and len(summary.title) > 100:
-        raise AppError(
-            status_code=422,
-            code="VALIDATION_ERROR",
-            message="Tiêu đề quá dài để phân tích. Hãy rút gọn tiêu đề, giữ chi tiết trong nội dung.",
-            field_errors=[
-                FieldError(
-                    field_path="summary.title",
-                    code="string_too_long",
-                    message="Tiêu đề tối đa 100 ký tự; nội dung nhập được giữ nguyên.",
-                )
-            ],
-            next_action="fix_fields",
-        )
+    # T4.4 (RISK-01): Cắt mềm tiêu đề > 100 ký tự khi tạo DTO cho AI thay vì ném 422 cứng.
     previous = LLMTaskExtractionPayload(
-        title=summary.title,
+        title=(summary.title[:100].rstrip() if summary.title else None),
         goal=summary.goal,
         time_constraint=ExtractedTimeConstraint.model_validate(
             tc.model_dump(mode="json")
@@ -2109,6 +2241,7 @@ async def analyze_draft(
             "availability",
         )
         if getattr(summary, field_name) is not None
+        and not (field_name == "title" and summary.title is not None and len(summary.title) > 100)
         and (src := summary.field_sources.get(field_name)) is not None
         and src.source in {"user_confirmed", "user_input"}
         and src.source_ref != "raw_input"
@@ -2163,15 +2296,19 @@ async def analyze_draft(
         and (has_explicit_decision_verb or not _UF1_SCOPE_ALT_DELIVERABLE_RE.search(edit_text))
     )
     needs_scope_decision = scope_needs_choice or (scope_choice_pending and not user_selected_scope)
+    normalized_input = normalize_vietnamese_transcript(input_text)
+    normalized_followup = (
+        normalize_vietnamese_transcript(latest_message) if latest_message else None
+    )
     try:
         extracted = TaskExtractionResult.model_validate(
             await ai_service.extract_task_intent(
-                input_text,
+                normalized_input,
                 timezone=timezone_name,
                 previous_draft=previous,
                 default_free_windows=default_free_windows,
                 locked_fields=locked_fields or None,
-                followup_message=latest_message or None,
+                followup_message=normalized_followup,
                 requested_edit_fields=tuple(sorted(reviewed_edits | active_pending_fields)),
                 needs_user_decision=needs_scope_decision,
                 retrying_fallback_edit=bool(active_pending_fields),
@@ -2239,6 +2376,19 @@ async def analyze_draft(
         if field_name in frozen_fields:
             continue
         current_value = getattr(current_draft.summary, field_name)
+        is_overlong_title = (
+            field_name == "title"
+            and isinstance(current_value, str)
+            and len(current_value) > 100
+        )
+        if is_overlong_title:
+            if proposed_val is not None and proposed_val.strip():
+                merged_updates["title"] = proposed_val[:100].rstrip()
+                new_field_sources["title"] = FieldSource(
+                    source="ai_suggested",
+                    source_ref=f"summary_revision:{next_summary_rev}",
+                )
+            continue
         if proposed_val is None or proposed_val == current_value:
             continue
         source = current_draft.summary.field_sources.get(field_name)
@@ -2271,6 +2421,16 @@ async def analyze_draft(
             continue
         merged_updates[field_name] = proposed_val
         new_field_sources[field_name] = FieldSource(
+            source="ai_suggested",
+            source_ref=f"summary_revision:{next_summary_rev}",
+        )
+    if (
+        current_draft.summary.title is not None
+        and len(current_draft.summary.title) > 100
+        and "title" not in merged_updates
+    ):
+        merged_updates["title"] = current_draft.summary.title[:100].rstrip()
+        new_field_sources["title"] = FieldSource(
             source="ai_suggested",
             source_ref=f"summary_revision:{next_summary_rev}",
         )
@@ -2425,6 +2585,69 @@ async def analyze_draft(
                 update={
                     "structured_free_windows": default_windows_objs,
                     "free_time_slots": [w.raw_phrase for w in default_windows_objs],
+                }
+            )
+    dur_text = edit_text or latest_message
+    dur = _extract_explicit_duration_minutes(normalize_vietnamese_transcript(dur_text))
+    if dur is not None and extracted.availability_update_mode != "replace":
+        raw_prev_windows = current_draft.ai_context.get("availability_windows") or []
+        open_ended_old = next(
+            (
+                (w.model_dump(mode="json") if isinstance(w, ExtractedFreeWindowSchema) else w)
+                for w in raw_prev_windows
+                if isinstance(w, (dict, ExtractedFreeWindowSchema))
+                and (
+                    (
+                        w.get("is_ambiguous")
+                        and w.get("start_local")
+                        and not w.get("end_local")
+                        and not w.get("is_excluded")
+                    )
+                    if isinstance(w, dict)
+                    else (
+                        w.is_ambiguous
+                        and w.start_local is not None
+                        and w.end_local is None
+                        and not w.is_excluded
+                    )
+                )
+            ),
+            None,
+        )
+        has_exclude_or_reset = any(
+            w.is_excluded or w.op in ("exclude", "reset_override")
+            for w in extracted.structured_free_windows
+        )
+        has_completion_window = any(
+            w.end_local is not None
+            or w.duration_minutes is not None
+            or (
+                w.start_local is None
+                and not w.is_excluded
+                and w.op in ("add", "replace_day")
+                and _extract_explicit_duration_minutes(w.raw_phrase) is not None
+            )
+            for w in extracted.structured_free_windows
+        )
+        if open_ended_old is not None and not has_exclude_or_reset and not has_completion_window:
+            safe_raw_phrase = (
+                dur_text[:200].strip()
+                or str(open_ended_old.get("raw_phrase") or "bổ sung thời lượng")[:200].strip()
+            )
+            synth = ExtractedFreeWindowSchema(
+                kind=open_ended_old.get("kind", "daily"),
+                date=open_ended_old.get("date"),
+                weekday=open_ended_old.get("weekday"),
+                weekdays=open_ended_old.get("weekdays"),
+                date_from=open_ended_old.get("date_from"),
+                date_to=open_ended_old.get("date_to"),
+                raw_phrase=safe_raw_phrase,
+                duration_minutes=dur,
+                op="add",
+            )
+            extracted = extracted.model_copy(
+                update={
+                    "structured_free_windows": [*extracted.structured_free_windows, synth],
                 }
             )
     proposed_availability, availability_state = None, None
@@ -2956,3 +3179,43 @@ async def analyze_draft(
     )
     await _persist_draft_to_db(db, user_id, updated_draft, expected=snapshot_draft)
     return updated_draft
+
+
+async def analyze_draft(
+    *,
+    user_id: str,
+    draft_id: str,
+    idempotency_key: str,
+    payload: DraftAnalyzeRequest,
+    db: AsyncSession | None = None,
+) -> PlanningDraft:
+    """Dòng 5 (POST /api/v1/drafts/{draft_id}/analyze): Gọi AI trích xuất & làm rõ 1 vòng có khóa single-flight (I01, A01/A02.1, T03, T18, T4.2)."""
+    if not idempotency_key:
+        return await _analyze_draft_impl(
+            user_id=user_id,
+            draft_id=draft_id,
+            idempotency_key=idempotency_key,
+            payload=payload,
+            db=db,
+        )
+    lock_key = (user_id, draft_id, idempotency_key)
+    flight = _INFLIGHT_ANALYZE_LOCKS.get(lock_key)
+    if flight is None:
+        flight = _AnalyzeFlightLock()
+        _INFLIGHT_ANALYZE_LOCKS[lock_key] = flight
+    flight.ref_count += 1
+    try:
+        async with flight.lock:
+            if db is not None and db.in_transaction():
+                await db.rollback()
+            return await _analyze_draft_impl(
+                user_id=user_id,
+                draft_id=draft_id,
+                idempotency_key=idempotency_key,
+                payload=payload,
+                db=db,
+            )
+    finally:
+        flight.ref_count -= 1
+        if flight.ref_count <= 0 and _INFLIGHT_ANALYZE_LOCKS.get(lock_key) is flight:
+            _INFLIGHT_ANALYZE_LOCKS.pop(lock_key, None)
