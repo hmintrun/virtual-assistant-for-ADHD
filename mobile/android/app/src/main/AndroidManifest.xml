@@ -75,9 +75,13 @@
         <receiver
             android:name="dev.fluttercommunity.plus.androidalarmmanager.AlarmBroadcastReceiver"
             android:exported="false"/>
+        <!-- Khôi phục báo thức trả DND (+300s) sau khi khởi động lại máy. Plugin tự bật/tắt receiver
+             này lúc chạy khi có báo thức rescheduleOnReboot; để sẵn "true" cho chắc trên ROM chặn
+             setComponentEnabledSetting. Chuông hết phiên / chuyển pha / nhắc trước phiên do
+             ScheduledNotificationBootReceiver (flutter_local_notifications) khôi phục. -->
         <receiver
             android:name="dev.fluttercommunity.plus.androidalarmmanager.RebootBroadcastReceiver"
-            android:enabled="false"
+            android:enabled="true"
             android:exported="false">
             <intent-filter>
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
