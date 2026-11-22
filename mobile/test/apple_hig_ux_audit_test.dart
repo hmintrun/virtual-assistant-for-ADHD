@@ -414,4 +414,155 @@ void main() {
     expect(find.byIcon(Icons.add_circle_rounded), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
+
+  testWidgets(
+      'MelbelStepProgressBar animates fill on mount, updates forward/backward, settles cleanly, and respects disableAnimations',
+      (tester) async {
+    await tester.pumpWidget(MaterialApp(
+      theme: MelbelTheme.themeFor(isDark: true),
+      home: const Scaffold(
+        body: PlanningStageHeader(
+          step: 2,
+          label: 'Kiểm tra thông tin',
+        ),
+      ),
+    ));
+
+    List<double> segmentScales() => tester
+        .widgetList<Transform>(
+          find.descendant(
+            of: find.byType(MelbelStepProgressBar),
+            matching: find.byType(Transform),
+          ),
+        )
+        .map((t) => t.transform.storage[0])
+        .toList();
+
+    final initialScales = segmentScales();
+    expect(initialScales, hasLength(1));
+    expect(initialScales.first, closeTo(1.0, 0.001));
+
+    await tester.pump(const Duration(milliseconds: 300));
+    final midScales = segmentScales();
+    expect(midScales, hasLength(2));
+    expect(midScales[0], closeTo(1.0, 0.001));
+    expect(midScales[1], greaterThan(0.0));
+    expect(midScales[1], lessThan(1.0));
+
+    await tester.pumpAndSettle();
+    final settledScales = segmentScales();
+    expect(settledScales, hasLength(2));
+    expect(settledScales[0], closeTo(1.0, 0.001));
+    expect(settledScales[1], closeTo(1.0, 0.001));
+
+    var currentStep = 1;
+    late void Function(VoidCallback) updateStep;
+    await tester.pumpWidget(MaterialApp(
+      theme: MelbelTheme.themeFor(isDark: false),
+      home: Scaffold(
+        body: StatefulBuilder(
+          builder: (context, setState) {
+            updateStep = setState;
+            return MelbelStepProgressBar(
+              totalSteps: 3,
+              currentStep: currentStep,
+            );
+          },
+        ),
+      ),
+    ));
+    await tester.pumpAndSettle();
+    expect(segmentScales(), hasLength(1));
+
+    updateStep(() => currentStep = 2);
+    await tester.pump();
+    await tester.pumpAndSettle();
+    expect(segmentScales(), hasLength(2));
+    expect(segmentScales()[1], closeTo(1.0, 0.001));
+
+    updateStep(() => currentStep = 1);
+    await tester.pump();
+    await tester.pumpAndSettle();
+    expect(segmentScales(), hasLength(1));
+    expect(segmentScales().first, closeTo(1.0, 0.001));
+    expect(tester.takeException(), isNull);
+
+    await tester.pumpWidget(MaterialApp(
+      theme: MelbelTheme.themeFor(isDark: false),
+      home: const MediaQuery(
+        data: MediaQueryData(disableAnimations: true),
+        child: Scaffold(
+          body: PlanningStageHeader(
+            step: 2,
+            label: 'Reduced',
+          ),
+        ),
+      ),
+    ));
+    final reducedScales = segmentScales();
+    expect(reducedScales, hasLength(2));
+    expect(reducedScales[0], closeTo(1.0, 0.001));
+    expect(reducedScales[1], closeTo(1.0, 0.001));
+  });
+
+  testWidgets(
+      'MelbelAnimatedProgressBar interpolates smoothly from zero, updates cleanly, and respects disableAnimations',
+      (tester) async {
+    double currentBarScale() => tester
+        .widget<Transform>(
+          find.descendant(
+            of: find.byType(MelbelAnimatedProgressBar),
+            matching: find.byType(Transform),
+          ),
+        )
+        .transform
+        .storage[0];
+
+    var targetValue = 0.75;
+    late void Function(VoidCallback) updateValue;
+    await tester.pumpWidget(MaterialApp(
+      theme: MelbelTheme.themeFor(isDark: false),
+      home: Scaffold(
+        body: StatefulBuilder(
+          builder: (context, setState) {
+            updateValue = setState;
+            return MelbelAnimatedProgressBar(
+              value: targetValue,
+              semanticsLabel: 'Tiến độ',
+            );
+          },
+        ),
+      ),
+    ));
+
+    expect(currentBarScale(), closeTo(0.0, 0.01));
+
+    await tester.pump(const Duration(milliseconds: 220));
+    final midScale = currentBarScale();
+    expect(midScale, greaterThan(0.0));
+    expect(midScale, lessThan(0.75));
+
+    await tester.pumpAndSettle();
+    expect(currentBarScale(), closeTo(0.75, 0.001));
+
+    updateValue(() => targetValue = 0.50);
+    await tester.pump();
+    await tester.pumpAndSettle();
+    expect(currentBarScale(), closeTo(0.50, 0.001));
+    expect(tester.takeException(), isNull);
+
+    await tester.pumpWidget(MaterialApp(
+      theme: MelbelTheme.themeFor(isDark: true),
+      home: const MediaQuery(
+        data: MediaQueryData(disableAnimations: true),
+        child: Scaffold(
+          body: MelbelAnimatedProgressBar(
+            value: 0.75,
+            semanticsLabel: 'Tiến độ reduced',
+          ),
+        ),
+      ),
+    ));
+    expect(currentBarScale(), closeTo(0.75, 0.001));
+  });
 }

@@ -729,6 +729,380 @@ class MelbelEntrance extends StatelessWidget {
   }
 }
 
+class MelbelStepProgressBar extends StatefulWidget {
+  const MelbelStepProgressBar({
+    required this.totalSteps,
+    required this.currentStep,
+    this.height = 6,
+    this.spacing = 6,
+    super.key,
+  });
+
+  final int totalSteps;
+  final int currentStep;
+  final double height;
+  final double spacing;
+
+  @override
+  State<MelbelStepProgressBar> createState() => _MelbelStepProgressBarState();
+}
+
+class _MelbelStepProgressBarState extends State<MelbelStepProgressBar>
+    with SingleTickerProviderStateMixin {
+  late int _fromStep;
+  late int _toStep;
+  bool _hasStarted = false;
+  bool _isMountAnimation = true;
+  late final AnimationController _controller = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 1150),
+  );
+
+  @override
+  void initState() {
+    super.initState();
+    _toStep = widget.currentStep.clamp(0, widget.totalSteps);
+    _fromStep = (_toStep - 1).clamp(0, widget.totalSteps);
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final reducedMotion = MediaQuery.disableAnimationsOf(context);
+    if (!_hasStarted) {
+      _hasStarted = true;
+      if (reducedMotion || _toStep == 0) {
+        _controller.value = 1.0;
+      } else {
+        _controller.forward(from: 0.0);
+      }
+    } else if (reducedMotion && _controller.isAnimating) {
+      _controller.value = 1.0;
+    }
+  }
+
+  @override
+  void didUpdateWidget(covariant MelbelStepProgressBar oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.currentStep != oldWidget.currentStep ||
+        widget.totalSteps != oldWidget.totalSteps) {
+      final nextTo = widget.currentStep.clamp(0, widget.totalSteps);
+      if (widget.totalSteps != oldWidget.totalSteps) {
+        _fromStep = (nextTo - 1).clamp(0, widget.totalSteps);
+        _isMountAnimation = true;
+      } else {
+        _fromStep = oldWidget.currentStep.clamp(0, widget.totalSteps);
+        _isMountAnimation = false;
+      }
+      _toStep = nextTo;
+      if (MediaQuery.disableAnimationsOf(context)) {
+        _controller.value = 1.0;
+      } else {
+        _controller.forward(from: 0.0);
+      }
+    }
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = context.melbel;
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final reducedMotion = MediaQuery.disableAnimationsOf(context);
+    final trackColor =
+        isDark ? const Color(0xFF3E3454) : const Color(0xFFE6DCF7);
+    final accentHighlight = Color.lerp(
+      palette.sage,
+      Colors.white,
+      isDark ? 0.24 : 0.16,
+    )!;
+
+    return RepaintBoundary(
+      child: AnimatedBuilder(
+        animation: _controller,
+        builder: (context, _) {
+          final t = reducedMotion ? 1.0 : _controller.value;
+          final fillInterval = _isMountAnimation
+              ? const Interval(0.08, 0.54, curve: Curves.easeOutCubic)
+              : const Interval(0.0, 0.48, curve: Curves.easeOutCubic);
+          final sheenInterval = _isMountAnimation
+              ? const Interval(0.50, 1.0, curve: Curves.easeInOutCubic)
+              : const Interval(0.44, 1.0, curve: Curves.easeInOutCubic);
+          final fillT = fillInterval.transform(t);
+          final sheenT = sheenInterval.transform(t);
+          final advancing = _toStep >= _fromStep;
+
+          return Row(
+            spacing: widget.spacing,
+            children: [
+              for (var index = 1; index <= widget.totalSteps; index++)
+                () {
+                  final double fill;
+                  if (advancing) {
+                    if (index <= _fromStep) {
+                      fill = 1.0;
+                    } else if (index <= _toStep) {
+                      fill = fillT;
+                    } else {
+                      fill = 0.0;
+                    }
+                  } else {
+                    if (index <= _toStep) {
+                      fill = 1.0;
+                    } else if (index <= _fromStep) {
+                      fill = 1.0 - fillT;
+                    } else {
+                      fill = 0.0;
+                    }
+                  }
+
+                  final showSheen = !reducedMotion &&
+                      advancing &&
+                      index == _toStep &&
+                      sheenT > 0.0 &&
+                      sheenT < 1.0;
+                  final sheenOpacity = showSheen
+                      ? math.sin(sheenT * math.pi).clamp(0.0, 1.0)
+                      : 0.0;
+
+                  return Expanded(
+                    child: ClipRRect(
+                      borderRadius: BorderRadius.circular(999),
+                      child: SizedBox(
+                        height: widget.height,
+                        child: DecoratedBox(
+                          decoration: BoxDecoration(color: trackColor),
+                          child: Stack(
+                            fit: StackFit.expand,
+                            children: [
+                              if (fill > 0.001)
+                                Transform.scale(
+                                  alignment: Alignment.centerLeft,
+                                  scaleX: fill.clamp(0.0, 1.0),
+                                  child: DecoratedBox(
+                                    decoration: BoxDecoration(
+                                      borderRadius: BorderRadius.circular(999),
+                                      gradient: LinearGradient(
+                                        colors: [palette.sage, accentHighlight],
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                              if (showSheen && sheenOpacity > 0.01)
+                                Opacity(
+                                  opacity: sheenOpacity,
+                                  child: FractionalTranslation(
+                                    translation:
+                                        Offset(-1.05 + 2.1 * sheenT, 0),
+                                    child: const DecoratedBox(
+                                      decoration: BoxDecoration(
+                                        gradient: LinearGradient(
+                                          colors: [
+                                            Color(0x00FFFFFF),
+                                            Color(0x99FFFFFF),
+                                            Color(0x33FFFFFF),
+                                            Color(0x00FFFFFF),
+                                          ],
+                                          stops: [0.0, 0.45, 0.65, 1.0],
+                                        ),
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ),
+                  );
+                }(),
+            ],
+          );
+        },
+      ),
+    );
+  }
+}
+
+class MelbelAnimatedProgressBar extends StatefulWidget {
+  const MelbelAnimatedProgressBar({
+    required this.value,
+    this.height = 8,
+    this.semanticsLabel,
+    this.animateFromZeroOnMount = true,
+    super.key,
+  });
+
+  final double value;
+  final double height;
+  final String? semanticsLabel;
+  final bool animateFromZeroOnMount;
+
+  @override
+  State<MelbelAnimatedProgressBar> createState() =>
+      _MelbelAnimatedProgressBarState();
+}
+
+class _MelbelAnimatedProgressBarState extends State<MelbelAnimatedProgressBar>
+    with SingleTickerProviderStateMixin {
+  late double _fromValue;
+  late double _toValue;
+  bool _hasStarted = false;
+  late bool _playSheen;
+  late final AnimationController _controller = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 680),
+  );
+
+  double _fillProgress(double t) {
+    final curve = _playSheen
+        ? const Interval(0.0, 0.65, curve: Curves.easeOutCubic)
+        : Curves.easeOutCubic;
+    final curved = curve.transform(t.clamp(0.0, 1.0));
+    return (_fromValue + (_toValue - _fromValue) * curved).clamp(0.0, 1.0);
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    final clamped = widget.value.clamp(0.0, 1.0).toDouble();
+    _toValue = clamped;
+    _fromValue = widget.animateFromZeroOnMount ? 0.0 : clamped;
+    _playSheen = widget.animateFromZeroOnMount && clamped > 0.05;
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final reducedMotion = MediaQuery.disableAnimationsOf(context);
+    if (!_hasStarted) {
+      _hasStarted = true;
+      if (reducedMotion || (_fromValue - _toValue).abs() < 0.001) {
+        _controller.value = 1.0;
+      } else {
+        _controller.forward(from: 0.0);
+      }
+    } else if (reducedMotion && _controller.isAnimating) {
+      _controller.value = 1.0;
+    }
+  }
+
+  @override
+  void didUpdateWidget(covariant MelbelAnimatedProgressBar oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    final next = widget.value.clamp(0.0, 1.0).toDouble();
+    if ((next - _toValue).abs() >= 0.0005) {
+      _fromValue = _fillProgress(_controller.value);
+      _toValue = next;
+      _playSheen = false;
+      _controller.duration = const Duration(milliseconds: 320);
+      if (MediaQuery.disableAnimationsOf(context)) {
+        _controller.value = 1.0;
+      } else {
+        _controller.forward(from: 0.0);
+      }
+    }
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = context.melbel;
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final reducedMotion = MediaQuery.disableAnimationsOf(context);
+    final trackColor =
+        isDark ? const Color(0xFF3E3454) : const Color(0xFFE6DCF7);
+    final accentHighlight = Color.lerp(
+      palette.sage,
+      Colors.white,
+      isDark ? 0.24 : 0.16,
+    )!;
+
+    return Semantics(
+      label: widget.semanticsLabel,
+      value: '${(_toValue * 100).round()}%',
+      child: RepaintBoundary(
+        child: AnimatedBuilder(
+          animation: _controller,
+          builder: (context, _) {
+            final t = reducedMotion ? 1.0 : _controller.value;
+            final currentFill = reducedMotion ? _toValue : _fillProgress(t);
+            final sheenT = _playSheen
+                ? const Interval(0.55, 1.0, curve: Curves.easeInOutCubic)
+                    .transform(t)
+                : 0.0;
+            final showSheen = !reducedMotion &&
+                _playSheen &&
+                currentFill > 0.05 &&
+                sheenT > 0.0 &&
+                sheenT < 1.0;
+            final sheenOpacity =
+                showSheen ? math.sin(sheenT * math.pi).clamp(0.0, 1.0) : 0.0;
+
+            return ClipRRect(
+              borderRadius: BorderRadius.circular(999),
+              child: SizedBox(
+                width: double.infinity,
+                height: widget.height,
+                child: DecoratedBox(
+                  decoration: BoxDecoration(color: trackColor),
+                  child: Stack(
+                    fit: StackFit.expand,
+                    children: [
+                      Transform.scale(
+                        alignment: Alignment.centerLeft,
+                        scaleX: currentFill.clamp(0.0, 1.0),
+                        child: DecoratedBox(
+                          decoration: BoxDecoration(
+                            borderRadius: BorderRadius.circular(999),
+                            gradient: LinearGradient(
+                              colors: [palette.sage, accentHighlight],
+                            ),
+                          ),
+                        ),
+                      ),
+                      if (showSheen && sheenOpacity > 0.01)
+                        Opacity(
+                          opacity: sheenOpacity,
+                          child: FractionalTranslation(
+                            translation: Offset(-1.05 + 2.1 * sheenT, 0),
+                            child: const DecoratedBox(
+                              decoration: BoxDecoration(
+                                gradient: LinearGradient(
+                                  colors: [
+                                    Color(0x00FFFFFF),
+                                    Color(0x99FFFFFF),
+                                    Color(0x33FFFFFF),
+                                    Color(0x00FFFFFF),
+                                  ],
+                                  stops: [0.0, 0.45, 0.65, 1.0],
+                                ),
+                              ),
+                            ),
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+              ),
+            );
+          },
+        ),
+      ),
+    );
+  }
+}
+
 class PlanningStageHeader extends StatelessWidget {
   const PlanningStageHeader({
     required this.step,
@@ -743,8 +1117,6 @@ class PlanningStageHeader extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final palette = context.melbel;
-    final isDark = theme.brightness == Brightness.dark;
-    final reducedMotion = MediaQuery.disableAnimationsOf(context);
     return Semantics(
       label: 'Bước $step trên 3: $label',
       child: MelbelEntrance(
@@ -772,46 +1144,9 @@ class PlanningStageHeader extends StatelessWidget {
               ],
             ),
             const SizedBox(height: 10),
-            Row(
-              spacing: 6,
-              children: [
-                for (var index = 1; index <= 3; index++)
-                  Expanded(
-                    child: ClipRRect(
-                      borderRadius: BorderRadius.circular(999),
-                      child: Container(
-                        height: 6,
-                        color: isDark
-                            ? const Color(0xFF3E3454)
-                            : const Color(0xFFE6DCF7),
-                        child: RepaintBoundary(
-                          child: TweenAnimationBuilder<double>(
-                            tween: Tween<double>(
-                              end: index <= step ? 1.0 : 0.0,
-                            ),
-                            duration: reducedMotion
-                                ? Duration.zero
-                                : const Duration(milliseconds: 260),
-                            curve: Curves.easeOutCubic,
-                            builder: (context, factor, bar) => Transform.scale(
-                              alignment: Alignment.centerLeft,
-                              scaleX: factor,
-                              child: bar,
-                            ),
-                            child: SizedBox.expand(
-                              child: DecoratedBox(
-                                decoration: BoxDecoration(
-                                  color: palette.sage,
-                                  borderRadius: BorderRadius.circular(999),
-                                ),
-                              ),
-                            ),
-                          ),
-                        ),
-                      ),
-                    ),
-                  ),
-              ],
+            MelbelStepProgressBar(
+              totalSteps: 3,
+              currentStep: step,
             ),
           ],
         ),

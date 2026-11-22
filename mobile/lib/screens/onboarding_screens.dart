@@ -405,7 +405,7 @@ class _SetupFlowScreenState extends State<SetupFlowScreen>
   Widget build(BuildContext context) {
     final palette = context.melbel;
     final theme = Theme.of(context);
-    final isDark = theme.brightness == Brightness.dark;
+    final reducedMotion = MediaQuery.disableAnimationsOf(context);
     final totalBars = _step < 4 ? 4 : 3;
     final activeBars = _step < 4 ? _step + 1 : _step - 3;
 
@@ -485,42 +485,51 @@ class _SetupFlowScreenState extends State<SetupFlowScreen>
                     ),
                   ),
                   const SizedBox(height: 10),
-                  Row(
-                    spacing: 6,
-                    children: [
-                      for (var i = 1; i <= totalBars; i++)
-                        Expanded(
-                          child: AnimatedContainer(
-                            duration: MediaQuery.disableAnimationsOf(context)
-                                ? Duration.zero
-                                : const Duration(milliseconds: 220),
-                            height: 6,
-                            decoration: BoxDecoration(
-                              color: i <= activeBars
-                                  ? palette.sage
-                                  : (isDark
-                                      ? const Color(0xFF3E3454)
-                                      : const Color(0xFFE6DCF7)),
-                              borderRadius: BorderRadius.circular(999),
-                            ),
-                          ),
-                        ),
-                    ],
+                  MelbelStepProgressBar(
+                    totalSteps: totalBars,
+                    currentStep: activeBars,
                   ),
                 ],
               ),
             ),
             Expanded(
-              child: SingleChildScrollView(
-                key: ValueKey(_step),
-                padding: const EdgeInsets.fromLTRB(24, 20, 24, 20),
-                child: switch (_step) {
-                  0 => _appearanceStep(context),
-                  1 => _durationStep(context),
-                  2 => _reminderStep(context),
-                  3 => _guideStep(context),
-                  _ => _permissionStep(context, _step - 4),
+              child: AnimatedSwitcher(
+                duration: reducedMotion
+                    ? Duration.zero
+                    : const Duration(milliseconds: 240),
+                switchInCurve: Curves.easeOutCubic,
+                switchOutCurve: Curves.easeInCubic,
+                layoutBuilder: (currentChild, previousChildren) => Stack(
+                  alignment: Alignment.topCenter,
+                  children: [
+                    ...previousChildren,
+                    if (currentChild != null) currentChild,
+                  ],
+                ),
+                transitionBuilder: (child, animation) {
+                  if (reducedMotion) return child;
+                  return FadeTransition(
+                    opacity: animation,
+                    child: SlideTransition(
+                      position: Tween<Offset>(
+                        begin: const Offset(0.03, 0),
+                        end: Offset.zero,
+                      ).animate(animation),
+                      child: child,
+                    ),
+                  );
                 },
+                child: SingleChildScrollView(
+                  key: ValueKey(_step),
+                  padding: const EdgeInsets.fromLTRB(24, 20, 24, 20),
+                  child: switch (_step) {
+                    0 => _appearanceStep(context),
+                    1 => _durationStep(context),
+                    2 => _reminderStep(context),
+                    3 => _guideStep(context),
+                    _ => _permissionStep(context, _step - 4),
+                  },
+                ),
               ),
             ),
             SafeArea(
@@ -608,8 +617,11 @@ class _SetupFlowScreenState extends State<SetupFlowScreen>
                 Text(
                     '$_focusMinutes phút tập trung · $_breakMinutes phút nghỉ'),
                 const SizedBox(height: 12),
-                LinearProgressIndicator(
-                    value: _focusMinutes / (_focusMinutes + _breakMinutes)),
+                MelbelAnimatedProgressBar(
+                  value: _focusMinutes / (_focusMinutes + _breakMinutes),
+                  height: 8,
+                  semanticsLabel: 'Tỷ lệ tập trung và nghỉ',
+                ),
               ],
             ),
           ),

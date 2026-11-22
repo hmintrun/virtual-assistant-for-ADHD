@@ -414,12 +414,11 @@ class _FocusScreenState extends State<FocusScreen> with WidgetsBindingObserver {
                     ],
                   ),
                   const SizedBox(height: 12),
-                  ClipRRect(
-                    borderRadius: BorderRadius.circular(99),
-                    child: LinearProgressIndicator(
-                      value: focus.microTaskProgress,
-                      minHeight: 8,
-                    ),
+                  MelbelAnimatedProgressBar(
+                    value: focus.microTaskProgress,
+                    height: 8,
+                    animateFromZeroOnMount: false,
+                    semanticsLabel: 'Tiến độ khởi động 2 phút',
                   ),
                 ],
               ),

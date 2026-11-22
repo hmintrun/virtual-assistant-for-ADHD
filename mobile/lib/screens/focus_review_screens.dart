@@ -113,14 +113,11 @@ class ReviewSessionCard extends StatelessWidget {
             ),
             if (session.workSeconds > 0) ...[
               const SizedBox(height: 8),
-              ClipRRect(
-                borderRadius: BorderRadius.circular(99),
-                child: LinearProgressIndicator(
-                  minHeight: 8,
-                  value:
-                      (actual / session.workSeconds).clamp(0.0, 1.0).toDouble(),
-                  semanticsLabel: 'Thời gian đã làm so với kế hoạch',
-                ),
+              MelbelAnimatedProgressBar(
+                height: 8,
+                value:
+                    (actual / session.workSeconds).clamp(0.0, 1.0).toDouble(),
+                semanticsLabel: 'Thời gian đã làm so với kế hoạch',
               ),
             ],
           ],
