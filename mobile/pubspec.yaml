@@ -58,6 +58,7 @@ dev_dependencies:
 flutter:
   uses-material-design: true
   assets:
+    - assets/branding/
     - assets/melbel_svg/
     - assets/audio/
     - assets/fonts/OFL.txt

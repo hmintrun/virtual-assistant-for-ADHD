@@ -2,7 +2,6 @@ import 'dart:async';
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
-import 'package:flutter_svg/flutter_svg.dart';
 
 import '../core/theme.dart';
 import '../services/melbel_sound_service.dart';
@@ -129,63 +128,34 @@ class _MelbelSplashScreenState extends State<MelbelSplashScreen>
                   children: [
                     RepaintBoundary(
                       child: SizedBox(
-                        width: 172,
-                        height: 172,
+                        width: 196,
+                        height: 196,
                         child: AnimatedBuilder(
                           animation: _controller,
                           builder: (context, _) {
-                            final smiling = _controller.value >= 0.36;
-                            final expr = smiling ? 'happy' : 'neutral';
                             return Stack(
                               alignment: Alignment.center,
                               children: [
                                 // Outer gentle butter-gold ripple ring
                                 Transform.scale(
-                                  scale: 0.72 + 0.44 * haloRipple.value,
+                                  scale: 0.78 + 0.36 * haloRipple.value,
                                   child: Opacity(
                                     opacity: (1 - haloRipple.value) * 0.48,
                                     child: DecoratedBox(
                                       decoration: BoxDecoration(
-                                        shape: BoxShape.circle,
+                                        borderRadius: BorderRadius.circular(42),
                                         border: Border.all(
                                           color: palette.amber,
                                           width: 1.6,
                                         ),
                                       ),
                                       child: const SizedBox.square(
-                                        dimension: 148,
+                                        dimension: 172,
                                       ),
                                     ),
                                   ),
                                 ),
-                                // Soft Lavender outer ambient halo + Moon glow behind dark Melbel
-                                Transform.scale(
-                                  scale: 0.86 + 0.14 * logoScale.value,
-                                  child: Opacity(
-                                    opacity: logoOpacity.value,
-                                    child: Container(
-                                      width: 132,
-                                      height: 132,
-                                      decoration: BoxDecoration(
-                                        shape: BoxShape.circle,
-                                        color: palette.sageSoft,
-                                      ),
-                                      alignment: Alignment.center,
-                                      child: DecoratedBox(
-                                        decoration: BoxDecoration(
-                                          shape: BoxShape.circle,
-                                          color: dark
-                                              ? const Color(0xFFA797C4)
-                                              : const Color(0xFFFFF8E2),
-                                        ),
-                                        child: const SizedBox.square(
-                                          dimension: 106,
-                                        ),
-                                      ),
-                                    ),
-                                  ),
-                                ),
-                                // Brand Mascot Emblem
+                                // Animated rounded-squircle brand logo emblem
                                 Transform.translate(
                                   offset: Offset(
                                     0,
@@ -195,23 +165,47 @@ class _MelbelSplashScreenState extends State<MelbelSplashScreen>
                                     scale: 0.86 + 0.14 * logoScale.value,
                                     child: Opacity(
                                       opacity: logoOpacity.value,
-                                      child: AnimatedSwitcher(
-                                        duration: const Duration(
-                                          milliseconds: 200,
+                                      child: Container(
+                                        width: 156,
+                                        height: 156,
+                                        decoration: BoxDecoration(
+                                          color: const Color(0xFFFCF5EB),
+                                          borderRadius:
+                                              BorderRadius.circular(36),
+                                          border: Border.all(
+                                            color: dark
+                                                ? palette.sage
+                                                    .withValues(alpha: 0.45)
+                                                : palette.hairline,
+                                            width: 1.2,
+                                          ),
+                                          boxShadow: [
+                                            BoxShadow(
+                                              color: Colors.black.withValues(
+                                                alpha: dark ? 0.28 : 0.08,
+                                              ),
+                                              blurRadius: 20,
+                                              offset: const Offset(0, 8),
+                                            ),
+                                          ],
                                         ),
-                                        child: SvgPicture.asset(
-                                          'assets/melbel_svg/cat_light_$expr.svg',
-                                          key: ValueKey('splash_light_$expr'),
-                                          width: 96,
-                                          height: 84,
-                                          fit: BoxFit.contain,
-                                          excludeFromSemantics: true,
+                                        child: ClipRRect(
+                                          borderRadius:
+                                              BorderRadius.circular(35),
+                                          child: Image.asset(
+                                            'assets/branding/app_logo.png',
+                                            width: 156,
+                                            height: 156,
+                                            fit: BoxFit.cover,
+                                            filterQuality: FilterQuality.medium,
+                                            excludeFromSemantics: true,
+                                          ),
                                         ),
                                       ),
                                     ),
                                   ),
                                 ),
-                                // Calm pastel sparkles when Melbel smiles
+                                // Calm pastel sparkles
                                 if (sparkleBurst.value > 0 &&
                                     sparkleBurst.value < 1)
                                   Positioned.fill(
