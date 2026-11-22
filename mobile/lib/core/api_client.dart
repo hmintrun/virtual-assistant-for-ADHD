@@ -46,9 +46,7 @@ class ApiClient {
             if (session == null ||
                 !session.active ||
                 error.response?.statusCode != 401 ||
-                (request.path.startsWith('/calendar/') &&
-                    error.response?.data is Map &&
-                    (error.response?.data as Map)['detail'] is String) ||
+                _isCalendarAuthorizationError(error) ||
                 request.extra['auth_retried'] == true) {
               handler.next(error);
               return;
@@ -71,13 +69,22 @@ class ApiClient {
                     extra: {...request.extra, 'auth_retried': true},
                   )));
             } on DioException catch (retryError) {
-              if (session.active && retryError.response?.statusCode == 401) {
+              if (session.active &&
+                  retryError.response?.statusCode == 401 &&
+                  !_isCalendarAuthorizationError(retryError)) {
                 session.onUnauthorized?.call();
               }
               handler.next(retryError);
             }
           },
         ));
+  }
+
+  static bool _isCalendarAuthorizationError(DioException error) {
+    final body = error.response?.data;
+    if (body is! Map) return false;
+    final details = body['error'];
+    return details is Map && details['code'] == 'CALENDAR_AUTH_REQUIRED';
   }
 
   static const _configuredBaseUrl = String.fromEnvironment('API_BASE_URL');
@@ -165,12 +172,17 @@ class ApiClient {
     Object? data,
     String? idempotencyKey,
     bool idempotent = true,
+    Duration? receiveTimeout,
   }) async {
     try {
       final response = await dio.post<Map<String, dynamic>>(
         path,
         data: data,
         options: Options(
+            receiveTimeout: receiveTimeout ??
+                (path == '/voice/transcriptions'
+                    ? const Duration(seconds: 45)
+                    : null),
             headers: idempotent
                 ? {
                     'Idempotency-Key':
@@ -188,15 +200,19 @@ class ApiClient {
     String path, {
     required Object data,
     String? idempotencyKey,
+    Duration? receiveTimeout,
   }) async {
     try {
       final response = await dio.patch<Map<String, dynamic>>(
         path,
         data: data,
-        options: Options(headers: {
-          'Idempotency-Key':
-              idempotencyKey ?? newIdempotencyKey('mobile_patch'),
-        }),
+        options: Options(
+          receiveTimeout: receiveTimeout,
+          headers: {
+            'Idempotency-Key':
+                idempotencyKey ?? newIdempotencyKey('mobile_patch'),
+          },
+        ),
       );
       return _unwrap(response.data);
     } on DioException catch (error) {
@@ -219,6 +235,49 @@ class ApiClient {
       );
       return _unwrap(response.data);
     } on DioException catch (error) {
+      throw ApiException.fromDio(error);
+    }
+  }
+
+  Future<Map<String, dynamic>> deleteData(
+    String path, {
+    Object? data,
+    String? idempotencyKey,
+    bool idempotent = false,
+  }) async {
+    try {
+      final response = await dio.delete<Map<String, dynamic>>(
+        path,
+        data: data,
+        options: Options(
+          headers: idempotent
+              ? {
+                  'Idempotency-Key':
+                      idempotencyKey ?? newIdempotencyKey('mobile_delete'),
+                }
+              : null,
+        ),
+      );
+      return _unwrap(response.data);
+    } on DioException catch (error) {
+      throw ApiException.fromDio(error);
+    }
+  }
+
+  /// Checks `/api/v1/health` (unwrapped JSON) and falls back cleanly to
+  /// `/capabilities` on older backend versions returning 404.
+  Future<Map<String, dynamic>> checkHealth() async {
+    try {
+      final response = await dio.get<Map<String, dynamic>>('/health');
+      final body = response.data;
+      if (body != null && body['status'] == 'ok') {
+        return body;
+      }
+      return _unwrap(body);
+    } on DioException catch (error) {
+      if (error.response?.statusCode == 404) {
+        return getData('/capabilities');
+      }
       throw ApiException.fromDio(error);
     }
   }

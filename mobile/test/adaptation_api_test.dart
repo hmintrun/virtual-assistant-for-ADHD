@@ -52,4 +52,67 @@ void main() {
       'expected_source_revisions': revisions,
     });
   });
+
+  test('respond returns result map and sends annoyance_feedback only when non-empty',
+      () async {
+    final requests = <RequestOptions>[];
+    final dio = Dio()
+      ..interceptors.add(InterceptorsWrapper(onRequest: (request, handler) {
+        requests.add(request);
+        handler.resolve(Response(
+          requestOptions: request,
+          data: {
+            'data': {
+              'suggestion_id': 's1',
+              'suggestion_revision': 2,
+              'kind': 'buffer_multiplier',
+              'action': request.data['action'],
+              'status': request.data['action'] == 'reject'
+                  ? 'rejected'
+                  : 'accepted',
+              'application_state': request.data['action'] == 'reject'
+                  ? 'not_applied'
+                  : 'pending_review',
+              'effective_revision': 3,
+              'pending_proposal_id':
+                  request.data['action'] == 'reject' ? null : 'proposal-a20',
+            },
+          },
+        ));
+      }));
+    final api = AdaptationApi(ApiClient(dio: dio, bindSession: false));
+    final suggestion = {
+      'suggestion_id': 's1',
+      'suggestion_revision': 1,
+    };
+
+    final acceptResult = await api.respond(suggestion, 3, 'accept');
+    expect(acceptResult['pending_proposal_id'], 'proposal-a20');
+    expect(requests.last.path, '/suggestions/s1/response');
+    expect(requests.last.data, {
+      'expected_suggestion_revision': 1,
+      'expected_preference_revision': 3,
+      'action': 'accept',
+    });
+
+    await api.respond(suggestion, 3, 'reject', annoyanceFeedback: '   ');
+    expect(
+      (requests.last.data as Map).containsKey('annoyance_feedback'),
+      isFalse,
+    );
+
+    final rejectResult = await api.respond(
+      suggestion,
+      3,
+      'reject',
+      annoyanceFeedback: 'too_frequent',
+    );
+    expect(rejectResult['status'], 'rejected');
+    expect(requests.last.data, {
+      'expected_suggestion_revision': 1,
+      'expected_preference_revision': 3,
+      'action': 'reject',
+      'annoyance_feedback': 'too_frequent',
+    });
+  });
 }

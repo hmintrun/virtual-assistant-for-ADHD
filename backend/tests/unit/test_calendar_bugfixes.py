@@ -500,12 +500,14 @@ async def test_bug3_worker_post_rollback_does_not_raise_missing_greenlet(monkeyp
                 mp.setattr(cal_service.client, "create_event", fail_auth)
                 j = await db.get(CalendarSyncJob, auth_id)
                 assert j is not None
-                assert await process_sync_job(db, j, cal_service) == "retry"
+                assert await process_sync_job(db, j, cal_service) == "failed"
 
         async with strict_factory() as db:
             j = await db.get(CalendarSyncJob, auth_id)
             c = await db.get(CalendarConnection, conn_id)
-            assert j is not None and j.attempt_count == 1
+            assert j is not None and j.attempt_count == 5
+            assert j.job_state == "failed"
+            assert j.lease_expires_at is None
             assert j.last_error_code == "AUTH_EXPIRED"
             assert c is not None and c.connection_state == "needs_reconnect"
 

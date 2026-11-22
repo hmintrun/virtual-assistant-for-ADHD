@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
 import '../core/theme.dart';
+import '../core/responsive_layout.dart';
 import '../services/voice_service.dart';
 import '../models/focus_session_model.dart';
 import '../providers/focus_provider.dart';
@@ -22,33 +23,22 @@ Future<void> _open(BuildContext context, Widget page) => Navigator.push<void>(
 // ============================================================================
 
 class DecompositionChoiceScreen extends StatefulWidget {
-  const DecompositionChoiceScreen({super.key});
+  const DecompositionChoiceScreen({super.key, this.returnToReview = false});
+
+  final bool returnToReview;
 
   @override
   State<DecompositionChoiceScreen> createState() =>
       _DecompositionChoiceScreenState();
 }
 
-class _DecompositionChoiceScreenState extends State<DecompositionChoiceScreen>
-    with SingleTickerProviderStateMixin {
-  final TextEditingController _intentController = TextEditingController();
-  bool _isListening = false;
+class _DecompositionChoiceScreenState extends State<DecompositionChoiceScreen> {
+  final _intentController = TextEditingController();
   bool _isGenerating = false;
-  late AnimationController _pulseController;
-
-  @override
-  void initState() {
-    super.initState();
-    _pulseController = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 900),
-    )..repeat(reverse: true);
-  }
 
   @override
   void dispose() {
     _intentController.dispose();
-    _pulseController.dispose();
     super.dispose();
   }
 
@@ -61,18 +51,17 @@ class _DecompositionChoiceScreenState extends State<DecompositionChoiceScreen>
     });
   }
 
-  void _startHold() {
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(
-        content: Text(
-          'Nhập giọng nói chưa sẵn sàng. Hãy gõ ý tưởng vào ô bên dưới.',
-        ),
+  Future<void> _dictateRequest() async {
+    final words = await showModalBottomSheet<String>(
+      context: context,
+      isScrollControlled: true,
+      showDragHandle: true,
+      builder: (sheet) => VoiceAssistantModal(
+        applyLabel: 'Dùng yêu cầu này',
+        onApply: (value) => Navigator.pop(sheet, value),
       ),
     );
-  }
-
-  void _stopHold() {
-    if (_isListening) setState(() => _isListening = false);
+    if (mounted && words != null) _applyChip(words);
   }
 
   Future<void> _generateCandidate({bool useManualAvailability = false}) async {
@@ -86,6 +75,10 @@ class _DecompositionChoiceScreenState extends State<DecompositionChoiceScreen>
         useManualAvailability: useManualAvailability,
       );
       if (!mounted) return;
+      if (widget.returnToReview) {
+        Navigator.pop(context);
+        return;
+      }
       await Navigator.push(
         context,
         MaterialPageRoute<void>(builder: (_) => const CandidateReviewScreen()),
@@ -112,333 +105,116 @@ class _DecompositionChoiceScreenState extends State<DecompositionChoiceScreen>
   Widget build(BuildContext context) {
     final task = context.watch<TaskProvider>();
 
-    return Scaffold(
-      appBar: const MelbelAppBar(title: 'Phân Tách Nhiệm Vụ', showBack: true),
-      body: SafeArea(
-        top: false,
-        child: ListView(
-          padding: const EdgeInsets.fromLTRB(20, 12, 20, 32),
-          children: [
-            // Mascot Container Melbel (D-21)
-            Center(
-              child: Column(
-                children: [
-                  const SizedBox(height: 8),
-                  AnimatedScale(
-                    scale: _isListening ? 1.05 : 1.0,
-                    duration: const Duration(milliseconds: 200),
-                    child: const MelbelMascot(),
-                  ),
-                  const SizedBox(height: 12),
-                  // Companion status badge
-                  Container(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 12,
-                      vertical: 5,
-                    ),
-                    decoration: BoxDecoration(
-                      color: MelbelColors.kSurfaceContainerHigh,
-                      borderRadius: BorderRadius.circular(999),
-                      border: Border.all(color: MelbelColors.kOutline),
-                    ),
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
+    final busy = _isGenerating || task.isApiBusy;
+    final text = Theme.of(context).textTheme;
+    return MelbelPageBackdrop(
+      showTopCloud: false,
+      showBottomClouds: true,
+      child: Scaffold(
+        backgroundColor: Colors.transparent,
+        appBar: const MelbelAppBar(
+          title: 'Chia nhỏ công việc',
+          showBack: true,
+          showTitleRays: true,
+        ),
+        body: SafeArea(
+          top: false,
+          child: ListView(
+            padding: MelbelLayout.pageInsets(context, top: 16, bottom: 32),
+            children: [
+              const PlanningStageHeader(step: 3, label: 'Lên phương án'),
+              const SizedBox(height: 16),
+              MelbelCard(
+                borderRadius: 26,
+                child: Row(
+                  children: [
+                    const MelbelCushionAvatar(width: 64, height: 56),
+                    const SizedBox(width: 12),
+                    Expanded(
+                        child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        Container(
-                          width: 6,
-                          height: 6,
-                          decoration: BoxDecoration(
-                            color: MelbelColors.kSecondary,
-                            shape: BoxShape.circle,
-                          ),
-                        ),
-                        const SizedBox(width: 6),
                         Text(
-                          _isListening
-                              ? 'Melbel đang nghe bạn...'
-                              : 'Melbel đang lắng nghe',
-                          style: TextStyle(
-                            fontFamily: 'Be Vietnam Pro',
-                            fontSize: 12,
-                            fontWeight: FontWeight.w500,
-                            color: MelbelColors.kOnSurfaceVariant,
-                          ),
-                        ),
+                            task.title.isEmpty ? 'Công việc của bạn' : task.title,
+                            style: text.titleMedium?.copyWith(
+                              fontWeight: FontWeight.w700,
+                            )),
+                        const SizedBox(height: 4),
+                        Text('Hạn chót: ${task.formatDeadline(task.deadline)}',
+                            style: text.bodyMedium),
                       ],
-                    ),
-                  ),
-                ],
+                    )),
+                  ],
+                ),
               ),
-            ),
-            const SizedBox(height: 20),
-
-            // Header & Guiding Copy
-            Center(
-              child: Column(
-                children: [
-                  Text(
-                    'Bạn muốn chia việc này thế nào?',
-                    textAlign: TextAlign.center,
-                    style: TextStyle(
-                      fontFamily: 'Be Vietnam Pro',
-                      fontSize: 22,
-                      fontWeight: FontWeight.w600,
-                      color: MelbelColors.kOnSurface,
-                      letterSpacing: -0.4,
-                    ),
-                  ),
-                  SizedBox(height: 8),
-                  Text(
-                    'Chia theo phiên nhỏ hoặc để Melbel tính toán thời gian phù hợp với bạn.',
-                    textAlign: TextAlign.center,
-                    style: TextStyle(
-                      fontFamily: 'Be Vietnam Pro',
-                      fontSize: 14,
-                      color: MelbelColors.kOnSurfaceVariant,
-                      height: 1.4,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-            const SizedBox(height: 20),
-
-            // Primary Input Card (Executive Shielding)
-            Container(
-              padding: const EdgeInsets.all(16),
-              decoration: BoxDecoration(
-                color: MelbelColors.kSurfaceContainer,
-                borderRadius: BorderRadius.circular(16),
-                border: Border.all(color: MelbelColors.kOutline),
-              ),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    'Ý định của bạn',
-                    style: TextStyle(
-                      fontFamily: 'Be Vietnam Pro',
-                      fontSize: 12,
-                      fontWeight: FontWeight.w500,
-                      color: MelbelColors.kOnSurfaceVariant,
-                    ),
-                  ),
-                  const SizedBox(height: 8),
-                  TextField(
-                    controller: _intentController,
-                    maxLines: 3,
-                    style: TextStyle(
-                      fontFamily: 'Be Vietnam Pro',
-                      fontSize: 16,
-                      color: MelbelColors.kOnSurface,
-                    ),
-                    decoration: InputDecoration(
-                      hintText: 'Nhập ý định hoặc số phiên bạn muốn làm...',
-                      hintStyle: TextStyle(
-                        fontFamily: 'Be Vietnam Pro',
-                        fontSize: 15,
-                        color: MelbelColors.kOnSurfaceVariant,
-                      ),
-                      border: InputBorder.none,
-                      contentPadding: EdgeInsets.zero,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-            const SizedBox(height: 12),
-
-            // Quick Selection Micro-Chips
-            SingleChildScrollView(
-              scrollDirection: Axis.horizontal,
-              clipBehavior: Clip.none,
-              child: Row(
-                children: [
-                  _quickChip(
-                    '2 phiên nhẹ nhàng',
-                    () => _applyChip('2 phiên nhẹ nhàng (15p)'),
-                  ),
-                  const SizedBox(width: 8),
-                  _quickChip(
-                    '3 chặng thong thả',
-                    () => _applyChip('3 chặng có nghỉ giãn cách'),
-                  ),
-                  const SizedBox(width: 8),
-                  _quickChip(
-                    'Khởi động 5 phút',
-                    () => _applyChip('Làm thử 5 phút trước'),
-                  ),
-                ],
-              ),
-            ),
-            const SizedBox(height: 20),
-
-            // Voice Input Option: Hold-to-Talk Mic
-            Center(
-              child: Column(
-                children: [
-                  GestureDetector(
-                    onTapDown: (_) => _startHold(),
-                    onTapUp: (_) => _stopHold(),
-                    onTapCancel: () => _stopHold(),
-                    child: Container(
-                      width: 64,
-                      height: 64,
-                      decoration: BoxDecoration(
-                        color: _isListening
-                            ? MelbelColors.kSelectedSurface
-                            : MelbelColors.kSurfaceContainer,
-                        shape: BoxShape.circle,
-                        border: Border.all(
-                          color: _isListening
-                              ? MelbelColors.kPrimaryContainer
-                              : MelbelColors.kOutline,
-                        ),
-                      ),
-                      child: Icon(
-                        Icons.mic,
-                        size: 28,
-                        color: _isListening
-                            ? MelbelColors.kPrimaryContainer
-                            : MelbelColors.kOnSurface,
-                      ),
-                    ),
-                  ),
-                  const SizedBox(height: 8),
-                  Text(
-                    _isListening ? 'Melbel đang nghe bạn nói...' : 'Giữ để nói',
-                    style: TextStyle(
-                      fontFamily: 'Be Vietnam Pro',
-                      fontSize: 12,
-                      fontWeight: FontWeight.w500,
-                      color: _isListening
-                          ? MelbelColors.kPrimaryContainer
-                          : MelbelColors.kOnSurfaceVariant,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-            const SizedBox(height: 24),
-
-            // Primary Hero Action: Để AI đề xuất
-            InkWell(
-              onTap: _isGenerating
+            const SizedBox(height: 16),
+            PrimaryCta(
+              label: _isGenerating ? 'Đang tạo phương án…' : 'Để AI đề xuất',
+              icon: Icons.auto_awesome_rounded,
+              onPressed: busy
                   ? null
                   : () {
                       task.setDecompositionChoice('ai');
                       _generateCandidate();
                     },
-              borderRadius: BorderRadius.circular(16),
-              child: Container(
-                height: 56,
-                decoration: BoxDecoration(
-                  color: MelbelColors.kPrimaryContainer,
-                  borderRadius: BorderRadius.circular(16),
+            ),
+            const SizedBox(height: 12),
+            ExpansionTile(
+              initiallyExpanded: widget.returnToReview,
+              title: const Text('Tùy chỉnh cách chia việc'),
+              childrenPadding: const EdgeInsets.only(bottom: 12),
+              children: [
+                TextField(
+                  controller: _intentController,
+                  enabled: !busy,
+                  minLines: 1,
+                  maxLines: 4,
+                  decoration: const InputDecoration(
+                    labelText: 'Bạn muốn chia việc thế nào?',
+                    hintText: 'Ví dụ: Chia thành hai phiên 15 phút',
+                  ),
                 ),
-                child: Row(
-                  mainAxisAlignment: MainAxisAlignment.center,
+                const SizedBox(height: 8),
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 6,
                   children: [
-                    Icon(
-                      Icons.auto_awesome,
-                      color: MelbelColors.kOnPrimary,
-                      size: 20,
-                    ),
-                    const SizedBox(width: 8),
-                    Text(
-                      _isGenerating ? 'Đang tạo phương án…' : 'Để AI đề xuất',
-                      style: TextStyle(
-                        fontFamily: 'Be Vietnam Pro',
-                        fontSize: 16,
-                        fontWeight: FontWeight.w600,
-                        color: MelbelColors.kOnPrimary,
-                      ),
-                    ),
+                    for (final option in const [
+                      ('2 phiên 15 phút', '2 phiên nhẹ nhàng (15p)'),
+                      ('3 phiên có nghỉ', '3 chặng có nghỉ giãn cách'),
+                      ('Thử 5 phút', 'Làm thử 5 phút trước'),
+                    ])
+                      ActionChip(
+                          label: Text(option.$1),
+                          onPressed: busy ? null : () => _applyChip(option.$2)),
                   ],
                 ),
-              ),
+                TextButton.icon(
+                  icon: const Icon(Icons.mic_none),
+                  label: const Text('Nói yêu cầu'),
+                  onPressed: busy ? null : _dictateRequest,
+                ),
+                SecondaryCta(
+                  label: 'Tạo theo ý tôi',
+                  onPressed: busy
+                      ? null
+                      : () {
+                          task.setDecompositionChoice('manual');
+                          _generateCandidate();
+                        },
+                ),
+              ],
             ),
-            const SizedBox(height: 12),
-
-            // Secondary Quiet Path: Tự chọn phiên thủ công
-            InkWell(
-              onTap: _isGenerating
-                  ? null
-                  : () {
-                      task.setDecompositionChoice('manual');
-                      _generateCandidate();
-                    },
-              borderRadius: BorderRadius.circular(16),
-              child: Container(
-                height: 56,
-                decoration: BoxDecoration(
-                  color: MelbelColors.kSurfaceContainer,
-                  borderRadius: BorderRadius.circular(16),
-                  border: Border.all(color: MelbelColors.kOutline),
-                ),
-                child: Center(
-                  child: Text(
-                    'Tự chọn phiên thủ công',
-                    style: TextStyle(
-                      fontFamily: 'Be Vietnam Pro',
-                      fontSize: 16,
-                      fontWeight: FontWeight.w500,
-                      color: MelbelColors.kOnSurface,
-                    ),
-                  ),
-                ),
-              ),
-            ),
-            const SizedBox(height: 12),
-
-            // Demo link for AI Error Fallback (D-28)
-            Center(
-              child: TextButton.icon(
-                onPressed: () => _open(context, const AiFallbackScreen()),
-                icon: Icon(
-                  Icons.sync_problem,
-                  size: 16,
-                  color: MelbelColors.kOnSurfaceVariant,
-                ),
-                label: Text(
-                  'Xem thử kịch bản AI phản hồi chậm (D-28)',
-                  style: TextStyle(
-                    fontFamily: 'Be Vietnam Pro',
-                    fontSize: 12,
-                    color: MelbelColors.kOnSurfaceVariant,
-                  ),
-                ),
-              ),
+            TextButton.icon(
+              onPressed:
+                  busy ? null : () => _open(context, const AiFallbackScreen()),
+              icon: const Icon(Icons.sync_problem),
+              label: const Text('Xem thử khi AI phản hồi chậm'),
             ),
           ],
         ),
       ),
-    );
-  }
-
-  Widget _quickChip(String text, VoidCallback onTap) {
-    return InkWell(
-      onTap: onTap,
-      borderRadius: BorderRadius.circular(16),
-      child: Container(
-        height: 40,
-        padding: const EdgeInsets.symmetric(horizontal: 16),
-        decoration: BoxDecoration(
-          color: MelbelColors.kSurfaceContainer,
-          borderRadius: BorderRadius.circular(16),
-          border: Border.all(color: MelbelColors.kOutline),
-        ),
-        alignment: Alignment.center,
-        child: Text(
-          text,
-          style: TextStyle(
-            fontFamily: 'Be Vietnam Pro',
-            fontSize: 14,
-            fontWeight: FontWeight.w500,
-            color: MelbelColors.kOnSurfaceVariant,
-          ),
-        ),
-      ),
+    ),
     );
   }
 }
@@ -453,18 +229,39 @@ class PlanOverviewScreen extends StatelessWidget {
   Widget build(BuildContext context) {
     if (context.watch<TaskProvider>().candidate != null)
       return const CandidateReviewScreen();
-    return const Scaffold(
-        appBar: MelbelAppBar(title: 'Kế hoạch', showBack: true),
+    return const MelbelPageBackdrop(
+      showTopCloud: false,
+      showBottomClouds: true,
+      child: Scaffold(
+        backgroundColor: Colors.transparent,
+        appBar: MelbelAppBar(
+          title: 'Kế hoạch',
+          showBack: true,
+          showTitleRays: true,
+        ),
         body: Center(
-            child: Padding(
-                padding: EdgeInsets.all(24),
-                child: Text(
-                    'Chưa có phương án từ máy chủ. Hãy quay lại bản nháp để tạo kế hoạch.'))));
+          child: Padding(
+            padding: EdgeInsets.all(24),
+            child: MelbelCard(
+              borderRadius: 24,
+              child: Text(
+                'Chưa có phương án từ máy chủ. Hãy quay lại bản nháp để tạo kế hoạch.',
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
   }
 }
 
 class VoiceAssistantModal extends StatefulWidget {
-  const VoiceAssistantModal({required this.onApply, super.key});
+  const VoiceAssistantModal({
+    required this.onApply,
+    this.applyLabel = 'Tạo phương án mới',
+    super.key,
+  });
+  final String applyLabel;
   final ValueChanged<String> onApply;
 
   @override
@@ -612,7 +409,7 @@ class _VoiceAssistantModalState extends State<VoiceAssistantModal> {
               ),
               const SizedBox(height: 12),
               PrimaryCta(
-                label: 'Tạo phương án mới',
+                label: widget.applyLabel,
                 onPressed: _listening || _controller.text.trim().isEmpty
                     ? null
                     : () => widget.onApply(_controller.text.trim()),
@@ -644,39 +441,134 @@ class _FeasibilityScreenState extends State<FeasibilityScreen> {
   @override
   Widget build(BuildContext context) {
     final deficit = widget.deficitMinutes;
-    return Scaffold(
-      appBar: const MelbelAppBar(title: 'Điều chỉnh kế hoạch', showBack: true),
-      body: SafeArea(
-        child: ListView(
-          padding: const EdgeInsets.all(20),
-          children: [
-            const Center(child: MelbelMascot()),
-            const SizedBox(height: 12),
-            MelbelCard(
-              child: Text(deficit == null || deficit <= 0
-                  ? 'Phương án cần được điều chỉnh trước khi chốt.'
-                  : 'Cần thêm $deficit phút để xếp đủ các phiên.'),
-            ),
-            const SizedBox(height: 16),
-            for (final (option, label) in const [
-              (FeasibilityAdjustment.deadline, 'Nới hạn chót'),
-              (FeasibilityAdjustment.availability, 'Bổ sung giờ rảnh'),
-              (FeasibilityAdjustment.scope, 'Giảm phạm vi'),
-            ])
-              ListTile(
-                leading: Icon(_choice == option
-                    ? Icons.radio_button_checked
-                    : Icons.radio_button_off),
-                title: Text(label),
-                selected: _choice == option,
-                onTap: () => setState(() => _choice = option),
+    final palette = context.melbel;
+    final theme = Theme.of(context);
+    final isDark = theme.brightness == Brightness.dark;
+    final textTheme = theme.textTheme;
+    return MelbelPageBackdrop(
+      showTopCloud: false,
+      showBottomClouds: true,
+      child: Scaffold(
+        backgroundColor: Colors.transparent,
+        appBar: const MelbelAppBar(
+          title: 'Điều chỉnh kế hoạch',
+          showBack: true,
+          showTitleRays: true,
+        ),
+        body: SafeArea(
+          child: ListView(
+            padding: const EdgeInsets.fromLTRB(20, 16, 20, 28),
+            children: [
+              const MelbelEntrance(
+                child: Center(
+                  child: MelbelCushionAvatar(width: 84, height: 74),
+                ),
               ),
-            const SizedBox(height: 16),
-            PrimaryCta(
-              label: 'Mở mục cần sửa',
-              onPressed: () => Navigator.pop(context, _choice),
-            ),
-          ],
+              const SizedBox(height: 14),
+              MelbelCard(
+                borderRadius: 24,
+                tone: MelbelCardTone.amber,
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Icon(Icons.schedule_outlined, color: palette.amberInk),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: Text(
+                        deficit == null || deficit <= 0
+                            ? 'Phương án cần được điều chỉnh trước khi chốt.'
+                            : 'Cần thêm $deficit phút để xếp đủ các phiên.',
+                        style: textTheme.titleSmall?.copyWith(
+                          color: palette.onAmberSoft,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 16),
+              for (final (option, label, icon) in const [
+                (
+                  FeasibilityAdjustment.deadline,
+                  'Nới hạn chót',
+                  Icons.event_outlined,
+                ),
+                (
+                  FeasibilityAdjustment.availability,
+                  'Bổ sung giờ rảnh',
+                  Icons.access_time_rounded,
+                ),
+                (
+                  FeasibilityAdjustment.scope,
+                  'Giảm phạm vi',
+                  Icons.tune_rounded,
+                ),
+              ])
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 10),
+                  child: MelbelCard(
+                    borderRadius: 24,
+                    tone: _choice == option
+                        ? MelbelCardTone.sage
+                        : MelbelCardTone.neutral,
+                    borderColor: _choice == option
+                        ? palette.sage.withValues(alpha: 0.72)
+                        : (isDark ? palette.hairline : Colors.transparent),
+                    borderWidth:
+                        _choice == option ? 1.5 : (isDark ? 1.0 : 0.0),
+                    padding: EdgeInsets.zero,
+                    child: ListTile(
+                      contentPadding: const EdgeInsets.symmetric(
+                        horizontal: 16,
+                        vertical: 4,
+                      ),
+                      leading: Container(
+                        width: 40,
+                        height: 40,
+                        decoration: BoxDecoration(
+                          color: _choice == option
+                              ? palette.sage.withValues(alpha: 0.18)
+                              : palette.sageSoft,
+                          borderRadius: BorderRadius.circular(14),
+                        ),
+                        child: Icon(
+                          icon,
+                          size: 20,
+                          color: _choice == option
+                              ? palette.sage
+                              : palette.onSurfaceVariant,
+                        ),
+                      ),
+                      title: Text(
+                        label,
+                        style: textTheme.titleSmall?.copyWith(
+                          fontWeight: FontWeight.w700,
+                          color: _choice == option
+                              ? palette.onSageSoft
+                              : palette.onSurface,
+                        ),
+                      ),
+                      trailing: Icon(
+                        _choice == option
+                            ? Icons.radio_button_checked_rounded
+                            : Icons.radio_button_off_rounded,
+                        color: _choice == option
+                            ? palette.sage
+                            : palette.controlOutline,
+                      ),
+                      selected: _choice == option,
+                      onTap: () => setState(() => _choice = option),
+                    ),
+                  ),
+                ),
+              const SizedBox(height: 12),
+              PrimaryCta(
+                label: 'Mở mục cần sửa',
+                icon: Icons.arrow_forward_rounded,
+                onPressed: () => Navigator.pop(context, _choice),
+              ),
+            ],
+          ),
         ),
       ),
     );
@@ -729,14 +621,22 @@ class _ExtendTimeScreenState extends State<ExtendTimeScreen> {
         task.title.isEmpty ? 'Soạn báo cáo đánh giá quý 3' : task.title;
     final current = _options[_selectedOption];
 
-    return Scaffold(
-      appBar: const MelbelAppBar(title: 'Phân Tách Nhiệm Vụ', showBack: true),
-      body: SafeArea(
-        top: false,
-        child: ListView(
-          padding: const EdgeInsets.fromLTRB(20, 16, 20, 32),
-          children: [
-            // Context Card (D-25)
+    return MelbelPageBackdrop(
+      showTopCloud: false,
+      showBottomClouds: true,
+      child: Scaffold(
+        backgroundColor: Colors.transparent,
+        appBar: const MelbelAppBar(
+          title: 'Phân Tách Nhiệm Vụ',
+          showBack: true,
+          showTitleRays: true,
+        ),
+        body: SafeArea(
+          top: false,
+          child: ListView(
+            padding: const EdgeInsets.fromLTRB(20, 16, 20, 32),
+            children: [
+              // Context Card (D-25)
             Container(
               padding: const EdgeInsets.all(16),
               decoration: BoxDecoration(
@@ -767,8 +667,7 @@ class _ExtendTimeScreenState extends State<ExtendTimeScreen> {
                         Text(
                           'CÔNG VIỆC ĐANG THỰC HIỆN',
                           style: TextStyle(
-                            fontFamily: 'Be Vietnam Pro',
-                            fontSize: 11,
+                            fontSize: 12,
                             fontWeight: FontWeight.w600,
                             letterSpacing: 0.5,
                             color: MelbelColors.kOutline,
@@ -778,7 +677,6 @@ class _ExtendTimeScreenState extends State<ExtendTimeScreen> {
                         Text(
                           displayTitle,
                           style: TextStyle(
-                            fontFamily: 'Be Vietnam Pro',
                             fontSize: 17,
                             fontWeight: FontWeight.w500,
                             color: MelbelColors.kPrimary,
@@ -788,7 +686,6 @@ class _ExtendTimeScreenState extends State<ExtendTimeScreen> {
                         Text(
                           'Hạn hiện tại: 17:00 hôm nay',
                           style: TextStyle(
-                            fontFamily: 'Be Vietnam Pro',
                             fontSize: 13,
                             color: MelbelColors.kOnSurfaceVariant,
                           ),
@@ -808,7 +705,6 @@ class _ExtendTimeScreenState extends State<ExtendTimeScreen> {
                 Text(
                   'Chọn thêm thời gian phù hợp',
                   style: TextStyle(
-                    fontFamily: 'Be Vietnam Pro',
                     fontSize: 17,
                     fontWeight: FontWeight.w600,
                     color: MelbelColors.kPrimary,
@@ -817,7 +713,6 @@ class _ExtendTimeScreenState extends State<ExtendTimeScreen> {
                 Text(
                   'Gợi ý êm dịu',
                   style: TextStyle(
-                    fontFamily: 'Be Vietnam Pro',
                     fontSize: 12,
                     color: MelbelColors.kOutline,
                   ),
@@ -842,12 +737,11 @@ class _ExtendTimeScreenState extends State<ExtendTimeScreen> {
             Row(
               children: [
                 Icon(Icons.dark_mode, size: 20, color: MelbelColors.kSecondary),
-                SizedBox(width: 8),
+                const SizedBox(width: 8),
                 Expanded(
                   child: Text(
                     'Mình sẽ xếp lại và kiểm tra lại. Cứ thong thả, từng chút một.',
                     style: TextStyle(
-                      fontFamily: 'Be Vietnam Pro',
                       fontSize: 13,
                       color: MelbelColors.kOutline,
                     ),
@@ -877,12 +771,11 @@ class _ExtendTimeScreenState extends State<ExtendTimeScreen> {
                             size: 16,
                             color: MelbelColors.kOutline,
                           ),
-                          SizedBox(width: 6),
+                          const SizedBox(width: 6),
                           Text(
                             'KHOẢNG GIỜ MỚI',
                             style: TextStyle(
-                              fontFamily: 'Be Vietnam Pro',
-                              fontSize: 11,
+                              fontSize: 12,
                               fontWeight: FontWeight.w600,
                               letterSpacing: 0.5,
                               color: MelbelColors.kOutline,
@@ -902,7 +795,6 @@ class _ExtendTimeScreenState extends State<ExtendTimeScreen> {
                         child: Text(
                           'Hạn mới: ${current['deadline']}',
                           style: TextStyle(
-                            fontFamily: 'Be Vietnam Pro',
                             fontSize: 12,
                             fontWeight: FontWeight.w500,
                             color: MelbelColors.kSecondary,
@@ -918,7 +810,6 @@ class _ExtendTimeScreenState extends State<ExtendTimeScreen> {
                       Text(
                         current['range']!,
                         style: TextStyle(
-                          fontFamily: 'Be Vietnam Pro',
                           fontSize: 16,
                           fontWeight: FontWeight.w500,
                           color: MelbelColors.kOnSurface,
@@ -927,7 +818,6 @@ class _ExtendTimeScreenState extends State<ExtendTimeScreen> {
                       Text(
                         'Tổng cộng: 120 phút',
                         style: TextStyle(
-                          fontFamily: 'Be Vietnam Pro',
                           fontSize: 13,
                           color: MelbelColors.kOnSurfaceVariant,
                         ),
@@ -999,7 +889,6 @@ class _ExtendTimeScreenState extends State<ExtendTimeScreen> {
                   Text(
                     current['desc']!,
                     style: TextStyle(
-                      fontFamily: 'Be Vietnam Pro',
                       fontSize: 13,
                       color: MelbelColors.kOutline,
                     ),
@@ -1025,6 +914,7 @@ class _ExtendTimeScreenState extends State<ExtendTimeScreen> {
           ],
         ),
       ),
+    ),
     );
   }
 
@@ -1034,59 +924,65 @@ class _ExtendTimeScreenState extends State<ExtendTimeScreen> {
     required String sub,
     required bool isSelected,
   }) {
-    return InkWell(
-      onTap: () => setState(() => _selectedOption = index),
-      borderRadius: BorderRadius.circular(12),
-      child: Container(
-        height: 52,
-        padding: const EdgeInsets.symmetric(horizontal: 16),
-        decoration: BoxDecoration(
-          color: isSelected
-              ? MelbelColors.kPrimaryContainer
-              : MelbelColors.kSurfaceContainer,
-          borderRadius: BorderRadius.circular(12),
-        ),
-        child: Row(
-          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-          children: [
-            Row(
-              children: [
-                Container(
-                  width: 8,
-                  height: 8,
-                  decoration: BoxDecoration(
-                    color: isSelected
-                        ? MelbelColors.kOnPrimaryContainer
-                        : MelbelColors.kOutline,
-                    shape: BoxShape.circle,
+    return Semantics(
+      inMutuallyExclusiveGroup: true,
+      selected: isSelected,
+      button: true,
+      label: '$label, $sub',
+      excludeSemantics: true,
+      child: InkWell(
+        onTap: () => setState(() => _selectedOption = index),
+        borderRadius: BorderRadius.circular(12),
+        child: Container(
+          height: 52,
+          padding: const EdgeInsets.symmetric(horizontal: 16),
+          decoration: BoxDecoration(
+            color: isSelected
+                ? MelbelColors.kPrimaryContainer
+                : MelbelColors.kSurfaceContainer,
+            borderRadius: BorderRadius.circular(12),
+          ),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Row(
+                children: [
+                  Container(
+                    width: 8,
+                    height: 8,
+                    decoration: BoxDecoration(
+                      color: isSelected
+                          ? MelbelColors.kOnPrimaryContainer
+                          : MelbelColors.kOutline,
+                      shape: BoxShape.circle,
+                    ),
                   ),
-                ),
-                const SizedBox(width: 12),
-                Text(
-                  label,
-                  style: TextStyle(
-                    fontFamily: 'Be Vietnam Pro',
-                    fontSize: 16,
-                    fontWeight: isSelected ? FontWeight.w600 : FontWeight.w400,
-                    color: isSelected
-                        ? MelbelColors.kOnPrimaryContainer
-                        : MelbelColors.kOnSurface,
+                  const SizedBox(width: 12),
+                  Text(
+                    label,
+                    style: TextStyle(
+                      fontSize: 16,
+                      fontWeight:
+                          isSelected ? FontWeight.w600 : FontWeight.w400,
+                      color: isSelected
+                          ? MelbelColors.kOnPrimaryContainer
+                          : MelbelColors.kOnSurface,
+                    ),
                   ),
-                ),
-              ],
-            ),
-            Text(
-              sub,
-              style: TextStyle(
-                fontFamily: 'Be Vietnam Pro',
-                fontSize: 13,
-                fontWeight: isSelected ? FontWeight.w500 : FontWeight.w400,
-                color: isSelected
-                    ? MelbelColors.kOnPrimaryContainer
-                    : MelbelColors.kOutline,
+                ],
               ),
-            ),
-          ],
+              Text(
+                sub,
+                style: TextStyle(
+                  fontSize: 13,
+                  fontWeight: isSelected ? FontWeight.w500 : FontWeight.w400,
+                  color: isSelected
+                      ? MelbelColors.kOnPrimaryContainer
+                      : MelbelColors.kOnSurfaceVariant,
+                ),
+              ),
+            ],
+          ),
         ),
       ),
     );
@@ -1119,14 +1015,22 @@ class UnconfirmedPlanScreen extends StatelessWidget {
                     ? 'Còn ${(unscheduled / 60).ceil()} phút chưa xếp lịch'
                     : 'Chưa thể xếp lịch với giờ rảnh hiện tại';
 
-    return Scaffold(
-      appBar: const MelbelAppBar(title: 'Phân Tách Nhiệm Vụ', showBack: true),
-      body: SafeArea(
-        top: false,
-        child: ListView(
-          padding: const EdgeInsets.fromLTRB(20, 16, 20, 32),
-          children: [
-            // Reassuring Status Banner (D-26)
+    return MelbelPageBackdrop(
+      showTopCloud: false,
+      showBottomClouds: true,
+      child: Scaffold(
+        backgroundColor: Colors.transparent,
+        appBar: const MelbelAppBar(
+          title: 'Phân Tách Nhiệm Vụ',
+          showBack: true,
+          showTitleRays: true,
+        ),
+        body: SafeArea(
+          top: false,
+          child: ListView(
+            padding: const EdgeInsets.fromLTRB(20, 16, 20, 32),
+            children: [
+              // Reassuring Status Banner (D-26)
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
               decoration: BoxDecoration(
@@ -1140,12 +1044,11 @@ class UnconfirmedPlanScreen extends StatelessWidget {
                     size: 20,
                     color: MelbelColors.kSecondary,
                   ),
-                  SizedBox(width: 10),
+                  const SizedBox(width: 10),
                   Expanded(
                     child: Text(
                       'Chưa ghi vào lịch chính thức · Lịch của bạn vẫn an toàn',
                       style: TextStyle(
-                        fontFamily: 'Be Vietnam Pro',
                         fontSize: 13,
                         fontWeight: FontWeight.w500,
                         color: MelbelColors.kSecondary,
@@ -1184,7 +1087,6 @@ class UnconfirmedPlanScreen extends StatelessWidget {
                           Text(
                             'BẢN NHÁP TẠM LƯU',
                             style: TextStyle(
-                              fontFamily: 'Be Vietnam Pro',
                               fontSize: 12,
                               fontWeight: FontWeight.w600,
                               letterSpacing: 0.5,
@@ -1204,7 +1106,6 @@ class UnconfirmedPlanScreen extends StatelessWidget {
                   Text(
                     displayTitle,
                     style: TextStyle(
-                      fontFamily: 'Be Vietnam Pro',
                       fontSize: 18,
                       fontWeight: FontWeight.w600,
                       color: MelbelColors.kOnSurface,
@@ -1228,11 +1129,10 @@ class UnconfirmedPlanScreen extends StatelessWidget {
                           size: 15,
                           color: MelbelColors.kOnSurfaceVariant,
                         ),
-                        SizedBox(width: 6),
+                        const SizedBox(width: 6),
                         Text(
                           'Hạn: ${task.formatDeadline(task.deadline)}',
                           style: TextStyle(
-                            fontFamily: 'Be Vietnam Pro',
                             fontSize: 12,
                             fontWeight: FontWeight.w500,
                             color: MelbelColors.kOnSurfaceVariant,
@@ -1260,7 +1160,7 @@ class UnconfirmedPlanScreen extends StatelessWidget {
                           size: 18,
                           color: MelbelColors.kOnSurfaceVariant,
                         ),
-                        SizedBox(width: 10),
+                        const SizedBox(width: 10),
                         Expanded(
                           child: Column(
                             crossAxisAlignment: CrossAxisAlignment.start,
@@ -1268,16 +1168,14 @@ class UnconfirmedPlanScreen extends StatelessWidget {
                               Text(
                                 'Chưa chốt',
                                 style: TextStyle(
-                                  fontFamily: 'Be Vietnam Pro',
                                   fontSize: 12,
                                   color: MelbelColors.kOnSurfaceVariant,
                                 ),
                               ),
-                              SizedBox(height: 2),
+                              const SizedBox(height: 2),
                               Text(
                                 feasibilityText,
                                 style: TextStyle(
-                                  fontFamily: 'Be Vietnam Pro',
                                   fontSize: 13,
                                   color: MelbelColors.kOnSurface,
                                 ),
@@ -1304,7 +1202,7 @@ class UnconfirmedPlanScreen extends StatelessWidget {
                           size: 18,
                           color: MelbelColors.kSecondary,
                         ),
-                        SizedBox(width: 10),
+                        const SizedBox(width: 10),
                         Expanded(
                           child: Column(
                             crossAxisAlignment: CrossAxisAlignment.start,
@@ -1312,16 +1210,14 @@ class UnconfirmedPlanScreen extends StatelessWidget {
                               Text(
                                 'Số phiên dự kiến',
                                 style: TextStyle(
-                                  fontFamily: 'Be Vietnam Pro',
                                   fontSize: 12,
                                   color: MelbelColors.kOnSurfaceVariant,
                                 ),
                               ),
-                              SizedBox(height: 2),
+                              const SizedBox(height: 2),
                               Text(
-                                '$sessionCount phiên theo phương án backend',
+                                '$sessionCount phiên đã đề xuất',
                                 style: TextStyle(
-                                  fontFamily: 'Be Vietnam Pro',
                                   fontSize: 13,
                                   color: MelbelColors.kOnSurface,
                                 ),
@@ -1338,12 +1234,11 @@ class UnconfirmedPlanScreen extends StatelessWidget {
                   Row(
                     children: [
                       Icon(Icons.eco, size: 16, color: MelbelColors.kSecondary),
-                      SizedBox(width: 6),
+                      const SizedBox(width: 6),
                       Expanded(
                         child: Text(
                           'Bạn có thể chỉnh sửa lại bất cứ lúc nào, không lo bị trùng lịch.',
                           style: TextStyle(
-                            fontFamily: 'Be Vietnam Pro',
                             fontSize: 13,
                             color: MelbelColors.kOnSurfaceVariant,
                           ),
@@ -1383,12 +1278,11 @@ class UnconfirmedPlanScreen extends StatelessWidget {
                     size: 14,
                     color: MelbelColors.kOnSurfaceVariant,
                   ),
-                  SizedBox(width: 6),
+                  const SizedBox(width: 6),
                   Flexible(
                       child: Text(
                     'Lưu trữ an toàn trong không gian riêng của bạn',
                     style: TextStyle(
-                      fontFamily: 'Be Vietnam Pro',
                       fontSize: 12,
                       color: MelbelColors.kOnSurfaceVariant,
                     ),
@@ -1399,6 +1293,7 @@ class UnconfirmedPlanScreen extends StatelessWidget {
           ],
         ),
       ),
+    ),
     );
   }
 }
@@ -1455,6 +1350,9 @@ class PlanLockedScreen extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final task = context.watch<TaskProvider>();
+    final palette = context.melbel;
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final textTheme = Theme.of(context).textTheme;
     final confirmedTask = task.confirmedTask;
     final title = (confirmedTask?.title ?? task.title).trim();
     final input = task.inputText.trim();
@@ -1467,95 +1365,147 @@ class PlanLockedScreen extends StatelessWidget {
             ? firstSentence
             : title;
     final confirmedSessions = confirmedTask?.sessions ?? const [];
+    final confirmedSteps = confirmedTask?.steps ?? const [];
+    final firstSession = confirmedSessions.firstOrNull;
+    final firstStep = firstSession == null
+        ? confirmedSteps.firstOrNull
+        : confirmedSteps
+                .where((s) => s.stepId == firstSession.stepId)
+                .firstOrNull ??
+            confirmedSteps.firstOrNull;
+    final firstMinutes =
+        firstSession == null ? 0 : (firstSession.workSeconds / 60).ceil();
+    final firstMicroTask = firstSession?.microTaskText.trim() ?? '';
     final localizations = MaterialLocalizations.of(context);
-    final firstStart = confirmedSessions.isEmpty
-        ? null
-        : confirmedSessions.first.scheduledStart.toLocal();
+    final firstStart = firstSession?.scheduledStart.toLocal();
     final deadlineAt =
         task.draft?.summary['time_constraint']?['deadline_at'] as String?;
     final confirmedDeadline = deadlineAt == null
         ? task.formatDeadline(task.deadline)
         : task.formatDeadline(DateTime.tryParse(deadlineAt)?.toLocal());
     final calendarStatus = switch (task.calendarSyncState) {
-      'synced' => 'Đã đồng bộ',
-      'pending' || 'outbox_queued' => 'Đang chờ đồng bộ',
+      'synced' => 'Đã đồng bộ Google Calendar',
+      'pending' || 'outbox_queued' => 'Đang chờ đồng bộ lịch',
       'not_integrated' => 'Chưa liên kết lịch để ghi phiên',
       'conflict' => 'Có thay đổi cần xem lại',
       'failed' => 'Đồng bộ chưa thành công',
       _ => 'Chưa có trạng thái đồng bộ',
     };
+    final haloColor =
+        isDark ? const Color(0xFFA797C4) : const Color(0xFFFFF8E2);
 
-    return Scaffold(
-      appBar: const MelbelAppBar(title: 'Kế hoạch đã sẵn sàng', showBack: true),
-      bottomNavigationBar: Container(
-        padding: EdgeInsets.fromLTRB(
-          20,
-          12,
-          20,
-          16 + MediaQuery.paddingOf(context).bottom,
+    return MelbelPageBackdrop(
+      showTopCloud: false,
+      showBottomClouds: true,
+      child: Scaffold(
+        backgroundColor: Colors.transparent,
+        appBar: const MelbelAppBar(
+          title: 'Kế hoạch đã sẵn sàng',
+          showBack: true,
+          showTitleRays: true,
         ),
-        decoration: BoxDecoration(
-          color: MelbelColors.kSurface.withValues(alpha: 0.95),
-          border: Border(
-            top: BorderSide(color: MelbelColors.kOutlineVariant, width: 0.5),
+        bottomNavigationBar: ColoredBox(
+          color: Colors.transparent,
+        child: Padding(
+          padding: EdgeInsets.fromLTRB(
+            20,
+            8,
+            20,
+            16 + MediaQuery.paddingOf(context).bottom,
           ),
-        ),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            PrimaryCta(
-              label: 'Bắt đầu phiên đầu tiên',
-              icon: Icons.play_arrow,
-              onPressed: confirmedSessions.isEmpty
-                  ? null
-                  : () => _startFirstSession(context),
-            ),
-            const SizedBox(height: 8),
-            SecondaryCta(
-              label: 'Về trang chủ',
-              icon: Icons.home_outlined,
-              height: 48,
-              onPressed: () {
-                Navigator.of(context)
-                    .pushNamedAndRemoveUntil('/home', (_) => false);
-              },
-            ),
-          ],
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              PrimaryCta(
+                label: firstMinutes > 0
+                    ? 'Bắt đầu đếm giờ ${firstMinutes}p ngay bây giờ'
+                    : 'Bắt đầu phiên đầu tiên',
+                icon: Icons.play_arrow_rounded,
+                onPressed: confirmedSessions.isEmpty
+                    ? null
+                    : () => _startFirstSession(context),
+              ),
+              const SizedBox(height: 10),
+              SecondaryCta(
+                label: 'Để sau, nhắc tôi trước 15 phút',
+                icon: Icons.notifications_active_outlined,
+                height: 50,
+                onPressed: () {
+                  Navigator.of(context)
+                      .pushNamedAndRemoveUntil('/home', (_) => false);
+                },
+              ),
+            ],
+          ),
         ),
       ),
       body: SafeArea(
         top: false,
         child: ListView(
-          padding: const EdgeInsets.fromLTRB(20, 12, 20, 32),
+          padding: MelbelLayout.pageInsets(context, top: 12, bottom: 28),
           children: [
-            // Character Mascot with Happy Crescent Eyes (D-27)
-            Center(
+            MelbelCard(
+              tone: MelbelCardTone.sage,
+              borderRadius: 28,
+              padding: const EdgeInsets.fromLTRB(20, 22, 20, 22),
               child: Column(
                 children: [
-                  const MelbelMascot(expression: CatExpression.happy),
-                  const SizedBox(height: 16),
+                  Stack(
+                    clipBehavior: Clip.none,
+                    alignment: Alignment.center,
+                    children: [
+                      Container(
+                        width: 106,
+                        height: 106,
+                        decoration: BoxDecoration(
+                          shape: BoxShape.circle,
+                          color: haloColor,
+                        ),
+                        alignment: Alignment.center,
+                        child: const MelbelMascot(
+                          expression: CatExpression.happy,
+                          forceLightSvg: true,
+                          width: 94,
+                          height: 84,
+                        ),
+                      ),
+                      Positioned(
+                        top: 2,
+                        right: -10,
+                        child: Transform.rotate(
+                          angle: 0.35,
+                          child: MelbelDoodleRays(
+                            size: 20,
+                            color: isDark ? palette.amber : palette.sage,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 14),
                   Text(
-                    'Đã chốt lịch thành công',
-                    style: TextStyle(
-                      fontFamily: 'Be Vietnam Pro',
-                      fontSize: 24,
-                      fontWeight: FontWeight.w600,
-                      color: MelbelColors.kOnSurface,
+                    'Kế hoạch đã sẵn sàng!',
+                    textAlign: TextAlign.center,
+                    style: textTheme.headlineSmall?.copyWith(
+                      fontWeight: FontWeight.w800,
+                      color: palette.onSageSoft,
+                    ),
+                  ),
+                  const SizedBox(height: 6),
+                  Text(
+                    'Bạn đã vượt qua bước khó nhất: bắt đầu lập kế hoạch.',
+                    textAlign: TextAlign.center,
+                    style: textTheme.bodyMedium?.copyWith(
+                      color: palette.onSageSoft.withValues(alpha: 0.86),
                     ),
                   ),
                 ],
               ),
             ),
-            const SizedBox(height: 20),
-
-            // Card: Kế hoạch vừa khóa (D-27)
-            Container(
+            const SizedBox(height: 16),
+            MelbelCard(
+              borderRadius: 28,
               padding: const EdgeInsets.all(20),
-              decoration: BoxDecoration(
-                color: MelbelColors.kSurfaceContainer,
-                borderRadius: BorderRadius.circular(16),
-                border: Border.all(color: MelbelColors.kOutline),
-              ),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
@@ -1566,63 +1516,99 @@ class PlanLockedScreen extends StatelessWidget {
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
-                            Text(
-                              'KẾ HOẠCH VỪA KHÓA',
-                              style: TextStyle(
-                                fontFamily: 'Be Vietnam Pro',
-                                fontSize: 11,
-                                fontWeight: FontWeight.w600,
-                                letterSpacing: 0.5,
-                                color: MelbelColors.kOutline,
-                              ),
-                            ),
+                            const Eyebrow('Phiên đầu tiên'),
                             const SizedBox(height: 4),
                             Text(
-                              displayTitle,
-                              style: TextStyle(
-                                fontFamily: 'Be Vietnam Pro',
-                                fontSize: 17,
-                                fontWeight: FontWeight.w600,
-                                color: MelbelColors.kOnSurface,
+                              firstStep?.title ?? displayTitle,
+                              style: textTheme.titleLarge?.copyWith(
+                                fontWeight: FontWeight.w800,
+                                color: palette.onSurface,
                               ),
                             ),
+                            if (firstStep != null &&
+                                firstStep.title != displayTitle) ...[
+                              const SizedBox(height: 2),
+                              Text(
+                                displayTitle,
+                                style: textTheme.bodySmall?.copyWith(
+                                  color: palette.onSurfaceVariant,
+                                ),
+                              ),
+                            ],
                           ],
                         ),
                       ),
                       const SizedBox(width: 12),
                       Container(
-                        width: 32,
-                        height: 32,
+                        width: 40,
+                        height: 40,
                         decoration: BoxDecoration(
-                          color: MelbelColors.kSurfaceContainerHigh,
-                          shape: BoxShape.circle,
+                          color: palette.sageSoft,
+                          borderRadius: BorderRadius.circular(14),
                         ),
                         child: Icon(
-                          Icons.lock,
-                          size: 18,
-                          color: MelbelColors.kPrimaryContainer,
+                          Icons.lock_rounded,
+                          size: 20,
+                          color: palette.accentInk,
                         ),
                       ),
                     ],
                   ),
-                  const SizedBox(height: 16),
+                  if (firstMicroTask.isNotEmpty) ...[
+                    const SizedBox(height: 14),
+                    Container(
+                      width: double.infinity,
+                      padding: const EdgeInsets.all(14),
+                      decoration: BoxDecoration(
+                        color:
+                            isDark ? palette.sageSoft : palette.amberSoft,
+                        borderRadius: BorderRadius.circular(18),
+                      ),
+                      child: Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Icon(
+                            Icons.rocket_launch_outlined,
+                            size: 18,
+                            color: isDark ? palette.sage : palette.amber,
+                          ),
+                          const SizedBox(width: 10),
+                          Expanded(
+                            child: Text(
+                              'Khởi động 2p: $firstMicroTask',
+                              style: textTheme.bodySmall?.copyWith(
+                                fontWeight: FontWeight.w600,
+                                color: isDark
+                                    ? palette.onSageSoft
+                                    : palette.onAmberSoft,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                  const SizedBox(height: 14),
                   _lockedRow(
-                    icon: Icons.play_circle,
-                    iconColor: MelbelColors.kPrimaryContainer,
-                    title: 'Khởi động nhẹ nhàng',
-                    desc:
-                        'Phiên đầu: ${firstStart == null ? 'Chưa có giờ' : '${firstStart.day.toString().padLeft(2, '0')}/${firstStart.month.toString().padLeft(2, '0')} ${firstStart.hour.toString().padLeft(2, '0')}:${firstStart.minute.toString().padLeft(2, '0')}'}',
+                    context,
+                    icon: Icons.play_circle_outline_rounded,
+                    iconColor: palette.sage,
+                    title: 'Thời điểm dự kiến',
+                    desc: firstStart == null
+                        ? 'Chưa có giờ'
+                        : '${firstStart.day.toString().padLeft(2, '0')}/${firstStart.month.toString().padLeft(2, '0')} ${firstStart.hour.toString().padLeft(2, '0')}:${firstStart.minute.toString().padLeft(2, '0')}',
                   ),
                   const SizedBox(height: 10),
                   _lockedRow(
-                    icon: Icons.timelapse,
-                    iconColor: MelbelColors.kOnSurfaceVariant,
+                    context,
+                    icon: Icons.cloud_done_outlined,
+                    iconColor: palette.sage,
                     title: 'Google Calendar',
                     desc: calendarStatus,
                   ),
                   if (task.canRefreshCalendarSync)
                     TextButton.icon(
-                      icon: const Icon(Icons.sync),
+                      icon: const Icon(Icons.sync_rounded),
                       label: Text(task.isApiBusy
                           ? 'Đang cập nhật…'
                           : 'Cập nhật đồng bộ'),
@@ -1643,64 +1629,82 @@ class PlanLockedScreen extends StatelessWidget {
                     ),
                   const SizedBox(height: 10),
                   _lockedRow(
-                    icon: Icons.calendar_today,
-                    iconColor: MelbelColors.kOutline,
-                    title: 'Thời hạn mong muốn',
-                    desc: 'Hạn chót: $confirmedDeadline',
+                    context,
+                    icon: Icons.flag_outlined,
+                    iconColor: palette.onSurfaceVariant,
+                    title: 'Hạn chót',
+                    desc: confirmedDeadline,
                   ),
                   if (confirmedSessions.isNotEmpty) ...[
-                    const Divider(height: 24),
-                    const Eyebrow('Các phiên đã xác nhận'),
-                    for (final session in confirmedSessions)
-                      ListTile(
-                        contentPadding: EdgeInsets.zero,
-                        leading: const Icon(Icons.event_available_outlined),
+                    const SizedBox(height: 10),
+                    Theme(
+                      data: Theme.of(context)
+                          .copyWith(dividerColor: Colors.transparent),
+                      child: ExpansionTile(
+                        tilePadding: EdgeInsets.zero,
                         title: Text(
-                          localizations.formatShortDate(
-                            session.scheduledStart.toLocal(),
-                          ),
-                        ),
-                        subtitle: Text(
-                          '${TimeOfDay.fromDateTime(session.scheduledStart.toLocal()).format(context)} – '
-                          '${TimeOfDay.fromDateTime(session.scheduledEnd.toLocal()).format(context)}',
-                        ),
+                            'Xem lịch ${confirmedSessions.length} phiên đã chốt'),
+                        children: [
+                          for (final session in confirmedSessions)
+                            ListTile(
+                              contentPadding: EdgeInsets.zero,
+                              leading:
+                                  const Icon(Icons.event_available_outlined),
+                              title: Text(
+                                localizations.formatShortDate(
+                                  session.scheduledStart.toLocal(),
+                                ),
+                              ),
+                              subtitle: Text(
+                                '${localizations.formatTimeOfDay(TimeOfDay.fromDateTime(session.scheduledStart.toLocal()), alwaysUse24HourFormat: true)} – '
+                                '${localizations.formatTimeOfDay(TimeOfDay.fromDateTime(session.scheduledEnd.toLocal()), alwaysUse24HourFormat: true)}',
+                              ),
+                            ),
+                        ],
                       ),
+                    ),
                   ],
                 ],
               ),
             ),
-            const SizedBox(height: 16),
-            TextButton.icon(
-              onPressed: () => _open(context, const SessionReminderScreen()),
-              icon: const Icon(Icons.notifications_none),
-              label: const Text('Xem thử nhắc phiên'),
+            const SizedBox(height: 12),
+            Center(
+              child: TextButton.icon(
+                onPressed: () => _open(context, const SessionReminderScreen()),
+                icon: const Icon(Icons.notifications_none),
+                label: const Text('Xem thử nhắc phiên'),
+              ),
             ),
           ],
         ),
       ),
+    ),
     );
   }
 
-  Widget _lockedRow({
+  Widget _lockedRow(
+    BuildContext context, {
     required IconData icon,
     required Color iconColor,
     required String title,
     required String desc,
   }) {
+    final palette = context.melbel;
+    final textTheme = Theme.of(context).textTheme;
     return Container(
-      padding: const EdgeInsets.all(12),
+      padding: const EdgeInsets.all(14),
       decoration: BoxDecoration(
-        color: MelbelColors.kSurfaceContainerLow,
-        borderRadius: BorderRadius.circular(12),
+        color: palette.mutedSurface,
+        borderRadius: BorderRadius.circular(18),
       ),
       child: Row(
         children: [
           Container(
-            width: 36,
-            height: 36,
+            width: 38,
+            height: 38,
             decoration: BoxDecoration(
-              color: MelbelColors.kSurfaceContainer,
-              borderRadius: BorderRadius.circular(8),
+              color: palette.surface,
+              borderRadius: BorderRadius.circular(12),
             ),
             child: Icon(icon, size: 20, color: iconColor),
           ),
@@ -1711,20 +1715,15 @@ class PlanLockedScreen extends StatelessWidget {
               children: [
                 Text(
                   title,
-                  style: TextStyle(
-                    fontFamily: 'Be Vietnam Pro',
-                    fontSize: 12,
-                    color: MelbelColors.kOnSurfaceVariant,
+                  style: textTheme.labelSmall?.copyWith(
+                    color: palette.onSurfaceVariant,
                   ),
                 ),
                 const SizedBox(height: 2),
                 Text(
                   desc,
-                  style: TextStyle(
-                    fontFamily: 'Be Vietnam Pro',
-                    fontSize: 14,
-                    fontWeight: FontWeight.w500,
-                    color: MelbelColors.kOnSurface,
+                  style: textTheme.titleSmall?.copyWith(
+                    color: palette.onSurface,
                   ),
                 ),
               ],
@@ -1756,7 +1755,7 @@ class AiFallbackScreen extends StatelessWidget {
       if (context.mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text('Backend chưa tạo được phương án dự phòng: $error'),
+            content: Text('Chưa tạo được phương án dự phòng: $error'),
           ),
         );
       }
@@ -1769,24 +1768,35 @@ class AiFallbackScreen extends StatelessWidget {
     final displayTitle =
         task.title.isEmpty ? 'Soạn báo cáo đánh giá quý 3' : task.title;
 
-    return Scaffold(
-      appBar: const MelbelAppBar(title: 'Phân Tách Nhiệm Vụ', showBack: true),
-      body: SafeArea(
-        top: false,
-        child: ListView(
-          padding: const EdgeInsets.fromLTRB(20, 16, 20, 32),
-          children: [
-            // Character Mascot with Peaceful Blob (D-28)
-            Center(
-              child: Column(
-                children: [
-                  const MelbelMascot(expression: CatExpression.sleepy),
+    return MelbelPageBackdrop(
+      showTopCloud: false,
+      showBottomClouds: true,
+      child: Scaffold(
+        backgroundColor: Colors.transparent,
+        appBar: const MelbelAppBar(
+          title: 'Phân Tách Nhiệm Vụ',
+          showBack: true,
+          showTitleRays: true,
+        ),
+        body: SafeArea(
+          top: false,
+          child: ListView(
+            padding: const EdgeInsets.fromLTRB(20, 16, 20, 32),
+            children: [
+              // Character Mascot with Peaceful Blob (D-28)
+              Center(
+                child: Column(
+                  children: [
+                    const MelbelCushionAvatar(
+                      expression: CatExpression.sleepy,
+                      width: 88,
+                      height: 78,
+                    ),
                   const SizedBox(height: 16),
                   Text(
                     'Không sao cả, mình cùng đi từng bước nhé',
                     textAlign: TextAlign.center,
                     style: TextStyle(
-                      fontFamily: 'Be Vietnam Pro',
                       fontSize: 20,
                       fontWeight: FontWeight.w600,
                       color: MelbelColors.kOnSurface,
@@ -1797,7 +1807,6 @@ class AiFallbackScreen extends StatelessWidget {
                     'Hệ thống chuẩn bị sẵn lịch mẫu tiêu chuẩn cho bạn',
                     textAlign: TextAlign.center,
                     style: TextStyle(
-                      fontFamily: 'Be Vietnam Pro',
                       fontSize: 14,
                       color: MelbelColors.kOnSurfaceVariant,
                     ),
@@ -1838,11 +1847,10 @@ class AiFallbackScreen extends StatelessWidget {
                               size: 8,
                               color: MelbelColors.kSecondary,
                             ),
-                            SizedBox(width: 6),
+                            const SizedBox(width: 6),
                             Text(
                               'Lộ trình chuẩn',
                               style: TextStyle(
-                                fontFamily: 'Be Vietnam Pro',
                                 fontSize: 12,
                                 fontWeight: FontWeight.w500,
                                 color: MelbelColors.kSecondary,
@@ -1862,7 +1870,6 @@ class AiFallbackScreen extends StatelessWidget {
                           Text(
                             task.formatDeadline(task.deadline),
                             style: TextStyle(
-                              fontFamily: 'Be Vietnam Pro',
                               fontSize: 12,
                               color: MelbelColors.kOnSurfaceVariant,
                             ),
@@ -1875,7 +1882,6 @@ class AiFallbackScreen extends StatelessWidget {
                   Text(
                     displayTitle,
                     style: TextStyle(
-                      fontFamily: 'Be Vietnam Pro',
                       fontSize: 18,
                       fontWeight: FontWeight.w600,
                       color: MelbelColors.kOnSurface,
@@ -1900,14 +1906,13 @@ class AiFallbackScreen extends StatelessWidget {
                               size: 18,
                               color: MelbelColors.kPrimaryContainer,
                             ),
-                            SizedBox(width: 8),
+                            const SizedBox(width: 8),
                             Column(
                               crossAxisAlignment: CrossAxisAlignment.start,
                               children: [
                                 Text(
                                   'Nhịp độ gợi ý',
                                   style: TextStyle(
-                                    fontFamily: 'Be Vietnam Pro',
                                     fontSize: 12,
                                     color: MelbelColors.kOnSurfaceVariant,
                                   ),
@@ -1915,7 +1920,6 @@ class AiFallbackScreen extends StatelessWidget {
                                 Text(
                                   'Nhịp tiêu chuẩn Pomodoro êm dịu',
                                   style: TextStyle(
-                                    fontFamily: 'Be Vietnam Pro',
                                     fontSize: 14,
                                     fontWeight: FontWeight.w500,
                                     color: MelbelColors.kOnSurface,
@@ -1932,7 +1936,6 @@ class AiFallbackScreen extends StatelessWidget {
                             Text(
                               '3 phiên (25p tập trung + 5p nghỉ)',
                               style: TextStyle(
-                                fontFamily: 'Be Vietnam Pro',
                                 fontSize: 12,
                                 color: MelbelColors.kOnSurfaceVariant,
                               ),
@@ -1940,7 +1943,6 @@ class AiFallbackScreen extends StatelessWidget {
                             Text(
                               '90 phút',
                               style: TextStyle(
-                                fontFamily: 'Be Vietnam Pro',
                                 fontSize: 13,
                                 fontWeight: FontWeight.w500,
                                 color: MelbelColors.kPrimaryContainer,
@@ -1997,11 +1999,10 @@ class AiFallbackScreen extends StatelessWidget {
                             size: 18,
                             color: MelbelColors.kOnSurfaceVariant,
                           ),
-                          SizedBox(width: 8),
+                          const SizedBox(width: 8),
                           Text(
                             'Thời điểm khởi động',
                             style: TextStyle(
-                              fontFamily: 'Be Vietnam Pro',
                               fontSize: 13,
                               color: MelbelColors.kOnSurfaceVariant,
                             ),
@@ -2009,9 +2010,8 @@ class AiFallbackScreen extends StatelessWidget {
                         ],
                       ),
                       Text(
-                        'Giờ bắt đầu sẽ do backend xếp sau khi tạo phương án',
+                        'Giờ bắt đầu sẽ hiện trong phương án',
                         style: TextStyle(
-                          fontFamily: 'Be Vietnam Pro',
                           fontSize: 13,
                           fontWeight: FontWeight.w500,
                           color: MelbelColors.kOnSurface,
@@ -2035,12 +2035,11 @@ class AiFallbackScreen extends StatelessWidget {
                           size: 18,
                           color: MelbelColors.kSecondary,
                         ),
-                        SizedBox(width: 8),
+                        const SizedBox(width: 8),
                         Expanded(
                           child: Text(
                             'Bạn luôn có thể điều chỉnh thời lượng bất kỳ lúc nào.',
                             style: TextStyle(
-                              fontFamily: 'Be Vietnam Pro',
                               fontSize: 13,
                               color: MelbelColors.kSecondary,
                             ),
@@ -2069,6 +2068,7 @@ class AiFallbackScreen extends StatelessWidget {
           ],
         ),
       ),
+    ),
     );
   }
 
@@ -2091,8 +2091,7 @@ class AiFallbackScreen extends StatelessWidget {
           Text(
             label,
             style: TextStyle(
-              fontFamily: 'Be Vietnam Pro',
-              fontSize: 10,
+              fontSize: 12,
               color: textColor ?? MelbelColors.kOnSurfaceVariant,
             ),
           ),
@@ -2115,14 +2114,22 @@ class SessionReminderScreen extends StatelessWidget {
     final displayTitle =
         task.title.isEmpty ? 'Soạn báo cáo đánh giá quý 3' : task.title;
 
-    return Scaffold(
-      appBar: const MelbelAppBar(title: 'Nhắc Trước Phiên', showBack: true),
-      body: SafeArea(
-        top: false,
-        child: ListView(
-          padding: const EdgeInsets.fromLTRB(20, 16, 20, 32),
-          children: [
-            // Subtle Visual Hero: Moon Glow & Gentle Icon (D-29)
+    return MelbelPageBackdrop(
+      showTopCloud: false,
+      showBottomClouds: true,
+      child: Scaffold(
+        backgroundColor: Colors.transparent,
+        appBar: const MelbelAppBar(
+          title: 'Nhắc Trước Phiên',
+          showBack: true,
+          showTitleRays: true,
+        ),
+        body: SafeArea(
+          top: false,
+          child: ListView(
+            padding: const EdgeInsets.fromLTRB(20, 16, 20, 32),
+            children: [
+              // Subtle Visual Hero: Moon Glow & Gentle Icon (D-29)
             Center(
               child: Column(
                 children: [
@@ -2154,7 +2161,6 @@ class SessionReminderScreen extends StatelessWidget {
                   Text(
                     'Sắp đến phiên làm việc',
                     style: TextStyle(
-                      fontFamily: 'Be Vietnam Pro',
                       fontSize: 22,
                       fontWeight: FontWeight.w600,
                       color: MelbelColors.kOnSurface,
@@ -2164,7 +2170,6 @@ class SessionReminderScreen extends StatelessWidget {
                   Text(
                     'Chuẩn bị vào phiên lúc 15:30.',
                     style: TextStyle(
-                      fontFamily: 'Be Vietnam Pro',
                       fontSize: 15,
                       color: MelbelColors.kOnSurfaceVariant,
                     ),
@@ -2203,11 +2208,10 @@ class SessionReminderScreen extends StatelessWidget {
                               size: 8,
                               color: MelbelColors.kPrimaryContainer,
                             ),
-                            SizedBox(width: 6),
+                            const SizedBox(width: 6),
                             Text(
                               'Phiên 1 / 3 • 25 phút',
                               style: TextStyle(
-                                fontFamily: 'Be Vietnam Pro',
                                 fontSize: 12,
                                 fontWeight: FontWeight.w500,
                                 color: MelbelColors.kOnSurfaceVariant,
@@ -2219,7 +2223,6 @@ class SessionReminderScreen extends StatelessWidget {
                       Text(
                         'Hạn chót: 18:00 ngày mai',
                         style: TextStyle(
-                          fontFamily: 'Be Vietnam Pro',
                           fontSize: 12,
                           color: MelbelColors.kOnSurfaceVariant,
                         ),
@@ -2230,7 +2233,6 @@ class SessionReminderScreen extends StatelessWidget {
                   Text(
                     displayTitle,
                     style: TextStyle(
-                      fontFamily: 'Be Vietnam Pro',
                       fontSize: 18,
                       fontWeight: FontWeight.w600,
                       color: MelbelColors.kOnSurface,
@@ -2244,11 +2246,10 @@ class SessionReminderScreen extends StatelessWidget {
                         size: 18,
                         color: MelbelColors.kSecondary,
                       ),
-                      SizedBox(width: 6),
+                      const SizedBox(width: 6),
                       Text(
                         'Bước 1: Soạn dàn ý',
                         style: TextStyle(
-                          fontFamily: 'Be Vietnam Pro',
                           fontSize: 15,
                           fontWeight: FontWeight.w500,
                           color: MelbelColors.kSecondary,
@@ -2268,11 +2269,10 @@ class SessionReminderScreen extends StatelessWidget {
                         size: 18,
                         color: MelbelColors.kPrimaryContainer,
                       ),
-                      SizedBox(width: 8),
+                      const SizedBox(width: 8),
                       Text(
                         'Có 2 phút khởi động nhẹ nhàng.',
                         style: TextStyle(
-                          fontFamily: 'Be Vietnam Pro',
                           fontSize: 13,
                           color: MelbelColors.kOnSurfaceVariant,
                         ),
@@ -2317,7 +2317,6 @@ class SessionReminderScreen extends StatelessWidget {
                 child: Text(
                   'Dời lịch',
                   style: TextStyle(
-                    fontFamily: 'Be Vietnam Pro',
                     fontSize: 14,
                     color: MelbelColors.kOnSurfaceVariant,
                   ),
@@ -2338,7 +2337,6 @@ class SessionReminderScreen extends StatelessWidget {
                 label: Text(
                   'Xem giao diện thông báo màn hình khóa (D-30)',
                   style: TextStyle(
-                    fontFamily: 'Be Vietnam Pro',
                     fontSize: 12,
                     color: MelbelColors.kOutline,
                   ),
@@ -2348,6 +2346,7 @@ class SessionReminderScreen extends StatelessWidget {
           ],
         ),
       ),
+    ),
     );
   }
 }
@@ -2389,7 +2388,6 @@ class _LockScreenPreviewState extends State<LockScreenPreview> {
                   Text(
                     'Mô phỏng Màn hình khóa',
                     style: TextStyle(
-                      fontFamily: 'Be Vietnam Pro',
                       fontSize: 13,
                       color: MelbelColors.kOutline,
                     ),
@@ -2414,12 +2412,11 @@ class _LockScreenPreviewState extends State<LockScreenPreview> {
                           size: 16,
                           color: MelbelColors.kOnSurfaceVariant,
                         ),
-                        SizedBox(width: 4),
+                        const SizedBox(width: 4),
                         Text(
                           'BẢO MẬT',
                           style: TextStyle(
-                            fontFamily: 'Be Vietnam Pro',
-                            fontSize: 11,
+                            fontSize: 12,
                             letterSpacing: 1.5,
                             fontWeight: FontWeight.w600,
                             color: MelbelColors.kOnSurfaceVariant,
@@ -2435,11 +2432,11 @@ class _LockScreenPreviewState extends State<LockScreenPreview> {
                     child: Text(
                       '15:25',
                       style: TextStyle(
-                        fontFamily: 'Be Vietnam Pro',
                         fontSize: 64,
-                        fontWeight: FontWeight.w300,
+                        fontWeight: FontWeight.w500,
                         color: MelbelColors.kPrimary,
                         letterSpacing: -1,
+                        fontFeatures: const [FontFeature.tabularFigures()],
                       ),
                     ),
                   ),
@@ -2447,7 +2444,6 @@ class _LockScreenPreviewState extends State<LockScreenPreview> {
                     child: Text(
                       'Thứ Năm, 24 tháng 10',
                       style: TextStyle(
-                        fontFamily: 'Be Vietnam Pro',
                         fontSize: 15,
                         color: MelbelColors.kOnSurfaceVariant,
                       ),
@@ -2499,11 +2495,10 @@ class _LockScreenPreviewState extends State<LockScreenPreview> {
                           size: 20,
                           color: MelbelColors.kOnSurfaceVariant,
                         ),
-                        SizedBox(height: 2),
+                        const SizedBox(height: 2),
                         Text(
                           'Vuốt lên để mở',
                           style: TextStyle(
-                            fontFamily: 'Be Vietnam Pro',
                             fontSize: 12,
                             letterSpacing: 0.5,
                             color: MelbelColors.kOnSurfaceVariant,
@@ -2523,24 +2518,30 @@ class _LockScreenPreviewState extends State<LockScreenPreview> {
               child: Row(
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
-                  InkWell(
-                    onTap: () => setState(() => _flashlightOn = !_flashlightOn),
-                    borderRadius: BorderRadius.circular(999),
-                    child: Container(
-                      width: 48,
-                      height: 48,
-                      decoration: BoxDecoration(
-                        color: _flashlightOn
-                            ? MelbelColors.kPrimaryContainer
-                            : MelbelColors.kSurfaceContainer,
-                        shape: BoxShape.circle,
-                      ),
-                      child: Icon(
-                        Icons.flashlight_on,
-                        size: 22,
-                        color: _flashlightOn
-                            ? MelbelColors.kOnPrimaryContainer
-                            : MelbelColors.kOnSurface,
+                  Semantics(
+                    button: true,
+                    toggled: _flashlightOn,
+                    label: 'Đèn pin',
+                    excludeSemantics: true,
+                    child: InkWell(
+                      onTap: () => setState(() => _flashlightOn = !_flashlightOn),
+                      borderRadius: BorderRadius.circular(999),
+                      child: Container(
+                        width: 48,
+                        height: 48,
+                        decoration: BoxDecoration(
+                          color: _flashlightOn
+                              ? MelbelColors.kPrimaryContainer
+                              : MelbelColors.kSurfaceContainer,
+                          shape: BoxShape.circle,
+                        ),
+                        child: Icon(
+                          Icons.flashlight_on,
+                          size: 22,
+                          color: _flashlightOn
+                              ? MelbelColors.kOnPrimaryContainer
+                              : MelbelColors.kOnSurface,
+                        ),
                       ),
                     ),
                   ),
@@ -2615,7 +2616,6 @@ class _LockScreenPreviewState extends State<LockScreenPreview> {
                   Text(
                     'Melbel',
                     style: TextStyle(
-                      fontFamily: 'Be Vietnam Pro',
                       fontSize: 12,
                       fontWeight: FontWeight.w500,
                       color: MelbelColors.kOnSurfaceVariant,
@@ -2625,7 +2625,7 @@ class _LockScreenPreviewState extends State<LockScreenPreview> {
                   Text(
                     '•',
                     style: TextStyle(
-                      fontSize: 11,
+                      fontSize: 12,
                       color: MelbelColors.kOnSurfaceVariant,
                     ),
                   ),
@@ -2633,7 +2633,6 @@ class _LockScreenPreviewState extends State<LockScreenPreview> {
                   Text(
                     timeAgo,
                     style: TextStyle(
-                      fontFamily: 'Be Vietnam Pro',
                       fontSize: 12,
                       color: MelbelColors.kOnSurfaceVariant,
                     ),
@@ -2651,7 +2650,6 @@ class _LockScreenPreviewState extends State<LockScreenPreview> {
           Text(
             title,
             style: TextStyle(
-              fontFamily: 'Be Vietnam Pro',
               fontSize: 15,
               fontWeight: FontWeight.w600,
               color: MelbelColors.kPrimary,
@@ -2661,7 +2659,6 @@ class _LockScreenPreviewState extends State<LockScreenPreview> {
           Text(
             body,
             style: TextStyle(
-              fontFamily: 'Be Vietnam Pro',
               fontSize: 13,
               color: MelbelColors.kOnSurfaceVariant,
               height: 1.4,
@@ -2670,48 +2667,56 @@ class _LockScreenPreviewState extends State<LockScreenPreview> {
           const SizedBox(height: 12),
           Row(
             children: [
-              InkWell(
-                onTap: onBtn1,
-                borderRadius: BorderRadius.circular(12),
-                child: Container(
-                  height: 38,
-                  padding: const EdgeInsets.symmetric(horizontal: 16),
-                  decoration: BoxDecoration(
-                    color: MelbelColors.kSurfaceContainerHigh,
-                    borderRadius: BorderRadius.circular(12),
-                  ),
-                  alignment: Alignment.center,
-                  child: Text(
-                    btn1Text,
-                    style: TextStyle(
-                      fontFamily: 'Be Vietnam Pro',
-                      fontSize: 13,
-                      fontWeight: FontWeight.w500,
-                      color: isBtn1Secondary
-                          ? MelbelColors.kSecondary
-                          : MelbelColors.kPrimary,
+              Semantics(
+                button: true,
+                label: btn1Text,
+                excludeSemantics: true,
+                child: InkWell(
+                  onTap: onBtn1,
+                  borderRadius: BorderRadius.circular(12),
+                  child: Container(
+                    constraints: const BoxConstraints(minHeight: 44),
+                    padding: const EdgeInsets.symmetric(horizontal: 16),
+                    decoration: BoxDecoration(
+                      color: MelbelColors.kSurfaceContainerHigh,
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    alignment: Alignment.center,
+                    child: Text(
+                      btn1Text,
+                      style: TextStyle(
+                        fontSize: 13,
+                        fontWeight: FontWeight.w500,
+                        color: isBtn1Secondary
+                            ? MelbelColors.kSecondary
+                            : MelbelColors.kPrimary,
+                      ),
                     ),
                   ),
                 ),
               ),
               const SizedBox(width: 8),
-              InkWell(
-                onTap: onBtn2,
-                borderRadius: BorderRadius.circular(12),
-                child: Container(
-                  height: 38,
-                  padding: const EdgeInsets.symmetric(horizontal: 16),
-                  decoration: BoxDecoration(
-                    color: MelbelColors.kSurfaceContainerLow,
-                    borderRadius: BorderRadius.circular(12),
-                  ),
-                  alignment: Alignment.center,
-                  child: Text(
-                    btn2Text,
-                    style: TextStyle(
-                      fontFamily: 'Be Vietnam Pro',
-                      fontSize: 13,
-                      color: MelbelColors.kOnSurfaceVariant,
+              Semantics(
+                button: true,
+                label: btn2Text,
+                excludeSemantics: true,
+                child: InkWell(
+                  onTap: onBtn2,
+                  borderRadius: BorderRadius.circular(12),
+                  child: Container(
+                    constraints: const BoxConstraints(minHeight: 44),
+                    padding: const EdgeInsets.symmetric(horizontal: 16),
+                    decoration: BoxDecoration(
+                      color: MelbelColors.kSurfaceContainerLow,
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    alignment: Alignment.center,
+                    child: Text(
+                      btn2Text,
+                      style: TextStyle(
+                        fontSize: 13,
+                        color: MelbelColors.kOnSurfaceVariant,
+                      ),
                     ),
                   ),
                 ),

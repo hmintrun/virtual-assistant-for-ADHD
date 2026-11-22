@@ -6,6 +6,7 @@ class OutboxEventType {
   static const String checkinCreate = 'checkin_create';
   static const String checkinResponse = 'checkin_response';
   static const String thoughtCapture = 'thought_capture';
+  static const String thoughtDelete = 'thought_delete';
   static const String runEventBatch = 'run_event_batch';
   static const String actualCorrection = 'actual_correction';
 }
@@ -21,21 +22,24 @@ class OutboxStatus {
 
 /// Mô hình một bản ghi trong hàng đợi `local_outbox`.
 class OutboxRecord {
-  const OutboxRecord({
+  OutboxRecord({
     required this.clientEventId,
     required this.eventType,
     this.targetResourceId,
     required this.endpoint,
     required this.httpMethod,
     required this.payload,
-    required this.occurredAt,
-    required this.holdUntil,
+    required DateTime occurredAt,
+    required DateTime holdUntil,
     this.status = OutboxStatus.pending,
     this.retryCount = 0,
     this.lastError,
-    this.createdAt,
-    this.syncedAt,
-  });
+    DateTime? createdAt,
+    DateTime? syncedAt,
+  })  : occurredAt = occurredAt.toUtc(),
+        holdUntil = holdUntil.toUtc(),
+        createdAt = createdAt?.toUtc(),
+        syncedAt = syncedAt?.toUtc();
 
   final String clientEventId;
   final String eventType;
@@ -110,13 +114,13 @@ class OutboxRecord {
       endpoint: map['endpoint'] as String,
       httpMethod: map['http_method'] as String,
       payload: parsedPayload,
-      occurredAt: DateTime.parse(map['occurred_at'] as String),
-      holdUntil: DateTime.parse(map['hold_until'] as String),
+      occurredAt: DateTime.parse(map['occurred_at'] as String).toUtc(),
+      holdUntil: DateTime.parse(map['hold_until'] as String).toUtc(),
       status: map['status'] as String? ?? OutboxStatus.pending,
       retryCount: map['retry_count'] as int? ?? 0,
       lastError: map['last_error'] as String?,
-      createdAt: map['created_at'] != null ? DateTime.parse(map['created_at'] as String) : null,
-      syncedAt: map['synced_at'] != null ? DateTime.parse(map['synced_at'] as String) : null,
+      createdAt: map['created_at'] != null ? DateTime.parse(map['created_at'] as String).toUtc() : null,
+      syncedAt: map['synced_at'] != null ? DateTime.parse(map['synced_at'] as String).toUtc() : null,
     );
   }
 
@@ -138,12 +142,12 @@ class OutboxRecord {
         endpoint: endpoint,
         httpMethod: httpMethod,
         payload: payload ?? this.payload,
-        occurredAt: occurredAt,
-        holdUntil: holdUntil ?? this.holdUntil,
+        occurredAt: occurredAt.toUtc(),
+        holdUntil: (holdUntil ?? this.holdUntil).toUtc(),
         status: status ?? this.status,
         retryCount: retryCount ?? this.retryCount,
         lastError: clearLastError ? null : (lastError ?? this.lastError),
-        createdAt: createdAt ?? this.createdAt,
-        syncedAt: syncedAt ?? this.syncedAt,
+        createdAt: (createdAt ?? this.createdAt)?.toUtc(),
+        syncedAt: (syncedAt ?? this.syncedAt)?.toUtc(),
       );
 }

@@ -67,11 +67,13 @@ class TaskProvider extends ChangeNotifier {
   String _title = '';
   String _rawInputText = '';
   String _entrySource = 'text';
+  bool _isVoiceLowConfidence = false;
   String _scope = '';
   DateTime? _deadline;
   AvailabilitySlot? _availability;
   bool _draftSaved = false;
   bool _confirmed = false;
+  bool _availabilityCleared = false;
   String _voiceQuestion = '';
   String? _decompositionChoice;
   bool _planLocked = false;
@@ -84,8 +86,7 @@ class TaskProvider extends ChangeNotifier {
   bool get canRefreshCalendarSync =>
       _confirmedScheduleRevision != null &&
       (_confirmedTask?.sessions.isNotEmpty ?? false) &&
-      (_calendarSyncState == 'pending' ||
-          _calendarSyncState == 'outbox_queued');
+      _calendarSyncState == 'pending';
   String? get calendarSyncState => _calendarSyncState;
   bool _isApiBusy = false;
   String? _apiError;
@@ -99,13 +100,16 @@ class TaskProvider extends ChangeNotifier {
 
   String get title => _title;
   String get inputText => _rawInputText.isEmpty ? _title : _rawInputText;
+  bool get isVoiceLowConfidence => _isVoiceLowConfidence;
   String get scope => _scope;
   DateTime? get deadline => _deadline;
   AvailabilitySlot? get availability => _availability;
+  bool get availabilityCleared => _availabilityCleared;
   bool get hasAvailability =>
-      _availability != null ||
-      draft?.summary['availability'] != null ||
-      draft?.summary['availability_ref'] != null;
+      (!_availabilityCleared && _availability != null) ||
+      (!_availabilityCleared &&
+          (draft?.summary['availability'] != null ||
+              draft?.summary['availability_ref'] != null));
   bool get draftSaved => _draftSaved;
   bool get draftPersisted =>
       _title.trim().isNotEmpty && _savedEditRevision == _editRevision;
@@ -122,6 +126,9 @@ class TaskProvider extends ChangeNotifier {
   String? get apiError => _apiError;
   bool get canPlan => _draft?.canPlan ?? false;
   String get availabilitySummary {
+    if (_availabilityCleared) {
+      return 'Chưa chọn khung giờ rảnh cho công việc này.';
+    }
     final selected = _availability;
     if (selected != null) return selected.label;
     final summary = _draft?.summary;
@@ -292,6 +299,7 @@ class TaskProvider extends ChangeNotifier {
       _draft = draft;
       _rawInputText = draft.rawInput ?? draft.title;
       _entrySource = 'text';
+      _isVoiceLowConfidence = false;
       _clientDraftId = draft.clientDraftId;
       _clientDraftFingerprint = null;
       _title = draft.title.isEmpty ? _rawInputText : draft.title;
@@ -370,6 +378,7 @@ class TaskProvider extends ChangeNotifier {
           scope: scope,
           deadline: deadline,
           availability: availability,
+          clearAvailability: _availabilityCleared,
         ),
         revision,
       );
@@ -377,6 +386,7 @@ class TaskProvider extends ChangeNotifier {
     _draft = current;
     _applyDraftSummary();
     _availability = null;
+    _availabilityCleared = false;
     _candidate = null;
     await _persist();
     return current;
@@ -393,6 +403,7 @@ class TaskProvider extends ChangeNotifier {
   Future<void> updateDraftOnBackend({String? extraRequirement}) async {
     final draft = _draft;
     final availability = _pendingAvailability;
+    final clearAvailability = _availabilityCleared;
     if (draft == null)
       throw const ApiException('Chưa có bản nháp trên máy chủ.');
     final extras = (draft.summary['extra_requirements'] as List? ?? const [])
@@ -409,12 +420,14 @@ class TaskProvider extends ChangeNotifier {
           scope: _scope.trim(),
           deadline: _deadline,
           availability: availability,
+          clearAvailability: clearAvailability,
           extraRequirements: extraRequirements,
         ),
         revision,
       );
       _draft = current;
       _availability = null;
+      _availabilityCleared = false;
       _applyDraftSummary();
       _candidate = null;
       await _persist();
@@ -889,12 +902,29 @@ class TaskProvider extends ChangeNotifier {
     if (_scope.trim().isEmpty && scope != null) setScope(scope[1]!.trim());
   }
 
-  void setTitle(String value, {bool fromVoice = false}) {
-    if (inputText.trim() == value.trim()) return;
+  void setTitle(
+    String value, {
+    bool fromVoice = false,
+    bool lowConfidence = false,
+  }) {
+    final nextLowConfidence = fromVoice ? lowConfidence : false;
+    if (inputText.trim() == value.trim()) {
+      if (fromVoice || _isVoiceLowConfidence != nextLowConfidence) {
+        _isVoiceLowConfidence = nextLowConfidence;
+        if (fromVoice && value.trim().isNotEmpty) {
+          _entrySource = 'voice';
+        }
+        unawaited(_persist());
+        notifyListeners();
+      }
+      return;
+    }
+    _isVoiceLowConfidence = nextLowConfidence;
     if (_draft != null) {
       _scope = '';
       _deadline = null;
       _availability = null;
+      _availabilityCleared = false;
     }
     _entrySource =
         fromVoice || (_entrySource == 'voice' && value.trim().isNotEmpty)
@@ -937,6 +967,27 @@ class TaskProvider extends ChangeNotifier {
 
   void setAvailability(AvailabilitySlot value) {
     _availability = value;
+    _availabilityCleared = false;
+    _candidate = null;
+    _confirmed = false;
+    _changed();
+  }
+
+  AvailabilitySlot? clearAvailability() {
+    if (!hasAvailability) return null;
+    final previous = _availability;
+    _availability = null;
+    _availabilityCleared = true;
+    _candidate = null;
+    _confirmed = false;
+    _changed();
+    return previous;
+  }
+
+  void undoClearAvailability(AvailabilitySlot? previous) {
+    if (!_availabilityCleared) return;
+    _availability = previous;
+    _availabilityCleared = false;
     _candidate = null;
     _confirmed = false;
     _changed();
@@ -987,7 +1038,9 @@ class TaskProvider extends ChangeNotifier {
               start: DateTime.parse(start),
               end: DateTime.parse(end),
             );
+      _availabilityCleared = data['availability_cleared'] as bool? ?? false;
       _entrySource = data['entry_source'] == 'voice' ? 'voice' : 'text';
+      _isVoiceLowConfidence = false;
       _draftSaved = data['draft_saved'] as bool? ?? true;
       _confirmed = data['confirmed'] as bool? ?? false;
       _decompositionChoice = data['decomposition_choice'] as String?;
@@ -1036,6 +1089,29 @@ class TaskProvider extends ChangeNotifier {
     }
   }
 
+  Future<void> deleteCurrentDraft() async {
+    if (_isApiBusy) return;
+    final draft = _draft;
+    if (draft != null && draft.confirmedTaskId == null) {
+      _isApiBusy = true;
+      _apiError = null;
+      notifyListeners();
+      try {
+        await _planningApi.deleteDraft(draft.draftId);
+      } on ApiException catch (error) {
+        if (error.statusCode != 404) {
+          _isApiBusy = false;
+          _apiError = error.message;
+          notifyListeners();
+          rethrow;
+        }
+      } finally {
+        _isApiBusy = false;
+      }
+    }
+    clearDraft();
+  }
+
   void clearDraft() {
     _editRevision++;
     _activeOperation = null;
@@ -1048,9 +1124,11 @@ class TaskProvider extends ChangeNotifier {
     _title = '';
     _rawInputText = '';
     _entrySource = 'text';
+    _isVoiceLowConfidence = false;
     _scope = '';
     _deadline = null;
     _availability = null;
+    _availabilityCleared = false;
     _draftSaved = false;
     _confirmed = false;
     _draft = null;
@@ -1085,6 +1163,7 @@ class TaskProvider extends ChangeNotifier {
       'deadline': _deadline?.toIso8601String(),
       'availability_start': _availability?.start.toIso8601String(),
       'availability_end': _availability?.end.toIso8601String(),
+      'availability_cleared': _availabilityCleared,
       'draft_saved': _draftSaved,
       'confirmed': _confirmed,
       'decomposition_choice': _decompositionChoice,

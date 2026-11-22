@@ -53,7 +53,9 @@ async def get_preferences(
     db: DbSessionDep,
 ) -> SuccessEnvelope[UserPreference]:
     """Trả về cấu hình trợ lý đang có hiệu lực và yêu cầu đang chờ duyệt của người dùng."""
-    pref = await load_preferences(user_id=current_user.user_id, db=db)
+    pref = await load_preferences(
+        user_id=current_user.user_id, db=db, commit_if_created=True
+    )
     request_id = getattr(request.state, "request_id", None)
     return SuccessEnvelope(
         data=pref,
@@ -220,6 +222,7 @@ async def get_current_suggestion_endpoint(
         db,
         user_id=current_user.user_id,
         kind=kind,
+        commit_if_created=True,
     )
     request_id = getattr(request.state, "request_id", None)
     return SuccessEnvelope(data=result, meta=build_response_meta(request_id))

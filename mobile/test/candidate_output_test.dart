@@ -53,4 +53,35 @@ void main() {
       );
     });
   }
+  testWidgets('chỉnh bước giữ dữ liệu khi thiếu kết quả', (tester) async {
+    final task = _CandidateTask(PlanCandidateModel.fromJson({
+      'candidate_id': 'edit-demo',
+      'review_revision': 1,
+      'feasibility': {'status': 'feasible'},
+      'steps': [
+        {
+          'client_step_key': 'step-1',
+          'title': 'Chuẩn bị báo cáo',
+          'estimated_base_seconds': 1200,
+        },
+      ],
+      'sessions': [],
+    }));
+    addTearDown(task.dispose);
+    await tester.pumpWidget(ChangeNotifierProvider<TaskProvider>.value(
+      value: task,
+      child: const MaterialApp(home: CandidateReviewScreen()),
+    ));
+    await tester.ensureVisible(find.byTooltip('Chỉnh bước'));
+    await tester.tap(find.byTooltip('Chỉnh bước'));
+    await tester.pumpAndSettle();
+    await tester.enterText(
+        find.widgetWithText(TextFormField, 'Tên bước'), 'Viết phần mở đầu');
+    await tester.ensureVisible(find.text('Gửi thay đổi'));
+    await tester.tap(find.text('Gửi thay đổi'));
+    await tester.pumpAndSettle();
+    expect(find.text('Nhập kết quả bạn muốn đạt.'), findsOneWidget);
+    expect(find.text('Viết phần mở đầu'), findsOneWidget);
+    expect(find.text('Chỉnh bước kế hoạch'), findsOneWidget);
+  });
 }

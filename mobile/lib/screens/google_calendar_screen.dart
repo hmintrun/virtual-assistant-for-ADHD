@@ -1,8 +1,12 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../core/api_client.dart';
+import '../core/responsive_layout.dart';
+import '../core/theme.dart';
 import '../services/google_calendar_api.dart';
 import '../widgets/melbel_ui.dart';
 
@@ -89,53 +93,169 @@ class _GoogleCalendarScreenState extends State<GoogleCalendarScreen>
       });
 
   Future<void> _open(Map<String, dynamic> connection) async {
-    await Navigator.of(context).push<void>(MaterialPageRoute(
-      builder: (_) => _GoogleCalendarAccount(api: _api, connection: connection),
-    ));
-    if (mounted) await _load();
+    final disconnected = await Navigator.of(context).push<bool>(
+      MaterialPageRoute(
+        builder: (_) =>
+            _GoogleCalendarAccount(api: _api, connection: connection),
+      ),
+    );
+    if (!mounted) return;
+    await _load();
+    if (disconnected == true && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        duration: const Duration(seconds: 5),
+        content: const Text(
+            'Đã ngắt Google Calendar. Hoàn tác sẽ mở Google để cấp lại quyền.'),
+        action: SnackBarAction(
+          label: 'Hoàn tác',
+          onPressed: () => unawaited(_connect()),
+        ),
+      ));
+    }
   }
 
   @override
-  Widget build(BuildContext context) => Scaffold(
-        appBar: const MelbelAppBar(title: 'Google Calendar', showBack: true),
+  Widget build(BuildContext context) {
+    final palette = context.melbel;
+    return MelbelPageBackdrop(
+      showTopCloud: false,
+      showBottomClouds: true,
+      child: Scaffold(
+        backgroundColor: Colors.transparent,
+        appBar: const MelbelAppBar(
+          title: 'Google Calendar',
+          showBack: true,
+          showTitleRays: true,
+        ),
         body: SafeArea(
-            child: ListView(
-          padding: const EdgeInsets.all(20),
-          children: [
-            if (_loading) const LinearProgressIndicator(),
-            if (_error != null) Text(_error!),
-            if (_pendingConsent)
-              const Text(
-                  'Sau khi cấp quyền trên Google, quay lại và tải lại kết nối.'),
-            if (!_loading && _error == null && _connections.isEmpty)
-              const Text('Chưa liên kết Google Calendar.'),
-            for (final connection in _connections)
-              MelbelCard(
-                  child: ListTile(
-                leading: const Icon(Icons.calendar_month_outlined),
-                title: Text(
-                    connection['account_ref'] as String? ?? 'Google Calendar'),
-                subtitle: Text(connection['connection_state'] != 'connected'
-                    ? 'Cần cấp lại quyền'
-                    : connection['write_calendar_id'] == null
-                        ? 'Chưa chọn lịch ghi phiên'
-                        : 'Đã chọn lịch ghi phiên'),
-                onTap: _loading
-                    ? null
-                    : connection['connection_state'] == 'connected'
-                        ? () => _open(connection)
-                        : _connect,
-              )),
-            const SizedBox(height: 12),
-            PrimaryCta(
-                label: 'Liên kết Google Calendar',
-                onPressed: _loading ? null : _connect),
-            const SizedBox(height: 8),
-            SecondaryCta(
-                label: 'Tải lại kết nối', onPressed: _loading ? null : _load),
-          ],
-        )),
-      );
+          child: ListView(
+            padding: MelbelLayout.pageInsets(context, top: 16, bottom: 28),
+            children: [
+              if (_loading)
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 12),
+                  child: ClipRRect(
+                    borderRadius: BorderRadius.circular(999),
+                    child: const LinearProgressIndicator(minHeight: 6),
+                  ),
+                ),
+              if (_error != null) ...[
+                MelbelCard(
+                  borderRadius: 22,
+                  tone: MelbelCardTone.amber,
+                  child: Row(
+                    children: [
+                      Icon(Icons.cloud_off_outlined, color: palette.amberInk),
+                      const SizedBox(width: 10),
+                      Expanded(child: Text(_error!)),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 12),
+              ],
+              if (_pendingConsent) ...[
+                const MelbelCard(
+                  borderRadius: 22,
+                  tone: MelbelCardTone.sage,
+                  child: Text(
+                    'Sau khi cấp quyền trên Google, quay lại và tải lại kết nối.',
+                  ),
+                ),
+                const SizedBox(height: 12),
+              ],
+              if (!_loading && _error == null && _connections.isEmpty) ...[
+                const MelbelSectionBanner(
+                  title: 'Đồng bộ lịch Google',
+                  art: MelbelSectionArt.sprout,
+                ),
+                const SizedBox(height: 12),
+                const MelbelCard(
+                  borderRadius: 24,
+                  child: Text(
+                    'Kết nối Google Calendar để xem lịch bận và đồng bộ các phiên đã chốt.',
+                  ),
+                ),
+                const SizedBox(height: 12),
+              ],
+              for (final connection in _connections)
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 10),
+                  child: MelbelCard(
+                    borderRadius: 24,
+                    padding: EdgeInsets.zero,
+                    child: ListTile(
+                      contentPadding: const EdgeInsets.symmetric(
+                        horizontal: 16,
+                        vertical: 6,
+                      ),
+                      leading: Container(
+                        width: 40,
+                        height: 40,
+                        decoration: BoxDecoration(
+                          color: palette.sageSoft,
+                          borderRadius: BorderRadius.circular(14),
+                        ),
+                        child: Icon(
+                          Icons.calendar_month_outlined,
+                          color: palette.accentInk,
+                        ),
+                      ),
+                      title: Text(
+                        connection['account_ref'] as String? ?? 'Google Calendar',
+                        style: Theme.of(context)
+                            .textTheme
+                            .titleSmall
+                            ?.copyWith(fontWeight: FontWeight.w700),
+                      ),
+                      subtitle: Text(
+                        connection['connection_state'] != 'connected'
+                            ? 'Cần cấp lại quyền'
+                            : connection['write_calendar_id'] == null
+                                ? 'Chưa chọn lịch ghi phiên'
+                                : 'Đã chọn lịch ghi phiên',
+                      ),
+                      trailing: Icon(
+                        Icons.chevron_right_rounded,
+                        color: palette.onSurfaceVariant,
+                      ),
+                      onTap: _loading
+                          ? null
+                          : connection['connection_state'] == 'connected'
+                              ? () => _open(connection)
+                              : _connect,
+                    ),
+                  ),
+                ),
+              const SizedBox(height: 8),
+              if (_pendingConsent) ...[
+                PrimaryCta(
+                  label: 'Kiểm tra quyền đã cấp',
+                  onPressed: _loading ? null : _load,
+                ),
+                const SizedBox(height: 10),
+                SecondaryCta(
+                  label: 'Mở lại trang cấp quyền',
+                  onPressed: _loading ? null : _connect,
+                ),
+              ] else ...[
+                PrimaryCta(
+                  label: _connections.isEmpty
+                      ? 'Liên kết Google Calendar'
+                      : 'Liên kết thêm tài khoản',
+                  onPressed: _loading ? null : _connect,
+                ),
+                const SizedBox(height: 10),
+                SecondaryCta(
+                  label: 'Tải lại kết nối',
+                  onPressed: _loading ? null : _load,
+                ),
+              ],
+            ],
+          ),
+        ),
+      ),
+    );
+  }
 }
 
 class _GoogleCalendarAccount extends StatefulWidget {
@@ -276,6 +396,8 @@ class _GoogleCalendarAccountState extends State<_GoogleCalendarAccount> {
       if (!mounted) return;
       final apply = await showModalBottomSheet<bool>(
         context: context,
+        showDragHandle: true,
+        isScrollControlled: true,
         builder: (sheet) => SafeArea(
             child: Padding(
           padding: const EdgeInsets.all(20),
@@ -319,69 +441,162 @@ class _GoogleCalendarAccountState extends State<_GoogleCalendarAccount> {
   Widget build(BuildContext context) {
     final write =
         _calendars.where((item) => item['id'] == _writeId).firstOrNull;
-    return Scaffold(
-      appBar: const MelbelAppBar(title: 'Lịch đã liên kết', showBack: true),
-      body: SafeArea(
+    return MelbelPageBackdrop(
+      showTopCloud: false,
+      showBottomClouds: true,
+      child: Scaffold(
+        backgroundColor: Colors.transparent,
+        appBar: const MelbelAppBar(
+          title: 'Lịch đã liên kết',
+          showBack: true,
+          showTitleRays: true,
+        ),
+        body: SafeArea(
           child: ListView(
-        padding: const EdgeInsets.all(20),
-        children: [
-          if (_busy) const LinearProgressIndicator(),
-          if (_error != null) ...[
-            Text(_error!),
-            TextButton(
-                onPressed: _busy ? null : _loadCalendars,
-                child: const Text('Thử lại')),
-          ],
-          if (_calendars.isNotEmpty) ...[
-            DropdownButton<String>(
-              isExpanded: true,
-              value: _selected,
-              items: [
-                for (final calendar in _calendars)
-                  DropdownMenuItem(
-                    value: calendar['id'] as String,
-                    child: Text(calendar['summary'] as String? ?? 'Lịch Google',
-                        overflow: TextOverflow.ellipsis),
+            padding: const EdgeInsets.all(20),
+            children: [
+              if (_busy)
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 12),
+                  child: ClipRRect(
+                    borderRadius: BorderRadius.circular(999),
+                    child: const LinearProgressIndicator(minHeight: 6),
+                  ),
+                ),
+              if (_error != null) ...[
+                MelbelCard(
+                  borderRadius: 22,
+                  tone: MelbelCardTone.amber,
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(_error!),
+                      const SizedBox(height: 6),
+                      TextButton(
+                        onPressed: _busy ? null : _loadCalendars,
+                        child: const Text('Thử lại'),
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 12),
+              ],
+              if (_calendars.isNotEmpty) ...[
+                const MelbelSectionBanner(
+                  title: 'Sự kiện theo ngày',
+                  art: MelbelSectionArt.sprout,
+                ),
+                const SizedBox(height: 12),
+                MelbelCard(
+                  borderRadius: 22,
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 16,
+                    vertical: 6,
+                  ),
+                  child: DropdownButton<String>(
+                    isExpanded: true,
+                    underline: const SizedBox.shrink(),
+                    value: _selected,
+                    items: [
+                      for (final calendar in _calendars)
+                        DropdownMenuItem(
+                          value: calendar['id'] as String,
+                          child: Text(
+                            calendar['summary'] as String? ?? 'Lịch Google',
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                    ],
+                    onChanged:
+                        _busy ? null : (value) => _showDay(calendarId: value),
+                  ),
+                ),
+                const SizedBox(height: 8),
+                Align(
+                  alignment: Alignment.centerLeft,
+                  child: TextButton.icon(
+                    icon: const Icon(Icons.today_outlined),
+                    label: Text(
+                      MaterialLocalizations.of(context).formatFullDate(_day),
+                    ),
+                    onPressed: _busy ? null : _pickDay,
+                  ),
+                ),
+                if (_loadedEvents && _events.isEmpty && _error == null)
+                  const MelbelCard(
+                    borderRadius: 22,
+                    child: Text('Không có sự kiện trong ngày đã chọn.'),
+                  ),
+                for (final event in _events)
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 8),
+                    child: MelbelCard(
+                      borderRadius: 22,
+                      padding: EdgeInsets.zero,
+                      child: ListTile(
+                        title: Text(
+                          event['title'] as String? ?? 'Sự kiện không tiêu đề',
+                          style: Theme.of(context)
+                              .textTheme
+                              .titleSmall
+                              ?.copyWith(fontWeight: FontWeight.w700),
+                        ),
+                        subtitle: Text(
+                          '${_when(context, event['start_at'])} – ${_when(context, event['end_at'])}',
+                        ),
+                      ),
+                    ),
                   ),
               ],
-              onChanged: _busy ? null : (value) => _showDay(calendarId: value),
-            ),
-            TextButton.icon(
-              icon: const Icon(Icons.today_outlined),
-              label:
-                  Text(MaterialLocalizations.of(context).formatFullDate(_day)),
-              onPressed: _busy ? null : _pickDay,
-            ),
-            if (_loadedEvents && _events.isEmpty && _error == null)
-              const Text('Không có sự kiện trong ngày đã chọn.'),
-            for (final event in _events)
+              const SizedBox(height: 16),
               MelbelCard(
-                  child: ListTile(
-                title:
-                    Text(event['title'] as String? ?? 'Sự kiện không tiêu đề'),
-                subtitle: Text(
-                    '${_when(context, event['start_at'])} – ${_when(context, event['end_at'])}'),
-              )),
-          ],
-          const SizedBox(height: 16),
-          Text(_writeId == null
-              ? 'Chưa chọn lịch ghi phiên'
-              : 'Lịch ghi phiên: ${write?['summary'] ?? _writeId}'),
-          const SizedBox(height: 8),
-          SecondaryCta(
-              label: 'Chọn lịch ghi',
-              onPressed: _busy ? null : _chooseWriteCalendar),
-          TextButton(
-            onPressed: _busy
-                ? null
-                : () => _perform(() async {
-                      await widget.api.disconnect(_id);
-                      if (mounted) Navigator.pop(context);
-                    }),
-            child: const Text('Ngắt kết nối'),
+                borderRadius: 22,
+                tone: MelbelCardTone.sage,
+                child: Text(
+                  _writeId == null
+                      ? 'Chưa chọn lịch ghi phiên'
+                      : 'Lịch ghi phiên: ${write?['summary'] ?? _writeId}',
+                ),
+              ),
+              const SizedBox(height: 12),
+              SecondaryCta(
+                label: 'Chọn lịch ghi',
+                onPressed: _busy ? null : _chooseWriteCalendar,
+              ),
+              const SizedBox(height: 8),
+              SecondaryCta(
+                label: 'Đồng bộ ngay',
+                icon: Icons.sync_rounded,
+                onPressed: _busy
+                    ? null
+                    : () {
+                        final messenger = ScaffoldMessenger.of(context);
+                        unawaited(_perform(() async {
+                          await widget.api.refreshConnection(_id);
+                          await _readDay();
+                          messenger.showSnackBar(
+                            const SnackBar(
+                              content: Text('Đã đồng bộ lịch Google.'),
+                              behavior: SnackBarBehavior.floating,
+                            ),
+                          );
+                        }));
+                      },
+              ),
+              const SizedBox(height: 6),
+              TextButton(
+                onPressed: _busy
+                    ? null
+                    : () => _perform(() async {
+                          await widget.api.disconnect(_id);
+                          if (mounted) Navigator.pop(context, true);
+                        }),
+                child: const Text('Ngắt kết nối'),
+              ),
+            ],
           ),
-        ],
-      )),
+        ),
+      ),
     );
   }
 }

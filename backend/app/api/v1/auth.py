@@ -6,15 +6,29 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Depends
 
 from app.api.deps import CurrentUserDep, DbSessionDep
-from app.schemas.auth import GoogleLoginData, GoogleLoginRequest, VerifiedGoogleIdentity
+from app.schemas.auth import (
+    GoogleLoginData,
+    GoogleLoginRequest,
+    LogoutData,
+    RefreshTokenRequest,
+    TokenBundle,
+    VerifiedGoogleIdentity,
+)
 from app.schemas.common import ErrorEnvelope, SuccessEnvelope, build_response_meta
 from app.schemas.user import CurrentUser
-from app.services.auth_service import login_with_google
+from app.services.auth_service import (
+    login_with_google,
+    logout_app_session,
+    refresh_app_tokens,
+)
 from app.services.google_identity_verifier import verify_google_identity
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 errors: dict[int | str, dict[str, Any]] = {
     status: {"model": ErrorEnvelope} for status in (401, 403, 409, 422, 503)
+}
+logout_errors: dict[int | str, dict[str, Any]] = {
+    status: {"model": ErrorEnvelope} for status in (401, 403, 422, 503)
 }
 
 
@@ -31,6 +45,33 @@ async def google_login(
     ],
 ):
     data = await login_with_google(db, payload.id_token, verifier=verifier)
+    return SuccessEnvelope(data=data, meta=build_response_meta())
+
+
+@router.post("/refresh", response_model=SuccessEnvelope[TokenBundle], responses=errors)
+async def refresh_token_endpoint(
+    payload: RefreshTokenRequest,
+    db: DbSessionDep,
+):
+    data = await refresh_app_tokens(db, payload.refresh_token)
+    return SuccessEnvelope(data=data, meta=build_response_meta())
+
+
+@router.post(
+    "/logout",
+    response_model=SuccessEnvelope[LogoutData],
+    summary="Đăng xuất phiên làm việc",
+    description=(
+        "Public theo refresh_token; nếu token còn hiệu lực sẽ thu hồi chuỗi token của phiên và trả "
+        "revoked=true; nếu jti đã thu hồi/rotated trước đó sẽ trả 200 idempotent với revoked=false."
+    ),
+    responses=logout_errors,
+)
+async def logout_endpoint(
+    payload: RefreshTokenRequest,
+    db: DbSessionDep,
+):
+    data = await logout_app_session(db, payload.refresh_token)
     return SuccessEnvelope(data=data, meta=build_response_meta())
 
 

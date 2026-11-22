@@ -1,0 +1,280 @@
+{
+  "contract_source": "schema.md sections 14–15; backend 23e856b; auth target ba16055",
+  "cases": [
+    {
+      "name": "start_idempotent",
+      "scope": "runtime",
+      "method": "POST",
+      "path": "/api/v1/sessions/55555555-5555-4555-8555-555555555555/start",
+      "response": {
+        "status": 201,
+        "body": {
+          "data": {
+            "run_id": "44444444-4444-4444-8444-444444444444",
+            "session_id": "55555555-5555-4555-8555-555555555555",
+            "device_id": "device-1",
+            "run_revision": 1,
+            "started_at": "2026-11-20T03:00:00Z",
+            "ended_at": null,
+            "run_state": "running",
+            "active_phase": "work",
+            "segment_index": 0,
+            "work_elapsed_seconds": null,
+            "rest_elapsed_seconds": null,
+            "actual_work_seconds": null,
+            "actual_source": null,
+            "outcome": "unknown",
+            "checkin_timeout_at": null,
+            "settings_snapshot": {
+              "effective_revision": 3,
+              "session": {
+                "session_id": "55555555-5555-4555-8555-555555555555",
+                "step_id": "step-1",
+                "scheduled_start": "2026-11-20T03:00:00Z",
+                "scheduled_end": "2026-11-20T03:30:00Z",
+                "micro_task_text": null,
+                "micro_task_seconds": null,
+                "work_seconds": 1500,
+                "rest_seconds": 300,
+                "segments": [
+                  {
+                    "order_index": 0,
+                    "kind": "work",
+                    "duration_seconds": 1500
+                  },
+                  {
+                    "order_index": 1,
+                    "kind": "rest",
+                    "duration_seconds": 300
+                  }
+                ],
+                "duration_seconds": 1800,
+                "schedule_revision": 8,
+                "status": "in_progress",
+                "calendar_event_link_id": null,
+                "start_state": "started",
+                "start_decision_due_at": "2026-11-20T03:05:00Z"
+              }
+            },
+            "check_in": null,
+            "dnd_release_at": null,
+            "total_planned_seconds": null,
+            "segments": [],
+            "continuation_of_run_id": null
+          },
+          "meta": {
+            "request_id": "w4-example",
+            "server_time": "2026-11-20T03:00:00Z"
+          }
+        }
+      },
+      "request": {
+        "expected_schedule_revision": 8,
+        "device_id": "device-1",
+        "requested_start_at": "2026-11-20T03:00:00Z"
+      },
+      "request_headers": {
+        "Idempotency-Key": "w4-start-1"
+      }
+    },
+    {
+      "name": "start_idempotent_replay",
+      "scope": "runtime",
+      "method": "POST",
+      "path": "/api/v1/sessions/55555555-5555-4555-8555-555555555555/start",
+      "response": {
+        "status": 201,
+        "body": {
+          "data": {
+            "run_id": "44444444-4444-4444-8444-444444444444",
+            "session_id": "55555555-5555-4555-8555-555555555555",
+            "device_id": "device-1",
+            "run_revision": 1,
+            "started_at": "2026-11-20T03:00:00Z",
+            "ended_at": null,
+            "run_state": "running",
+            "active_phase": "work",
+            "segment_index": 0,
+            "work_elapsed_seconds": null,
+            "rest_elapsed_seconds": null,
+            "actual_work_seconds": null,
+            "actual_source": null,
+            "outcome": "unknown",
+            "checkin_timeout_at": null,
+            "settings_snapshot": {
+              "effective_revision": 3,
+              "session": {
+                "session_id": "55555555-5555-4555-8555-555555555555",
+                "step_id": "step-1",
+                "scheduled_start": "2026-11-20T03:00:00Z",
+                "scheduled_end": "2026-11-20T03:30:00Z",
+                "micro_task_text": null,
+                "micro_task_seconds": null,
+                "work_seconds": 1500,
+                "rest_seconds": 300,
+                "segments": [
+                  {
+                    "order_index": 0,
+                    "kind": "work",
+                    "duration_seconds": 1500
+                  },
+                  {
+                    "order_index": 1,
+                    "kind": "rest",
+                    "duration_seconds": 300
+                  }
+                ],
+                "duration_seconds": 1800,
+                "schedule_revision": 8,
+                "status": "in_progress",
+                "calendar_event_link_id": null,
+                "start_state": "started",
+                "start_decision_due_at": "2026-11-20T03:05:00Z"
+              }
+            },
+            "check_in": null,
+            "dnd_release_at": null,
+            "total_planned_seconds": null,
+            "segments": [],
+            "continuation_of_run_id": null
+          },
+          "meta": {
+            "request_id": "w4-example",
+            "server_time": "2026-11-20T03:00:00Z"
+          }
+        }
+      },
+      "request": {
+        "expected_schedule_revision": 8,
+        "device_id": "device-1",
+        "requested_start_at": "2026-11-20T03:00:00Z"
+      },
+      "request_headers": {
+        "Idempotency-Key": "w4-start-1"
+      },
+      "client_expectations": {
+        "replay_returns_same_run": true
+      }
+    },
+    {
+      "name": "command_receipt",
+      "scope": "runtime",
+      "method": "GET",
+      "path": "/api/v1/commands/start-1",
+      "response": {
+        "status": 200,
+        "body": {
+          "data": {
+            "command_id": "start-1",
+            "command_type": "start_session_run",
+            "state": "applied",
+            "result_reference": {
+              "run_id": "44444444-4444-4444-8444-444444444444"
+            },
+            "applied_at": "2026-11-20T03:00:00Z"
+          },
+          "meta": {
+            "request_id": "w4-example",
+            "server_time": "2026-11-20T03:00:00Z"
+          }
+        }
+      }
+    },
+    {
+      "name": "start_clock_skew",
+      "scope": "runtime",
+      "method": "POST",
+      "path": "/api/v1/sessions/55555555-5555-4555-8555-555555555555/start",
+      "response": {
+        "status": 422,
+        "body": {
+          "error": {
+            "code": "VALIDATION_ERROR",
+            "message": "Thiếu mã thiết bị hoặc thời điểm bắt đầu hợp lệ.",
+            "field_errors": [
+              {
+                "field_path": "requested_start_at",
+                "message": "Thiếu mã thiết bị hoặc thời điểm bắt đầu hợp lệ.",
+                "code": null
+              }
+            ],
+            "retryable": false,
+            "current_revisions": {},
+            "next_action": "fix_fields"
+          },
+          "meta": {
+            "request_id": "w4-example",
+            "server_time": "2026-11-20T03:00:00Z"
+          }
+        }
+      },
+      "request": {
+        "expected_schedule_revision": 8,
+        "device_id": "device-1",
+        "requested_start_at": "2026-11-20T03:05:01Z"
+      },
+      "request_headers": {
+        "Idempotency-Key": "w4-start-clock-skew"
+      }
+    },
+    {
+      "name": "thought_capture",
+      "scope": "runtime",
+      "method": "POST",
+      "path": "/api/v1/thoughts",
+      "response": {
+        "status": 201,
+        "body": {
+          "data": {
+            "client_thought_id": "client-thought-1",
+            "source_run_id": "44444444-4444-4444-8444-444444444444",
+            "input_type": "audio",
+            "capture_state": "raw_saved",
+            "attempt_count": 1,
+            "text_content": null,
+            "thought_id": "66666666-6666-4666-8666-666666666666",
+            "thought_revision": 1,
+            "linked_draft_id": null,
+            "converted_task_id": null,
+            "retention_expires_at": null
+          },
+          "meta": {
+            "request_id": "w4-example",
+            "server_time": "2026-11-20T03:00:00Z"
+          }
+        }
+      },
+      "request": {
+        "client_thought_id": "client-thought-1",
+        "source_run_id": "44444444-4444-4444-8444-444444444444",
+        "input_type": "audio",
+        "capture_state": "raw_saved",
+        "attempt_count": 1,
+        "text_content": null
+      }
+    },
+    {
+      "name": "thought_delete",
+      "scope": "runtime",
+      "method": "DELETE",
+      "path": "/api/v1/thoughts/66666666-6666-4666-8666-666666666666",
+      "response": {
+        "status": 200,
+        "body": {
+          "data": {
+            "thought_id": "66666666-6666-4666-8666-666666666666",
+            "deleted": true,
+            "local_cleanup_required": true
+          },
+          "meta": {
+            "request_id": "w4-example",
+            "server_time": "2026-11-20T03:00:00Z"
+          }
+        }
+      },
+      "request": {
+        "expected_thought_revision": 1
+      }
+    }
+  ]
+}

@@ -93,7 +93,7 @@ class _WeeklyAvailabilityEditorState extends State<WeeklyAvailabilityEditor> {
                   Expanded(
                     child: OutlinedButton.icon(
                       onPressed: () async {
-                        final value = await showTimePicker(
+                        final value = await showMelbelTimePicker(
                           context: context,
                           initialTime: start,
                           helpText: 'Giờ bắt đầu rảnh',
@@ -102,14 +102,14 @@ class _WeeklyAvailabilityEditorState extends State<WeeklyAvailabilityEditor> {
                         if (value != null) setSheetState(() => start = value);
                       },
                       icon: const Icon(Icons.access_time, size: 18),
-                      label: Text('Từ ${start.format(context)}'),
+                      label: Text('Từ ${_formatTime(start)}'),
                     ),
                   ),
                   const SizedBox(width: 8),
                   Expanded(
                     child: OutlinedButton.icon(
                       onPressed: () async {
-                        final value = await showTimePicker(
+                        final value = await showMelbelTimePicker(
                           context: context,
                           initialTime: end,
                           helpText: 'Giờ kết thúc rảnh',
@@ -118,7 +118,7 @@ class _WeeklyAvailabilityEditorState extends State<WeeklyAvailabilityEditor> {
                         if (value != null) setSheetState(() => end = value);
                       },
                       icon: const Icon(Icons.access_time_filled, size: 18),
-                      label: Text('Đến ${end.format(context)}'),
+                      label: Text('Đến ${_formatTime(end)}'),
                     ),
                   ),
                 ],
@@ -230,7 +230,7 @@ class _WeeklyAvailabilityEditorState extends State<WeeklyAvailabilityEditor> {
               const SizedBox(height: 12),
               if (_rules.isEmpty)
                 Padding(
-                  padding: EdgeInsets.symmetric(vertical: 10),
+                  padding: const EdgeInsets.symmetric(vertical: 10),
                   child: Text(
                     'Chưa có khung giờ rảnh nào.',
                     style: TextStyle(color: MelbelColors.kOnSurfaceVariant),
@@ -259,8 +259,23 @@ class _WeeklyAvailabilityEditorState extends State<WeeklyAvailabilityEditor> {
                           ),
                           IconButton(
                             tooltip: 'Xóa khung giờ',
-                            onPressed: () =>
-                                setState(() => _rules.removeAt(index)),
+                            onPressed: () {
+                              setState(() => _rules.removeAt(index));
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                SnackBar(
+                                  content: const Text('Đã xóa khung giờ'),
+                                  duration: const Duration(seconds: 5),
+                                  action: SnackBarAction(
+                                    label: 'Hoàn tác',
+                                    onPressed: () {
+                                      if (!mounted) return;
+                                      setState(() => _rules.insert(
+                                          index.clamp(0, _rules.length), rule));
+                                    },
+                                  ),
+                                ),
+                              );
+                            },
                             icon: const Icon(Icons.remove_circle_outline),
                           ),
                         ],

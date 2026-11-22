@@ -49,7 +49,15 @@ class ProposalFeasibilityData(ApiModel):
 
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
-    status: Literal["feasible", "deficit", "insufficient_data", "valid", "conflict", "unsolvable"]
+    status: Literal[
+        "feasible",
+        "infeasible",
+        "deficit",
+        "insufficient_data",
+        "valid",
+        "conflict",
+        "unsolvable",
+    ]
     confirmable: bool
     deficit_seconds: int | None = Field(default=None, alias="deficit_seconds")
     blocking_reasons: list[BlockingReason] = Field(default_factory=list)
@@ -341,6 +349,10 @@ class ProposalData(ApiModel):
     explanation: str
     generation_tier: ProposalGenerationTier = "python_fallback"
     stale: bool = False
+    pending_notification_state: Literal["not_needed", "not_sent", "pending", "sent"] = (
+        "not_sent"
+    )
+    pending_notification_sent_at: datetime | None = None
     created_at: datetime
     updated_at: datetime
 

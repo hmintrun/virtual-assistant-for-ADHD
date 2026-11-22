@@ -51,6 +51,36 @@ void main() {
     expect(requests.last.headers['Idempotency-Key'], 'key');
   });
 
+  test('Calendar permission 401 keeps the current app session', () async {
+    final session = ApiSession('owner-a', token: 'valid');
+    ApiSession.current = session;
+    session.renew = () async => throw StateError('Unexpected session renewal');
+    session.onUnauthorized = () => fail('App session was marked unauthorized');
+    final dio = Dio();
+    final client = ApiClient(dio: dio);
+    dio.interceptors.add(InterceptorsWrapper(onRequest: (request, handler) {
+      handler.reject(
+        DioException.badResponse(
+          statusCode: 401,
+          requestOptions: request,
+          response: Response(
+            requestOptions: request,
+            statusCode: 401,
+            data: {
+              'error': {'code': 'CALENDAR_AUTH_REQUIRED'}
+            },
+          ),
+        ),
+        true,
+      );
+    }));
+    await expectLater(
+      client.getData('/calendar/connections/id/calendars'),
+      throwsA(isA<ApiException>()
+          .having((error) => error.code, 'code', 'CALENDAR_AUTH_REQUIRED')),
+    );
+  });
+
   test('a client created for a signed-out owner cannot use the next token',
       () async {
     final first = ApiSession('owner-a', token: 'a');

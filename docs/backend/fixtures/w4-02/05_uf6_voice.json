@@ -1,0 +1,224 @@
+{
+  "contract_source": "schema.md sections 14–15; backend 23e856b; auth target ba16055",
+  "cases": [
+    {
+      "name": "proposal_deficit",
+      "scope": "runtime",
+      "method": "GET",
+      "path": "/api/v1/proposals/current",
+      "response": {
+        "status": 200,
+        "body": {
+          "data": {
+            "proposal_id": "proposal-1",
+            "status": "pending",
+            "trigger_reason": "settings_change",
+            "target_task_id": "task-1",
+            "allowed_task_ids": [
+              "task-1"
+            ],
+            "affected_task_ids": [
+              "task-1"
+            ],
+            "base_schedule_revision": 8,
+            "source_revisions": {
+              "task": 2,
+              "schedule": 8,
+              "availability": 1,
+              "settings": 3,
+              "calendar": 1
+            },
+            "proposal_revision": 1,
+            "supersedes_proposal_id": null,
+            "calculated_at": null,
+            "continuation_request": null,
+            "proposed_changes": {
+              "sessions_to_move": [],
+              "sessions_to_add": [],
+              "sessions_to_cancel": [
+                {
+                  "session_id": "55555555-5555-4555-8555-555555555555",
+                  "task_id": null,
+                  "step_id": null,
+                  "reason": "resegmented_by_settings_change"
+                }
+              ],
+              "steps_to_add": [
+                {
+                  "step_id": "step-2",
+                  "task_id": "task-1",
+                  "order_index": 2,
+                  "title": "Hoàn thiện bản nháp",
+                  "estimated_base_seconds": 3600
+                }
+              ],
+              "next_horizon_from": "2026-11-20T03:00:00Z",
+              "next_horizon_to": "2026-12-04T03:00:00Z"
+            },
+            "gap_exceptions": [],
+            "start_window": null,
+            "approval_envelope": null,
+            "feasibility": {
+              "status": "deficit",
+              "confirmable": false,
+              "deficit_seconds": 3600,
+              "blocking_reasons": [
+                {
+                  "code": "INSUFFICIENT_FREE_TIME",
+                  "message": "Còn thiếu 60 phút trước hạn."
+                }
+              ],
+              "next_horizon_preview": null
+            },
+            "explanation": "Bạn có thể mở thêm giờ rảnh hoặc lùi hạn chót để tính lại phương án.",
+            "generation_tier": "python_fallback",
+            "stale": false,
+            "pending_notification_state": "not_sent",
+            "pending_notification_sent_at": null,
+            "created_at": "2026-11-20T03:00:00Z",
+            "updated_at": "2026-11-20T03:00:00Z"
+          },
+          "meta": {
+            "request_id": "w4-example",
+            "server_time": "2026-11-20T03:00:00Z"
+          }
+        }
+      }
+    },
+    {
+      "name": "tts_empty_audio",
+      "scope": "runtime",
+      "method": "POST",
+      "path": "/api/v1/voice/tts",
+      "response": {
+        "status": 503,
+        "body": {
+          "error": {
+            "code": "TTS_EMPTY_AUDIO",
+            "message": "Không tạo được âm thanh lúc này. Ứng dụng sẽ dùng giọng đọc trên máy.",
+            "field_errors": [],
+            "retryable": false,
+            "current_revisions": {},
+            "next_action": "use_on_device_tts"
+          },
+          "meta": {
+            "request_id": "w4-example",
+            "server_time": "2026-11-20T03:00:00Z"
+          }
+        }
+      },
+      "request": {
+        "text": "Đến giờ kiểm tra tiến độ."
+      }
+    },
+    {
+      "name": "tts_timeout",
+      "scope": "runtime",
+      "method": "POST",
+      "path": "/api/v1/voice/tts",
+      "response": {
+        "status": 504,
+        "body": {
+          "error": {
+            "code": "TTS_TIMEOUT",
+            "message": "Tổng hợp giọng nói mất nhiều thời gian hơn dự kiến.",
+            "field_errors": [],
+            "retryable": true,
+            "current_revisions": {},
+            "next_action": "use_on_device_tts"
+          },
+          "meta": {
+            "request_id": "w4-example",
+            "server_time": "2026-11-20T03:00:00Z"
+          }
+        }
+      },
+      "request": {
+        "text": "Đến giờ kiểm tra tiến độ."
+      }
+    },
+    {
+      "name": "stt_timeout",
+      "scope": "runtime",
+      "method": "POST",
+      "path": "/api/v1/voice/transcriptions",
+      "response": {
+        "status": 504,
+        "body": {
+          "error": {
+            "code": "STT_TIMEOUT",
+            "message": "Nhận giọng nói mất nhiều thời gian hơn dự kiến.",
+            "field_errors": [],
+            "retryable": true,
+            "current_revisions": {},
+            "next_action": "use_on_device_stt_or_type"
+          },
+          "meta": {
+            "request_id": "w4-example",
+            "server_time": "2026-11-20T03:00:00Z"
+          }
+        }
+      },
+      "request": {
+        "purpose": "uf1_input",
+        "device_id": "device-1",
+        "file": "sample.m4a"
+      },
+      "request_headers": {
+        "Idempotency-Key": "w4-stt-timeout"
+      },
+      "client_expectations": {
+        "receive_timeout_seconds_min": 45
+      }
+    },
+    {
+      "name": "uf5_tts_fallback",
+      "scope": "runtime",
+      "method": "POST",
+      "path": "/api/v1/voice/uf5-checkin-prompt",
+      "response": {
+        "status": 200,
+        "body": {
+          "data": {
+            "prompt": {
+              "kind": "final",
+              "prompt_text": "Phiên tập trung đã kết thúc. Bạn có thể chọn nghỉ ngay hoặc xác nhận kết quả riêng cho phiên này (hoàn thành phiên, làm được một phần, chưa xong, báo bận hoặc bỏ qua).",
+              "asks_step_completion": false,
+              "skip_chips": [
+                {
+                  "skip_scope": "postpone_session",
+                  "label": "Hoãn phiên này làm sau",
+                  "description": "Giữ nguyên bước hiện tại và chuyển phiên này sang khung giờ rảnh khác qua UF6."
+                },
+                {
+                  "skip_scope": "skip_session",
+                  "label": "Bỏ qua phiên này",
+                  "description": "Bỏ qua riêng phiên hiện tại mà không tự động bỏ các phiên hay bước khác."
+                },
+                {
+                  "skip_scope": "skip_step",
+                  "label": "Bỏ toàn bộ bước này",
+                  "description": "Bỏ phần còn lại của bước hiện tại và chuyển qua UF6 để cập nhật lịch tương lai."
+                }
+              ],
+              "undo_notice": "Đã ghi nhận thao tác bỏ qua. Bạn có thể bấm Hoàn tác trong 5 giây nếu muốn đổi ý.",
+              "undo_timeout_seconds": 5
+            },
+            "audio_base64": null,
+            "audio_mime_type": null,
+            "tts_provider": null,
+            "fallback_to_device_tts": true
+          },
+          "meta": {
+            "request_id": "w4-example",
+            "server_time": "2026-11-20T03:00:00Z"
+          }
+        }
+      },
+      "request": {
+        "kind": "final",
+        "include_audio": true
+      }
+    }
+  ]
+}

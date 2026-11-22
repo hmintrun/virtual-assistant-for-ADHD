@@ -1094,3 +1094,119 @@ async def test_idempotency_active_run_source_changed_and_uf7_link(
     finally:
         app.dependency_overrides.clear()
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_uf6_create_proposal_wires_ai_empathy_and_generation_tier(
+    sqlite_migration: tuple[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """UF6: create_proposal gọi ai_service.generate_reschedule_empathy và lưu explanation + generation_tier."""
+    from unittest.mock import AsyncMock
+
+    from sqlalchemy import select
+
+    from app.core.config import Settings
+    from app.models.schedule_proposal import RescheduleProposal
+    from app.schemas.schedule import RescheduleEmpatheticResult
+    from app.services.ai_service import AIService
+
+    url, alembic = sqlite_migration
+    alembic("upgrade", "head")
+    engine = make_engine(url)
+    sf = session_factory(engine)
+
+    async def _override_db():
+        async with sf() as session:
+            yield session
+
+    app.dependency_overrides[get_db] = _override_db
+    fixed_now = datetime(2026, 11, 2, 14, 25, 10, tzinfo=TZ_VN)
+    monkeypatch.setattr(reschedule_service, "_current_utc_now", lambda now=None: now or fixed_now)
+
+    empathy_mock = AsyncMock(
+        return_value=RescheduleEmpatheticResult(
+            empathetic_note="Hôm nay có chút việc chen ngang, không sao đâu nhé.",
+            encouragement_tip="Mình nghỉ 2 phút rồi bắt đầu lại nhẹ nhàng nha.",
+            generation_tier="tier_1_gemini",
+        )
+    )
+    monkeypatch.setattr(
+        reschedule_service.ai_service,
+        "generate_reschedule_empathy",
+        empathy_mock,
+    )
+
+    try:
+        async with sf() as db:
+            ids = await _seed_uf6_fixture(db)
+
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.post(
+                "/api/v1/proposals",
+                headers=_auth_headers(ids["user_id"], "idem-uf6-ai-tier1"),
+                json={
+                    "trigger_reason": "checkin_busy",
+                    "target_task_id": str(ids["task1_id"]),
+                    "allowed_task_ids": [str(ids["task1_id"])],
+                    "expected_base_schedule_revision": 3,
+                    "expected_source_revisions": {
+                        "task": 1,
+                        "schedule": 3,
+                        "availability": 1,
+                        "settings": 1,
+                        "calendar": 1,
+                    },
+                    "request_text": "Có việc bận đột xuất",
+                },
+            )
+            assert resp.status_code == 201, resp.text
+            data = resp.json()["data"]
+            assert data["generation_tier"] == "tier_1_gemini"
+            assert "Hôm nay có chút việc chen ngang" in data["explanation"]
+            assert "Mình nghỉ 2 phút rồi bắt đầu lại nhẹ nhàng nha." in data["explanation"]
+
+            empathy_mock.assert_awaited_once()
+            call_kwargs = empathy_mock.await_args.kwargs
+            assert call_kwargs["trigger_reason"] == "busy"
+            assert call_kwargs["task_title"] is None
+            assert call_kwargs["proposal_available"] is True
+
+            async with sf() as db:
+                row = await db.scalar(
+                    select(RescheduleProposal).where(RescheduleProposal.id == UUID(data["proposal_id"]))
+                )
+                assert row is not None
+                assert row.generation_tier == "tier_1_gemini"
+                assert "Hôm nay có chút việc chen ngang" in row.explanation
+
+            # Kiểm tra Fallback Tier 3 thật khi không có API key (không mock generate_reschedule_empathy)
+            offline_ai = AIService(
+                app_settings=Settings(_env_file=None, GEMINI_API_KEY="", GROQ_API_KEY="")
+            )
+            monkeypatch.setattr(reschedule_service, "ai_service", offline_ai)
+
+            fb_resp = await client.post(
+                "/api/v1/proposals",
+                headers=_auth_headers(ids["user_id"], "idem-uf6-ai-tier3"),
+                json={
+                    "trigger_reason": "checkin_skipped",
+                    "target_task_id": str(ids["task1_id"]),
+                    "allowed_task_ids": [str(ids["task1_id"])],
+                    "expected_base_schedule_revision": 3,
+                    "expected_source_revisions": {
+                        "task": 1,
+                        "schedule": 3,
+                        "availability": 1,
+                        "settings": 1,
+                        "calendar": 1,
+                    },
+                    "request_text": "Bỏ qua phiên này",
+                },
+            )
+            assert fb_resp.status_code == 201, fb_resp.text
+            fb_data = fb_resp.json()["data"]
+            assert fb_data["generation_tier"] == "tier_3_rule_based"
+            assert isinstance(fb_data["explanation"], str) and len(fb_data["explanation"]) > 10
+    finally:
+        app.dependency_overrides.clear()
+        await engine.dispose()

@@ -7,18 +7,23 @@ from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
+from pydantic import ValidationError
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import AppError
+from app.models.execution import CheckIn
 from app.models.execution import SessionRun as SessionRunRow
 from app.models.schedule_proposal import RescheduleProposal as ProposalRow
 from app.models.session import Session as SessionRow
 from app.models.settings import AdaptationSuggestion as SuggestionRow
 from app.models.settings import SettingChangeRequest as SettingChangeRow
 from app.models.step import Step as StepRow
+from app.models.system import Reminder
 from app.models.task import Task as TaskRow
 from app.models.user import UserPreference as PreferenceRow
+from app.schemas.availability import DraftAvailability
 from app.schemas.draft import UpdateDraftRequest
 from app.schemas.settings import (
     AdaptationSuggestionData,
@@ -30,6 +35,7 @@ from app.schemas.settings import (
     SuggestionResponseRequest,
     SuggestionResponseResult,
     SuggestionStatus,
+    validate_strict_descending_offsets,
 )
 from app.services import draft_service, reschedule_service
 from app.services.command_service import durable_command, owner_uuid
@@ -45,8 +51,8 @@ DEFAULT_REMINDER_STYLE = "gentle"
 BUFFER_POLICY_MIN = 1.0
 BUFFER_POLICY_MAX = 2.0
 BUFFER_DELTA_THRESHOLD = 0.2
-SUGGESTION_MIN_SAMPLES = 5
-SUGGESTION_SLIDING_WINDOW = 15
+SUGGESTION_MIN_SAMPLES = 7
+SUGGESTION_SLIDING_WINDOW = 10
 SUGGESTION_COOLDOWN_SECONDS = 7 * 24 * 3600
 ANNOYANCE_COOLDOWN_SECONDS = 14 * 24 * 3600
 
@@ -55,7 +61,16 @@ _SCHEDULE_IMPACT_PREF_FIELDS = frozenset(
         "work_interval_seconds",
         "rest_interval_seconds",
         "buffer_multiplier",
+    }
+)
+_ALLOWED_CHANGE_GROUPS = frozenset({"availability", "preferences"})
+_ALLOWED_PREF_FIELDS = frozenset(
+    {
+        "work_interval_seconds",
+        "rest_interval_seconds",
         "reminder_offsets",
+        "buffer_multiplier",
+        "reminder_style",
     }
 )
 _CANCELLABLE_CHANGE_STATES = frozenset({"pending_review", "pending_proposal"})
@@ -114,6 +129,26 @@ def _suggestion_to_schema(row: SuggestionRow) -> AdaptationSuggestionData:
             str(row.supersedes_suggestion_id) if row.supersedes_suggestion_id else None
         ),
     )
+
+
+def _dump_availability_payload(avail_raw: Any) -> dict[str, Any] | None:
+    if avail_raw is None:
+        return None
+    if isinstance(avail_raw, dict):
+        return avail_raw
+    if hasattr(avail_raw, "model_dump"):
+        return avail_raw.model_dump(mode="json", exclude_none=True)
+    return None
+
+
+def _dump_changes_payload(changes_raw: Any) -> dict[str, Any]:
+    if changes_raw is None:
+        return {}
+    if isinstance(changes_raw, dict):
+        return changes_raw
+    if hasattr(changes_raw, "model_dump"):
+        return changes_raw.model_dump(mode="json", exclude_none=True)
+    return {}
 
 
 async def _has_future_confirmed_sessions(
@@ -204,13 +239,25 @@ def _validate_preferences_payload(
         "reminder_style",
         preferences.reminder_style if preferences else "",
     )
+    valid_offsets = True
+    try:
+        validate_strict_descending_offsets(offsets)
+    except Exception:
+        valid_offsets = False
+
     if (
-        work <= 0
+        isinstance(work, bool)
+        or isinstance(rest, bool)
+        or isinstance(buffer, bool)
+        or isinstance(offsets, bool)
+        or not isinstance(work, int)
+        or not isinstance(rest, int)
+        or not isinstance(buffer, (int, float))
+        or work <= 0
         or rest < 0
-        or buffer < 1
-        or not 1 <= len(offsets) <= 3
-        or len(set(offsets)) != len(offsets)
-        or any(offset < 0 for offset in offsets)
+        or not (1.0 <= buffer <= 2.0)
+        or not math.isfinite(buffer)
+        or not valid_offsets
         or not str(style).strip()
     ):
         raise AppError(
@@ -246,16 +293,82 @@ async def apply_settings_change(
             next_action="reload_and_review",
         )
 
+    if isinstance(payload.changes, dict):
+        if (
+            not payload.changes
+            or any(k not in _ALLOWED_CHANGE_GROUPS for k in payload.changes)
+            or any(v is None for v in payload.changes.values())
+        ):
+            raise AppError(
+                status_code=422,
+                code="VALIDATION_ERROR",
+                message="Cần ít nhất một nhóm thay đổi hợp lệ và không chứa null.",
+                next_action="fix_fields",
+            )
+
+    pref_changes = getattr(payload.changes, "preferences", None)
+    if pref_changes is None and isinstance(payload.changes, dict):
+        pref_changes = payload.changes.get("preferences")
+
+    if (payload.target_task_id is not None or payload.target_draft_id is not None) and pref_changes is not None:
+        touches_global_sched = any(
+            (pref_changes.get(k) if isinstance(pref_changes, dict) else getattr(pref_changes, k, None)) is not None
+            for k in _SCHEDULE_IMPACT_PREF_FIELDS
+        )
+        if touches_global_sched:
+            raise AppError(
+                status_code=422,
+                code="VALIDATION_ERROR",
+                message="Không thể đổi cấu hình làm/nghỉ/buffer toàn cục kèm target_task_id; hãy tách thành yêu cầu toàn cục và yêu cầu sửa giờ riêng của công việc.",
+                next_action="fix_fields",
+            )
+
     pref_values: dict[str, Any] = {}
-    if payload.changes.preferences is not None:
-        pref_values = payload.changes.preferences.model_dump(exclude_unset=True)
+    if pref_changes is not None:
+        pref_values = (
+            pref_changes.model_dump(exclude_unset=True)
+            if hasattr(pref_changes, "model_dump")
+            else dict(pref_changes)
+        )
+        if (
+            not pref_values
+            or any(k not in _ALLOWED_PREF_FIELDS for k in pref_values)
+            or any(v is None for v in pref_values.values())
+        ):
+            raise AppError(
+                status_code=422,
+                code="VALIDATION_ERROR",
+                message="Trường cài đặt ưu tiên không hợp lệ hoặc có giá trị null.",
+                next_action="fix_fields",
+            )
         _validate_preferences_payload(values=pref_values, preferences=preferences)
 
     updated_draft = None
     target_task: TaskRow | None = None
     avail_impacts_schedule = False
-    if payload.changes.availability is not None:
+    avail_changes = getattr(payload.changes, "availability", None)
+    if avail_changes is None and isinstance(payload.changes, dict):
+        avail_changes = payload.changes.get("availability")
+
+    if avail_changes is not None:
         if payload.target_task_id is not None:
+            if payload.expected_task_revision is None:
+                raise AppError(
+                    status_code=422,
+                    code="VALIDATION_ERROR",
+                    message="Cần expected_task_revision khi sửa availability cho task.",
+                    next_action="fix_fields",
+                )
+            if isinstance(avail_changes, dict):
+                try:
+                    avail_changes = DraftAvailability.model_validate(avail_changes)
+                except ValidationError as exc:
+                    raise AppError(
+                        status_code=422,
+                        code="VALIDATION_ERROR",
+                        message="Cấu hình giờ rảnh availability không hợp lệ.",
+                        next_action="fix_fields",
+                    ) from exc
             task_uuid = _parse_uuid(payload.target_task_id)
             target_task = await db.scalar(
                 select(TaskRow).where(TaskRow.id == task_uuid, TaskRow.user_id == owner)
@@ -288,6 +401,16 @@ async def apply_settings_change(
                     message="Cần Draft và revision để chỉnh giờ.",
                     next_action="fix_fields",
                 )
+            if isinstance(avail_changes, dict):
+                try:
+                    avail_changes = DraftAvailability.model_validate(avail_changes)
+                except ValidationError as exc:
+                    raise AppError(
+                        status_code=422,
+                        code="VALIDATION_ERROR",
+                        message="Cấu hình giờ rảnh availability không hợp lệ.",
+                        next_action="fix_fields",
+                    ) from exc
             draft = await draft_service.get_draft_by_id(
                 user_id=user_id, draft_id=payload.target_draft_id, db=db
             )
@@ -298,6 +421,14 @@ async def apply_settings_change(
                     message="Draft đã thành Task; cần chỉnh Task qua xem tác động.",
                     next_action="review_task",
                 )
+            avail_dump = _dump_availability_payload(avail_changes)
+            if avail_dump is None:
+                raise AppError(
+                    status_code=422,
+                    code="VALIDATION_ERROR",
+                    message="Thiếu availability trong changes khi sửa draft.",
+                    next_action="fix_fields",
+                )
             updated_draft = await draft_service.patch_draft(
                 user_id=user_id,
                 draft_id=payload.target_draft_id,
@@ -307,7 +438,7 @@ async def apply_settings_change(
                     expected_planning_input_revision=payload.expected_planning_input_revision,
                     changes={
                         "summary": {
-                            "availability": payload.changes.availability.model_dump(mode="json")
+                            "availability": avail_dump
                         }
                     },
                 ),
@@ -324,6 +455,7 @@ async def apply_settings_change(
         if touches_schedule_field:
             pref_impacts_schedule = await _has_future_confirmed_sessions(db, owner)
 
+    avail_dump_for_proposal = _dump_availability_payload(avail_changes)
     if avail_impacts_schedule or pref_impacts_schedule:
         # Tạo RescheduleProposal trước khi ghi requested_* lên UserPreference vì helper bên dưới sẽ dọn proposal pending cũ.
         proposal_target_id = payload.target_task_id if avail_impacts_schedule else None
@@ -334,6 +466,8 @@ async def apply_settings_change(
             target_task_id=proposal_target_id,
             allowed_task_ids=allowed_ids,
             request_text="Đề xuất điều chỉnh lịch do thay đổi cài đặt UF7",
+            override_preferences=dict(pref_values) if pref_values else None,
+            override_availability=avail_dump_for_proposal,
             now=now,
         )
         proposal_uuid = UUID(proposal.proposal_id)
@@ -354,8 +488,8 @@ async def apply_settings_change(
         eff_avail_rev = target_task.revision if target_task is not None else None
 
         stored_changes: dict[str, Any] = {}
-        if payload.changes.availability is not None:
-            stored_changes["availability"] = payload.changes.availability.model_dump(mode="json")
+        if avail_dump_for_proposal is not None:
+            stored_changes["availability"] = avail_dump_for_proposal
         if payload.target_task_id is not None:
             stored_changes["target_task_id"] = payload.target_task_id
         if payload.target_draft_id is not None:
@@ -397,7 +531,10 @@ async def apply_settings_change(
 
     # Nhánh không ảnh hưởng lịch tương lai: áp dụng ngay cho Draft hoặc từ phiên tiếp theo (giữ nguyên settings_snapshot của phiên đang chạy).
     if pref_values:
+        preferences_created = False
+        old_offsets = list(preferences.reminder_offsets) if preferences and preferences.reminder_offsets else []
         if preferences is None:
+            preferences_created = True
             preferences = PreferenceRow(
                 user_id=owner,
                 effective_revision=1,
@@ -410,8 +547,67 @@ async def apply_settings_change(
         elif any(getattr(preferences, k) != v for k, v in pref_values.items()):
             for k, v in pref_values.items():
                 setattr(preferences, k, v)
-            preferences.effective_revision += 1
+            if preferences.pending_proposal_id is not None:
+                new_eff_rev = max(preferences.effective_revision, preferences.requested_revision or 0) + 1
+                preferences.effective_revision = new_eff_rev
+                if preferences.requested_revision is not None and preferences.requested_revision <= new_eff_rev:
+                    preferences.requested_revision = new_eff_rev + 1
+            else:
+                preferences.effective_revision += 1
             preferences.updated_at = now
+
+        new_offsets = pref_values.get("reminder_offsets")
+        offsets_actually_changed = (
+            "reminder_offsets" in pref_values
+            and (preferences_created or new_offsets != old_offsets)
+        )
+        if offsets_actually_changed and isinstance(new_offsets, list):
+            future_sessions = list(
+                await db.scalars(
+                    select(SessionRow)
+                    .where(
+                        SessionRow.user_id == owner,
+                        SessionRow.status == "scheduled",
+                        SessionRow.scheduled_start > now,
+                    )
+                )
+            )
+            if future_sessions:
+                existing_rems = list(
+                    await db.scalars(
+                        select(Reminder)
+                        .where(
+                            Reminder.user_id == owner,
+                            Reminder.session_id.in_([s.id for s in future_sessions]),
+                            Reminder.delivery_state.in_(("scheduled", "snoozed")),
+                        )
+                    )
+                )
+                for r in existing_rems:
+                    r.delivery_state = "cancelled"
+                    r.updated_at = now
+                for s in future_sessions:
+                    for offset in new_offsets:
+                        fire_at = s.scheduled_start - timedelta(seconds=offset)
+                        if fire_at < now:
+                            continue
+                        key = f"session:{s.id}:version:{s.schedule_revision}:reminder:{offset}:pref:{preferences.effective_revision}"
+                        try:
+                            async with db.begin_nested():
+                                db.add(
+                                    Reminder(
+                                        user_id=owner,
+                                        session_id=s.id,
+                                        schedule_revision=s.schedule_revision,
+                                        kind="pre_session",
+                                        fire_at=fire_at,
+                                        dedupe_key=key,
+                                        delivery_state="scheduled",
+                                    )
+                                )
+                                await db.flush()
+                        except IntegrityError:
+                            pass
         await db.flush()
 
     effective_rev = preferences.effective_revision if preferences else 0
@@ -424,7 +620,7 @@ async def apply_settings_change(
         effective_revision=effective_rev,
         requested_availability_revision=None,
         effective_availability_revision=None,
-        requested_changes=payload.changes.model_dump(mode="json", exclude_none=True),
+        requested_changes=_dump_changes_payload(payload.changes),
         pending_proposal_id=None,
         created_at=now,
         updated_at=now,
@@ -585,19 +781,44 @@ async def collect_buffer_step_samples(
         )
     ).all()
 
+    run_ids = [r.id for r in run_rows]
+    final_checkins = (
+        await db.scalars(
+            select(CheckIn)
+            .where(
+                CheckIn.user_id == owner,
+                CheckIn.run_id.in_(run_ids),
+                CheckIn.kind == "final",
+            )
+            .order_by(CheckIn.responded_at.desc(), CheckIn.updated_at.desc())
+        )
+    ).all() if run_ids else []
+
+    final_ci_by_run_id: dict[UUID, CheckIn] = {}
+    for ci in final_checkins:
+        if ci.run_id not in final_ci_by_run_id:
+            final_ci_by_run_id[ci.run_id] = ci
+
     runs_by_step: dict[UUID, list[SessionRunRow]] = {}
     for run in run_rows:
         step_id = session_to_step.get(run.session_id)
         if step_id is None:
             continue
-        if run.run_state in ("running", "paused"):
+        if run.ended_at is None or run.run_state in ("running", "paused", "awaiting_checkin"):
             continue
-        if run.outcome == "cancelled":
+        if run.outcome in ("cancelled", "unknown", "no_response", "skipped"):
             continue
         if run.actual_work_seconds is None or run.actual_work_seconds <= 0:
             continue
         if run.actual_source not in ("timer_proxy", "self_report"):
             continue
+        final_ci = final_ci_by_run_id.get(run.id)
+        if final_ci is not None:
+            if final_ci.response_state != "answered":
+                continue
+        else:
+            if not (run.run_state in ("closed", "ended") and run.outcome == "completed"):
+                continue
         runs_by_step.setdefault(step_id, []).append(run)
 
     ordered_entries: list[tuple[datetime, dict[str, Any]]] = []
@@ -645,6 +866,7 @@ async def get_current_suggestion(
     user_id: str,
     kind: SuggestionKind | None = None,
     now: datetime | None = None,
+    commit_if_created: bool = False,
 ) -> AdaptationSuggestionData | None:
     """Đọc gợi ý pending hiện hành hoặc đánh giá A20 từ các mẫu Step hoàn thành sạch."""
     calc_now = _utc_now(now)
@@ -663,10 +885,59 @@ async def get_current_suggestion(
     if kind not in (None, "buffer_multiplier"):
         return None
 
-    preferences = await db.scalar(select(PreferenceRow).where(PreferenceRow.user_id == owner))
+    preferences = await db.scalar(
+        select(PreferenceRow)
+        .where(PreferenceRow.user_id == owner)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    pref_created = False
+    if preferences is None:
+        # Đảm bảo luôn có PreferenceRow để SELECT ... FOR UPDATE thực sự khóa được row trên PostgreSQL.
+        new_pref = PreferenceRow(
+            user_id=owner,
+            work_interval_seconds=DEFAULT_WORK_INTERVAL_SECONDS,
+            rest_interval_seconds=DEFAULT_REST_INTERVAL_SECONDS,
+            micro_task_seconds=DEFAULT_MICRO_TASK_SECONDS,
+            reminder_offsets=list(DEFAULT_REMINDER_OFFSETS),
+            effective_revision=1,
+            buffer_multiplier=DEFAULT_BUFFER_MULTIPLIER,
+            reminder_style=DEFAULT_REMINDER_STYLE,
+            created_at=calc_now,
+            updated_at=calc_now,
+        )
+        try:
+            async with db.begin_nested():
+                db.add(new_pref)
+                await db.flush()
+            pref_created = True
+        except IntegrityError:
+            existing_pref = await db.scalar(
+                select(PreferenceRow.user_id).where(PreferenceRow.user_id == owner)
+            )
+            if existing_pref is None:
+                raise
+        preferences = await db.scalar(
+            select(PreferenceRow)
+            .where(PreferenceRow.user_id == owner)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+    # Kiểm tra lại sau khi khóa hàng PreferenceRow để tránh tạo trùng pending suggestion đồng thời.
+    pending_row = await db.scalar(
+        pending_stmt.order_by(SuggestionRow.created_at.desc())
+        .limit(1)
+        .execution_options(populate_existing=True)
+    )
+    if pending_row is not None:
+        if pref_created and commit_if_created:
+            await db.commit()
+        return _suggestion_to_schema(pending_row)
     if preferences is not None:
         cooldown_until = _as_utc(preferences.suggestion_cooldown_until)
         if cooldown_until is not None and cooldown_until > calc_now:
+            if pref_created and commit_if_created:
+                await db.commit()
             return None
 
     last_rejected = await db.scalar(
@@ -680,6 +951,10 @@ async def get_current_suggestion(
         .limit(1)
     )
     last_rejected_at = _as_utc(last_rejected.updated_at) if last_rejected is not None else None
+    if last_rejected_at is not None and last_rejected_at > calc_now:
+        if pref_created and commit_if_created:
+            await db.commit()
+        return None
 
     samples = await collect_buffer_step_samples(db, owner=owner)
     current_buffer = preferences.buffer_multiplier if preferences else DEFAULT_BUFFER_MULTIPLIER
@@ -697,11 +972,15 @@ async def get_current_suggestion(
         cooldown_seconds=SUGGESTION_COOLDOWN_SECONDS,
     )
     if eval_result is None:
+        if pref_created and commit_if_created:
+            await db.commit()
         return None
 
     # Quy tắc UF7 (A20): chỉ tạo gợi ý khi |k_user - k_history| > 0.2.
     diff = abs(Decimal(str(eval_result["suggested_value"])) - Decimal(str(current_buffer)))
     if diff <= Decimal(str(BUFFER_DELTA_THRESHOLD)):
+        if pref_created and commit_if_created:
+            await db.commit()
         return None
 
     created = SuggestionRow(
@@ -719,8 +998,11 @@ async def get_current_suggestion(
         created_at=calc_now,
         updated_at=calc_now,
     )
-    db.add(created)
-    await db.commit()
+    async with db.begin_nested():
+        db.add(created)
+        await db.flush()
+    if commit_if_created:
+        await db.commit()
     await db.refresh(created)
     return _suggestion_to_schema(created)
 
@@ -749,19 +1031,25 @@ def _validate_accepted_suggestion_value(
         return round(numeric, 4)
 
     if kind == "reminder_offset":
-        if (
-            not isinstance(raw_value, list)
-            or not 1 <= len(raw_value) <= 3
-            or any(isinstance(v, bool) or not isinstance(v, int) or v < 0 for v in raw_value)
-            or len(set(raw_value)) != len(raw_value)
-        ):
+        if isinstance(raw_value, bool):
             raise AppError(
                 status_code=422,
                 code="VALIDATION_ERROR",
-                message="Mốc nhắc phải gồm 1–3 số nguyên không âm và không trùng nhau.",
+                message="Mốc nhắc phải gồm 1–3 số nguyên không âm giảm dần nghiêm ngặt.",
                 next_action="fix_fields",
             )
-        return [int(v) for v in raw_value]
+        try:
+            res = validate_strict_descending_offsets(raw_value)
+            if res is None:
+                raise ValueError()
+            return res
+        except Exception as err:
+            raise AppError(
+                status_code=422,
+                code="VALIDATION_ERROR",
+                message="Mốc nhắc phải gồm 1–3 số nguyên không âm giảm dần nghiêm ngặt.",
+                next_action="fix_fields",
+            ) from err
 
     raise AppError(
         status_code=422,
@@ -874,10 +1162,65 @@ async def respond_to_suggestion(
     suggestion.updated_at = now
 
     has_future_sessions = await _has_future_confirmed_sessions(db, owner)
-    if not has_future_sessions:
+    if not has_future_sessions or kind == "reminder_offset":
         setattr(pref_row, pref_field, accepted_value)
-        pref_row.effective_revision += 1
+        if pref_row.pending_proposal_id is not None:
+            new_eff_rev = max(pref_row.effective_revision, pref_row.requested_revision or 0) + 1
+            pref_row.effective_revision = new_eff_rev
+            if pref_row.requested_revision is not None and pref_row.requested_revision <= new_eff_rev:
+                pref_row.requested_revision = new_eff_rev + 1
+        else:
+            pref_row.effective_revision += 1
         pref_row.updated_at = now
+
+        if kind == "reminder_offset" and isinstance(accepted_value, list):
+            future_sessions = list(
+                await db.scalars(
+                    select(SessionRow)
+                    .where(
+                        SessionRow.user_id == owner,
+                        SessionRow.status == "scheduled",
+                        SessionRow.scheduled_start > now,
+                    )
+                )
+            )
+            if future_sessions:
+                existing_rems = list(
+                    await db.scalars(
+                        select(Reminder)
+                        .where(
+                            Reminder.user_id == owner,
+                            Reminder.session_id.in_([s.id for s in future_sessions]),
+                            Reminder.delivery_state.in_(("scheduled", "snoozed")),
+                        )
+                    )
+                )
+                for r in existing_rems:
+                    r.delivery_state = "cancelled"
+                    r.updated_at = now
+                for s in future_sessions:
+                    for offset in accepted_value:
+                        fire_at = s.scheduled_start - timedelta(seconds=offset)
+                        if fire_at < now:
+                            continue
+                        key = f"session:{s.id}:version:{s.schedule_revision}:reminder:{offset}:pref:{pref_row.effective_revision}"
+                        try:
+                            async with db.begin_nested():
+                                db.add(
+                                    Reminder(
+                                        user_id=owner,
+                                        session_id=s.id,
+                                        schedule_revision=s.schedule_revision,
+                                        kind="pre_session",
+                                        fire_at=fire_at,
+                                        dedupe_key=key,
+                                        delivery_state="scheduled",
+                                    )
+                                )
+                                await db.flush()
+                        except IntegrityError:
+                            pass
+
         change = SettingChangeRow(
             user_id=owner,
             application_state="effective_from_next_session",
@@ -911,6 +1254,7 @@ async def respond_to_suggestion(
         db,
         owner=owner,
         request_text=f"Cập nhật {kind} từ gợi ý trợ lý",
+        override_preferences=dict(pref_delta),
         now=now,
     )
     proposal_uuid = UUID(proposal.proposal_id)

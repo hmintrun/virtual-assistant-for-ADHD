@@ -1,0 +1,235 @@
+{
+  "contract_source": "schema.md sections 14–15; backend 23e856b; auth target ba16055",
+  "cases": [
+    {
+      "name": "configuration_preview",
+      "scope": "runtime",
+      "method": "POST",
+      "path": "/api/v1/calendar/connections/22222222-2222-4222-8222-222222222222/configuration-previews",
+      "response": {
+        "status": 200,
+        "body": {
+          "data": {
+            "preview_id": "33333333-3333-4333-8333-333333333333",
+            "connection_id": "22222222-2222-4222-8222-222222222222",
+            "read_calendar_ids": [
+              "primary"
+            ],
+            "write_calendar_id": "primary",
+            "existing_event_action": "keep",
+            "status": "pending",
+            "preview_revision": 1,
+            "base_connection_revision": 2
+          },
+          "meta": {
+            "request_id": "w4-example",
+            "server_time": "2026-11-20T03:00:00Z"
+          }
+        }
+      },
+      "request": {
+        "read_calendar_ids": [
+          "primary"
+        ],
+        "write_calendar_id": "primary",
+        "existing_event_action": "keep"
+      }
+    },
+    {
+      "name": "configuration_preview_dynamic_revision",
+      "scope": "runtime",
+      "method": "POST",
+      "path": "/api/v1/calendar/connections/22222222-2222-4222-8222-222222222222/configuration-previews",
+      "response": {
+        "status": 200,
+        "body": {
+          "data": {
+            "preview_id": "33333333-3333-4333-8333-333333333333",
+            "connection_id": "22222222-2222-4222-8222-222222222222",
+            "read_calendar_ids": [
+              "primary"
+            ],
+            "write_calendar_id": "primary",
+            "existing_event_action": "keep",
+            "status": "pending",
+            "preview_revision": 7,
+            "base_connection_revision": 2
+          },
+          "meta": {
+            "request_id": "w4-example",
+            "server_time": "2026-11-20T03:00:00Z"
+          }
+        }
+      },
+      "request": {
+        "read_calendar_ids": [
+          "primary"
+        ],
+        "write_calendar_id": "primary",
+        "existing_event_action": "keep"
+      }
+    },
+    {
+      "name": "event_preview",
+      "scope": "runtime",
+      "method": "POST",
+      "path": "/api/v1/calendar/event-change-previews",
+      "response": {
+        "status": 200,
+        "body": {
+          "data": {
+            "preview_id": "33333333-3333-4333-8333-333333333333",
+            "connection_id": "22222222-2222-4222-8222-222222222222",
+            "kind": "event_change",
+            "operation": "update",
+            "status": "pending",
+            "payload": {
+              "operation": "update",
+              "connection_id": "22222222-2222-4222-8222-222222222222",
+              "google_calendar_id": "primary",
+              "payload": {
+                "summary": "Họp nhóm"
+              },
+              "recurrence_scope": "single",
+              "google_event_id": "event-1",
+              "expected_google_etag": "\"etag-v1\""
+            },
+            "preview_revision": 1,
+            "base_connection_revision": 2
+          },
+          "meta": {
+            "request_id": "w4-example",
+            "server_time": "2026-11-20T03:00:00Z"
+          }
+        }
+      },
+      "request": {
+        "operation": "update",
+        "connection_id": "22222222-2222-4222-8222-222222222222",
+        "google_calendar_id": "primary",
+        "payload": {
+          "summary": "Họp nhóm"
+        },
+        "recurrence_scope": "single",
+        "google_event_id": "event-1",
+        "expected_google_etag": "\"etag-v1\""
+      }
+    },
+    {
+      "name": "event_preview_dynamic_revision",
+      "scope": "runtime",
+      "method": "POST",
+      "path": "/api/v1/calendar/event-change-previews",
+      "response": {
+        "status": 200,
+        "body": {
+          "data": {
+            "preview_id": "33333333-3333-4333-8333-333333333333",
+            "connection_id": "22222222-2222-4222-8222-222222222222",
+            "kind": "event_change",
+            "operation": "update",
+            "status": "pending",
+            "payload": {
+              "operation": "update",
+              "connection_id": "22222222-2222-4222-8222-222222222222",
+              "google_calendar_id": "primary",
+              "payload": {
+                "summary": "Họp nhóm"
+              },
+              "recurrence_scope": "single",
+              "google_event_id": "event-1",
+              "expected_google_etag": "\"etag-v1\""
+            },
+            "preview_revision": 7,
+            "base_connection_revision": 2
+          },
+          "meta": {
+            "request_id": "w4-example",
+            "server_time": "2026-11-20T03:00:00Z"
+          }
+        }
+      },
+      "request": {
+        "operation": "update",
+        "connection_id": "22222222-2222-4222-8222-222222222222",
+        "google_calendar_id": "primary",
+        "payload": {
+          "summary": "Họp nhóm"
+        },
+        "recurrence_scope": "single",
+        "google_event_id": "event-1",
+        "expected_google_etag": "\"etag-v1\""
+      }
+    },
+    {
+      "name": "preview_conflict",
+      "scope": "runtime",
+      "method": "POST",
+      "path": "/api/v1/calendar/event-change-previews/33333333-3333-4333-8333-333333333333/confirm",
+      "response": {
+        "status": 409,
+        "body": {
+          "error": {
+            "code": "REVISION_CONFLICT",
+            "message": "Phiên bản bản xem trước không khớp (đã bị cập nhật).",
+            "field_errors": [],
+            "retryable": false,
+            "current_revisions": {
+              "preview_revision": 2
+            },
+            "next_action": "reload_and_review"
+          },
+          "meta": {
+            "request_id": "w4-example",
+            "server_time": "2026-11-20T03:00:00Z"
+          }
+        }
+      },
+      "request": {
+        "expected_preview_revision": 7,
+        "source_revisions": {}
+      }
+    },
+    {
+      "name": "google_etag_412",
+      "scope": "google_upstream",
+      "method": "PUT",
+      "path": "/calendar/v3/calendars/primary/events/event-1",
+      "response": {
+        "status": 412,
+        "body": {
+          "error": {
+            "code": 412,
+            "message": "Precondition Failed"
+          }
+        }
+      }
+    },
+    {
+      "name": "sync_job_after_412",
+      "scope": "runtime",
+      "method": "GET",
+      "path": "/api/v1/calendar/sync-jobs/job-1",
+      "response": {
+        "status": 200,
+        "body": {
+          "data": {
+            "job_id": "job-1",
+            "connection_id": "22222222-2222-4222-8222-222222222222",
+            "target_kind": "external_event",
+            "target_ref": "33333333-3333-4333-8333-333333333333",
+            "operation": "update",
+            "job_state": "conflict",
+            "attempt_count": 1,
+            "next_retry_at": null,
+            "last_error_code": "ETAG_CONFLICT_412"
+          },
+          "meta": {
+            "request_id": "w4-example",
+            "server_time": "2026-11-20T03:00:00Z"
+          }
+        }
+      }
+    }
+  ]
+}

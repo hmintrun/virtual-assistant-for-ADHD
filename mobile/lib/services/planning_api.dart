@@ -137,10 +137,7 @@ class PlanningApi {
         'input_source': inputSource,
         'raw_input': rawInput,
         'summary': {
-          if (title.trim().isNotEmpty &&
-              title != rawInput &&
-              title.length <= 100)
-            'title': title,
+          if (title.trim().isNotEmpty && title != rawInput) 'title': title,
           if (availability != null) 'availability': availability,
           'importance': 3,
           if (scope.trim().isNotEmpty) 'scope': scope.trim(),
@@ -200,6 +197,7 @@ class PlanningApi {
     required String scope,
     required DateTime? deadline,
     JsonMap? availability,
+    bool clearAvailability = false,
     List<String>? extraRequirements,
   }) async {
     final oldTime = draft.summary['time_constraint'] as Map<String, dynamic>?;
@@ -208,8 +206,12 @@ class PlanningApi {
     final deadlineChanged = deadline != null &&
         (oldEnd == null || !deadline.isAtSameMomentAs(oldEnd));
     final changes = <String, dynamic>{
-      if (title.length <= 100 && title != draft.title) 'title': title,
+      if (title != draft.title) 'title': title,
       if (scope != draft.scope) 'scope': scope,
+      if (clearAvailability) ...{
+        'availability': null,
+        'availability_ref': null,
+      },
       if (availability != null) 'availability': availability,
       if (extraRequirements != null) 'extra_requirements': extraRequirements,
       if (deadlineChanged)
@@ -228,6 +230,7 @@ class PlanningApi {
       'title': title,
       'scope': scope,
       'deadline': deadline?.toUtc().toIso8601String(),
+      'clear_availability': clearAvailability,
       if (availability != null) 'availability': availability,
       'previous_time_constraint': oldTime,
       if (extraRequirements != null) 'extra_requirements': extraRequirements,
@@ -286,7 +289,8 @@ class PlanningApi {
       'source_planning_input_revision': draft.planningInputRevision,
       'selected_step_keys': null,
       'planning_horizon': null,
-      if (calendarContextRef != null) 'calendar_context_ref': calendarContextRef,
+      if (calendarContextRef != null)
+        'calendar_context_ref': calendarContextRef,
     };
     final json = await _command(
       operation: 'candidate_${draft.draftId}',
@@ -295,7 +299,8 @@ class PlanningApi {
       send: (payload, key) => _client.postData(
           '/drafts/${Uri.encodeComponent(draft.draftId)}/candidates',
           idempotencyKey: key,
-          data: payload),
+          data: payload,
+          receiveTimeout: const Duration(seconds: 30)),
     );
     return PlanCandidateModel.fromJson(json);
   }
@@ -308,6 +313,10 @@ class PlanningApi {
   Future<TaskModel> getTask(String taskId) async => TaskModel.fromJson(
         await _client.getData('/tasks/${Uri.encodeComponent(taskId)}'),
       );
+
+  Future<void> deleteDraft(String draftId) async {
+    await _client.deleteData('/drafts/${Uri.encodeComponent(draftId)}');
+  }
 
   Future<PlanCandidateModel> updateCandidateStep({
     required PlanCandidateModel candidate,
@@ -322,6 +331,7 @@ class PlanningApi {
         'patch_candidate_${candidate.candidateId}',
         '${candidate.reviewRevision}_${clientStepKey}_${title}_${expectedOutput}_$estimatedBaseSeconds',
       ),
+      receiveTimeout: const Duration(seconds: 30),
       data: {
         'expected_review_revision': candidate.reviewRevision,
         'edits': {

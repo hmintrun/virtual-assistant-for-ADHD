@@ -55,14 +55,14 @@ class CachedScheduleItem {
         runId: map['run_id'] as String?,
         taskId: map['task_id'] as String,
         stepId: map['step_id'] as String,
-        plannedStart: DateTime.parse(map['planned_start'] as String),
-        plannedEnd: DateTime.parse(map['planned_end'] as String),
+        plannedStart: DateTime.parse(map['planned_start'] as String).toUtc(),
+        plannedEnd: DateTime.parse(map['planned_end'] as String).toUtc(),
         durationMin: map['duration_min'] as int,
         stepTitle: map['step_title'] as String?,
         taskTitle: map['task_title'] as String?,
         status: map['status'] as String,
         scheduleRevision: map['schedule_revision'] as int,
-        updatedAt: DateTime.parse(map['updated_at'] as String),
+        updatedAt: DateTime.parse(map['updated_at'] as String).toUtc(),
       );
 }
 
@@ -140,8 +140,8 @@ class CachedProposalResult {
       sourceRevisions: sources,
       isLocalPreview: (map['is_local_preview'] as int? ?? 0) == 1,
       payload: parsedPayload,
-      createdAt: DateTime.parse(map['created_at'] as String),
-      updatedAt: DateTime.parse(map['updated_at'] as String),
+      createdAt: DateTime.parse(map['created_at'] as String).toUtc(),
+      updatedAt: DateTime.parse(map['updated_at'] as String).toUtc(),
     );
   }
 }
@@ -180,12 +180,14 @@ abstract class LocalScheduleRepository {
 
 /// Triển khai LocalScheduleRepository trên SQLite.
 class SqliteScheduleRepository extends LocalScheduleRepository {
-  SqliteScheduleRepository({LocalDatabaseManager? dbManager})
-      : _dbManager = dbManager ?? LocalDatabaseManager.instance;
+  SqliteScheduleRepository({LocalDatabaseManager? dbManager, Database? db})
+      : _dbManager = dbManager ?? LocalDatabaseManager.instance,
+        _explicitDb = db;
 
   final LocalDatabaseManager _dbManager;
+  final Database? _explicitDb;
 
-  Future<Database> _getDb() => _dbManager.getDatabase();
+  Future<Database> _getDb() async => _explicitDb ?? await _dbManager.getDatabase();
 
   @override
   Future<void> cacheScheduleItems(
@@ -284,7 +286,7 @@ class SqliteScheduleRepository extends LocalScheduleRepository {
       {
         'run_id': runId,
         'context_payload': jsonEncode(contextPayload),
-        'updated_at': DateTime.now().toIso8601String(),
+        'updated_at': DateTime.now().toUtc().toIso8601String(),
       },
       conflictAlgorithm: ConflictAlgorithm.replace,
     );

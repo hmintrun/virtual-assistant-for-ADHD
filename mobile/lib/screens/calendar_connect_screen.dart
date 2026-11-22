@@ -9,9 +9,11 @@ import 'package:intl/intl.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../core/api_client.dart';
+import '../core/responsive_layout.dart';
 import '../core/theme.dart';
 import '../services/calendar_api.dart';
 import '../widgets/melbel_ui.dart';
+import '../widgets/shimmer_loading.dart';
 
 class CalendarConnectScreen extends StatefulWidget {
   const CalendarConnectScreen({super.key, this.api});
@@ -178,9 +180,15 @@ class _CalendarConnectScreenState extends State<CalendarConnectScreen>
         _busyEvents = const [];
       });
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Đã ngắt Google Calendar. ProPlan sẽ xếp theo giờ '
-              'rảnh bạn nhập. Bấm Kết nối lại khi cần.'),
+        SnackBar(
+          duration: const Duration(seconds: 5),
+          content: const Text(
+            'Đã ngắt Google Calendar. Hoàn tác sẽ mở Google để cấp lại quyền.',
+          ),
+          action: SnackBarAction(
+            label: 'Hoàn tác',
+            onPressed: _undoDisconnect,
+          ),
         ),
       );
     } on ApiException catch (e) {
@@ -188,6 +196,10 @@ class _CalendarConnectScreenState extends State<CalendarConnectScreen>
     } finally {
       if (mounted) setState(() => _working = false);
     }
+  }
+
+  void _undoDisconnect() {
+    unawaited(_connect());
   }
 
   /// Lịch ghi phiên Focus sau khi duyệt: giữ lựa chọn cũ nếu có, không thì
@@ -227,131 +239,226 @@ class _CalendarConnectScreenState extends State<CalendarConnectScreen>
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: const MelbelAppBar(
-        title: 'Google Calendar',
-        showBack: true,
-        showGlobalActions: false,
-      ),
-      body: _loading
-          ? const Center(child: CircularProgressIndicator())
-          : ListView(
-              padding: const EdgeInsets.all(20),
-              children: [
-                if (_error != null) ...[
-                  MelbelCard(
-                    child: Text(
-                      _error!,
-                      style: TextStyle(color: MelbelColors.kOnSurfaceVariant),
+    final palette = context.melbel;
+    return MelbelPageBackdrop(
+      showTopCloud: true,
+      showBottomClouds: true,
+      child: Scaffold(
+        backgroundColor: Colors.transparent,
+        appBar: const MelbelAppBar(
+          title: 'Google Calendar',
+          showBack: true,
+          showGlobalActions: false,
+          showTitleRays: true,
+        ),
+        body: _loading
+            ? Padding(
+                padding: MelbelLayout.pageInsets(context, top: 16, bottom: 24),
+                child: const MelbelLoadingSkeleton(
+                  cardCount: 2,
+                  caption: 'Đang kiểm tra kết nối Google Calendar...',
+                ),
+              )
+            : ListView(
+                padding: MelbelLayout.pageInsets(context, top: 16, bottom: 28),
+                children: [
+                  if (_error != null) ...[
+                    MelbelCard(
+                      borderRadius: 22,
+                      tone: MelbelCardTone.amber,
+                      child: Row(
+                        children: [
+                          Icon(Icons.cloud_off_outlined,
+                              color: palette.amberInk),
+                          const SizedBox(width: 10),
+                          Expanded(
+                            child: Text(
+                              _error!,
+                              style: Theme.of(context)
+                                  .textTheme
+                                  .bodySmall
+                                  ?.copyWith(color: palette.onAmberSoft),
+                            ),
+                          ),
+                        ],
+                      ),
                     ),
-                  ),
-                  const SizedBox(height: 12),
+                    const SizedBox(height: 6),
+                    TextButton.icon(
+                      icon: const Icon(Icons.refresh_rounded),
+                      onPressed: _working ? null : _refresh,
+                      label: const Text('Tải lại kết nối'),
+                    ),
+                    const SizedBox(height: 12),
+                  ],
+                  if (_connection == null)
+                    ..._buildNotConnected(context)
+                  else
+                    ..._buildConnected(context, _connection!),
                 ],
-                if (_connection == null)
-                  ..._buildNotConnected(context)
-                else
-                  ..._buildConnected(context, _connection!),
-              ],
-            ),
+              ),
+      ),
     );
   }
 
-  List<Widget> _buildNotConnected(BuildContext context) => [
-        Text(
-          'Cho ProPlan đọc giờ bận từ Google Calendar để không xếp phiên '
-          'tập trung trùng giờ học, giờ họp của bạn.',
-          style: Theme.of(context).textTheme.bodyMedium,
+  List<Widget> _buildNotConnected(BuildContext context) {
+    final palette = context.melbel;
+    return [
+      MelbelEntrance(
+        child: MelbelCard(
+          tone: MelbelCardTone.muted,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const MelbelStatusPill(
+                label: 'Đọc giờ bận tự động',
+                icon: Icons.event_available_outlined,
+                tone: MelbelCardTone.sage,
+              ),
+              const SizedBox(height: 12),
+              Text(
+                'ProPlan VA xem giờ bận để tránh xếp phiên trùng lịch.',
+                style: Theme.of(context).textTheme.bodyMedium,
+              ),
+              const SizedBox(height: 8),
+              Text(
+                'Phiên chỉ được ghi lên lịch sau khi bạn duyệt kế hoạch.',
+                style: Theme.of(context)
+                    .textTheme
+                    .bodySmall
+                    ?.copyWith(color: palette.onSurfaceVariant),
+              ),
+            ],
+          ),
         ),
-        const SizedBox(height: 8),
-        Text(
-          'ProPlan chỉ ghi phiên lên lịch sau khi bạn duyệt kế hoạch.',
-          style: Theme.of(context)
-              .textTheme
-              .bodySmall
-              ?.copyWith(color: MelbelColors.kTextSecondary),
-        ),
-        const SizedBox(height: 20),
-        PrimaryCta(
-          label: 'Kết nối Google Calendar',
-          icon: Icons.link,
-          onPressed: _working ? null : _connect,
-        ),
-      ];
+      ),
+      const SizedBox(height: 20),
+      PrimaryCta(
+        label: 'Kết nối Google Calendar',
+        icon: Icons.link_rounded,
+        onPressed: _working ? null : _connect,
+      ),
+    ];
+  }
 
   List<Widget> _buildConnected(
     BuildContext context,
     CalendarConnection connection,
   ) {
     final textTheme = Theme.of(context).textTheme;
+    final palette = context.melbel;
     if (connection.state != 'connected') {
-      // Quyền bị thu hồi/hết hạn: báo tình trạng nguồn, cho kết nối lại.
-      // Trong lúc đó lập kế hoạch vẫn dùng được giờ rảnh nhập tay.
       return [
-        Text('Mất quyền đọc lịch: ${connection.accountRef}',
-            style: textTheme.titleMedium),
-        const SizedBox(height: 8),
-        Text(
-          'ProPlan chưa đọc được giờ bận từ tài khoản này. Khi lập kế hoạch, '
-          'bạn có thể dùng giờ rảnh nhập tay.',
-          style: textTheme.bodySmall
-              ?.copyWith(color: MelbelColors.kTextSecondary),
+        MelbelCard(
+          tone: MelbelCardTone.amber,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                'Mất quyền đọc lịch: ${connection.accountRef}',
+                style: textTheme.titleMedium?.copyWith(
+                  color: palette.onAmberSoft,
+                ),
+              ),
+              const SizedBox(height: 8),
+              Text(
+                'ProPlan chưa đọc được giờ bận từ tài khoản này. Khi lập kế hoạch, '
+                'bạn có thể dùng giờ rảnh nhập tay.',
+                style: textTheme.bodySmall?.copyWith(
+                  color: palette.onAmberSoft,
+                ),
+              ),
+            ],
+          ),
         ),
         const SizedBox(height: 20),
         PrimaryCta(
           label: 'Kết nối lại Google Calendar',
-          icon: Icons.refresh,
+          icon: Icons.refresh_rounded,
           onPressed: _working ? null : _connect,
         ),
-        TextButton(
-          onPressed: _working ? null : _disconnect,
-          child: const Text('Ngắt kết nối'),
+        const SizedBox(height: 6),
+        Center(
+          child: TextButton(
+            onPressed: _working ? null : _disconnect,
+            child: const Text('Ngắt kết nối'),
+          ),
         ),
       ];
     }
     return [
-      Text('Đã kết nối: ${connection.accountRef}',
-          style: textTheme.titleMedium),
+      MelbelCard(
+        tone: MelbelCardTone.sage,
+        child: Row(
+          children: [
+            Icon(Icons.check_circle_outline_rounded,
+                color: palette.accentInk),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Text(
+                'Đã kết nối: ${connection.accountRef}',
+                style: textTheme.titleSmall?.copyWith(
+                  color: palette.onSageSoft,
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
       const SizedBox(height: 16),
       Text('Đọc giờ bận từ lịch nào?', style: textTheme.titleSmall),
-      const SizedBox(height: 4),
-      for (final calendar in _calendars)
-        CheckboxListTile(
-          contentPadding: EdgeInsets.zero,
-          value: _selectedReadIds.contains(calendar.id),
-          title: Text(calendar.summary),
-          subtitle: calendar.primary ? const Text('Lịch chính') : null,
-          onChanged: _working
-              ? null
-              : (checked) => setState(() {
-                    checked == true
-                        ? _selectedReadIds.add(calendar.id)
-                        : _selectedReadIds.remove(calendar.id);
-                  }),
+      const SizedBox(height: 8),
+      MelbelCard(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+        child: Column(
+          children: [
+            for (final calendar in _calendars)
+              CheckboxListTile(
+                contentPadding: EdgeInsets.zero,
+                value: _selectedReadIds.contains(calendar.id),
+                title: Text(calendar.summary),
+                subtitle: calendar.primary ? const Text('Lịch chính') : null,
+                onChanged: _working
+                    ? null
+                    : (checked) => setState(() {
+                          checked == true
+                              ? _selectedReadIds.add(calendar.id)
+                              : _selectedReadIds.remove(calendar.id);
+                        }),
+              ),
+          ],
         ),
-      const SizedBox(height: 12),
+      ),
+      const SizedBox(height: 14),
       PrimaryCta(
         label: 'Lưu lịch đọc giờ bận',
-        icon: Icons.check,
+        icon: Icons.check_rounded,
         onPressed: _working ? null : _saveSelection,
       ),
       const SizedBox(height: 24),
       Text('Giờ bận 7 ngày tới', style: textTheme.titleSmall),
       const SizedBox(height: 8),
       if (connection.readCalendarIds.isEmpty)
-        Text('Chọn ít nhất 1 lịch rồi bấm Lưu để xem giờ bận.',
-            style: textTheme.bodySmall
-                ?.copyWith(color: MelbelColors.kTextSecondary))
+        Text(
+          'Chọn ít nhất 1 lịch rồi bấm Lưu để xem giờ bận.',
+          style: textTheme.bodySmall?.copyWith(color: palette.onSurfaceVariant),
+        )
+      else if (_error != null)
+        const Text('Chưa cập nhật được giờ bận.')
       else if (_busyEvents.isEmpty)
-        Text('Không có giờ bận nào trong 7 ngày tới.',
-            style: textTheme.bodySmall
-                ?.copyWith(color: MelbelColors.kTextSecondary))
+        Text(
+          'Không có giờ bận nào trong 7 ngày tới.',
+          style: textTheme.bodySmall?.copyWith(color: palette.onSurfaceVariant),
+        )
       else
         for (final event in _busyEvents) _BusyEventRow(event: event),
-      const SizedBox(height: 24),
-      TextButton.icon(
-        onPressed: _working ? null : _disconnect,
-        icon: const Icon(Icons.link_off),
-        label: const Text('Ngắt kết nối Google Calendar'),
+      const SizedBox(height: 20),
+      Center(
+        child: TextButton.icon(
+          onPressed: _working ? null : _disconnect,
+          icon: const Icon(Icons.link_off_rounded),
+          label: const Text('Ngắt kết nối Google Calendar'),
+        ),
       ),
     ];
   }

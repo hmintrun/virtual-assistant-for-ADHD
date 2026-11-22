@@ -199,6 +199,8 @@ class CalendarConfigurationPreviewResponse(StrictSchema):
     write_calendar_id: str | None = None
     existing_event_action: str | None = None
     status: str = "pending"
+    preview_revision: int = 1
+    base_connection_revision: int | None = None
 
 
 class CalendarConfigurationConfirmRequest(StrictSchema):
@@ -262,6 +264,8 @@ class EventChangePreviewResponse(StrictSchema):
     operation: str
     status: str = "pending"
     payload: dict[str, Any]
+    preview_revision: int = 1
+    base_connection_revision: int | None = None
 
 
 class EventChangeConfirmRequest(StrictSchema):

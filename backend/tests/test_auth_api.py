@@ -4,7 +4,7 @@ from uuid import UUID
 
 import pytest
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 
 from app.api.deps import get_db
 from app.api.v1.auth import get_google_verifier
@@ -12,7 +12,7 @@ from app.core.config import settings
 from app.core.database import make_engine, session_factory
 from app.core.errors import AppError
 from app.main import app
-from app.models import Base, User, UserPreference
+from app.models import Base, RefreshToken, User, UserPreference
 from app.schemas.auth import VerifiedGoogleIdentity
 from app.services.auth_service import login_with_google
 from app.services.draft_service import ensure_dev_seed_in_db
@@ -131,6 +131,7 @@ async def test_collision_disabled_deleted(auth_api):
     assert (await client.get("/api/v1/auth/me", headers=headers)).status_code == 403
     assert (await client.post("/api/v1/auth/google", json={"id_token": "a"})).status_code == 403
     async with factory() as db:
+        await db.execute(delete(RefreshToken).where(RefreshToken.user_id == uid))
         pref = await db.scalar(select(UserPreference).where(UserPreference.user_id == uid))
         await db.delete(pref)
         await db.delete(await db.get(User, uid))
@@ -250,7 +251,9 @@ async def test_calendar_callback_uses_state_without_bearer(auth_api, monkeypatch
     for path in ("/api/v1/calendar/oauth/callback", "/api/v1/calendar/oauth2callback"):
         response = await auth_api[0].get(path, params={"code": "code", "state": "invalid"})
         assert response.status_code == 401
-        assert response.json()["detail"] == "Invalid state"
+        err = response.json()["error"]
+        assert err["code"] == "CALENDAR_AUTH_REQUIRED"
+        assert err["message"] == "Invalid state"
     assert len(calls) == 2
     assert all(call["user_id"] is None for call in calls)
 
