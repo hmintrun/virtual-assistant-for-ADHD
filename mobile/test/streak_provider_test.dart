@@ -7,6 +7,7 @@ import 'package:proplan_va/core/api_client.dart';
 import 'package:proplan_va/core/theme.dart';
 import 'package:proplan_va/providers/streak_provider.dart';
 import 'package:proplan_va/screens/calendar_screen.dart';
+import 'package:proplan_va/screens/support_screens.dart';
 import 'package:proplan_va/widgets/melbel_ui.dart';
 import 'package:proplan_va/widgets/streak_widgets.dart';
 
@@ -328,4 +329,78 @@ void main() {
       expect(tester.takeException(), isNull);
     });
   }
+
+  testWidgets('MelbelStreakIntroCard opens streak guide and dismissIntro persists',
+      (tester) async {
+    final streak = StreakProvider(ownerId: 'intro_card');
+    await streak.restore();
+    expect(streak.introDismissed, isFalse);
+
+    await tester.pumpWidget(MaterialApp(
+      theme: MelbelTheme.themeFor(isDark: false),
+      home: Builder(
+        builder: (context) => Scaffold(
+          body: MelbelStreakIntroCard(
+            streak: streak,
+            onLearnMore: () => showMelbelStreakGuide(context, streak: streak),
+            onDismiss: streak.dismissIntro,
+          ),
+        ),
+      ),
+    ));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Giữ 3 ngày liên tiếp để mở Streak'), findsOneWidget);
+    await tester.tap(find.text('Xem giới thiệu'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Nhịp cùng Melbel (Streak)'), findsOneWidget);
+    expect(find.text('3 ngày liên tiếp mở chuỗi (≥ 2 phút/ngày)'),
+        findsOneWidget);
+
+    await tester.scrollUntilVisible(
+      find.text('Đã hiểu · Bắt đầu giữ nhịp'),
+      220,
+      scrollable: find.byType(Scrollable).last,
+    );
+    await tester.tap(find.text('Đã hiểu · Bắt đầu giữ nhịp'));
+    await tester.pumpAndSettle();
+
+    expect(streak.introDismissed, isTrue);
+    final reloaded = StreakProvider(ownerId: 'intro_card');
+    await reloaded.restore();
+    expect(reloaded.introDismissed, isTrue);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('HelpScreen introduces Streak feature and opens guide sheet',
+      (tester) async {
+    await tester.pumpWidget(MaterialApp(
+      theme: MelbelTheme.themeFor(isDark: false),
+      home: const HelpScreen(),
+    ));
+    await tester.pumpAndSettle();
+
+    expect(find.byType(MelbelSectionBanner), findsNWidgets(2));
+    expect(find.text('Nhịp tập trung (Streak)'), findsOneWidget);
+    await tester.scrollUntilVisible(
+      find.text('Chuỗi tập trung (Streak) hoạt động thế nào?'),
+      200,
+    );
+    await tester.pumpAndSettle();
+    expect(
+      find.text('Chuỗi tập trung (Streak) hoạt động thế nào?'),
+      findsOneWidget,
+    );
+
+    await tester.scrollUntilVisible(
+      find.text('Nhịp tập trung (Streak)'),
+      -200,
+    );
+    await tester.tap(find.text('Nhịp tập trung (Streak)'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Nhịp cùng Melbel (Streak)'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
 }

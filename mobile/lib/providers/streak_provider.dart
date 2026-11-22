@@ -164,6 +164,7 @@ class StreakProvider extends ChangeNotifier {
   bool _warmupMissedNotice = false;
   bool _softResetNotice = false;
   bool _crownEnabled = true;
+  bool _introDismissed = false;
   bool _restored = false;
   StreakCelebrationEvent? _pendingCelebration;
   final Map<String, StreakDayRecord> _dayRecords = {};
@@ -186,6 +187,7 @@ class StreakProvider extends ChangeNotifier {
   bool get warmupMissedNotice => _warmupMissedNotice;
   bool get softResetNotice => _softResetNotice;
   bool get crownEnabled => _crownEnabled;
+  bool get introDismissed => _introDismissed;
   StreakCelebrationEvent? get pendingCelebration => _pendingCelebration;
 
   bool get todayDone => dayStatus(_now()) == StreakDayKind.done;
@@ -336,6 +338,7 @@ class StreakProvider extends ChangeNotifier {
     _warmupMissedNotice = json['warmup_missed_notice'] as bool? ?? false;
     _softResetNotice = json['soft_reset_notice'] as bool? ?? false;
     _crownEnabled = json['crown_enabled'] as bool? ?? true;
+    _introDismissed = json['intro_dismissed'] as bool? ?? false;
 
     _dayRecords.clear();
     final days = json['day_records'];
@@ -610,6 +613,13 @@ class StreakProvider extends ChangeNotifier {
     notifyListeners();
   }
 
+  Future<void> dismissIntro() async {
+    if (_introDismissed) return;
+    _introDismissed = true;
+    await _persist();
+    notifyListeners();
+  }
+
   Future<void> _persist() async {
     try {
       final prefs = await SharedPreferences.getInstance();
@@ -627,6 +637,7 @@ class StreakProvider extends ChangeNotifier {
         'warmup_missed_notice': _warmupMissedNotice,
         'soft_reset_notice': _softResetNotice,
         'crown_enabled': _crownEnabled,
+        'intro_dismissed': _introDismissed,
         'day_records': {
           for (final entry in _dayRecords.entries)
             entry.key: entry.value.toJson(),

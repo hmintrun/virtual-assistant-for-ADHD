@@ -765,6 +765,10 @@ class _SetupFlowScreenState extends State<SetupFlowScreen>
               number: '3',
               title: 'Bắt đầu phiên',
               detail: 'Tập trung một việc.'),
+          const _GuideTile(
+              number: '4',
+              title: 'Giữ nhịp 3 ngày mở Streak',
+              detail: 'Chỉ cần ≥ 2 phút/ngày, có Khiên ngủ nướng giữ chuỗi.'),
         ],
       );
 

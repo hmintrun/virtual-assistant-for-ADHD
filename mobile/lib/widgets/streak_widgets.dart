@@ -300,6 +300,14 @@ class _MelbelStreakSheet extends StatelessWidget {
                         ),
                       ),
                       IconButton(
+                        tooltip: 'Cách hoạt động',
+                        constraints:
+                            const BoxConstraints(minWidth: 48, minHeight: 48),
+                        onPressed: () =>
+                            showMelbelStreakGuide(context, streak: streak),
+                        icon: const Icon(Icons.help_outline_rounded),
+                      ),
+                      IconButton(
                         tooltip: 'Đóng',
                         constraints:
                             const BoxConstraints(minWidth: 48, minHeight: 48),
@@ -974,4 +982,381 @@ Future<void> showMelbelStreakCelebration(
       );
     },
   );
+}
+
+/// Dismissible first-time feature introduction card for [HomeScreen].
+class MelbelStreakIntroCard extends StatelessWidget {
+  const MelbelStreakIntroCard({
+    required this.streak,
+    required this.onLearnMore,
+    required this.onDismiss,
+    super.key,
+  });
+
+  final StreakProvider streak;
+  final VoidCallback onLearnMore;
+  final VoidCallback onDismiss;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final palette = context.melbel;
+    final days = streak.effectiveDisplayStreak;
+    return MelbelCard(
+      tone: MelbelCardTone.sage,
+      borderRadius: 24,
+      padding: const EdgeInsets.all(16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const MelbelStatusPill(
+                label: 'Mới · Nhịp cùng Melbel',
+                icon: Icons.auto_awesome_rounded,
+                tone: MelbelCardTone.amber,
+              ),
+              const Spacer(),
+              TextButton(
+                onPressed: onDismiss,
+                style: TextButton.styleFrom(
+                  visualDensity: VisualDensity.compact,
+                  minimumSize: const Size(48, 36),
+                ),
+                child: const Text('Ẩn'),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Text(
+            'Giữ 3 ngày liên tiếp để mở Streak',
+            style: theme.textTheme.titleMedium?.copyWith(
+              fontWeight: FontWeight.w700,
+              color: palette.onSageSoft,
+            ),
+          ),
+          const SizedBox(height: 4),
+          Text(
+            'Chỉ cần ≥ 2 phút mỗi ngày. Có Khiên ngủ nướng và 24h nối nhịp, không gây áp lực.',
+            style: theme.textTheme.bodySmall?.copyWith(
+              color: palette.onSurfaceVariant,
+              height: 1.4,
+            ),
+          ),
+          const SizedBox(height: 12),
+          Row(
+            children: [
+              SizedBox(
+                width: 24,
+                height: 26,
+                child: CustomPaint(
+                  painter: MelbelPawPainter(
+                    fillColor: palette.amberSoft,
+                    strokeColor: palette.amber,
+                    strokeWidth: 2.2,
+                  ),
+                ),
+              ),
+              const SizedBox(width: 6),
+              Text(
+                '$days/${StreakProvider.unlockDays} ngày',
+                style: theme.textTheme.labelLarge?.copyWith(
+                  fontWeight: FontWeight.w700,
+                  color: palette.accentInk,
+                  fontFeatures: const [FontFeature.tabularFigures()],
+                ),
+              ),
+              const Spacer(),
+              FilledButton.tonalIcon(
+                onPressed: onLearnMore,
+                icon: const Icon(Icons.menu_book_rounded, size: 16),
+                label: const Text('Xem giới thiệu'),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Illustrated bottom sheet introducing the 3-day unlock rule, ADHD-safe
+/// protection layers, and Melbel's evolution milestones.
+Future<void> showMelbelStreakGuide(
+  BuildContext context, {
+  StreakProvider? streak,
+  bool showOpenStreakCta = false,
+}) =>
+    showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      showDragHandle: true,
+      builder: (sheetContext) {
+        final theme = Theme.of(sheetContext);
+        final palette = sheetContext.melbel;
+        final maxH = MediaQuery.sizeOf(sheetContext).height * 0.84;
+        return SafeArea(
+          child: ConstrainedBox(
+            constraints: BoxConstraints(maxHeight: maxH),
+            child: Column(
+              children: [
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(20, 4, 12, 8),
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              'GIỚI THIỆU TÍNH NĂNG',
+                              style: theme.textTheme.labelSmall?.copyWith(
+                                color: palette.accentInk,
+                                fontWeight: FontWeight.w700,
+                                letterSpacing: 0.6,
+                              ),
+                            ),
+                            Text(
+                              'Nhịp cùng Melbel (Streak)',
+                              style: theme.textTheme.titleLarge?.copyWith(
+                                fontWeight: FontWeight.w800,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      IconButton(
+                        tooltip: 'Đóng',
+                        constraints:
+                            const BoxConstraints(minWidth: 48, minHeight: 48),
+                        onPressed: () => Navigator.of(sheetContext).pop(),
+                        icon: const Icon(Icons.close_rounded),
+                      ),
+                    ],
+                  ),
+                ),
+                Expanded(
+                  child: ListView(
+                    padding: const EdgeInsets.fromLTRB(20, 4, 20, 24),
+                    children: [
+                      MelbelCard(
+                        tone: MelbelCardTone.sage,
+                        borderRadius: 22,
+                        padding: const EdgeInsets.all(16),
+                        child: Column(
+                          children: [
+                            const MelbelMascot(
+                              expression: CatExpression.happy,
+                              width: 88,
+                              height: 78,
+                            ),
+                            const SizedBox(height: 8),
+                            Text(
+                              'Giữ nhịp tập trung dịu nhẹ cho người ADHD-I — không áp lực mất trắng.',
+                              textAlign: TextAlign.center,
+                              style: theme.textTheme.bodyMedium?.copyWith(
+                                color: palette.onSageSoft,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                            const SizedBox(height: 12),
+                            Wrap(
+                              spacing: 10,
+                              runSpacing: 8,
+                              alignment: WrapAlignment.center,
+                              children: [
+                                _GuidePawLegendChip(
+                                  label: 'Giữ nhịp',
+                                  fill: palette.sage,
+                                ),
+                                _GuidePawLegendChip(
+                                  label: 'Khiên ngủ nướng',
+                                  fill: palette.surface,
+                                  stroke: palette.sage,
+                                ),
+                                _GuidePawLegendChip(
+                                  label: 'Chờ nối 24h',
+                                  fill: palette.amberSoft,
+                                  stroke: palette.amber,
+                                  dashed: true,
+                                ),
+                              ],
+                            ),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+                      const _GuideRuleCard(
+                        step: '1',
+                        title: '3 ngày liên tiếp mở chuỗi (≥ 2 phút/ngày)',
+                        description:
+                            'Hoàn thành Khởi động 2 phút hoặc 1 phiên tập trung là tính 1 ngày. Đủ 3 ngày liên tiếp, chuỗi sẽ chính thức sáng và nối dải paw mèo trên Lịch.',
+                      ),
+                      const _GuideRuleCard(
+                        step: '2',
+                        title: 'Tầng 1 · Khiên ngủ nướng tự động',
+                        description:
+                            'Sau khi mở chuỗi (≥ 3 ngày), lỡ 1 ngày bận/mệt thì Khiên tự động bật giữ nguyên chuỗi (tặng sẵn 1, tối đa 2; nhận thêm ở mốc 7 & bội số 5 ngày).',
+                      ),
+                      const _GuideRuleCard(
+                        step: '3',
+                        title: 'Tầng 2 · Nối lại nhịp trong 24h',
+                        description:
+                            'Hết khiên mà lỡ 1 ngày? Chuỗi tạm chờ 24h thay vì xoá ngay — chỉ cần làm ≥ 2 phút hôm sau là nối tiếp được (tối đa 2 lần/tháng).',
+                      ),
+                      const _GuideRuleCard(
+                        step: '4',
+                        title: 'Tầng 3 · Tiến hoá Melbel & Giữ thành quả',
+                        description:
+                            'Mở khoá 5 chặng tiến hoá (3 → 7 → 14 → 30 → 100 ngày, có phụ kiện nơ sao ở mốc 30 ngày). Dù nghỉ dài ngày, Kỷ lục và Tổng ngày tháng này vẫn luôn được giữ.',
+                      ),
+                      const SizedBox(height: 8),
+                      PrimaryCta(
+                        label: 'Đã hiểu · Bắt đầu giữ nhịp',
+                        onPressed: () {
+                          if (streak != null) {
+                            unawaited(streak.dismissIntro());
+                          }
+                          Navigator.of(sheetContext).pop();
+                        },
+                      ),
+                      if (showOpenStreakCta && streak != null) ...[
+                        const SizedBox(height: 10),
+                        SecondaryCta(
+                          label: 'Xem chuỗi của tôi',
+                          onPressed: () {
+                            Navigator.of(sheetContext).pop();
+                            showMelbelStreakSheet(context, streak);
+                          },
+                        ),
+                      ],
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+
+class _GuidePawLegendChip extends StatelessWidget {
+  const _GuidePawLegendChip({
+    required this.label,
+    required this.fill,
+    this.stroke,
+    this.dashed = false,
+  });
+
+  final String label;
+  final Color fill;
+  final Color? stroke;
+  final bool dashed;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final palette = context.melbel;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+      decoration: BoxDecoration(
+        color: palette.surface,
+        borderRadius: BorderRadius.circular(999),
+        border: Border.all(color: palette.hairline),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          SizedBox(
+            width: 14,
+            height: 16,
+            child: CustomPaint(
+              painter: MelbelPawPainter(
+                fillColor: fill,
+                strokeColor: stroke,
+                strokeWidth: stroke != null ? 2.4 : 0,
+                dashed: dashed,
+              ),
+            ),
+          ),
+          const SizedBox(width: 6),
+          Text(
+            label,
+            style: theme.textTheme.labelSmall?.copyWith(
+              fontWeight: FontWeight.w600,
+              color: palette.onSurface,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _GuideRuleCard extends StatelessWidget {
+  const _GuideRuleCard({
+    required this.step,
+    required this.title,
+    required this.description,
+  });
+
+  final String step;
+  final String title;
+  final String description;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final palette = context.melbel;
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 10),
+      child: MelbelCard(
+        borderRadius: 20,
+        padding: const EdgeInsets.all(14),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Container(
+              width: 28,
+              height: 28,
+              decoration: BoxDecoration(
+                color: palette.sageSoft,
+                shape: BoxShape.circle,
+              ),
+              alignment: Alignment.center,
+              child: Text(
+                step,
+                style: theme.textTheme.labelLarge?.copyWith(
+                  fontWeight: FontWeight.w800,
+                  color: palette.accentInk,
+                ),
+              ),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    title,
+                    style: theme.textTheme.titleSmall?.copyWith(
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    description,
+                    style: theme.textTheme.bodySmall?.copyWith(
+                      color: palette.onSurfaceVariant,
+                      height: 1.4,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
 }

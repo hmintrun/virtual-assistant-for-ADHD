@@ -412,6 +412,18 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                     children: [upcoming])
               else
                 upcoming,
+              if (streak != null &&
+                  !streak.introDismissed &&
+                  !streak.isUnlocked &&
+                  !resumeRun) ...[
+                const SizedBox(height: 14),
+                MelbelStreakIntroCard(
+                  streak: streak,
+                  onLearnMore: () =>
+                      showMelbelStreakGuide(context, streak: streak),
+                  onDismiss: () => unawaited(streak.dismissIntro()),
+                ),
+              ],
               if (hasDraft) ...[
                 const SizedBox(height: 14),
                 MelbelCard(

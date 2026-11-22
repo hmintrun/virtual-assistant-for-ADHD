@@ -1,6 +1,7 @@
 import '../services/google_calendar_api.dart';
 import '../services/auth_service.dart';
 import '../providers/focus_provider.dart';
+import '../providers/streak_provider.dart';
 import '../providers/task_provider.dart';
 import '../widgets/google_login_button.dart';
 import '../core/api_client.dart';
@@ -14,6 +15,7 @@ import '../core/theme.dart';
 import '../providers/theme_provider.dart';
 import '../widgets/melbel_ui.dart';
 import '../widgets/shimmer_loading.dart';
+import '../widgets/streak_widgets.dart';
 import 'onboarding_screens.dart';
 
 /// Supporting Help flow attached to the global help icon.
@@ -56,12 +58,18 @@ class HelpScreen extends StatelessWidget {
               useHoney: true,
               showRays: true,
             ),
-            const _HelpRow(
-              icon: Icons.cloud_outlined,
-              title: 'Đóng băng chuỗi',
-              subtitle: 'Giữ chuỗi khi bạn lỡ nhịp.',
+            _HelpRow(
+              icon: Icons.pets_rounded,
+              title: 'Nhịp tập trung (Streak)',
+              subtitle:
+                  'Giữ 3 ngày liên tiếp (≥ 2 phút/ngày) để mở chuỗi, nhận Khiên ngủ nướng và tiến hoá Melbel.',
               useHoney: false,
               showRays: true,
+              onTap: () => showMelbelStreakGuide(
+                context,
+                streak: StreakProvider.maybeOf(context, listen: false),
+                showOpenStreakCta: true,
+              ),
             ),
             const _HelpRow(
               icon: Icons.calendar_month_outlined,
@@ -76,6 +84,11 @@ class HelpScreen extends StatelessWidget {
               art: MelbelSectionArt.sprout,
             ),
             const SizedBox(height: 10),
+            const _Faq(
+              question: 'Chuỗi tập trung (Streak) hoạt động thế nào?',
+              answer:
+                  'Chỉ cần hoàn thành ít nhất 2 phút tập trung mỗi ngày trong 3 ngày liên tiếp để mở chuỗi. Sau khi mở, lỡ 1 ngày sẽ tự bật Khiên ngủ nướng hoặc mở 24h nối lại nhịp; nghỉ dài vẫn giữ nguyên kỷ lục và tổng ngày tháng này.',
+            ),
             const _Faq(
               question: 'Nếu tôi trễ giờ hẹn thì sao?',
               answer:
@@ -147,6 +160,7 @@ class _AccountScreenState extends State<AccountScreen> {
   Widget build(BuildContext context) {
     final auth = context.watch<AuthService>();
     final focus = context.watch<FocusProvider>();
+    final streak = StreakProvider.maybeOf(context);
     final canSignOut = !focus.isActiveRun &&
         !focus.isRecording &&
         !focus.runCommandBusy &&
@@ -360,22 +374,29 @@ class _AccountScreenState extends State<AccountScreen> {
             const SizedBox(height: 12),
             const _AppearanceSettingsPanel(),
             const SizedBox(height: 12),
-            const MelbelDisclosure(
+            MelbelDisclosure(
                 title: 'Nhật ký của bạn',
                 icon: Icons.history_rounded,
                 children: [
                   _HelpRow(
-                    icon: Icons.nightlight_outlined,
+                    icon: Icons.pets_rounded,
                     title: 'Chuỗi ngày',
-                    subtitle: '— · Chưa có dữ liệu',
+                    subtitle: streak == null
+                        ? '— · Chưa có dữ liệu'
+                        : streak.isUnlocked
+                            ? '${streak.effectiveDisplayStreak} ngày liên tiếp · Kỷ lục ${streak.longestStreak} ngày'
+                            : 'Khởi động ${streak.effectiveDisplayStreak}/${StreakProvider.unlockDays} ngày · Chạm để xem hướng dẫn',
+                    onTap: streak == null
+                        ? () => showMelbelStreakGuide(context)
+                        : () => showMelbelStreakSheet(context, streak),
                   ),
-                  _HelpRow(
+                  const _HelpRow(
                     icon: Icons.hourglass_top,
                     title: 'Thời gian tập trung',
                     subtitle: '— · Chưa có dữ liệu',
                     useHoney: true,
                   ),
-                  _HelpRow(
+                  const _HelpRow(
                     icon: Icons.all_inbox_outlined,
                     title: 'Hòm thư nháp',
                     subtitle: '— · Chưa có dữ liệu tài khoản',
@@ -802,6 +823,7 @@ class _HelpRow extends StatelessWidget {
     required this.subtitle,
     this.useHoney = false,
     this.showRays = false,
+    this.onTap,
   });
 
   final IconData icon;
@@ -809,6 +831,7 @@ class _HelpRow extends StatelessWidget {
   final String subtitle;
   final bool useHoney;
   final bool showRays;
+  final VoidCallback? onTap;
 
   @override
   Widget build(BuildContext context) {
@@ -830,63 +853,81 @@ class _HelpRow extends StatelessWidget {
       child: Icon(icon, color: iconColor, size: 20),
     );
 
+    final rowContent = Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+      child: Row(
+        children: [
+          if (showRays)
+            Stack(
+              clipBehavior: Clip.none,
+              children: [
+                badge,
+                Positioned(
+                  top: -4,
+                  right: -4,
+                  child: IgnorePointer(
+                    child: Transform.rotate(
+                      angle: 0.35,
+                      child: MelbelDoodleRays(
+                        size: 13,
+                        color: isDark
+                            ? const Color(0xFFF3CA52)
+                            : const Color(0xFFF0C24D),
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            )
+          else
+            badge,
+          const SizedBox(width: 14),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  title,
+                  style: theme.textTheme.titleSmall?.copyWith(
+                    fontSize: 15.5,
+                    fontWeight: FontWeight.w700,
+                    color: palette.onSurface,
+                  ),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  subtitle,
+                  style: theme.textTheme.bodySmall?.copyWith(
+                    color: palette.onSurfaceVariant,
+                    height: 1.3,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          if (onTap != null) ...[
+            const SizedBox(width: 8),
+            Icon(
+              Icons.chevron_right_rounded,
+              color: palette.onSurfaceVariant,
+            ),
+          ],
+        ],
+      ),
+    );
+
     return Padding(
       padding: const EdgeInsets.only(bottom: 8),
       child: MelbelCard(
         borderRadius: 22,
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-        child: Row(
-          children: [
-            if (showRays)
-              Stack(
-                clipBehavior: Clip.none,
-                children: [
-                  badge,
-                  Positioned(
-                    top: -4,
-                    right: -4,
-                    child: IgnorePointer(
-                      child: Transform.rotate(
-                        angle: 0.35,
-                        child: MelbelDoodleRays(
-                          size: 13,
-                          color: isDark
-                              ? const Color(0xFFF3CA52)
-                              : const Color(0xFFF0C24D),
-                        ),
-                      ),
-                    ),
-                  ),
-                ],
-              )
-            else
-              badge,
-            const SizedBox(width: 14),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    title,
-                    style: theme.textTheme.titleSmall?.copyWith(
-                      fontSize: 15.5,
-                      fontWeight: FontWeight.w700,
-                      color: palette.onSurface,
-                    ),
-                  ),
-                  const SizedBox(height: 2),
-                  Text(
-                    subtitle,
-                    style: theme.textTheme.bodySmall?.copyWith(
-                      color: palette.onSurfaceVariant,
-                      height: 1.3,
-                    ),
-                  ),
-                ],
+        padding: EdgeInsets.zero,
+        child: onTap == null
+            ? rowContent
+            : InkWell(
+                borderRadius: BorderRadius.circular(22),
+                onTap: onTap,
+                child: rowContent,
               ),
-            ),
-          ],
-        ),
       ),
     );
   }
