@@ -738,7 +738,10 @@ class FocusProvider extends ChangeNotifier {
     unawaited(repo.enqueueOutboxRecord(record));
   }
 
-  Future<void> startSession(FocusSessionInfo session) async {
+  Future<void> startSession(
+    FocusSessionInfo session, {
+    bool continueImmediately = false,
+  }) async {
     if (isActiveRun || hasUnfinishedServerRun || _runCommandBusy) return;
     microTaskTimer.stop();
     _checkInDeadline?.cancel();
@@ -760,8 +763,10 @@ class FocusProvider extends ChangeNotifier {
     recorder.resetFailures();
     _lastError = null;
     _alarmScheduled = null;
-    _dndApplyState = 'not_applied';
-    _dndRestoreState = 'not_needed';
+    if (!continueImmediately) {
+      _dndApplyState = 'not_applied';
+      _dndRestoreState = 'not_needed';
+    }
     await _refreshDndPermission();
     _notify();
   }
@@ -1101,6 +1106,7 @@ class FocusProvider extends ChangeNotifier {
     String? skipScope,
     String? remainingNote,
     bool? stepCompleted,
+    bool preserveFocusMode = false,
   }) async {
     final checkIn = _checkIn;
     if (checkIn == null || !canAnswerCheckIn || _runCommandBusy || canUndoSkip)
@@ -1122,7 +1128,9 @@ class FocusProvider extends ChangeNotifier {
           'remaining_note': remainingNote!.trim(),
       };
       await _persistRun();
-      await _restoreFocusMode();
+      if (!preserveFocusMode) {
+        await _restoreFocusMode();
+      }
       if (_outboxRepository != null) {
         final clientEventId = ApiClient.stableIdempotencyKey(
             'checkin_${checkIn['checkin_id']}', pending.toString());
