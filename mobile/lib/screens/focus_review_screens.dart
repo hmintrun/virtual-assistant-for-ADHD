@@ -563,7 +563,7 @@ class _ScheduleComparisonScreenState extends State<ScheduleComparisonScreen>
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed &&
         _proposal?['status'] == 'pending') {
-      _load(forceCurrent: true);
+      _load();
     }
   }
 

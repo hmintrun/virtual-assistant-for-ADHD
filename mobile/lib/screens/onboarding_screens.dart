@@ -199,8 +199,20 @@ class _SetupFlowScreenState extends State<SetupFlowScreen>
     _persistProgress();
   }
 
+  AuthService? _maybeAuth() {
+    try {
+      return Provider.of<AuthService>(context, listen: false);
+    } catch (_) {
+      return null;
+    }
+  }
+
   Future<void> _restoreSetup() async {
-    final auth = context.read<AuthService>();
+    final auth = _maybeAuth();
+    if (auth == null) {
+      if (mounted) setState(() => _loadingPreferences = false);
+      return;
+    }
     final savedProgress = await auth.loadOnboardingProgress();
     try {
       final preferences = await _api.getData('/preferences');
@@ -265,7 +277,9 @@ class _SetupFlowScreenState extends State<SetupFlowScreen>
   }
 
   void _persistProgress() {
-    unawaited(context.read<AuthService>().saveOnboardingProgress({
+    final auth = _maybeAuth();
+    if (auth == null) return;
+    unawaited(auth.saveOnboardingProgress({
       'step': _step,
       'appearance': _appearance,
       'focus_minutes': _focusMinutes,
@@ -314,7 +328,7 @@ class _SetupFlowScreenState extends State<SetupFlowScreen>
 
   Future<void> _openHome() async {
     if (_savingPreferences || _loadingPreferences) return;
-    final auth = context.read<AuthService>();
+    final auth = _maybeAuth();
     setState(() => _savingPreferences = true);
     try {
       if (!_preferencesLoaded || _serverPreferences == null) {
@@ -364,7 +378,7 @@ class _SetupFlowScreenState extends State<SetupFlowScreen>
               'onboarding_preferences', payload.toString()),
         );
       }
-      await auth.completeOnboarding();
+      await auth?.completeOnboarding();
     } on ApiException catch (error) {
       if (error.code == 'REVISION_CONFLICT') unawaited(_restoreSetup());
       if (mounted)
@@ -400,8 +414,6 @@ class _SetupFlowScreenState extends State<SetupFlowScreen>
       showBottomClouds: true,
       child: Scaffold(
         backgroundColor: Colors.transparent,
-        appBar: MelbelAppBar(
-          title: _title,
         appBar: MelbelAppBar(
           title: _title,
           showBack: true,
