@@ -26,7 +26,7 @@ Nguồn đối chiếu mã nguồn: `backend/app/core/config.py`, `backend/app/c
 | `CALENDAR_PROVIDER_MODE` | `real` *(hoặc `fake` nếu staging không nối Google thật)* | Khi đặt `real`, bắt buộc cấu hình đủ cặp OAuth Client ID/Secret thật. Lưu ý: nếu thiếu Client ID/Secret, app không ném `ValueError` fail-fast lúc khởi động mà `settings.is_calendar_real_mode` trả `False` và tự động rơi về `FakeCalendarClient`. |
 | `GOOGLE_OAUTH_CLIENT_ID` | `<REDACTED>.apps.googleusercontent.com` | OAuth 2.0 Client ID trên Google Cloud Console; không dùng giá trị mẫu `.env.example`. |
 | `GOOGLE_OAUTH_CLIENT_SECRET` | `<REDACTED>` | OAuth 2.0 Client Secret trên Google Cloud Console; ẩn khỏi log/repr. |
-| `GOOGLE_OAUTH_REDIRECT_URI` | `https://<STAGING_API_HOST>/api/v1/calendar/oauth/callback` | URL HTTPS callback khớp chính xác Authorized Redirect URI trên Google Cloud Console. Mặc định trong `config.py#L91` là `http://localhost:8000/api/v1/calendar/oauth/callback` cho local dev và không có startup guard chặn `localhost`, nên khi deploy lên server bắt buộc ghi đè qua biến môi trường này. |
+| `GOOGLE_OAUTH_REDIRECT_URI` | `https://virtual-assistant-for-adhd.onrender.com/api/v1/calendar/oauth/callback` | URL HTTPS callback khớp chính xác Authorized Redirect URI trên Google Cloud Console. Mặc định trong `config.py#L91` đã trỏ sẵn về `https://virtual-assistant-for-adhd.onrender.com/api/v1/calendar/oauth/callback`; khi `ENVIRONMENT=staging`/`production`, `validate_secret_configuration()` chặn fail-fast nếu giá trị rỗng, không phải `https://`, hoặc trỏ về `localhost`/`127.0.0.1` (còn ở `ENVIRONMENT=development` vẫn cho phép override `http://localhost:8000/api/v1/calendar/oauth/callback` khi dev local). |
 | `GEMINI_API_KEY` *(hoặc `GOOGLE_CREDENTIALS_PATH`)* | `<REDACTED>` *(hoặc đường dẫn JSON Service Account + `GOOGLE_CLOUD_PROJECT`)* | Tối thiểu có 1 phương thức xác thực Gemini hợp lệ (`has_gemini_auth == True`). |
 | `GROQ_API_KEY` | `<REDACTED>` | Khóa Groq Cloud phục vụ fallback LLM (`qwen/qwen3.8-27b` / `openai/gpt-oss-20b`) và Whisper STT (`whisper-large-v3-turbo`). |
 | Cấu hình AI/Voice/TZ mặc định | `GEMINI_FLASH_MODEL="gemini-3.5-flash-lite"`, `VOICE_STT_PROVIDER="auto"`, `DEFAULT_TIMEZONE="Asia/Ho_Chi_Minh"` | **Giữ nguyên mặc định** theo cấu hình hiện hành (`GEMINI_BACKUP_MODEL="gemini-3.5-flash-lite"`, `GEMINI_UF1_MODEL="gemini-3.5-flash-lite"`, `GEMINI_STT_MODEL="gemini-3.5-flash-lite"`, `VOICE_STT_UF5_PREFER_GROQ=true`). |
@@ -45,21 +45,24 @@ Thay `<STAGING_BASE_URL>` bằng URL staging thật (ví dụ `https://virtual-a
     -H "Origin: https://evil.example" \
     -H "Access-Control-Request-Method: GET"
   ```
-  - **Kỳ vọng:** HTTP `400` (`Disallowed CORS origin`), **không có** header `access-control-allow-origin` và **không có** `access-control-allow-credentials: true`.
+  - **Kỳ vọng:** HTTP `400` (`Disallowed CORS origin`), **không có** header `access-control-allow-origin` (trình duyệt chặn hoàn toàn; lưu ý `CORSMiddleware` của Starlette vẫn trả kèm `access-control-allow-credentials: true` nhưng vô hiệu khi thiếu `access-control-allow-origin`), và có đủ `x-request-id`, `cache-control: no-store`, `x-content-type-options: nosniff`, `x-frame-options: DENY`, `referrer-policy: no-referrer`.
 - [ ] **Không phản chiếu origin lạ hoặc trick domain/userinfo trên `GET`:**
   ```bash
   curl -i -sS "<STAGING_BASE_URL>/api/v1/health" -H "Origin: https://evil.example"
   curl -i -sS "<STAGING_BASE_URL>/api/v1/health" -H "Origin: http://localhost:8080@evil.com"
   ```
   - **Kỳ vọng:** Response không chứa `access-control-allow-origin`.
-- [ ] **Cho phép đúng origin nằm trong allowlist `CORS_ALLOWED_ORIGINS`:**
+- [ ] **Cho phép đúng origin nằm trong allowlist `CORS_ALLOWED_ORIGINS` (preflight `OPTIONS` & actual `GET`):**
   ```bash
   curl -i -sS -X OPTIONS "<STAGING_BASE_URL>/api/v1/auth/me" \
     -H "Origin: <ALLOWED_ORIGIN>" \
     -H "Access-Control-Request-Method: GET" \
     -H "Access-Control-Request-Headers: Authorization,Content-Type"
+  curl -i -sS "<STAGING_BASE_URL>/api/v1/health" -H "Origin: <ALLOWED_ORIGIN>"
   ```
-  - **Kỳ vọng:** HTTP `200`, trả chính xác `access-control-allow-origin: <ALLOWED_ORIGIN>`, `access-control-allow-credentials: true`, `access-control-expose-headers: X-Request-ID`.
+  - **Kỳ vọng:**
+    - `OPTIONS /api/v1/auth/me`: HTTP `200`, trả chính xác `access-control-allow-origin: <ALLOWED_ORIGIN>`, `access-control-allow-credentials: true`, kèm `x-request-id`, `cache-control: no-store`, `x-content-type-options: nosniff`, `x-frame-options: DENY`, `referrer-policy: no-referrer`.
+    - `GET /api/v1/health`: HTTP `200`, trả chính xác `access-control-allow-origin: <ALLOWED_ORIGIN>`, `access-control-allow-credentials: true`, `access-control-expose-headers: X-Request-ID`, `x-request-id`, cùng 3 security headers (`nosniff`, `DENY`, `no-referrer`).
 
 ### 2.2. `BE-05` — OAuth Redirect Allowlist & Fail-fast Secrets
 
@@ -71,6 +74,7 @@ Thay `<STAGING_BASE_URL>` bằng URL staging thật (ví dụ `https://virtual-a
     - `AUTH_MODE=dev_user` $\rightarrow$ fail-fast `ValueError` tại `validate_auth_configuration()`.
     - `SECRET_KEY` mặc định hoặc `< 32` bytes $\rightarrow$ fail-fast `ValueError` tại `validate_secret_configuration()`.
     - `CALENDAR_CREDENTIAL_SECRET_KEY` rỗng hoặc không đúng định dạng Fernet 32-byte base64 $\rightarrow$ fail-fast `ValueError` tại `calendar_credential_key()`.
+    - `GOOGLE_OAUTH_REDIRECT_URI` rỗng, không phải `https://`, hoặc trỏ về `localhost`/`127.0.0.1` $\rightarrow$ fail-fast `ValueError` tại `validate_secret_configuration()`.
     - `JWT_SECRET_KEY` rỗng, `< 32` bytes, trùng `SECRET_KEY`, hoặc chứa `placeholder`/`your-`/`change`/`example` $\rightarrow$ fail-fast `ValueError` tại `validate_app_signing_configuration()`.
     - `GOOGLE_SIGN_IN_AUDIENCES` rỗng hoặc không phải client ID `.apps.googleusercontent.com` thật $\rightarrow$ fail-fast `ValueError`.
 - [ ] **Log Redaction (`OAuthLogRedactionFilter`):**

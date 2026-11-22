@@ -65,8 +65,6 @@ app = FastAPI(title=settings.PROJECT_NAME, lifespan=lifespan)
 
 app.add_middleware(BodySizeLimitMiddleware)
 app.add_middleware(ObservabilityMiddleware)
-app.add_middleware(RequestIdMiddleware)
-app.add_middleware(SecurityHeadersMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.browser_origins,
@@ -75,6 +73,8 @@ app.add_middleware(
     allow_headers=["*"],
     expose_headers=["X-Request-ID"],
 )
+app.add_middleware(RequestIdMiddleware)
+app.add_middleware(SecurityHeadersMiddleware)
 
 register_exception_handlers(app)
 app.include_router(api_router)

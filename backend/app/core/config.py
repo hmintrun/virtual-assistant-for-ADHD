@@ -88,7 +88,9 @@ class Settings(BaseSettings):
         repr=False,
         description="OAuth 2.0 Client Secret; ẩn hoàn toàn khỏi log/repr để bảo mật.",
     )
-    GOOGLE_OAUTH_REDIRECT_URI: str = "http://localhost:8000/api/v1/calendar/oauth/callback"
+    GOOGLE_OAUTH_REDIRECT_URI: str = (
+        "https://virtual-assistant-for-adhd.onrender.com/api/v1/calendar/oauth/callback"
+    )
     CALENDAR_CREDENTIAL_SECRET_KEY: str = Field(
         default="",
         repr=False,
@@ -196,6 +198,23 @@ class Settings(BaseSettings):
         if len(key.encode()) < 32 or key == DEFAULT_SECRET_KEY:
             raise ValueError("Staging/production yêu cầu SECRET_KEY riêng, tối thiểu 32 byte")
         self.calendar_credential_key()
+        redirect_uri = self.GOOGLE_OAUTH_REDIRECT_URI.strip()
+        try:
+            parsed_redirect = urlsplit(redirect_uri)
+        except ValueError:
+            raise ValueError(
+                "Staging/production yêu cầu GOOGLE_OAUTH_REDIRECT_URI là URL HTTPS hợp lệ (không dùng localhost)"
+            ) from None
+        if (
+            not redirect_uri
+            or any(ch.isspace() for ch in redirect_uri)
+            or parsed_redirect.scheme != "https"
+            or not parsed_redirect.hostname
+            or parsed_redirect.hostname.lower() in {"localhost", "127.0.0.1"}
+        ):
+            raise ValueError(
+                "Staging/production yêu cầu GOOGLE_OAUTH_REDIRECT_URI là URL HTTPS hợp lệ (không dùng localhost)"
+            )
 
     def calendar_credential_key(self) -> bytes | None:
         """Trả khóa Fernet tường minh, hoặc cho phép khóa dẫn xuất ở dev/test."""

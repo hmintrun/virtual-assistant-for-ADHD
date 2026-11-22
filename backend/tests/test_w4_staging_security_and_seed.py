@@ -95,6 +95,10 @@ async def test_be02_cors_blocks_evil_origin_and_allows_local_origins():
             )
             assert opt_bad.status_code == 400
             assert "access-control-allow-origin" not in opt_bad.headers
+            assert opt_bad.headers.get("x-request-id")
+            assert opt_bad.headers["x-content-type-options"] == "nosniff"
+            assert opt_bad.headers["x-frame-options"] == "DENY"
+            assert opt_bad.headers["referrer-policy"] == "no-referrer"
 
             get_bad = await client.get("/api/v1/health", headers={"Origin": evil})
             assert get_bad.status_code == 200
@@ -111,11 +115,16 @@ async def test_be02_cors_blocks_evil_origin_and_allows_local_origins():
             assert opt_ok.status_code == 200
             assert opt_ok.headers["access-control-allow-origin"] == allowed
             assert opt_ok.headers["access-control-allow-credentials"] == "true"
+            assert opt_ok.headers.get("x-request-id")
+            assert opt_ok.headers["x-content-type-options"] == "nosniff"
+            assert opt_ok.headers["x-frame-options"] == "DENY"
+            assert opt_ok.headers["referrer-policy"] == "no-referrer"
 
             get_ok = await client.get("/api/v1/health", headers={"Origin": allowed})
             assert get_ok.status_code == 200
             assert get_ok.headers["access-control-allow-origin"] == allowed
             assert get_ok.headers["access-control-allow-credentials"] == "true"
+            assert "x-request-id" in get_ok.headers.get("access-control-expose-headers", "").lower()
 
 
 @pytest.mark.asyncio
@@ -402,6 +411,61 @@ def test_be05_deployed_secret_configuration_fails_fast(
     if secret_key == _STRONG_SECRET:
         with pytest.raises(ValueError):
             cfg.calendar_credential_key()
+
+
+@pytest.mark.parametrize("env_name", ["staging", "production"])
+@pytest.mark.parametrize(
+    "bad_redirect_uri",
+    [
+        "",
+        "   ",
+        "http://virtual-assistant-for-adhd.onrender.com/api/v1/calendar/oauth/callback",
+        "http://localhost:8000/api/v1/calendar/oauth/callback",
+        "https://localhost:8000/api/v1/calendar/oauth/callback",
+        "https://127.0.0.1:8000/api/v1/calendar/oauth/callback",
+        "https://[::1/callback",
+    ],
+)
+def test_be05_deployed_redirect_uri_configuration_fails_fast(
+    env_name: Literal["staging", "production"],
+    bad_redirect_uri: str,
+):
+    cfg = Settings(
+        _env_file=None,
+        ENVIRONMENT=env_name,
+        SECRET_KEY=_STRONG_SECRET,
+        CALENDAR_CREDENTIAL_SECRET_KEY=_VALID_FERNET,
+        GOOGLE_OAUTH_REDIRECT_URI=bad_redirect_uri,
+    )
+    with pytest.raises(ValueError):
+        cfg.validate_secret_configuration()
+
+
+def test_be05_redirect_uri_default_render_and_local_dev_override():
+    default_cfg = Settings(_env_file=None)
+    assert (
+        default_cfg.GOOGLE_OAUTH_REDIRECT_URI
+        == "https://virtual-assistant-for-adhd.onrender.com/api/v1/calendar/oauth/callback"
+    )
+
+    deployed_cfg = Settings(
+        _env_file=None,
+        ENVIRONMENT="staging",
+        SECRET_KEY=_STRONG_SECRET,
+        CALENDAR_CREDENTIAL_SECRET_KEY=_VALID_FERNET,
+    )
+    deployed_cfg.validate_secret_configuration()
+
+    dev_cfg = Settings(
+        _env_file=None,
+        ENVIRONMENT="development",
+        GOOGLE_OAUTH_REDIRECT_URI="http://localhost:8000/api/v1/calendar/oauth/callback",
+    )
+    dev_cfg.validate_secret_configuration()
+    assert (
+        dev_cfg.GOOGLE_OAUTH_REDIRECT_URI
+        == "http://localhost:8000/api/v1/calendar/oauth/callback"
+    )
 
 
 def test_be05_secret_valid_in_staging_and_fallback_in_dev_test(monkeypatch, caplog):
