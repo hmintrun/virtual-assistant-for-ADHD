@@ -46,6 +46,7 @@ from app.schemas.task import (
     TaskDecompositionResult,
     TaskExtractionResult,
     _extract_explicit_time_range,
+    _extract_single_spoken_weekday,
 )
 
 logger = logging.getLogger(__name__)
@@ -136,6 +137,10 @@ _TIER3_WEEKDAYS_RE = re.compile(
 _TIER3_WEEKEND_RE = re.compile(r"\bcuối\s+tuần\b", re.IGNORECASE)
 _TIER3_BUSY_HINT_RE = re.compile(r"\b(?:bận|trừ|nghỉ|họp|không\s+rảnh)\b", re.IGNORECASE)
 _TIER3_DEADLINE_PREFIX_RE = re.compile(r"\b(?:hạn(?:\s+chót)?|trước|deadline)\b", re.IGNORECASE)
+_TIER3_NON_WEEKDAY_ORDINAL_RE = re.compile(
+    r"\b(?:lần|bước|chương|phần|tuần|ngày|buổi|mục|câu|bài)\s+thứ\s*\d+\b",
+    re.IGNORECASE,
+)
 _TIER3_EXPLICIT_DMY_RE = re.compile(r"(?<!\d)(\d{1,2})/(\d{1,2})/(\d{4})(?!\d)")
 _TIER3_EXPLICIT_TIME_RE = re.compile(
     r"(?<!\d)(\d{1,2})\s*(?:(?::|h|g)\s*(\d{2})?|giờ\s*(\d{2})?)(?!\d)",
@@ -1766,6 +1771,23 @@ class AIService:
                             )
                         except ValueError:
                             candidate = None
+                    elif (
+                        not _TIER3_DEADLINE_PREFIX_RE.search(clause)
+                        and not _UF1_RELATIVE_DATE_RE.search(clause)
+                        and (
+                            single_wd := _extract_single_spoken_weekday(
+                                _TIER3_NON_WEEKDAY_ORDINAL_RE.sub(" ", clause)
+                            )
+                        )
+                        is not None
+                    ):
+                        candidate = ExtractedFreeWindowSchema(
+                            kind="weekly_rule",
+                            weekday=single_wd,
+                            start_local=s_local,
+                            end_local=e_local,
+                            raw_phrase=phrase,
+                        )
                     if candidate is not None and not candidate.is_ambiguous:
                         extracted_windows.append(candidate)
                 if extracted_windows:
@@ -2433,10 +2455,17 @@ class AIService:
         raw_reason = (trigger_reason or "").strip().lower()
         reason_aliases = {
             "partial": "incomplete",
+            "checkin_incomplete": "incomplete",
+            "checkin_busy": "busy",
+            "checkin_skipped": "skipped",
             "settings_change": "setting_changed",
             "no_response": "missed_session",
             "no_respond": "missed_session",
+            "missed_start": "missed_session",
+            "early_completion_pull_forward": "step_completed_early",
+            "expand_next_horizon": "expand_horizon",
             "user_requested": "manual",
+            "user_reschedule": "manual",
         }
         reason = reason_aliases.get(raw_reason, raw_reason)
 

@@ -13,6 +13,10 @@ Tài liệu này được nạp tự động vào mọi phiên làm việc của
    - Nếu tồn tại [DEVELOPER.md](./DEVELOPER.md), Agent tự động nạp thông tin thành viên (Tên, Git Handle, Vai trò chính, Phân hệ phụ trách và Kỳ vọng).
    - Agent **phải chủ động cá nhân hóa** câu trả lời, góc nhìn phản biện, đề xuất kỹ thuật và phong cách code tương ứng với chuyên môn của thành viên đó (ví dụ: tư duy bảo mật & async cho Backend Lead, tư duy W3C COGA & 60 FPS cho Mobile Lead, hoặc bẫy edge case cho QA/Tester).
    - **Lưu ý:** Việc cá nhân hóa phong cách trao đổi **KHÔNG ĐƯỢC PHÉP** làm thay đổi hay vi phạm các quy tắc bất biến trong [Project.md](./Project.md) và cơ chế Strict Guardrail bên dưới.
+3. **Giới hạn Phạm vi Chỉnh sửa File (Strict Ownership Boundary — BẮT BUỘC):**
+   - Agent **CHỈ ĐƯỢC PHÉP** chỉnh sửa các file thuộc trách nhiệm trực tiếp của thành viên đang hoạt động trong [DEVELOPER.md](./DEVELOPER.md) (đối chiếu [Project.md](./Project.md) §9.2 và kế hoạch tuần).
+   - **TUYỆT ĐỐI KHÔNG SỬA CODE CỦA ĐỒNG ĐỘI KHÁC** (kể cả khi nhận lệnh chung như *"hoàn thành hết task dev"* hay *"tìm và sửa toàn bộ lỗi"*), **TRỪ KHI** người dùng yêu cầu chính xác, đích danh phần/file của người khác cần sửa.
+   - Nếu công việc có điểm chạm sang file của đồng đội khác mà chưa có chỉ định tường minh, Agent **PHẢI DỪNG LẠI**, liệt kê các file ngoài phạm vi và **hỏi lại người dùng để đảm bảo** trước khi sửa.
 
 ---
 
@@ -63,16 +67,16 @@ Tài liệu này được nạp tự động vào mọi phiên làm việc của
     2. Tắt DND & Focus Mode ngay khi người dùng xác nhận nghỉ/kết thúc/báo bận/bỏ qua, **HOẶC tự động tắt sau 5 phút nếu người dùng không phản hồi Check-in** (`status = 'no_response'`).
     3. Giữ nguyên DND nếu người dùng chọn làm tiếp luôn phiên kế tiếp.
 - **UF6 (Đánh giá tiếp tục & Điều chỉnh lịch):**
-  - Đề xuất phương án lịch mới kèm 1 câu giải thích lý do / động viên tinh thần (*Guilt-free Adaptive Rescheduling*).
+  - Đề xuất phương án lịch mới kèm 1 câu giải thích lý do / động viên tinh thần (*Guilt-free Adaptive Rescheduling*): Python chuẩn bị các lựa chọn đã kiểm chứng theo trạng thái thực tế (`trigger_reason`, `proposal_available`, `deficit_minutes`), LLM chỉ chọn nguyên văn 1 câu ngắn không phán xét từ tập cho phép (không gửi `task_title` thô và không tự bịa mốc giờ, ngày hay hứa hẹn deadline), và dùng fallback khớp đúng trạng thái nếu AI lỗi hoặc trả ngoài tập.
   - **Quy tắc đóng App trước khi duyệt:** Đóng app **KHÔNG** phải là đồng ý. Phải giữ nguyên lịch cũ đã xác nhận, lưu lịch mới vào `ScheduleProposal(status='pending_approval')`. Khi người dùng mở lại app, bắt buộc chạy thuật toán kiểm tra lại tính khả thi theo thời gian thực tại thời điểm mở app (tịnh tiến các ô lịch đã trôi qua) rồi mới hiển thị cho người dùng duyệt.
 - **UF7 (Thiết lập ban đầu & Tùy chỉnh trợ lý):**
   - Thay đổi cài đặt không bao giờ làm thay đổi phiên đang chạy (chỉ áp dụng từ phiên tiếp theo).
   - Đổi giọng đọc/tần suất nhắc $\rightarrow$ áp dụng ngay cho phiên kế tiếp.
   - Đổi thời lượng phiên/nghỉ ảnh hưởng lịch tương lai $\rightarrow$ dùng thuật toán Python tính lại các phiên chưa chạy và đẩy qua **UF6** để người dùng duyệt (kèm cooldown chống làm phiền).
-  - **Quy tắc tính Hệ số đệm ($k_{\text{buffer}}$):**
-    - Tính $k_{\text{history}}$ theo Moving Average 7–10 phiên gần nhất ($k_{\text{history}} = \frac{1}{N}\sum \frac{\text{actual}}{\text{planned}}$).
-    - Ưu tiên 100% cấu hình thủ công của người dùng ($k_{\text{user}}$).
-    - Chu kỳ kiểm tra 1 lần/tuần vào cuối tuần: Nếu $|k_{\text{user}} - k_{\text{history}}| > 0.2$ (lệch $> 20\%$), hiển thị gợi ý nhẹ nhàng để người dùng cân nhắc cập nhật.
+  - **Quy tắc tính Hệ số đệm ($k_{\text{buffer}}$ — Pilot A20):**
+    - Tính $k_{\text{suggested}}$ theo **A20 Median Step** (`adaptation.py` & `settings_service.py`): dùng **trung vị (Median)** tỷ số `actual_work_seconds / estimated_base_seconds` trên **tối thiểu 7 Step hoàn tất sạch** (`SUGGESTION_MIN_SAMPLES = 7`) trong cửa sổ **10 Step sạch gần nhất** (`SUGGESTION_SLIDING_WINDOW = 10`, cùng user/phạm vi, `scope_modified=False`, `actual_source` thuộc `timer_proxy`/`self_report`, `actual_work_seconds > 0`, đã loại trùng/xung đột ID), làm tròn bước **`0.05`** (`ROUND_HALF_UP`) và kẹp miền **`[1.0, 2.0]`**.
+    - Ưu tiên **100%** cấu hình thủ công của người dùng ($k_{\text{user}}$); tuyệt đối không tự động ghi đè.
+    - Chỉ gợi ý khi **`|k_{\text{suggested}} - k_{\text{user}}| > 0.20`** (lệch đúng `0.20` không gợi ý) và $k_{\text{suggested}} \neq k_{\text{user}}$; kèm cooldown **`7 ngày`** (`604800s`) khi từ chối thường và **`14 ngày`** (`1209600s`) khi từ chối có `annoyance_feedback`.
 
 ---
 
@@ -80,8 +84,8 @@ Tài liệu này được nạp tự động vào mọi phiên làm việc của
 
 | Mã Flow | Đầu vào (Trigger) | Trạng thái / Đầu ra (Output State) | Luồng đích (Next Flow) | Ràng buộc Nghiệp vụ Cốt lõi |
 | :--- | :--- | :--- | :--- | :--- |
-| **UF7** | Mở Cài đặt / Lần đầu dùng app | Cấu hình lưu vào `USER_PREFERENCE` (áp dụng từ phiên sau) | **UF1** (nếu cài đặt ban đầu) hoặc **UF6** (nếu lệch lịch đã chốt) | Giữ nguyên phiên đang chạy; tính $k_{\text{history}}$ theo Moving Average 7–10 phiên; gợi ý cập nhật 1 lần/tuần nếu lệch > 20%. |
-| **UF1** | Nhập công việc bằng Voice (Groq Whisper) hoặc Text | `TASK(status='draft')` nếu thiếu tin; `TASK(status='confirmed')` khi đủ 4 trường | **UF2** (khi đủ 4 thông tin & bấm xác nhận) | Gộp toàn bộ câu hỏi làm rõ vào 1 vòng duy nhất; tự động lưu nháp nếu thoát app; đọc giờ bận từ Google Calendar MCP. |
+| **UF7** | Mở Cài đặt / Lần đầu dùng app | Cấu hình lưu vào `USER_PREFERENCE` (áp dụng từ phiên sau) | **UF1** (nếu cài đặt ban đầu) hoặc **UF6** (nếu lệch lịch đã chốt) | Giữ nguyên phiên đang chạy; tính Pilot A20 (trung vị tối thiểu 7/10 Step sạch, `[1.0, 2.0]`, bước `0.05`); ưu tiên 100% $k_{\text{user}}$; gợi ý khi `|k_suggested - k_user| > 0.20`; cooldown `7d`/`14d`. |
+| **UF1** | Nhập công việc bằng Voice (Gemini inline / Groq Whisper) hoặc Text | `TASK(status='draft')` nếu thiếu tin; `TASK(status='confirmed')` khi đủ 4 trường | **UF2** (khi đủ 4 thông tin & bấm xác nhận) | Gộp toàn bộ câu hỏi làm rõ vào 1 vòng duy nhất; tự động lưu nháp nếu thoát app; đọc giờ bận từ Google Calendar MCP. |
 | **UF2** | `TASK(status='confirmed')` từ UF1 | `SESSION(status='scheduled')` thuộc `Official Schedule` | **UF3** | AI sinh sẵn đề xuất chia bước tránh tê liệt khởi động; thuật toán tính $\Delta T_{\text{deficit}}$; tuyệt đối không tự ý dời Task khác; đồng bộ Google Calendar qua MCP sau khi bấm xác nhận. |
 | **UF3** | Đến mốc nhắc (15/10/5p) & User bấm "Bắt đầu" | Kích hoạt Focus Mode + Bật DND + Chạy Visual Timer trên 1-Step UI | **UF4** (nhánh phụ), **UF5** (hết giờ/báo kết quả), **UF6** (đột xuất) | Giao diện tuân thủ 1-Step UI; chạy offline hoàn toàn nếu mất mạng; chuông báo thức chính xác $\le 1\text{s}$. |
 | **UF4** | Bấm giữ nút Push-to-Talk "Cất suy nghĩ" trong UF3 | Lưu file ghi âm thô vào `DRAFT_THOUGHT(status='raw_saved')` | **Quay lại UF3 ngay lập tức** | KHÔNG gọi STT, KHÔNG gọi LLM trong phiên; thử lại tối đa 3 lần nếu lỗi $\rightarrow$ mở ô nhập text; timer UF3 vẫn chạy liên tục. |
@@ -93,15 +97,15 @@ Tài liệu này được nạp tự động vào mọi phiên làm việc của
 ## 3. Ranh giới Kiến trúc: LLM vs. Thuật toán Python & Cơ chế Dự phòng
 
 1. **Phân tách Trách nhiệm (Hybrid Architecture):**
-   - **LLM (`Gemini Flash`):** Chỉ xử lý ngôn ngữ tự nhiên & ngữ nghĩa: Trích xuất thực thể & đặt câu hỏi gộp (UF1), sinh sẵn phương án chia `Task -> Steps` & gợi ý Micro-task 2 phút (UF2), phân tích yêu cầu đổi lịch tự nhiên và sinh lời động viên (UF2, UF6).
+   - **LLM (`Gemini Flash`):** Chỉ xử lý ngôn ngữ tự nhiên & ngữ nghĩa: Trích xuất thực thể & đặt câu hỏi gộp (UF1), sinh sẵn phương án chia `Task -> Steps` & gợi ý Micro-task 2 phút (UF2), phân tích yêu cầu đổi lịch tự nhiên (UF2) và chọn nguyên văn 1 câu giải thích không phán xét từ tập lựa chọn đã được Python kiểm chứng theo trạng thái (UF6; không tự bịa mốc giờ/deadline).
    - **Thuật toán Python (`scheduler_engine.py`):** Đảm nhận **100%** phép toán thời gian và lịch biểu: Chia `Steps -> Sessions`, nhân hệ số $k_{\text{buffer}}$ cá nhân hóa, kiểm tra trùng giờ, tính phút thiếu hụt $\Delta T$ so với Deadline (UF2) và tịnh tiến ô lịch (UF6, UF7). **CẤM** để LLM tự tính toán cộng/trừ ngày giờ mà không qua thuật toán Python kiểm chứng.
 2. **Dự phòng AI Đa Tầng có Hedged Warm Backup (Quality-First 3-Tier Graceful Degradation — Mục tiêu phản hồi $\le 2.5\text{s}$):**
-   - **UF1:** Flash-Lite (`MINIMAL`) ở giây 0, hedge Groq mặc định ở 3,5 giây và hết ưu tiên Gemini ở 4,5 giây. Các nhánh chia trần 6/8/10 giây theo ngữ cảnh mặc định. Có thể thử GPT-OSS khi Qwen bị rate limit và còn ngân sách. Python fallback giữ dữ kiện đã biết và hỏi gộp. Yêu cầu sửa chưa áp dụng phải được duyệt trước khi xác nhận bản nháp.
-   - **Tầng 1 (Google Gemini) cho UF2/UF6:** `gemini-3.8-flash` (Primary) kết hợp **Warm Backup** `gemini-3.5-flash-lite` (Khung A UF2-Adjust/UF6 ngắt cứng `4.5s`; Khung B phân rã UF2 ưu tiên Primary tới `7.5s`, ngắt cứng `9.0s`).
+   - **UF1:** `gemini-3.5-flash-lite` (`MINIMAL`) từ `0.0s`, hedge Groq `qwen/qwen3.8-27b` mặc định ở `3.5s` và hết ưu tiên Gemini ở `4.5s`. Trần mặc định `6s`/`8s`/`10s` theo độ phức tạp ngữ cảnh (tối đa `15s`). Thử `openai/gpt-oss-20b` khi Qwen bị rate limit và còn ngân sách. Python fallback giữ dữ kiện đã biết và hỏi gộp. Yêu cầu sửa chưa áp dụng phải được duyệt trước khi xác nhận bản nháp.
+   - **Tầng 1 (Google Gemini) cho UF2/UF6:** Mặc định dùng `gemini-3.5-flash-lite` (tự động bật **Warm Backup** khi cấu hình `GEMINI_FLASH_MODEL != GEMINI_BACKUP_MODEL`). Khung A UF2-Adjust/UF6: Warm Backup `1.5s`, Groq Hedge `2.2s`, ưu tiên Primary `3.0s`, ngắt cứng `4.5s`. Khung B phân rã UF2: cơ sở `9.0s` (Warm Backup `2.0s`, Groq Hedge `5.0s`, ưu tiên Primary `4.5s`), mở rộng 3 bậc (`14.0s` / `20.0s`) cho dự án dài hạn (`> 14` ngày hoặc `> 20` giờ rảnh).
    - **Tầng 2 (Groq Cross-Provider) cho UF2/UF6:** Dùng **`qwen/qwen3.8-27b`** và model phụ **`openai/gpt-oss-20b`** theo profile khi nhánh Google lỗi nhanh hoặc chạm mốc Hedge.
    - **Tầng 3:** Nếu mất kết nối cả 2 tầng AI, tự động chạy thuật toán Python chia công việc thành các phiên cố định (20–25 phút theo cấu hình user) để không bao giờ trả về màn hình lỗi trắng.
 3. **Luồng Giọng nói Kép (Dual-Tier Voice Pipeline):**
-   - Ở UF1/UF2/UF5/UF6: Ưu tiên dùng **Groq Whisper (`whisper-large-v3-turbo`)** cho STT và **`edge-tts`** cho TTS qua Backend; tự động fallback về `speech_to_text` và `flutter_tts` trên thiết bị Android khi mạng yếu hoặc Offline.
+   - `VOICE_STT_PROVIDER=auto` định tuyến theo mục đích (`purpose`): ưu tiên **`gemini-3.5-flash-lite` inline audio** $\rightarrow$ **Groq Whisper (`whisper-large-v3-turbo`)** cho UF1/nháp (ngân sách `8s` nhánh chính / `12s` tổng); riêng **`uf5_checkin`** đảo sang ưu tiên **Groq Whisper** $\rightarrow$ **Gemini** cho câu ngắn (`VOICE_STT_UF5_PREFER_GROQ=true`). TTS ưu tiên **`edge-tts`** qua Backend; tự động fallback về `speech_to_text` và `flutter_tts` trên thiết bị Android khi lỗi hoặc Offline.
 4. **Tích hợp Google Calendar qua Giao thức MCP:**
    - Dữ liệu sự kiện bận từ Google Calendar (qua MCP) chỉ đóng vai trò tham số đầu vào để xác định quỹ giờ rảnh ($T_{\text{free}}$) cho thuật toán Python. **CẤM** để LLM/MCP tự ý dịch chuyển hoặc ghi đè lịch mà không qua thuật toán Python (`scheduler_engine.py`).
    - Chỉ đồng bộ các phiên Focus Sessions lên Google Calendar **SAU KHI** người dùng bấm xác nhận lịch chính thức (UF2) hoặc duyệt dời lịch (UF6). Tuyệt đối không tự ý ghi sự kiện khi kế hoạch còn ở trạng thái `draft` hoặc `pending_approval`.
@@ -146,5 +150,5 @@ Tài liệu này được nạp tự động vào mọi phiên làm việc của
   - Người dùng nhập việc (Voice/Text) $\rightarrow$ AI trích xuất 4 trường gộp 1 vòng $\rightarrow$ AI sinh Default Proposal $\rightarrow$ Thuật toán Python xếp lịch Rolling Horizon 2–3 tuần $\rightarrow$ Xác nhận lịch chính thức (sử dụng Default Config 25p làm / 5p nghỉ / buffer 1.2).
 - **Tuần 2 — Giai đoạn Thực thi Tập trung (Execution Phase: UF3 + UF4):**
   - Nhắc trước phiên (15/10/5p) $\rightarrow$ Micro-task 2 phút $\rightarrow$ 1-Tap Start (Focus + DND + 1-Step UI) $\rightarrow$ Chuông báo thức Doze Mode chính xác $\le 1\text{s}$ $\rightarrow$ Nút Cất suy nghĩ Raw Audio UF4 (retry 3 lần $\rightarrow$ mở ô text).
-- **Tuần 3 — Giai đoạn Thích ứng, Tái lập lịch & Cài đặt (Adaptation Phase: UF5 + UF6 + UF7):**
-  - Voice Check-in 2 chiều cuối phiên (3 chip Bỏ qua, tự tắt DND sau 5p) $\rightarrow$ Adaptive Rescheduling UF6 (lưu `pending_approval`, tịnh tiến giờ thực tế khi mở lại app) $\rightarrow$ Màn hình Cài đặt UF7 hoàn chỉnh + Tiến hóa Buffer MA 7–10 phiên $\rightarrow$ Nghiệm thu E2E toàn trình.
+- **Tuần 3–4 — Giai đoạn Thích ứng, Tái lập lịch, Cài đặt & Nghiệm thu (Adaptation & Integration):**
+  - Voice Check-in 2 chiều cuối phiên (3 chip Bỏ qua, tự tắt DND sau 5p) $\rightarrow$ Adaptive Rescheduling UF6 (lưu `pending_approval`, tịnh tiến giờ thực tế khi mở lại app) $\rightarrow$ Màn hình Cài đặt UF7 hoàn chỉnh + Tiến hóa Buffer Pilot A20 (Median `7/10` Step sạch, `> 0.20`, cooldown `7d`/`14d`) $\rightarrow$ Nghiệm thu E2E toàn trình.
