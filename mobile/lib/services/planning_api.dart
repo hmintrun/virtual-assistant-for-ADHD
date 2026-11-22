@@ -293,7 +293,8 @@ class PlanningApi {
       send: (payload, key) => _client.postData(
           '/drafts/${Uri.encodeComponent(draft.draftId)}/candidates',
           idempotencyKey: key,
-          data: payload),
+          data: payload,
+          receiveTimeout: const Duration(seconds: 30)),
     );
     return PlanCandidateModel.fromJson(json);
   }
@@ -320,6 +321,7 @@ class PlanningApi {
         'patch_candidate_${candidate.candidateId}',
         '${candidate.reviewRevision}_${clientStepKey}_${title}_${expectedOutput}_$estimatedBaseSeconds',
       ),
+      receiveTimeout: const Duration(seconds: 30),
       data: {
         'expected_review_revision': candidate.reviewRevision,
         'edits': {

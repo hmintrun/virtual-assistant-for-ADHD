@@ -14,7 +14,16 @@ import 'drafts_screen.dart';
 import 'task_summary_screen.dart';
 
 class TaskEntryScreen extends StatefulWidget {
-  const TaskEntryScreen({super.key});
+  const TaskEntryScreen({
+    super.key,
+    this.recorder,
+    this.transcriptionService,
+    this.speechService,
+  });
+
+  final Uf1VoiceRecorderService? recorder;
+  final VoiceTranscriptionService? transcriptionService;
+  final OnDeviceSpeechService? speechService;
 
   @override
   State<TaskEntryScreen> createState() => _TaskEntryScreenState();
@@ -22,16 +31,20 @@ class TaskEntryScreen extends StatefulWidget {
 
 class _TaskEntryScreenState extends State<TaskEntryScreen> {
   late final TextEditingController _titleController;
+  final FocusNode _titleFocusNode = FocusNode();
   bool _isNavigating = false;
   bool _isListening = false;
   bool _startingSpeech = false;
   String _recognizedWords = '';
-  final OnDeviceSpeechService _speechService = OnDeviceSpeechService();
+  late final OnDeviceSpeechService _speechService =
+      widget.speechService ?? OnDeviceSpeechService();
   String _textBeforeListening = '';
-  final _recorder = !kIsWeb && defaultTargetPlatform == TargetPlatform.android
-      ? AudioRecorderService.taskEntry()
-      : null;
-  late final _transcription = VoiceTranscriptionService();
+  late final Uf1VoiceRecorderService? _recorder = widget.recorder ??
+      (!kIsWeb && defaultTargetPlatform == TargetPlatform.android
+          ? Uf1VoiceRecorderService()
+          : null);
+  late final VoiceTranscriptionService _transcription =
+      widget.transcriptionService ?? VoiceTranscriptionService();
   bool _useOnDevice = false;
   Future<void>? _recordingStart;
   int _voiceFailures = 0;
@@ -67,8 +80,9 @@ class _TaskEntryScreenState extends State<TaskEntryScreen> {
       recorder.onAutoStopFailed = (_) => _offerOnDevice();
     }
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted && recorder == null)
+      if (mounted && recorder == null) {
         _speechService.requestAndroidPermission();
+      }
       if (mounted && recorder != null) {
         _recordingStart = recorder
             .hasPermission()
@@ -88,6 +102,7 @@ class _TaskEntryScreenState extends State<TaskEntryScreen> {
       unawaited((_recordingStart ?? Future<void>.value())
           .whenComplete(recorder.dispose));
     }
+    _titleFocusNode.dispose();
     _titleController.dispose();
     super.dispose();
   }
@@ -175,7 +190,10 @@ class _TaskEntryScreenState extends State<TaskEntryScreen> {
     );
   }
 
-  void _finishSpeechAttempt({bool failed = false}) {
+  void _finishSpeechAttempt({
+    bool failed = false,
+    bool lowConfidence = false,
+  }) {
     if (!mounted || !_isListening) return;
     final words = _recognizedWords.trim();
     final success = !failed && words.isNotEmpty;
@@ -192,7 +210,12 @@ class _TaskEntryScreenState extends State<TaskEntryScreen> {
           text: combined,
           selection: TextSelection.collapsed(offset: combined.length),
         );
-        context.read<TaskProvider>().setTitle(combined, fromVoice: true);
+        context.read<TaskProvider>().setTitle(
+              combined,
+              fromVoice: true,
+              lowConfidence: lowConfidence,
+            );
+        _showEditor = true;
       }
     });
     if (!success) _showVoiceFailure();
@@ -210,10 +233,19 @@ class _TaskEntryScreenState extends State<TaskEntryScreen> {
 
   void _offerOnDevice() {
     if (!mounted || _useOnDevice) return;
-    _useOnDevice = true;
-    _startingSpeech = false;
-    _isListening = false;
-    _showVoiceFailure();
+    setState(() {
+      _useOnDevice = true;
+      _startingSpeech = false;
+      _isListening = false;
+      _voiceHint = null;
+    });
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(const SnackBar(
+        content: Text(
+          'Chưa chuyển được giọng nói. Chạm mic để thử nhận diện trên máy, hoặc gõ chữ.',
+        ),
+      ));
   }
 
   Future<void> _transcribe(ThoughtRecording recording) async {
@@ -221,11 +253,12 @@ class _TaskEntryScreenState extends State<TaskEntryScreen> {
     try {
       if (!mounted) return;
       setState(() => _startingSpeech = true);
-      _recognizedWords = await _transcription.transcribeM4a(
+      final result = await _transcription.transcribeM4aWithMetadata(
         recording.path,
         recordingId: recording.path,
       );
-      _finishSpeechAttempt();
+      _recognizedWords = result.text;
+      _finishSpeechAttempt(lowConfidence: result.lowConfidence);
     } catch (_) {
       _offerOnDevice();
     } finally {
@@ -239,6 +272,16 @@ class _TaskEntryScreenState extends State<TaskEntryScreen> {
     final recorder = _recorder;
     if (recorder == null || _useOnDevice) return _toggleOnDevice();
     if (_isListening) {
+      var isFinalizing = false;
+      try {
+        isFinalizing = recorder.isFinalizing;
+      } on UnimplementedError {
+        isFinalizing = false;
+      }
+      if (isFinalizing) {
+        setState(() => _startingSpeech = true);
+        return;
+      }
       setState(() => _startingSpeech = true);
       try {
         await _transcribe(await recorder.stopAndFinalize());
@@ -374,62 +417,121 @@ class _TaskEntryScreenState extends State<TaskEntryScreen> {
                         ),
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  Center(
-                    child: _VoiceRecordButton(
-                      listening: _isListening && !_startingSpeech,
-                      starting: _startingSpeech,
-                      onPressed:
-                          busy || _startingSpeech ? null : _toggleListening,
-                    ),
-                  ),
-                  if (_voiceHint != null && !_isListening && !_startingSpeech)
-                    Padding(
-                      padding: const EdgeInsets.only(top: 10),
-                      child: Semantics(
-                        liveRegion: true,
-                        child: Text(
-                          _voiceHint!,
-                          textAlign: TextAlign.center,
-                          style: textTheme.bodySmall?.copyWith(
-                            color: palette.amber,
-                            fontWeight: FontWeight.w500,
-                          ),
-                        ),
-                      ),
-                    ),
-                  if (_showEditor) ...[
-                    const SizedBox(height: 16),
-                    TextField(
-                      controller: _titleController,
-                      minLines: 3,
-                      maxLines: 6,
-                      textCapitalization: TextCapitalization.sentences,
-                      decoration: InputDecoration(
-                        labelText: 'Nội dung công việc',
-                        hintText:
-                            'Ví dụ: Viết báo cáo 3 trang trước 17:00 thứ Sáu.',
-                        alignLabelWithHint: true,
-                        suffixIcon: _titleController.text.isEmpty
-                            ? null
-                            : IconButton(
-                                tooltip: 'Xóa',
-                                onPressed: busy || _isListening
+                          children: [
+                            Center(
+                              child: _VoiceRecordButton(
+                                listening: _isListening && !_startingSpeech,
+                                starting: _startingSpeech,
+                                onPressed: busy || _startingSpeech
                                     ? null
-                                    : () {
-                                        _titleController.clear();
-                                        task.setTitle('');
-                                        setState(() {});
-                                      },
-                                icon: const Icon(Icons.close_rounded),
+                                    : _toggleListening,
                               ),
-                      ),
-                      enabled: !busy && !_isListening && !_startingSpeech,
-                      onChanged: (value) {
-                        task.setTitle(value);
-                        setState(() {});
-                      },
-                    ),
+                            ),
+                            if (_voiceHint != null &&
+                                !_isListening &&
+                                !_startingSpeech)
+                              Padding(
+                                padding: const EdgeInsets.only(top: 10),
+                                child: Semantics(
+                                  liveRegion: true,
+                                  child: Text(
+                                    _voiceHint!,
+                                    textAlign: TextAlign.center,
+                                    style: textTheme.bodySmall?.copyWith(
+                                      color: palette.amber,
+                                      fontWeight: FontWeight.w500,
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            if (_showEditor) ...[
+                              const SizedBox(height: 16),
+                              TextField(
+                                controller: _titleController,
+                                focusNode: _titleFocusNode,
+                                minLines: 3,
+                                maxLines: 6,
+                                textCapitalization:
+                                    TextCapitalization.sentences,
+                                decoration: InputDecoration(
+                                  labelText: 'Nội dung công việc',
+                                  hintText:
+                                      'Ví dụ: Viết báo cáo 3 trang trước 17:00 thứ Sáu.',
+                                  alignLabelWithHint: true,
+                                  suffixIcon: _titleController.text.isEmpty
+                                      ? null
+                                      : IconButton(
+                                          tooltip: 'Xóa',
+                                          onPressed: busy || _isListening
+                                              ? null
+                                              : () {
+                                                  _titleController.clear();
+                                                  task.setTitle('');
+                                                  setState(() {});
+                                                },
+                                          icon: const Icon(Icons.close_rounded),
+                                        ),
+                                ),
+                                enabled:
+                                    !busy && !_isListening && !_startingSpeech,
+                                onChanged: (value) {
+                                  task.setTitle(value);
+                                  setState(() {});
+                                },
+                              ),
+                              if (task.isVoiceLowConfidence &&
+                                  _titleController.text.trim().isNotEmpty) ...[
+                                const SizedBox(height: 10),
+                                Semantics(
+                                  liveRegion: true,
+                                  child: Material(
+                                    key: const Key('uf1_low_confidence_banner'),
+                                    color: palette.amberSoft,
+                                    shape: RoundedRectangleBorder(
+                                      borderRadius: BorderRadius.circular(16),
+                                      side: isDark
+                                          ? BorderSide(
+                                              color: palette.amber
+                                                  .withValues(alpha: 0.35),
+                                            )
+                                          : BorderSide.none,
+                                    ),
+                                    clipBehavior: Clip.antiAlias,
+                                    child: InkWell(
+                                      onTap: busy
+                                          ? null
+                                          : _titleFocusNode.requestFocus,
+                                      child: Padding(
+                                        padding: const EdgeInsets.symmetric(
+                                          horizontal: 14,
+                                          vertical: 10,
+                                        ),
+                                        child: Row(
+                                          crossAxisAlignment:
+                                              CrossAxisAlignment.start,
+                                          children: [
+                                            Icon(
+                                              Icons.graphic_eq_rounded,
+                                              size: 20,
+                                              color: palette.amber,
+                                            ),
+                                            const SizedBox(width: 10),
+                                            Expanded(
+                                              child: Text(
+                                                'Mình nghe chưa thật rõ (âm thanh nhỏ hoặc có tạp âm). Bạn kiểm tra hoặc chạm vào ô chữ ở trên để sửa trước khi phân tích nhé.',
+                                                style: textTheme.bodyMedium
+                                                    ?.copyWith(
+                                                  color: palette.onAmberSoft,
+                                                ),
+                                              ),
+                                            ),
+                                          ],
+                                        ),
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                              ],
                     if (_titleController.text.trim().isEmpty &&
                         !_isListening &&
                         !_startingSpeech) ...[
@@ -774,6 +876,8 @@ class AiLoadingScreen extends StatefulWidget {
 
 class _AiLoadingScreenState extends State<AiLoadingScreen> {
   String? _error;
+  Timer? _longPlanTimer;
+  bool _isLongPlanHint = false;
 
   @override
   void initState() {
@@ -781,9 +885,24 @@ class _AiLoadingScreenState extends State<AiLoadingScreen> {
     WidgetsBinding.instance.addPostFrameCallback((_) => _analyze());
   }
 
+  @override
+  void dispose() {
+    _longPlanTimer?.cancel();
+    super.dispose();
+  }
+
   Future<void> _analyze() async {
     if (!mounted) return;
-    setState(() => _error = null);
+    _longPlanTimer?.cancel();
+    setState(() {
+      _error = null;
+      _isLongPlanHint = false;
+    });
+    _longPlanTimer = Timer(const Duration(seconds: 5), () {
+      if (mounted) {
+        setState(() => _isLongPlanHint = true);
+      }
+    });
     try {
       await context.read<TaskProvider>().prepareDraftAndAnalyze();
       if (!mounted || ModalRoute.of(context)?.isCurrent != true) return;
@@ -793,6 +912,8 @@ class _AiLoadingScreenState extends State<AiLoadingScreen> {
       );
     } catch (error) {
       if (mounted) setState(() => _error = error.toString());
+    } finally {
+      _longPlanTimer?.cancel();
     }
   }
 
@@ -904,7 +1025,9 @@ class _AiLoadingScreenState extends State<AiLoadingScreen> {
                       ),
                       const SizedBox(height: 6),
                       Text(
-                        'Chờ Melbel một chút nhé...',
+                        _isLongPlanHint
+                            ? 'Kế hoạch dài hạn đang được sắp theo từng cột mốc cho bạn...'
+                            : 'Chờ Melbel một chút nhé...',
                         textAlign: TextAlign.center,
                         style: Theme.of(context).textTheme.bodyMedium?.copyWith(
                               color: context.melbel.onSurfaceVariant,

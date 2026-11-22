@@ -67,6 +67,7 @@ class TaskProvider extends ChangeNotifier {
   String _title = '';
   String _rawInputText = '';
   String _entrySource = 'text';
+  bool _isVoiceLowConfidence = false;
   String _scope = '';
   DateTime? _deadline;
   AvailabilitySlot? _availability;
@@ -98,6 +99,7 @@ class TaskProvider extends ChangeNotifier {
 
   String get title => _title;
   String get inputText => _rawInputText.isEmpty ? _title : _rawInputText;
+  bool get isVoiceLowConfidence => _isVoiceLowConfidence;
   String get scope => _scope;
   DateTime? get deadline => _deadline;
   AvailabilitySlot? get availability => _availability;
@@ -291,6 +293,7 @@ class TaskProvider extends ChangeNotifier {
       _draft = draft;
       _rawInputText = draft.rawInput ?? draft.title;
       _entrySource = 'text';
+      _isVoiceLowConfidence = false;
       _clientDraftId = draft.clientDraftId;
       _clientDraftFingerprint = null;
       _title = draft.title.isEmpty ? _rawInputText : draft.title;
@@ -888,8 +891,24 @@ class TaskProvider extends ChangeNotifier {
     if (_scope.trim().isEmpty && scope != null) setScope(scope[1]!.trim());
   }
 
-  void setTitle(String value, {bool fromVoice = false}) {
-    if (inputText.trim() == value.trim()) return;
+  void setTitle(
+    String value, {
+    bool fromVoice = false,
+    bool lowConfidence = false,
+  }) {
+    final nextLowConfidence = fromVoice ? lowConfidence : false;
+    if (inputText.trim() == value.trim()) {
+      if (fromVoice || _isVoiceLowConfidence != nextLowConfidence) {
+        _isVoiceLowConfidence = nextLowConfidence;
+        if (fromVoice && value.trim().isNotEmpty) {
+          _entrySource = 'voice';
+        }
+        unawaited(_persist());
+        notifyListeners();
+      }
+      return;
+    }
+    _isVoiceLowConfidence = nextLowConfidence;
     if (_draft != null) {
       _scope = '';
       _deadline = null;
@@ -987,6 +1006,7 @@ class TaskProvider extends ChangeNotifier {
               end: DateTime.parse(end),
             );
       _entrySource = data['entry_source'] == 'voice' ? 'voice' : 'text';
+      _isVoiceLowConfidence = false;
       _draftSaved = data['draft_saved'] as bool? ?? true;
       _confirmed = data['confirmed'] as bool? ?? false;
       _decompositionChoice = data['decomposition_choice'] as String?;
@@ -1047,6 +1067,7 @@ class TaskProvider extends ChangeNotifier {
     _title = '';
     _rawInputText = '';
     _entrySource = 'text';
+    _isVoiceLowConfidence = false;
     _scope = '';
     _deadline = null;
     _availability = null;
