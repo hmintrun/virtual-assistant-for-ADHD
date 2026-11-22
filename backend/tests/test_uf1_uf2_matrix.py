@@ -1734,3 +1734,200 @@ class TestUF1UF2PDFGaps(unittest.TestCase):
                 await engine.dispose()
 
         asyncio.run(run())
+
+    def test_finding5b2_expand_next_horizon_preserves_leftover_items_beyond_six(self):
+        """PR #22 Finding #5B-2: 8 mục trong unexpanded_scope -> expand lần 1 tạo 6 bước, giữ 'Phần 7; Phần 8' và partial."""
+        from app.schemas.reschedule import (
+            ApproveProposalRequest,
+            CreateProposalRequest,
+            ProposalSourceRevisions,
+        )
+        from app.services import reschedule_service
+
+        async def run():
+            engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+            try:
+                async with engine.begin() as conn:
+                    await conn.run_sync(Base.metadata.create_all)
+                factory = async_sessionmaker(engine, expire_on_commit=False)
+                now = datetime.now(UTC).replace(
+                    hour=8, minute=0, second=0, microsecond=0
+                ) + timedelta(days=1)
+                availability = DraftAvailability(
+                    timezone="UTC",
+                    weekly_rules=[
+                        WeeklyRule(weekday=w, start_local="08:00", end_local="20:00")
+                        for w in range(1, 8)
+                    ],
+                )
+                async with factory() as db:
+                    await draft_service.ensure_dev_seed_in_db(db)
+                    draft = await draft_service.create_draft(
+                        user_id="user_a",
+                        idempotency_key="f5b2-create",
+                        payload=CreateDraftRequest(
+                            client_draft_id="f5b2-client",
+                            input_source="text",
+                            raw_input="Kế hoạch nhiều phần",
+                            summary=SummaryInput(
+                                title="Kế hoạch nhiều phần",
+                                description="Hoàn thành 9 phần",
+                                scope="9 phần",
+                                time_constraint=TimeConstraint(
+                                    kind="deadline",
+                                    start_at=now,
+                                    deadline_at=now + timedelta(days=60),
+                                    input_timezone="UTC",
+                                ),
+                                availability=availability,
+                            ),
+                        ),
+                        db=db,
+                    )
+                async with factory() as db:
+                    await draft_service.confirm_draft_summary(
+                        user_id="user_a",
+                        draft_id=draft.draft_id,
+                        idempotency_key="f5b2-conf-sum",
+                        payload=ConfirmSummaryRequest(
+                            expected_summary_revision=draft.summary_revision
+                        ),
+                        db=db,
+                    )
+                async with factory() as db:
+                    cand = await plan_service.create_candidate(
+                        user_id="user_a",
+                        draft_id=draft.draft_id,
+                        idempotency_key="f5b2-cand",
+                        payload=GenerateCandidateRequest(
+                            source_summary_revision=draft.summary_revision,
+                            source_planning_input_revision=draft.planning_input_revision,
+                            manual_steps=[
+                                ManualStepInput(
+                                    order_index=0,
+                                    title="Phần mở đầu",
+                                    expected_output="Xong mở đầu",
+                                    estimated_base_seconds=1250,
+                                )
+                            ],
+                            unexpanded_scope="Phần 1; Phần 2; Phần 3; Phần 4; Phần 5; Phần 6; Phần 7; Phần 8",
+                        ),
+                        db=db,
+                    )
+                async with factory() as db:
+                    confirmed = await plan_service.confirm_candidate(
+                        user_id="user_a",
+                        candidate_id=cand.candidate_id,
+                        idempotency_key="f5b2-conf-cand",
+                        payload=ConfirmCandidateRequest(
+                            expected_review_revision=cand.review_revision,
+                            expected_summary_revision=cand.source_summary_revision,
+                            expected_planning_input_revision=cand.source_planning_input_revision,
+                            expected_source_revisions=cand.source_revisions,
+                        ),
+                        db=db,
+                    )
+                    task = confirmed.task
+
+                # Pass 1 expand_next_horizon: lấy 6 phần đầu, còn lại "Phần 7; Phần 8"
+                async with factory() as db:
+                    owner = draft_service.resolve_user_uuid("user_a")
+                    revs, _ = await reschedule_service._compute_db_source_revisions(
+                        db, owner, target_task_id=task.task_id
+                    )
+                    sched_rev = await reschedule_service._get_current_schedule_revision(db, owner)
+                    prop1 = await reschedule_service.create_proposal(
+                        db,
+                        user_id="user_a",
+                        idempotency_key="f5b2-prop-1",
+                        payload=CreateProposalRequest(
+                            trigger_reason="expand_next_horizon",
+                            target_task_id=task.task_id,
+                            allowed_task_ids=[task.task_id],
+                            expected_base_schedule_revision=sched_rev,
+                            expected_source_revisions=ProposalSourceRevisions.model_validate(
+                                revs.model_dump()
+                            ),
+                        ),
+                        now=now + timedelta(days=1),
+                    )
+                    self.assertEqual(len(prop1.proposed_changes.steps_to_add), 6)
+                    self.assertEqual(
+                        prop1.feasibility.next_horizon_preview["unexpanded_scope"],
+                        "Phần 7; Phần 8",
+                    )
+
+                async with factory() as db:
+                    await reschedule_service.approve_proposal(
+                        db,
+                        user_id="user_a",
+                        proposal_id=prop1.proposal_id,
+                        idempotency_key="f5b2-app-1",
+                        payload=ApproveProposalRequest(
+                            expected_proposal_revision=prop1.proposal_revision,
+                            expected_base_schedule_revision=prop1.base_schedule_revision,
+                            expected_source_revisions=prop1.source_revisions,
+                        ),
+                        now=now + timedelta(days=1, minutes=1),
+                    )
+
+                async with factory() as db:
+                    t_after1 = await plan_service.get_task_by_id(
+                        user_id="user_a", task_id=task.task_id, db=db
+                    )
+                    self.assertEqual(len(t_after1.steps), 7)
+                    self.assertEqual(t_after1.unexpanded_scope, "Phần 7; Phần 8")
+                    self.assertEqual(t_after1.decomposition_state, "partial")
+
+                # Pass 2 expand_next_horizon: lấy nốt "Phần 7; Phần 8" -> complete
+                async with factory() as db:
+                    owner = draft_service.resolve_user_uuid("user_a")
+                    revs2, _ = await reschedule_service._compute_db_source_revisions(
+                        db, owner, target_task_id=task.task_id
+                    )
+                    sched_rev2 = await reschedule_service._get_current_schedule_revision(db, owner)
+                    prop2 = await reschedule_service.create_proposal(
+                        db,
+                        user_id="user_a",
+                        idempotency_key="f5b2-prop-2",
+                        payload=CreateProposalRequest(
+                            trigger_reason="expand_next_horizon",
+                            target_task_id=task.task_id,
+                            allowed_task_ids=[task.task_id],
+                            expected_base_schedule_revision=sched_rev2,
+                            expected_source_revisions=ProposalSourceRevisions.model_validate(
+                                revs2.model_dump()
+                            ),
+                        ),
+                        now=now + timedelta(days=2),
+                    )
+                    self.assertEqual(len(prop2.proposed_changes.steps_to_add), 2)
+                    self.assertIsNone(
+                        prop2.feasibility.next_horizon_preview["unexpanded_scope"]
+                    )
+
+                async with factory() as db:
+                    await reschedule_service.approve_proposal(
+                        db,
+                        user_id="user_a",
+                        proposal_id=prop2.proposal_id,
+                        idempotency_key="f5b2-app-2",
+                        payload=ApproveProposalRequest(
+                            expected_proposal_revision=prop2.proposal_revision,
+                            expected_base_schedule_revision=prop2.base_schedule_revision,
+                            expected_source_revisions=prop2.source_revisions,
+                        ),
+                        now=now + timedelta(days=2, minutes=1),
+                    )
+
+                async with factory() as db:
+                    t_after2 = await plan_service.get_task_by_id(
+                        user_id="user_a", task_id=task.task_id, db=db
+                    )
+                    self.assertEqual(len(t_after2.steps), 9)
+                    self.assertIsNone(t_after2.unexpanded_scope)
+                    self.assertEqual(t_after2.decomposition_state, "complete")
+            finally:
+                await engine.dispose()
+
+        asyncio.run(run())

@@ -10,7 +10,7 @@ import unittest
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, get_args
 from unittest.mock import AsyncMock, patch
 
 from fastapi.testclient import TestClient
@@ -28,11 +28,13 @@ from app.schemas.schedule import (
     LLMRescheduleEmpathyPayload,
     ProposedSessionSchema,
     RescheduleEmpatheticResult,
+    RescheduleTriggerReason,
     SessionSegmentSchema,
     UF5CheckInPromptData,
     UF5SkipChipSchema,
 )
 from app.schemas.task import (
+    CandidateAdjustmentResult,
     ExtractedFreeWindowSchema,
     ExtractedTimeConstraint,
     LLMPlanAdjustmentPayload,
@@ -1151,7 +1153,7 @@ class TestAIService(unittest.TestCase):
             VOICE_STT_PROVIDER="auto",
         )
         auto_svc = build_voice_service(auto_cfg)
-        self.assertEqual(auto_svc.provider_name, "groq->gemini")
+        self.assertEqual(auto_svc.provider_name, "gemini->groq")
 
     def test_tts_service_fake_edge_mock_cache_and_validation(self) -> None:
         """Kiểm tra TtsService: FakeTtsProvider, EdgeTtsProvider mock, LRU cache và validate input."""
@@ -1329,6 +1331,113 @@ class TestAIService(unittest.TestCase):
         custom_uf1 = Settings(_env_file=None, AI_UF1_TIMEOUT_SECONDS=7.5)
         self.assertEqual(custom_uf1.AI_UF1_TIMEOUT_SECONDS, 7.5)
 
+    def test_uf1_chooses_budget_from_current_turn(self) -> None:
+        service = AIService(Settings(_env_file=None))
+        cases = (
+            ("Viết 2 trang, hạn 22h, rảnh 19:00–21:00.", {}, 6),
+            ("Rảnh 19:00–21:00.", {"followup": True}, 6),
+            ("Hạn ngày mai và rảnh 19:00–21:00.", {}, 8),
+            ("À nhầm, làm đúng 5 slide.", {}, 8),
+            ("Rảnh 08:00–10:00, 11:00–12:00, 20:00–22:00.", {}, 10),
+            ("Đổi hạn sang ngày mai.", {"edits_locked_field": True}, 10),
+            ("22:00 ngày 28/11/2026", {"retrying_fallback_edit": True}, 8),
+            ("Có ngoại lệ và nhiều giờ.", {"edits_locked_field": True, "needs_user_decision": True}, 6),
+        )
+        for text, context, expected in cases:
+            with self.subTest(text=text, context=context):
+                profile = service._extraction_profile(text, **context)
+                self.assertEqual(profile.hard_timeout, expected)
+                self.assertEqual(profile.primary_priority_until, 4.5)
+                self.assertEqual(profile.groq_hedge_at, 3.5)
+        fixed = AIService(Settings(_env_file=None, AI_UF1_ADAPTIVE_TIMEOUT_ENABLED=False))
+        self.assertEqual(fixed._extraction_profile("À nhầm", edits_locked_field=True).hard_timeout, 6)
+        capped = AIService(Settings(_env_file=None, AI_UF1_TIMEOUT_SECONDS=14))
+        self.assertEqual(capped._extraction_profile("À nhầm", edits_locked_field=True).hard_timeout, 15)
+        sub_second = AIService(Settings(_env_file=None, AI_UF1_TIMEOUT_SECONDS=0.05))
+        self.assertAlmostEqual(
+            sub_second._extraction_profile(
+                "Hạn ngày mai, rảnh 08:00–10:00, 11:00–12:00, 20:00–22:00.",
+                edits_locked_field=True,
+            ).hard_timeout,
+            0.05,
+        )
+
+    def test_uf1_budget_expiry_does_not_trip_provider_breaker(self) -> None:
+        service = AIService(Settings(_env_file=None, AI_UF1_TIMEOUT_SECONDS=0.05))
+
+        async def stalled(**_: Any) -> LLMTaskExtractionPayload:
+            await asyncio.sleep(2)
+            raise AssertionError("UF1 should cancel the unfinished provider call")
+
+        async def two_requests() -> None:
+            for _ in range(2):
+                result = await service.extract_task_intent("Làm báo cáo")
+                self.assertEqual(result.generation_tier, "tier_3_rule_based")
+
+        with (
+            patch.object(service, "_get_gemini_client", return_value=object()),
+            patch.object(service, "_get_groq_client", return_value=None),
+            patch.object(service, "_call_gemini_structured", side_effect=stalled) as gemini,
+        ):
+            asyncio.run(two_requests())
+        self.assertEqual(gemini.await_count, 2)
+        self.assertTrue(service.health.can_attempt("gemini", service._settings.GEMINI_UF1_MODEL))
+
+    def test_uf1_prolonged_budget_expiry_eventually_opens_provider_breaker(self) -> None:
+        service = AIService(
+            Settings(_env_file=None, AI_UF1_TIMEOUT_SECONDS=0.05),
+            failure_threshold=2,
+            cooldown_seconds=30.0,
+            max_transient_retries=0,
+        )
+
+        async def stalled(**_: Any) -> LLMTaskExtractionPayload:
+            await asyncio.sleep(2)
+            raise AssertionError("UF1 should cancel the unfinished provider call")
+
+        class _StalledGroqCompletions:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            async def create(self, **_: Any) -> Any:
+                self.calls += 1
+                await asyncio.sleep(2)
+                raise AssertionError("UF1 should cancel the unfinished Groq call")
+
+        groq_completions = _StalledGroqCompletions()
+
+        class _StalledGroqClient:
+            chat = type("_Chat", (), {"completions": groq_completions})()
+
+        async def five_requests() -> None:
+            for _ in range(5):
+                result = await service.extract_task_intent("Làm báo cáo")
+                self.assertEqual(result.generation_tier, "tier_3_rule_based")
+
+        with (
+            patch.object(service, "_get_gemini_client", return_value=object()),
+            patch.object(service, "_get_groq_client", return_value=None),
+            patch.object(service, "_call_gemini_structured", side_effect=stalled) as gemini,
+        ):
+            asyncio.run(five_requests())
+
+        self.assertEqual(gemini.await_count, 4)
+        self.assertFalse(service.health.can_attempt("gemini", service._settings.GEMINI_UF1_MODEL))
+        snap = service.health.snapshot()[f"gemini:{service._settings.GEMINI_UF1_MODEL}"]
+        self.assertEqual(snap["state"], "open")
+        self.assertEqual(snap["consecutive_failures"], 4)
+        self.assertLessEqual(snap["cooldown_remaining_s"], 15.0)
+
+        # Khi Gemini đã OPEN và chỉ còn Groq treo liên tục 4 lần, Groq cũng mở breaker ở lần 4.
+        with (
+            patch.object(service, "_get_gemini_client", return_value=None),
+            patch.object(service, "_get_groq_client", return_value=_StalledGroqClient()),
+        ):
+            asyncio.run(five_requests())
+
+        self.assertEqual(groq_completions.calls, 4)
+        self.assertFalse(service.health.can_attempt("groq", service._settings.GROQ_FALLBACK_MODEL))
+
     def test_uf1_stalled_gemini_rescued_by_hedged_groq_before_deadline(self) -> None:
         """Khi Gemini UF1 bị treo quá mốc fast-fail/hedge (1.0s), nhánh Groq hedge song song kịp trả kết quả trước deadline (2.2s)."""
         cfg = Settings(
@@ -1337,6 +1446,8 @@ class TestAIService(unittest.TestCase):
             GROQ_API_KEY="gsk_TestKey",
             GOOGLE_CREDENTIALS_PATH="",
             AI_UF1_TIMEOUT_SECONDS=2.2,
+            AI_UF1_ADAPTIVE_TIMEOUT_ENABLED=False,
+            AI_UF1_PRIMARY_PRIORITY_SECONDS=1.3,
             AI_UF1_GROQ_FAST_FAIL_SECONDS=1.0,
         )
         service = AIService(app_settings=cfg)
@@ -1357,17 +1468,21 @@ class TestAIService(unittest.TestCase):
                 summary="Groq hedge cứu hộ thành công khi Gemini UF1 treo.",
             )
 
+        async def request() -> TaskExtractionResult:
+            return await asyncio.wait_for(
+                service.extract_task_intent(
+                    "Ôn tập Cấu trúc dữ liệu 10 bài trước cuối tuần, rảnh tối thứ 5 19h-21h"
+                ),
+                timeout=1.9,
+            )
+
         with (
             patch.object(service, "_get_gemini_client", return_value=object()),
             patch.object(service, "_get_groq_client", return_value=object()),
             patch.object(service, "_call_gemini_structured", side_effect=_stalled_gemini) as gemini,
             patch.object(service, "_call_groq_structured", side_effect=_hedged_groq) as groq,
         ):
-            res = asyncio.run(
-                service.extract_task_intent(
-                    "Ôn tập Cấu trúc dữ liệu 10 bài trước cuối tuần, rảnh tối thứ 5 19h-21h"
-                )
-            )
+            res = asyncio.run(request())
 
         gemini.assert_awaited_once()
         groq.assert_awaited_once()
@@ -2038,6 +2153,247 @@ class TestAIService(unittest.TestCase):
         self.assertEqual(snap["groq:qwen/qwen3.8-27b"]["state"], "closed")
         self.assertEqual(snap["groq:openai/gpt-oss-20b"]["consecutive_failures"], 1)
         self.assertEqual(snap["groq:openai/gpt-oss-20b"]["last_error_category"], "timeout")
+
+    def test_w4_12a_uf6_wire_trigger_reasons_and_expand_horizon_grounded_copy(self) -> None:
+        """W4-12A: Mọi mã TriggerReason wire của UF6 đều ánh xạ đúng sang grounded copy, không lộ task_title."""
+        expected_canonical = {
+            "incomplete",
+            "busy",
+            "setting_changed",
+            "deadline_risk",
+            "skipped",
+            "manual",
+            "missed_session",
+            "step_completed_early",
+            "expand_horizon",
+        }
+        self.assertEqual(set(get_args(RescheduleTriggerReason)), expected_canonical)
+
+        wire_to_canonical = {
+            "checkin_incomplete": "incomplete",
+            "checkin_busy": "busy",
+            "checkin_skipped": "skipped",
+            "missed_start": "missed_session",
+            "user_reschedule": "manual",
+            "early_completion_pull_forward": "step_completed_early",
+            "settings_change": "setting_changed",
+            "expand_next_horizon": "expand_horizon",
+            "no_respond": "missed_session",
+        }
+        for wire_reason, canonical_reason in wire_to_canonical.items():
+            for proposal_available in (True, False):
+                with self.subTest(
+                    wire_reason=wire_reason,
+                    canonical_reason=canonical_reason,
+                    proposal_available=proposal_available,
+                ):
+                    wire_notes, wire_tip = ai_service._reschedule_copy(
+                        wire_reason, proposal_available=proposal_available
+                    )
+                    canon_notes, canon_tip = ai_service._reschedule_copy(
+                        canonical_reason, proposal_available=proposal_available
+                    )
+                    self.assertEqual(wire_notes, canon_notes)
+                    self.assertEqual(wire_tip, canon_tip)
+                    deficit_notes, deficit_tip = ai_service._reschedule_copy(
+                        wire_reason, proposal_available=proposal_available, deficit_minutes=25
+                    )
+                    canon_deficit_notes, canon_deficit_tip = ai_service._reschedule_copy(
+                        canonical_reason, proposal_available=proposal_available, deficit_minutes=25
+                    )
+                    self.assertEqual(deficit_notes, canon_deficit_notes)
+                    self.assertEqual(deficit_tip, canon_deficit_tip)
+                    self.assertIn("25 phút", deficit_notes[0])
+
+        cfg = Settings(
+            _env_file=None,
+            GEMINI_API_KEY="AIzaSyTestKey",
+            GROQ_API_KEY="",
+            GOOGLE_CREDENTIALS_PATH="",
+        )
+        service = AIService(app_settings=cfg)
+
+        async def _fake_verbatim_gemini(*, user_prompt: str, **_: Any) -> LLMRescheduleEmpathyPayload:
+            payload = json.loads(user_prompt)
+            self.assertNotIn("SENSITIVE_SECRET_TASK", user_prompt)
+            return LLMRescheduleEmpathyPayload(
+                empathetic_note=payload["allowed_notes"][0],
+                encouragement_tip=payload["allowed_tip"],
+            )
+
+        with (
+            patch.object(service, "_get_gemini_client", return_value=object()),
+            patch.object(service, "_call_gemini_structured", side_effect=_fake_verbatim_gemini),
+        ):
+            res = asyncio.run(
+                service.generate_reschedule_empathy(
+                    "checkin_busy",
+                    task_title="SENSITIVE_SECRET_TASK",
+                    proposal_available=True,
+                )
+            )
+        expected_notes, expected_tip = service._reschedule_copy("busy", proposal_available=True)
+        self.assertEqual(res.generation_tier, "tier_1_gemini")
+        self.assertEqual(res.empathetic_note, expected_notes[0])
+        self.assertEqual(res.encouragement_tip, expected_tip)
+
+    def test_w4_12a_uf1_tier3_fallback_extracts_daily_and_single_weekday_windows(self) -> None:
+        """W4-12A: Tier 3 fallback UF1 trích xuất an toàn khung giờ hằng ngày/thứ đơn lẻ, luôn giữ is_complete=False."""
+        ref_now = datetime(2026, 11, 22, 10, 0, tzinfo=UTC)
+
+        daily_res = ai_service._fallback_extract_task(
+            "Làm bài tập Toán, hằng ngày 19:00-21:00",
+            reference_now=ref_now,
+        )
+        self.assertEqual(daily_res.generation_tier, "tier_3_rule_based")
+        self.assertFalse(daily_res.is_complete)
+        self.assertEqual(len(daily_res.structured_free_windows), 1)
+        self.assertEqual(daily_res.structured_free_windows[0].kind, "daily")
+        self.assertEqual(daily_res.structured_free_windows[0].start_local, "19:00")
+        self.assertEqual(daily_res.structured_free_windows[0].end_local, "21:00")
+
+        weekday_cases = (
+            ("Ôn thi tiếng Anh, thứ 3 từ 19:00 đến 21:00", 2, "19:00", "21:00"),
+            ("Đọc tài liệu, Thứ Bảy 09h-11h", 6, "09:00", "11:00"),
+            ("Soạn slide, Chủ nhật 14:00-16:00", 7, "14:00", "16:00"),
+        )
+        for text, expected_wd, expected_start, expected_end in weekday_cases:
+            with self.subTest(text=text):
+                res = ai_service._fallback_extract_task(text, reference_now=ref_now)
+                self.assertEqual(res.generation_tier, "tier_3_rule_based")
+                self.assertFalse(res.is_complete)
+                self.assertEqual(len(res.structured_free_windows), 1)
+                win = res.structured_free_windows[0]
+                self.assertEqual(win.kind, "weekly_rule")
+                self.assertEqual(win.weekday, expected_wd)
+                self.assertEqual(win.start_local, expected_start)
+                self.assertEqual(win.end_local, expected_end)
+
+        unsafe_cases = (
+            "Làm lần thứ 2 bài tập, 19:00-21:00",
+            "Tuần sau thứ 3 19:00-21:00",
+            "Bận thứ 3 19:00-21:00",
+            "Từ thứ 2 đến thứ 5 19:00-21:00",
+        )
+        for unsafe_text in unsafe_cases:
+            with self.subTest(unsafe_text=unsafe_text):
+                res = ai_service._fallback_extract_task(unsafe_text, reference_now=ref_now)
+                self.assertFalse(res.is_complete)
+                self.assertEqual(res.structured_free_windows, [])
+
+        prev_draft = LLMTaskExtractionPayload(
+            title="Ôn thi tiếng Anh",
+            content="Ôn thi tiếng Anh",
+            scope="3 đề mẫu",
+            free_time_slots=["Thứ 2 19:00-21:00"],
+            structured_free_windows=[
+                ExtractedFreeWindowSchema(
+                    kind="weekly_rule",
+                    weekday=1,
+                    start_local="19:00",
+                    end_local="21:00",
+                    raw_phrase="Thứ 2 19:00-21:00",
+                )
+            ],
+            summary="Đã có giờ rảnh thứ 2.",
+        )
+        preserved = ai_service._fallback_extract_task(
+            "Thứ Bảy 09h-11h",
+            previous_draft=prev_draft,
+            reference_now=ref_now,
+        )
+        self.assertFalse(preserved.is_complete)
+        self.assertEqual(len(preserved.structured_free_windows), 1)
+        self.assertEqual(preserved.structured_free_windows[0].weekday, 1)
+
+    def test_w4_12a_uf2_long_horizon_profile_and_candidate_nl_fallback(self) -> None:
+        """W4-12A: Kiểm tra profile UF2 3 bậc, thinking MINIMAL dài hạn và fallback keyed adjustment."""
+        service = AIService(Settings(_env_file=None))
+
+        short_profile = service._decomposition_profile(total_project_days=14, total_free_hours=10.0)
+        self.assertEqual(short_profile.hard_timeout, 9.0)
+        self.assertEqual(short_profile.primary_priority_until, 4.5)
+        self.assertEqual(short_profile.warm_backup_at, 2.0)
+        self.assertEqual(short_profile.groq_hedge_at, 5.0)
+
+        mid_profile = service._decomposition_profile(total_project_days=21, total_free_hours=30.0)
+        self.assertEqual(mid_profile.hard_timeout, 14.0)
+        self.assertEqual(mid_profile.primary_priority_until, 5.5)
+        self.assertEqual(mid_profile.warm_backup_at, 2.5)
+        self.assertEqual(mid_profile.groq_hedge_at, 5.5)
+
+        long_profile = service._decomposition_profile(total_project_days=60, total_free_hours=80.0)
+        self.assertEqual(long_profile.hard_timeout, 20.0)
+        self.assertEqual(long_profile.primary_priority_until, 7.0)
+        self.assertEqual(long_profile.warm_backup_at, 3.0)
+        self.assertEqual(long_profile.groq_hedge_at, 6.5)
+
+        valid_payload = LLMTaskDecompositionPayload(
+            task_title="Khóa luận tốt nghiệp",
+            steps=[
+                StepPromptItem(
+                    order_index=1,
+                    title="Khảo sát tài liệu",
+                    expected_output="Tổng hợp 10 bài báo",
+                    estimated_minutes=90,
+                    micro_task_prompt="Mở trình duyệt và tạo thư mục tài liệu.",
+                    cognitive_load="medium",
+                )
+            ],
+            reasoning="Chia theo cột mốc tuần.",
+        )
+        with patch.object(
+            service, "_execute_hedged_structured", new_callable=AsyncMock, return_value=(valid_payload, "tier_1_gemini")
+        ) as hedged_mock:
+            asyncio.run(service.decompose_task(task_title="Khóa luận", total_project_days=30))
+            self.assertTrue(hedged_mock.call_args.kwargs["force_minimal_thinking"])
+            asyncio.run(service.decompose_task(task_title="Bài tập tuần", total_project_days=10))
+            self.assertFalse(hedged_mock.call_args.kwargs["force_minimal_thinking"])
+
+        snapshots = [
+            {"client_step_key": "step-1", "title": "Chuẩn bị", "estimated_base_seconds": 1500},
+            {"client_step_key": "step-2", "title": "Viết nháp", "estimated_base_seconds": 1800},
+        ]
+        draft_fb = service._fallback_adjust_candidate_by_nl(
+            "Đổi giờ rảnh sang tối thứ 6 và lùi deadline", snapshots
+        )
+        self.assertIsInstance(draft_fb, CandidateAdjustmentResult)
+        assert draft_fb is not None
+        self.assertTrue(draft_fb.requires_draft_update)
+        self.assertTrue(draft_fb.requires_clarification)
+        self.assertEqual(draft_fb.step_edits, [])
+        self.assertEqual(draft_fb.generation_tier, "tier_3_rule_based")
+
+        self.assertIsNone(
+            service._fallback_adjust_candidate_by_nl("Chỉnh bước 2 thành 40 phút", snapshots)
+        )
+        self.assertIsNone(
+            service._fallback_adjust_candidate_by_nl("giảm bước 1 đi 15 phút", snapshots)
+        )
+        self.assertIsNone(
+            service._fallback_adjust_candidate_by_nl(
+                "sửa nội dung bước 1 thành Viết mở bài và làm trong 45 phút", snapshots
+            )
+        )
+        self.assertIsNone(service._fallback_adjust_candidate_by_nl("Xóa bước 2", snapshots))
+
+        with patch.object(
+            service,
+            "_execute_hedged_structured",
+            new=AsyncMock(side_effect=RuntimeError("llm_down")),
+        ):
+            for step_instr in (
+                "Chỉnh bước 2 thành 40 phút",
+                "giảm bước 1 đi 15 phút",
+                "sửa nội dung bước 1 thành Viết mở bài và làm trong 45 phút",
+            ):
+                with self.assertRaises(TimeoutError):
+                    asyncio.run(
+                        service.adjust_candidate_by_nl(
+                            step_instr,
+                            current_steps=snapshots,
+                        )
+                    )
 
 
 if __name__ == "__main__":

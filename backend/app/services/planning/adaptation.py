@@ -24,17 +24,17 @@ def _finite_number(value: Any, name: str) -> Decimal:
 def evaluate_buffer_adaptation(
     step_samples: list[dict[str, Any]],
     current_buffer_multiplier: float,
-    min_sample_count: int = 5,
+    min_sample_count: int = 7,
     policy_min: float = 1.0,
     policy_max: float = 2.0,
     delta_threshold: float = 0.2,
     existing_suggestion_id: str | None = None,
     *,
-    sliding_window_steps: int = 15,
+    sliding_window_steps: int = 10,
     step_increment: float = 0.05,
     last_suggestion_at: datetime | None = None,
     current_time: datetime | None = None,
-    cooldown_seconds: int = 0,
+    cooldown_seconds: int = 7 * 24 * 3600,
     policy_revision: str = "v2_step_median_checked_inputs",
 ) -> dict[str, Any] | None:
     """Trả gợi ý pending hoặc None; cấu hình sai gây ValueError, mẫu bẩn bị loại.
@@ -122,7 +122,7 @@ def evaluate_buffer_adaptation(
     median_ratio = statistics.median(actual / base for _, (base, actual, _) in selected)
     rounded = (median_ratio / increment).to_integral_value(rounding=ROUND_HALF_UP) * increment
     suggested = min(upper, max(lower, rounded))
-    if suggested == current or abs(suggested - current) < threshold:
+    if suggested == current or abs(suggested - current) <= threshold:
         return None
     direction = "tăng" if suggested > current else "giảm"
     return {

@@ -24,9 +24,12 @@ from app.services.planning.durations import (
 )
 from app.services.planning.rescheduling import shift_elapsed_sessions
 from app.services.planning.scheduling import (
+    ExtraSchedulingConstraints,
     compute_task_priority_key,
     order_steps_by_priority,
+    parse_extra_requirements,
     schedule_candidate_sessions,
+    subtract_fixed_session_gaps,
 )
 from app.services.planning.validation import (
     SessionStartFeasibilityResult,
@@ -43,12 +46,15 @@ __all__ = [
     "build_session_segments",
     "calculate_buffered_work",
     "compute_effective_free_intervals",
+    "ExtraSchedulingConstraints",
     "compute_task_priority_key",
     "evaluate_buffer_adaptation",
     "order_steps_by_priority",
+    "parse_extra_requirements",
     "prepare_step_durations",
     "schedule_candidate_sessions",
     "shift_elapsed_sessions",
+    "subtract_fixed_session_gaps",
     "validate_planning_prerequisites",
     "SessionStartFeasibilityResult",
     "validate_session_start_feasibility",

@@ -155,4 +155,15 @@ def fit_session_to_slot(
             upper = work - 1
     if lower == 0:
         return [], 0, 0, 0
-    return build_session_segments(lower, work_interval_seconds, rest_interval_seconds)
+    segments, work, rest, duration = build_session_segments(
+        lower, work_interval_seconds, rest_interval_seconds
+    )
+    if (
+        work < remaining_work_seconds
+        and len(segments) > 1
+        and segments[-1].kind == "work"
+        and segments[-1].duration_seconds < min(120, work_interval_seconds)
+    ):
+        lower = (work // work_interval_seconds) * work_interval_seconds
+        return build_session_segments(lower, work_interval_seconds, rest_interval_seconds)
+    return segments, work, rest, duration

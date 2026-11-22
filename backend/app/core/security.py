@@ -168,6 +168,11 @@ def decode_app_refresh_token(token: str) -> AppRefreshClaims:
         jti = claims.get("jti")
         if not isinstance(jti, str) or not jti.strip():
             raise ValueError("missing refresh jti")
-        return AppRefreshClaims(user_id=UUID(claims["sub"]), jti=jti)
-    except (JWTError, ValueError, TypeError, KeyError):
+        return AppRefreshClaims(
+            user_id=UUID(claims["sub"]),
+            jti=jti,
+            issued_at=datetime.fromtimestamp(claims["iat"], tz=UTC),
+            expires_at=datetime.fromtimestamp(claims["exp"], tz=UTC),
+        )
+    except (JWTError, ValueError, TypeError, KeyError, OverflowError, OSError):
         raise unauthenticated() from None

@@ -16,7 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import get_current_user
 from app.core.config import settings
 from app.core.database import Base, get_db, make_engine, session_factory
-from app.core.security import issue_app_access_token
+from app.core.security import decode_app_refresh_token, issue_app_access_token
 from app.main import app
 from app.models.calendar import (
     CalendarAuthorization,
@@ -32,7 +32,7 @@ from app.models.settings import AdaptationSuggestion as AdaptationSuggestionRow
 from app.models.settings import Availability as AvailabilityRow
 from app.models.step import Step as StepRow
 from app.models.task import Task as TaskRow
-from app.models.user import User
+from app.models.user import RefreshToken, User
 from app.models.user import UserPreference as UserPreferenceRow
 from app.schemas.availability import DraftAvailability, WeeklyRule
 from app.schemas.common import TimeConstraint, TimeInterval
@@ -369,7 +369,6 @@ async def test_adv_p1_uf7_availability_moved_earlier_with_seg_same_true(
                     "expected_task_revision": 1,
                     "changes": {
                         "availability": _daily_availability_dict("09:00", "12:00"),
-                        "preferences": {"work_interval_seconds": 1800},
                     },
                 },
             )
@@ -493,7 +492,6 @@ async def test_adv_p1_uf7_availability_moved_earlier_with_seg_same_rest_change(
                     "expected_task_revision": 1,
                     "changes": {
                         "availability": _daily_availability_dict("09:00", "12:00"),
-                        "preferences": {"rest_interval_seconds": 600},
                     },
                 },
             )
@@ -1315,6 +1313,20 @@ async def test_adv_p2_refresh_token_security_traps(monkeypatch: pytest.MonkeyPat
         bundle = issue_app_access_token(active_uid)
         assert bundle.refresh_token is not None
         assert bundle.refresh_expires_in == settings.REFRESH_TOKEN_TTL_SECONDS == 30 * 86400
+        unregistered_bundle = issue_app_access_token(active_uid)
+        assert unregistered_bundle.refresh_token is not None
+        bundle_claims = decode_app_refresh_token(bundle.refresh_token)
+        async with factory() as db:
+            db.add(
+                RefreshToken(
+                    user_id=active_uid,
+                    jti=bundle_claims.jti,
+                    family_id=uuid4(),
+                    issued_at=bundle_claims.issued_at,
+                    expires_at=bundle_claims.expires_at,
+                )
+            )
+            await db.commit()
 
         now_ts = int(datetime.now(UTC).timestamp())
         base_claims = {
@@ -1382,6 +1394,12 @@ async def test_adv_p2_refresh_token_security_traps(monkeypatch: pytest.MonkeyPat
             # 10. User đã bị xóa -> 401
             r = await client.post("/api/v1/auth/refresh", json={"refresh_token": deleted_bundle.refresh_token})
             assert r.status_code == 401
+
+            # 10b. Refresh token chưa đăng ký trong DB (dù chữ ký hợp lệ cho active user) -> 401
+            r_unreg = await client.post(
+                "/api/v1/auth/refresh", json={"refresh_token": unregistered_bundle.refresh_token}
+            )
+            assert r_unreg.status_code == 401
 
             # 11. Refresh token hợp lệ -> 200 & cấp cặp token mới
             r_ok = await client.post("/api/v1/auth/refresh", json={"refresh_token": bundle.refresh_token})
@@ -1917,6 +1935,216 @@ async def test_adv_p3_health_db_failure_and_calendar_oauth_callback_error_envelo
             assert "error" in body and isinstance(body["error"], dict), (
                 f"Vi phạm RISK-CALENDAR-ERROR-ENVELOPE! oauth/callback trả raw body thay vì ErrorEnvelope: {body}"
             )
+    finally:
+        app.dependency_overrides.clear()
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_adv_p1_uf7_global_work_interval_change_with_seg_same_true(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """UF7-T6 Case 1: Đổi global work_interval_seconds (1500 -> 1800) với target_task_id=None
+    khi có future scheduled session để kiểm tra logic seg_same=True của UF6."""
+    engine, factory, override_get_db = await _make_mem_db()
+    app.dependency_overrides[get_db] = override_get_db
+    base_now = datetime(2026, 11, 10, 8, 0, tzinfo=VN_TZ)
+    monkeypatch.setattr("app.services.settings_service._utc_now", lambda: base_now)
+    monkeypatch.setattr(
+        "app.services.reschedule_service._current_utc_now",
+        lambda now=None: (now or base_now).astimezone(UTC),
+    )
+
+    try:
+        async with factory() as db:
+            user_id, _ = await _seed_user_pref_avail(db, work_sec=1500, rest_sec=300, buffer_mult=1.2)
+            task_id = uuid4()
+            step_id = uuid4()
+            db.add(
+                TaskRow(
+                    id=task_id,
+                    user_id=user_id,
+                    revision=1,
+                    title="Task Global Work Change",
+                    scope="1 phiên",
+                    time_constraint={
+                        "mode": "deadline",
+                        "at": "2026-11-10T17:00:00+07:00",
+                        "timezone": "Asia/Ho_Chi_Minh",
+                    },
+                    status="in_progress",
+                    decomposition_state="complete",
+                )
+            )
+            await db.flush()
+            db.add(
+                StepRow(
+                    id=step_id,
+                    user_id=user_id,
+                    task_id=task_id,
+                    revision=1,
+                    order_index=1,
+                    title="Bước 1",
+                    estimated_base_seconds=1250,
+                    remaining_base_seconds=1250,
+                    buffer_multiplier=1.2,
+                    estimate_source="user",
+                    status="pending",
+                )
+            )
+            await db.flush()
+            db.add(
+                SessionRow(
+                    id=uuid4(),
+                    user_id=user_id,
+                    step_id=step_id,
+                    revision=1,
+                    scheduled_start=datetime(2026, 11, 10, 14, 0, tzinfo=VN_TZ),
+                    scheduled_end=datetime(2026, 11, 10, 14, 30, tzinfo=VN_TZ),
+                    micro_task_seconds=120,
+                    work_seconds=1500,
+                    rest_seconds=300,
+                    segments=[
+                        {"order_index": 0, "kind": "work", "duration_seconds": 1500},
+                        {"order_index": 1, "kind": "rest", "duration_seconds": 300},
+                    ],
+                    duration_seconds=1800,
+                    schedule_revision=1,
+                    status="scheduled",
+                    start_state="waiting",
+                )
+            )
+            await db.commit()
+
+        headers = _set_user_override(user_id)
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.post(
+                "/api/v1/settings/change-requests",
+                headers={**headers, "Idempotency-Key": f"idem-{uuid4()}"},
+                json={
+                    "expected_preferences_revision": 1,
+                    "target_task_id": None,
+                    "changes": {
+                        "preferences": {
+                            "work_interval_seconds": 1800,
+                        },
+                    },
+                },
+            )
+            assert resp.status_code == 200, resp.text
+            prop_id = resp.json()["data"]["pending_proposal_id"]
+            assert prop_id is not None
+
+            prop_resp = await client.get(f"/api/v1/proposals/{prop_id}", headers=headers)
+            assert prop_resp.status_code == 200
+            prop = prop_resp.json()["data"]
+            assert prop["feasibility"]["status"] == "feasible"
+            assert prop["feasibility"]["confirmable"] is True
+    finally:
+        app.dependency_overrides.clear()
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_adv_p1_uf7_global_rest_interval_change_with_seg_same_true(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """UF7-T6 Case 2: Đổi global rest_interval_seconds (300 -> 600) với target_task_id=None
+    khi có future scheduled session để kiểm tra logic seg_same=True của UF6."""
+    engine, factory, override_get_db = await _make_mem_db()
+    app.dependency_overrides[get_db] = override_get_db
+    base_now = datetime(2026, 11, 10, 8, 0, tzinfo=VN_TZ)
+    monkeypatch.setattr("app.services.settings_service._utc_now", lambda: base_now)
+    monkeypatch.setattr(
+        "app.services.reschedule_service._current_utc_now",
+        lambda now=None: (now or base_now).astimezone(UTC),
+    )
+
+    try:
+        async with factory() as db:
+            user_id, _ = await _seed_user_pref_avail(db, work_sec=1500, rest_sec=300, buffer_mult=1.2)
+            task_id = uuid4()
+            step_id = uuid4()
+            db.add(
+                TaskRow(
+                    id=task_id,
+                    user_id=user_id,
+                    revision=1,
+                    title="Task Global Rest Change",
+                    scope="1 phiên",
+                    time_constraint={
+                        "mode": "deadline",
+                        "at": "2026-11-10T17:00:00+07:00",
+                        "timezone": "Asia/Ho_Chi_Minh",
+                    },
+                    status="in_progress",
+                    decomposition_state="complete",
+                )
+            )
+            await db.flush()
+            db.add(
+                StepRow(
+                    id=step_id,
+                    user_id=user_id,
+                    task_id=task_id,
+                    revision=1,
+                    order_index=1,
+                    title="Bước 1",
+                    estimated_base_seconds=1250,
+                    remaining_base_seconds=1250,
+                    buffer_multiplier=1.2,
+                    estimate_source="user",
+                    status="pending",
+                )
+            )
+            await db.flush()
+            db.add(
+                SessionRow(
+                    id=uuid4(),
+                    user_id=user_id,
+                    step_id=step_id,
+                    revision=1,
+                    scheduled_start=datetime(2026, 11, 10, 14, 0, tzinfo=VN_TZ),
+                    scheduled_end=datetime(2026, 11, 10, 14, 30, tzinfo=VN_TZ),
+                    micro_task_seconds=120,
+                    work_seconds=1500,
+                    rest_seconds=300,
+                    segments=[
+                        {"order_index": 0, "kind": "work", "duration_seconds": 1500},
+                        {"order_index": 1, "kind": "rest", "duration_seconds": 300},
+                    ],
+                    duration_seconds=1800,
+                    schedule_revision=1,
+                    status="scheduled",
+                    start_state="waiting",
+                )
+            )
+            await db.commit()
+
+        headers = _set_user_override(user_id)
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.post(
+                "/api/v1/settings/change-requests",
+                headers={**headers, "Idempotency-Key": f"idem-{uuid4()}"},
+                json={
+                    "expected_preferences_revision": 1,
+                    "target_task_id": None,
+                    "changes": {
+                        "preferences": {
+                            "rest_interval_seconds": 600,
+                        },
+                    },
+                },
+            )
+            assert resp.status_code == 200, resp.text
+            prop_id = resp.json()["data"]["pending_proposal_id"]
+            assert prop_id is not None
+
+            prop_resp = await client.get(f"/api/v1/proposals/{prop_id}", headers=headers)
+            assert prop_resp.status_code == 200
+            prop = prop_resp.json()["data"]
+            assert prop["feasibility"]["status"] == "feasible"
+            assert prop["feasibility"]["confirmable"] is True
     finally:
         app.dependency_overrides.clear()
         await engine.dispose()

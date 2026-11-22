@@ -1,38 +1,51 @@
 """Dịch vụ giọng nói Backend (Role Voice — V01 & A21): chuyển audio người dùng chủ động gửi thành chữ.
 
-Nhà cung cấp chính: Gemini 3.5 Transcribe (chế độ ``smart``) — chọn sau khảo sát STT tiếng Việt
-ngày 01/11/2026 (đúng ngày/giờ/thực thể tốt nhất, không bịa câu khi audio im lặng). Dự phòng khi
-Backend lỗi/mất mạng nằm ở Mobile (``speech_to_text`` on-device), không nằm trong file này.
+Nhà cung cấp chính: Gemini 3.5 Transcribe gửi audio inline qua ``generate_content`` (chế độ
+``verbatim``, đo ~2–2,9s cho câu 12–43s — xem docs/backend/VOICE_STT_BENCHMARK.md) với định tuyến theo
+mục đích (riêng ``uf5_checkin`` ưu tiên Groq Whisper cho câu trả lời ngắn) và dự phòng hai chiều.
+Dự phòng khi Backend lỗi/mất mạng nằm ở Mobile (``speech_to_text`` on-device), không nằm trong file này.
 
 Quy tắc bắt buộc (AGENTS.md §2 UF4, doc Backend UF4/A21):
 - Chỉ xử lý audio do người dùng CHỦ ĐỘNG gửi. Không gọi STT cho bản ghi UF4 trong phiên.
 - KHÔNG log nội dung audio hoặc transcript — log chỉ có mã lỗi, nhà cung cấp, thời gian xử lý.
-- File upload lên Google Files API phải được xóa ngay sau khi chép (kể cả khi lỗi).
-- Nhà cung cấp, model, chế độ, ngôn ngữ, timeout là tham số cấu hình (``app.core.config``).
+- File upload lên Google Files API (khi audio > 15MB hoặc chế độ legacy) phải được xóa ngay sau khi chép (kể cả khi lỗi).
+- Nhà cung cấp, model, transport, chế độ, ngôn ngữ, timeout là tham số cấu hình (``app.core.config``).
 """
 
 from __future__ import annotations
 
 import asyncio
 import hashlib
+import inspect
 import io
+import json
 import logging
+import math
+import re
 import struct
+import sys
 import time
+import unicodedata
+from array import array
 from collections import OrderedDict
 from dataclasses import dataclass
 from enum import StrEnum
 from functools import lru_cache
-from pathlib import PurePath
+from pathlib import Path, PurePath
 from typing import Any, Literal, Protocol
 
 import edge_tts
 from google import genai
+from google.genai import types
+from google.oauth2 import service_account
 from groq import AsyncGroq
 
 from app.core.config import Settings, settings
 
 logger = logging.getLogger(__name__)
+
+_CLOUD_PLATFORM_SCOPES = ["https://www.googleapis.com/auth/cloud-platform"]
+_GEMINI_INLINE_MAX_BYTES = 15 * 1024 * 1024
 
 # Định dạng audio Gemini Transcribe chấp nhận (docs ai.google.dev/gemini-api/docs/transcribe).
 _EXTENSION_TO_MIME: dict[str, str] = {
@@ -115,6 +128,17 @@ class SttResult:
     text: str
     provider: str
     latency_ms: int
+    low_confidence: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class SttProviderDetails:
+    """Chi tiết kết quả từ provider STT (kèm chỉ số âm học từ verbose_json nếu có)."""
+
+    text: str
+    no_speech_prob: float | None = None
+    avg_logprob: float | None = None
+    all_segments_silent: bool | None = None
 
 
 class SttProvider(Protocol):
@@ -167,11 +191,226 @@ def map_provider_exception(exc: Exception) -> SttError:
     return SttError(SttErrorCode.PROVIDER_ERROR, type(exc).__name__)
 
 
-class GeminiSttProvider:
-    """Gemini 3.5 Transcribe qua Gemini Developer API (API key AI Studio).
+_GEMINI_STT_PROMPT_SMART = (
+    "Hãy chép lời (transcribe) chính xác từng câu từ đoạn ghi âm tiếng Việt dưới đây.\n"
+    "Quy tắc:\n"
+    "1. Giữ nguyên văn ý nói của người dùng, sửa nhẹ dấu câu cho tự nhiên nhưng KHÔNG tự thêm bớt ý. "
+    "Bỏ các từ đệm ngập ngừng vô nghĩa (ờ, ừm), nhưng giữ nguyên các cụm đính chính "
+    "('à nhầm', 'sửa lại', 'thay vì').\n"
+    "2. Chú ý người Việt nói nhanh hoặc giọng vùng miền, và thường xen lẫn từ/thuật ngữ hoặc tên sách tiếng Anh "
+    "(ví dụ: tên framework, thuật ngữ lập trình, từ khóa tiếng Anh chuyên ngành). Hãy viết đúng chính tả tiếng Anh "
+    "của các từ đó theo âm thanh nghe được.\n"
+    "3. Viết số lượng, ngày, giờ bằng chữ số khi người nói đọc số (vd: 5 trang, 19:00).\n"
+    "4. Nếu không có lời nói rõ ràng (im lặng, chỉ có nhiễu nền) thì CHỈ trả về [NO_SPEECH].\n"
+    "5. Không giải thích, không thêm tiền tố như 'Transcript:', chỉ trả về duy nhất văn bản đã chép lời."
+)
 
-    Luồng: upload audio lên Files API -> ``interactions.create`` -> đọc ``output_text`` -> xóa file.
-    Docs chỉ mô tả cách gửi qua Files API nên chưa dùng inline bytes (cần đo lại nếu muốn giảm trễ).
+_GEMINI_STT_PROMPT_VERBATIM = (
+    "Hãy chép lời nguyên văn (verbatim) chính xác từng từ từ đoạn ghi âm tiếng Việt dưới đây.\n"
+    "Quy tắc:\n"
+    "1. Giữ nguyên văn mọi từ người dùng nói, kể cả từ đệm, ngập ngừng hay cụm đính chính; "
+    "KHÔNG tự thêm bớt hay diễn giải lại.\n"
+    "2. Viết đúng chính tả tiếng Việt và các từ/thuật ngữ hoặc tên sách tiếng Anh xen lẫn theo âm thanh nghe được.\n"
+    "3. Nếu không có lời nói rõ ràng (im lặng, chỉ có nhiễu nền) thì CHỈ trả về [NO_SPEECH].\n"
+    "4. Không giải thích, không thêm tiền tố như 'Transcript:', chỉ trả về duy nhất văn bản đã chép lời."
+)
+
+_GEMINI_STT_USER_PROMPT = "Chép lời đoạn ghi âm này."
+
+_CODE_FENCE_START_RE = re.compile(r"^```[a-zA-Z0-9_-]*\s*\n?")
+_CODE_FENCE_END_RE = re.compile(r"\n?\s*```$")
+_NO_SPEECH_SENTINEL_RE = re.compile(
+    r"^[\s\"'“”`.,!?;:\-–—…()]*\[\s*(?:no[_\s-]*speech|silence|inaudible)\s*\][\s\"'“”`.,!?;:\-–—…()]*$",
+    re.IGNORECASE,
+)
+_ECHO_PUNCT_RE = re.compile(r"[^\w\s]|_", re.UNICODE)
+_WAV_DIGITAL_SILENCE_PEAK_THRESHOLD = 32
+
+
+def _normalize_for_echo_check(text: str) -> str:
+    """Chuẩn hóa văn bản (NFC, lowercase, bỏ dấu câu, gộp khoảng trắng) để phát hiện echo prompt."""
+    normalized = unicodedata.normalize("NFC", text or "").lower()
+    without_punct = _ECHO_PUNCT_RE.sub(" ", normalized)
+    return " ".join(without_punct.split())
+
+
+_NORMALIZED_GEMINI_PROMPTS: tuple[str, ...] = tuple(
+    f" {_normalize_for_echo_check(p)} "
+    for p in (
+        _GEMINI_STT_PROMPT_SMART,
+        _GEMINI_STT_PROMPT_VERBATIM,
+        _GEMINI_STT_USER_PROMPT,
+    )
+)
+
+_PROMPT_META_ANCHORS: tuple[str, ...] = tuple(
+    f" {_normalize_for_echo_check(anchor)} "
+    for anchor in (
+        "quy tắc",
+        "chép lời",
+        "transcribe",
+        "transcript",
+        "đoạn ghi âm",
+        "không giải thích",
+        "tiền tố",
+        "lời nói rõ ràng",
+        "chỉ trả về",
+        "văn bản đã chép lời",
+    )
+)
+
+
+def _is_gemini_prompt_echo(text: str) -> bool:
+    """Kiểm tra đầu ra ngắn (<= 40 ký tự sau chuẩn hóa) có lặp lại meta-instruction trong prompt Gemini không."""
+    normalized = _normalize_for_echo_check(text)
+    if not normalized or len(normalized) > 40:
+        return False
+    padded = f" {normalized} "
+    if not any(padded in prompt_padded for prompt_padded in _NORMALIZED_GEMINI_PROMPTS):
+        return False
+    if len(normalized.split()) >= 4:
+        return True
+    return any(anchor in padded for anchor in _PROMPT_META_ANCHORS)
+
+
+def _is_wav_pcm16_digital_silence(
+    audio: bytes, *, peak_threshold: int = _WAV_DIGITAL_SILENCE_PEAK_THRESHOLD
+) -> bool:
+    """Tiền kiểm im lặng số (digital silence) cho WAV PCM 16-bit.
+
+    Parse các subchunk RIFF/WAVE (``fmt `` và ``data``) bằng ``struct``. Nếu header hỏng,
+    thiếu chunk hoặc không phải PCM 16-bit (``audio_format == 1``, ``bits_per_sample == 16``),
+    trả về ``False`` để bỏ qua precheck và vẫn cho gọi provider bình thường.
+    """
+    try:
+        if len(audio) < 12 or audio[0:4] != b"RIFF" or audio[8:12] != b"WAVE":
+            return False
+
+        audio_format: int | None = None
+        bits_per_sample: int | None = None
+        data_slice: memoryview | None = None
+        view = memoryview(audio)
+        total_len = len(audio)
+        offset = 12
+
+        while offset + 8 <= total_len:
+            chunk_id = audio[offset : offset + 4]
+            (chunk_size,) = struct.unpack_from("<I", audio, offset + 4)
+            data_start = offset + 8
+            data_end = data_start + chunk_size
+            if data_end > total_len:
+                return False
+
+            if chunk_id == b"fmt ":
+                if chunk_size < 16:
+                    return False
+                (
+                    audio_format,
+                    _channels,
+                    _sample_rate,
+                    _byte_rate,
+                    _block_align,
+                    bits_per_sample,
+                ) = struct.unpack_from("<HHIIHH", audio, data_start)
+            elif chunk_id == b"data":
+                data_slice = view[data_start:data_end]
+
+            if audio_format is not None and data_slice is not None:
+                break
+
+            offset = data_end + (chunk_size % 2)
+
+        if audio_format != 1 or bits_per_sample != 16 or data_slice is None:
+            return False
+
+        n_bytes = len(data_slice)
+        if n_bytes == 0:
+            return True
+        if n_bytes % 2 != 0:
+            return False
+
+        samples = array("h")
+        samples.frombytes(data_slice)
+        if sys.byteorder != "little":
+            samples.byteswap()
+        peak = max(abs(min(samples)), abs(max(samples)))
+        return peak <= peak_threshold
+    except (struct.error, ValueError, TypeError):
+        return False
+
+
+def _clean_gemini_transcript(raw_text: str) -> str:
+    """Làm sạch code fence ``` và dấu ngoặc kép bao quanh đầu ra văn bản từ Gemini."""
+    text = (raw_text or "").strip()
+    if text.startswith("```") and text.endswith("```") and len(text) >= 6:
+        text = _CODE_FENCE_START_RE.sub("", text, count=1)
+        text = _CODE_FENCE_END_RE.sub("", text, count=1).strip()
+    while len(text) >= 2:
+        if (text[0] == '"' and text[-1] == '"' and '"' not in text[1:-1]) or (
+            text[0] == "“" and text[-1] == "”" and "“" not in text[1:-1] and "”" not in text[1:-1]
+        ):
+            text = text[1:-1].strip()
+        else:
+            break
+    return text
+
+
+def _is_no_speech_sentinel(text: str) -> bool:
+    """Kiểm tra đầu ra Gemini có phải sentinel báo im lặng/không có lời nói hay không."""
+    cleaned = (text or "").strip()
+    if not cleaned:
+        return False
+    return bool(_NO_SPEECH_SENTINEL_RE.match(cleaned))
+
+
+def _transcript_text_of(resp: Any) -> str:
+    """Lấy transcript từ response Transcribe: ưu tiên phần text, nếu trống thì đọc ``audio_transcription``."""
+    texts: list[str] = []
+    transcriptions: list[str] = []
+    for candidate in getattr(resp, "candidates", None) or []:
+        content = getattr(candidate, "content", None)
+        for part in getattr(content, "parts", None) or []:
+            text = getattr(part, "text", None)
+            if isinstance(text, str) and text:
+                texts.append(text)
+            tr = getattr(part, "audio_transcription", None)
+            tr_text = getattr(tr, "text", None)
+            if isinstance(tr_text, str) and tr_text:
+                transcriptions.append(tr_text)
+        break  # chỉ đọc candidate đầu tiên
+    if texts or transcriptions:
+        return ("".join(texts) or "".join(transcriptions)).strip()
+    fallback = getattr(resp, "text", None)
+    return fallback.strip() if isinstance(fallback, str) else ""
+
+
+def _accepts_purpose_kwarg(func: Any) -> bool:
+    """Kiểm tra callable có nhận tham số ``purpose`` hoặc ``**kwargs`` hay không."""
+    try:
+        sig = inspect.signature(func)
+    except (TypeError, ValueError):
+        return False
+    for param in sig.parameters.values():
+        if param.kind == inspect.Parameter.VAR_KEYWORD:
+            return True
+        if param.name == "purpose" and param.kind in (
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            inspect.Parameter.KEYWORD_ONLY,
+        ):
+            return True
+    return False
+
+
+class GeminiSttProvider:
+    """Gemini STT: 3 cách gửi audio (``transport``).
+
+    - ``transcribe_inline``: model Transcribe + ``models.generate_content`` với audio inline và
+      ``audio_transcription_config`` (không prompt, không upload/xóa file). Nhanh nhất: ~2–2,9s.
+    - ``inline``: model Flash/Flash-Lite + prompt "chép lời" + audio inline.
+    - ``transcribe_api`` (legacy): Files API upload -> ``interactions.create`` -> xóa file (~10s).
+    - ``transport="auto"``: model có chữ ``transcribe`` -> ``transcribe_inline``; ngược lại -> ``inline``.
+      Audio > 15MB luôn quay về Files API.
+    - Hỗ trợ xác thực kép: ưu tiên ``GEMINI_API_KEY``, dự phòng Service Account (``enterprise=True``).
     """
 
     name = "gemini"
@@ -183,27 +422,74 @@ class GeminiSttProvider:
         model: str,
         mode: Literal["smart", "verbatim"],
         language_code: str,
+        transport: Literal["auto", "inline", "transcribe_inline", "transcribe_api"] = "auto",
+        credentials_file: Path | None = None,
+        project: str = "",
+        location: str = "global",
     ) -> None:
-        self._api_key = api_key
+        self._api_key = api_key.strip()
         self._model = model
         self._mode = mode
         self._language_code = language_code
+        self._transport = transport
+        self._credentials_file = credentials_file
+        self._project = project
+        self._location = location
         self._client: genai.Client | None = None
 
     def _get_client(self) -> genai.Client:
-        if not self._api_key:
-            raise SttError(SttErrorCode.PROVIDER_UNAVAILABLE, "missing_gemini_api_key")
-        if self._client is None:
-            self._client = genai.Client(api_key=self._api_key)
-        return self._client
+        if self._client is not None:
+            return self._client
+
+        http_opts = types.HttpOptions(
+            retry_options=types.HttpRetryOptions(attempts=1),
+        )
+
+        if self._api_key:
+            self._client = genai.Client(
+                api_key=self._api_key,
+                http_options=http_opts,
+            )
+            return self._client
+
+        if self._credentials_file is not None and self._credentials_file.is_file():
+            try:
+                raw_meta = json.loads(self._credentials_file.read_text(encoding="utf-8"))
+                project_id = self._project.strip() or str(raw_meta.get("project_id", "")).strip()
+                if project_id:
+                    sa_creds = service_account.Credentials.from_service_account_file(
+                        str(self._credentials_file),
+                        scopes=_CLOUD_PLATFORM_SCOPES,
+                    )
+                    self._client = genai.Client(
+                        enterprise=True,
+                        credentials=sa_creds,
+                        project=project_id,
+                        location=self._location,
+                        http_options=http_opts,
+                    )
+                    return self._client
+            except Exception as exc:
+                logger.warning(
+                    "Không thể nạp Service Account cho Gemini STT (%s).",
+                    type(exc).__name__,
+                )
+
+        raise SttError(SttErrorCode.PROVIDER_UNAVAILABLE, "missing_gemini_credentials")
+
+    def _resolved_transport(self) -> Literal["inline", "transcribe_inline", "transcribe_api"]:
+        if self._transport == "auto":
+            return "transcribe_inline" if "transcribe" in self._model.lower() else "inline"
+        return self._transport
 
     def _transcription_config(self) -> dict[str, Any]:
         # Docs: verbatim cấu hình dạng object, smart cấu hình dạng chuỗi.
         mode: str | dict[str, str] = "smart" if self._mode == "smart" else {"type": "verbatim"}
         return {"language_codes": [self._language_code], "mode": mode}
 
-    async def transcribe(self, audio: bytes, mime_type: str) -> str:
-        client = self._get_client()
+    async def _transcribe_via_transcribe_api(
+        self, client: genai.Client, audio: bytes, mime_type: str
+    ) -> str:
         uploaded = None
         try:
             uploaded = await client.aio.files.upload(
@@ -222,11 +508,98 @@ class GeminiSttProvider:
                 generation_config={"transcription_config": self._transcription_config()},
             )
             return (getattr(interaction, "output_text", None) or "").strip()
-        except Exception as exc:
-            raise map_provider_exception(exc) from exc
         finally:
             if uploaded is not None and uploaded.name:
                 await self._delete_quietly(client, uploaded.name)
+
+    async def _transcribe_via_transcribe_inline(
+        self, client: genai.Client, audio: bytes, mime_type: str
+    ) -> str:
+        """Model Transcribe qua ``generate_content`` + audio inline: 1 request duy nhất.
+
+        Đo trên 8 clip thật (speech-lab, 21/11/2026): nhanh gấp ~4 lần luồng Files API +
+        ``interactions`` và gấp ~2 lần ``interactions`` + inline, cùng chất lượng chép lời.
+        """
+        if len(audio) > _GEMINI_INLINE_MAX_BYTES:
+            return await self._transcribe_via_transcribe_api(client, audio, mime_type)
+        config = types.GenerateContentConfig(
+            audio_transcription_config=types.AudioTranscriptionConfig(
+                language_codes=[self._language_code],
+                mode=(
+                    types.AudioTranscriptionConfigMode.SMART
+                    if self._mode == "smart"
+                    else types.AudioTranscriptionConfigMode.VERBATIM
+                ),
+            ),
+        )
+        resp = await client.aio.models.generate_content(
+            model=self._model,
+            contents=[types.Part.from_bytes(data=audio, mime_type=mime_type)],
+            config=config,
+        )
+        cleaned = _clean_gemini_transcript(_transcript_text_of(resp))
+        if not cleaned:
+            raise SttError(SttErrorCode.NO_SPEECH, "empty_transcript")
+        return cleaned
+
+    async def _transcribe_via_inline(
+        self, client: genai.Client, audio: bytes, mime_type: str
+    ) -> str:
+        prompt = (
+            _GEMINI_STT_PROMPT_SMART if self._mode == "smart" else _GEMINI_STT_PROMPT_VERBATIM
+        )
+        config = types.GenerateContentConfig(
+            temperature=0.0,
+            candidate_count=1,
+            system_instruction=prompt,
+        )
+        uploaded = None
+        try:
+            if len(audio) > _GEMINI_INLINE_MAX_BYTES:
+                uploaded = await client.aio.files.upload(
+                    file=io.BytesIO(audio),
+                    config={"mime_type": mime_type},
+                )
+                uploaded_uri = uploaded.uri
+                if not uploaded_uri:
+                    raise SttError(SttErrorCode.PROVIDER_ERROR, "missing_uploaded_file_uri")
+                audio_part = types.Part.from_uri(
+                    file_uri=uploaded_uri,
+                    mime_type=uploaded.mime_type or mime_type,
+                )
+            else:
+                audio_part = types.Part.from_bytes(data=audio, mime_type=mime_type)
+
+            resp = await client.aio.models.generate_content(
+                model=self._model,
+                contents=[audio_part, _GEMINI_STT_USER_PROMPT],
+                config=config,
+            )
+            raw_text = (getattr(resp, "text", None) or "").strip()
+        finally:
+            if uploaded is not None and uploaded.name:
+                await self._delete_quietly(client, uploaded.name)
+
+        cleaned = _clean_gemini_transcript(raw_text)
+        if _is_no_speech_sentinel(cleaned):
+            raise SttError(SttErrorCode.NO_SPEECH, "no_speech_sentinel")
+        if not cleaned:
+            raise SttError(SttErrorCode.NO_SPEECH, "empty_transcript")
+        if _is_gemini_prompt_echo(cleaned):
+            raise SttError(SttErrorCode.NO_SPEECH, "prompt_echo_filtered")
+        return cleaned
+
+    async def transcribe(self, audio: bytes, mime_type: str) -> str:
+        client = self._get_client()
+        try:
+            transport = self._resolved_transport()
+            if transport == "transcribe_inline":
+                return await self._transcribe_via_transcribe_inline(client, audio, mime_type)
+            if transport == "transcribe_api":
+                return await self._transcribe_via_transcribe_api(client, audio, mime_type)
+            return await self._transcribe_via_inline(client, audio, mime_type)
+        except Exception as exc:
+            raise map_provider_exception(exc) from exc
 
     @staticmethod
     async def _delete_quietly(client: genai.Client, file_name: str) -> None:
@@ -251,12 +624,201 @@ class FakeSttProvider:
 
 _DEFAULT_STT_PROMPT = (
     "ProPlan VA, ADHD, Pomodoro, Focus Session, Micro-task, deadline, "
-    "lịch bận, Google Calendar, cất suy nghĩ, phiên tập trung."
+    "lịch bận, Google Calendar, cất suy nghĩ, phiên tập trung, "
+    "Thứ 2, Thứ 3, Thứ 4, Thứ 5, Thứ 6, Thứ 7, Chủ nhật, hằng ngày, cuối tuần, "
+    "19h30, 20h45, tiếng rưỡi, 90 phút, rảnh, bận, trừ, riêng, ngoại lệ, báo cáo, slide."
 )
+
+_WHISPER_HALLUCINATION_SUBSTRINGS: tuple[str, ...] = (
+    "hãy subscribe",
+    "đăng ký kênh",
+    "cảm ơn các bạn đã xem",
+    "hẹn gặp lại các bạn",
+    "hẹn gặp lại ở video",
+    "like và subscribe",
+    "nhấn chuông thông báo",
+    "subtitles by",
+    "amara.org",
+    "transcribed by",
+)
+_HALLUCINATION_PUNCT_RE = re.compile(r"[,\.!?;:\"'()\[\]…\-/\\]+")
+
+
+def _is_whisper_hallucination(text: str) -> bool:
+    """Phát hiện ảo giác đặc trưng của Whisper tiếng Việt khi audio im lặng hoặc nhiễu."""
+    raw_cleaned = (text or "").strip()
+    if not raw_cleaned:
+        return False
+    normalized = " ".join(raw_cleaned.lower().split()).strip(" ,.!?;:\"'")
+    if not normalized:
+        return True
+    if any(sub in normalized for sub in _WHISPER_HALLUCINATION_SUBSTRINGS):
+        return True
+
+    stripped = " ".join(_HALLUCINATION_PUNCT_RE.sub(" ", normalized).split())
+    if not stripped:
+        return True
+    if any(sub in stripped for sub in _WHISPER_HALLUCINATION_SUBSTRINGS if "." not in sub):
+        return True
+
+    words = stripped.split()
+    n_words = len(words)
+    for phrase_len in range(1, 6):
+        if n_words < phrase_len * 4:
+            continue
+        if n_words % phrase_len == 0:
+            unit = words[:phrase_len]
+            if all(words[i : i + phrase_len] == unit for i in range(0, n_words, phrase_len)):
+                return True
+        max_start = n_words - phrase_len * 4
+        for start in range(max_start + 1):
+            unit = words[start : start + phrase_len]
+            repeats = 1
+            cursor = start + phrase_len
+            while cursor + phrase_len <= n_words and words[cursor : cursor + phrase_len] == unit:
+                repeats += 1
+                cursor += phrase_len
+            if repeats >= 4 and (repeats * phrase_len) / n_words >= 0.8:
+                return True
+
+    return False
+
+
+def _to_finite_float(value: Any) -> float | None:
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        num = float(value)
+    except (TypeError, ValueError):
+        return None
+    return num if math.isfinite(num) else None
+
+
+def _is_segment_silent(no_speech_prob: float | None, avg_logprob: float | None) -> bool:
+    return (
+        no_speech_prob is not None
+        and avg_logprob is not None
+        and no_speech_prob > 0.85
+        and avg_logprob < -1.2
+    )
+
+
+def _extract_segment_metrics(
+    response: Any,
+) -> tuple[float | None, float | None, bool | None]:
+    """Rút trích chỉ số âm học theo từng segment từ verbose_json.
+
+    - Đánh giá im lặng trên từng segment (``no_speech_prob > 0.85`` và ``avg_logprob < -1.2``).
+    - ``all_segments_silent = True`` chỉ khi TẤT CẢ segment có chỉ số đều im lặng.
+    - Khi có ít nhất 1 segment không im lặng, ``(max_no_speech_prob, min_avg_logprob)`` chỉ
+      tính trên các segment không im lặng để khoảng lặng cuối câu không làm hỏng câu nói rõ.
+    """
+    segments = (
+        response.get("segments")
+        if isinstance(response, dict)
+        else getattr(response, "segments", None)
+    )
+    all_no_speech_probs: list[float] = []
+    all_avg_logprobs: list[float] = []
+    non_silent_no_speech_probs: list[float] = []
+    non_silent_avg_logprobs: list[float] = []
+    metric_segment_count = 0
+    silent_segment_count = 0
+
+    if isinstance(segments, (list, tuple)):
+        for seg in segments:
+            raw_no_speech = (
+                seg.get("no_speech_prob")
+                if isinstance(seg, dict)
+                else getattr(seg, "no_speech_prob", None)
+            )
+            raw_avg_logprob = (
+                seg.get("avg_logprob")
+                if isinstance(seg, dict)
+                else getattr(seg, "avg_logprob", None)
+            )
+            val_no_speech = _to_finite_float(raw_no_speech)
+            val_avg_logprob = _to_finite_float(raw_avg_logprob)
+            if val_no_speech is None and val_avg_logprob is None:
+                continue
+
+            metric_segment_count += 1
+            if val_no_speech is not None:
+                all_no_speech_probs.append(val_no_speech)
+            if val_avg_logprob is not None:
+                all_avg_logprobs.append(val_avg_logprob)
+
+            if _is_segment_silent(val_no_speech, val_avg_logprob):
+                silent_segment_count += 1
+            else:
+                if val_no_speech is not None:
+                    non_silent_no_speech_probs.append(val_no_speech)
+                if val_avg_logprob is not None:
+                    non_silent_avg_logprobs.append(val_avg_logprob)
+
+    if metric_segment_count > 0:
+        all_segments_silent = silent_segment_count == metric_segment_count
+        if all_segments_silent:
+            max_no_speech = max(all_no_speech_probs) if all_no_speech_probs else None
+            min_avg_logprob = min(all_avg_logprobs) if all_avg_logprobs else None
+        else:
+            max_no_speech = (
+                max(non_silent_no_speech_probs) if non_silent_no_speech_probs else None
+            )
+            min_avg_logprob = (
+                min(non_silent_avg_logprobs) if non_silent_avg_logprobs else None
+            )
+        return max_no_speech, min_avg_logprob, all_segments_silent
+
+    top_no_speech = (
+        response.get("no_speech_prob")
+        if isinstance(response, dict)
+        else getattr(response, "no_speech_prob", None)
+    )
+    top_avg_logprob = (
+        response.get("avg_logprob")
+        if isinstance(response, dict)
+        else getattr(response, "avg_logprob", None)
+    )
+    return (
+        _to_finite_float(top_no_speech),
+        _to_finite_float(top_avg_logprob),
+        None,
+    )
+
+
+async def _call_provider_details(
+    provider: Any,
+    audio: bytes,
+    mime_type: str,
+    *,
+    purpose: str | None = None,
+) -> SttProviderDetails:
+    """Gọi provider ưu tiên transcribe_verbose, nhưng tôn trọng mock patch.object(..., 'transcribe')."""
+    inst_dict = getattr(provider, "__dict__", {}) or {}
+    transcribe_verbose = getattr(provider, "transcribe_verbose", None)
+    if (
+        "transcribe" in inst_dict and "transcribe_verbose" not in inst_dict
+    ) or not callable(transcribe_verbose):
+        transcribe_fn = provider.transcribe
+        if purpose is not None and _accepts_purpose_kwarg(transcribe_fn):
+            raw = await transcribe_fn(audio, mime_type, purpose=purpose)
+        else:
+            raw = await transcribe_fn(audio, mime_type)
+        if isinstance(raw, SttProviderDetails):
+            return raw
+        return SttProviderDetails(text=raw)
+    if purpose is not None and _accepts_purpose_kwarg(transcribe_verbose):
+        raw_details = await transcribe_verbose(audio, mime_type, purpose=purpose)
+    else:
+        raw_details = await transcribe_verbose(audio, mime_type)
+    if isinstance(raw_details, SttProviderDetails):
+        return raw_details
+    return SttProviderDetails(text=str(raw_details))
 
 
 class GroqWhisperSttProvider:
-    """Groq Whisper (``whisper-large-v3-turbo``) dùng làm nhánh STT tốc độ cao / dự phòng."""
+    """Groq Whisper (mặc định ``whisper-large-v3``) dùng làm nhánh STT tốc độ cao / dự phòng."""
 
     name = "groq"
 
@@ -287,7 +849,7 @@ class GroqWhisperSttProvider:
             )
         return self._client
 
-    async def transcribe(self, audio: bytes, mime_type: str) -> str:
+    async def transcribe_verbose(self, audio: bytes, mime_type: str) -> SttProviderDetails:
         client = self._get_client()
         ext = _MIME_TO_EXTENSION.get(mime_type, ".m4a")
         try:
@@ -297,7 +859,7 @@ class GroqWhisperSttProvider:
                     file=(f"audio{ext}", audio, mime_type),
                     language=self._language,
                     prompt=self._prompt,
-                    response_format="json",
+                    response_format="verbose_json",
                     temperature=0.0,
                 )
             else:
@@ -305,34 +867,106 @@ class GroqWhisperSttProvider:
                     model=self._model,
                     file=(f"audio{ext}", audio, mime_type),
                     language=self._language,
-                    response_format="json",
+                    response_format="verbose_json",
                     temperature=0.0,
                 )
-            return (getattr(response, "text", None) or "").strip()
+            raw_text = (
+                response.get("text")
+                if isinstance(response, dict)
+                else getattr(response, "text", None)
+            )
+            text = (raw_text or "").strip()
+            no_speech_prob, avg_logprob, all_segments_silent = _extract_segment_metrics(response)
+            return SttProviderDetails(
+                text=text,
+                no_speech_prob=no_speech_prob,
+                avg_logprob=avg_logprob,
+                all_segments_silent=all_segments_silent,
+            )
         except Exception as exc:
             raise map_provider_exception(exc) from exc
 
+    async def transcribe(self, audio: bytes, mime_type: str) -> str:
+        details = await self.transcribe_verbose(audio, mime_type)
+        return details.text
+
+
+async def _call_fallback_within_budget(
+    provider: SttProvider,
+    audio: bytes,
+    mime_type: str,
+    *,
+    purpose: str | None,
+    started: float,
+    total_timeout_seconds: float | None,
+) -> SttProviderDetails:
+    """Chạy nhánh STT dự phòng trong đúng phần ngân sách thời gian còn lại (không nới sàn 1.0s)."""
+    if total_timeout_seconds is None:
+        return await _call_provider_details(provider, audio, mime_type, purpose=purpose)
+    remaining = total_timeout_seconds - (time.perf_counter() - started)
+    if remaining <= 0.0:
+        raise SttError(SttErrorCode.TIMEOUT, "fallback_timeout")
+    try:
+        return await asyncio.wait_for(
+            _call_provider_details(provider, audio, mime_type, purpose=purpose),
+            timeout=remaining,
+        )
+    except TimeoutError as exc:
+        raise SttError(SttErrorCode.TIMEOUT, "fallback_timeout") from exc
+
 
 class FallbackSttProvider:
-    """Điều phối STT 2 nhánh: ưu tiên ``primary`` (Groq), fallback sang ``fallback`` (Gemini)."""
+    """Điều phối STT 2 nhánh có định tuyến theo ``purpose`` và ngân sách timeout riêng cho nhánh chính."""
 
-    def __init__(self, *, primary: SttProvider, fallback: SttProvider) -> None:
+    def __init__(
+        self,
+        *,
+        primary: SttProvider,
+        fallback: SttProvider,
+        prefer_fallback_purposes: frozenset[str] = frozenset(),
+        primary_timeout_seconds: float | None = None,
+        total_timeout_seconds: float | None = None,
+    ) -> None:
         self._primary = primary
         self._fallback = fallback
+        self._prefer_fallback_purposes = prefer_fallback_purposes
+        self._primary_timeout_seconds = primary_timeout_seconds
+        self._total_timeout_seconds = total_timeout_seconds
         self.name = f"{primary.name}->{fallback.name}"
 
-    async def transcribe_with_provider(self, audio: bytes, mime_type: str) -> tuple[str, str]:
+    async def transcribe_verbose_with_provider(
+        self, audio: bytes, mime_type: str, purpose: str | None = None
+    ) -> tuple[SttProviderDetails, str]:
+        if purpose is not None and purpose in self._prefer_fallback_purposes:
+            first, second = self._fallback, self._primary
+        else:
+            first, second = self._primary, self._fallback
+
+        started = time.perf_counter()
+        first_timeout: float | None = self._primary_timeout_seconds
+        if first_timeout is not None and self._total_timeout_seconds is not None:
+            first_timeout = min(first_timeout, self._total_timeout_seconds)
+        elif first_timeout is None and self._total_timeout_seconds is not None:
+            first_timeout = self._total_timeout_seconds
+
         try:
-            text = await self._primary.transcribe(audio, mime_type)
-            return text, self._primary.name
+            first_coro = _call_provider_details(first, audio, mime_type, purpose=purpose)
+            if first_timeout is not None:
+                try:
+                    details = await asyncio.wait_for(first_coro, timeout=first_timeout)
+                except TimeoutError as exc:
+                    raise SttError(SttErrorCode.TIMEOUT, "primary_timeout") from exc
+            else:
+                details = await first_coro
+            return details, first.name
         except SttError as exc:
             if not (exc.code == SttErrorCode.PROVIDER_UNAVAILABLE or exc.retryable):
                 raise
             logger.warning(
                 "STT nhánh chính (%s) lỗi %s; chuyển sang dự phòng (%s).",
-                self._primary.name,
+                first.name,
                 exc.code,
-                self._fallback.name,
+                second.name,
             )
         except Exception as exc:
             mapped = map_provider_exception(exc)
@@ -340,16 +974,33 @@ class FallbackSttProvider:
                 raise mapped from exc
             logger.warning(
                 "STT nhánh chính (%s) gặp sự cố %s; chuyển sang dự phòng (%s).",
-                self._primary.name,
+                first.name,
                 mapped.code,
-                self._fallback.name,
+                second.name,
             )
 
-        text = await self._fallback.transcribe(audio, mime_type)
-        return text, self._fallback.name
+        details = await _call_fallback_within_budget(
+            second,
+            audio,
+            mime_type,
+            purpose=purpose,
+            started=started,
+            total_timeout_seconds=self._total_timeout_seconds,
+        )
+        return details, second.name
 
-    async def transcribe(self, audio: bytes, mime_type: str) -> str:
-        text, _ = await self.transcribe_with_provider(audio, mime_type)
+    async def transcribe_with_provider(
+        self, audio: bytes, mime_type: str, purpose: str | None = None
+    ) -> tuple[str, str]:
+        details, provider_name = await self.transcribe_verbose_with_provider(
+            audio, mime_type, purpose=purpose
+        )
+        return details.text, provider_name
+
+    async def transcribe(
+        self, audio: bytes, mime_type: str, purpose: str | None = None
+    ) -> str:
+        text, _ = await self.transcribe_with_provider(audio, mime_type, purpose=purpose)
         return text
 
 
@@ -363,11 +1014,13 @@ class VoiceService:
         timeout_seconds: float,
         max_audio_bytes: int,
         fallback_provider: SttProvider | None = None,
+        primary_timeout_seconds: float | None = None,
     ) -> None:
         self._provider = provider
         self._timeout_seconds = timeout_seconds
         self._max_audio_bytes = max_audio_bytes
         self._fallback_provider = fallback_provider
+        self._primary_timeout_seconds = primary_timeout_seconds
 
     @property
     def provider_name(self) -> str:
@@ -379,6 +1032,7 @@ class VoiceService:
         *,
         content_type: str | None = None,
         filename: str | None = None,
+        purpose: str | None = None,
     ) -> SttResult:
         """Chuyển audio thành chữ. Ném ``SttError`` nếu không có chữ hợp lệ để đưa sang A01."""
         if not audio:
@@ -388,26 +1042,77 @@ class VoiceService:
         mime_type = resolve_mime_type(content_type, filename)
 
         started = time.perf_counter()
+        if mime_type == "audio/wav" and _is_wav_pcm16_digital_silence(audio):
+            digital_silent = SttError(SttErrorCode.NO_SPEECH, "digital_silence")
+            self._log_failure(digital_silent, started)
+            raise digital_silent
+
+        use_fallback_headroom = isinstance(self._provider, FallbackSttProvider) and (
+            self._provider._total_timeout_seconds is not None
+            or self._provider._primary_timeout_seconds is not None
+        )
+        outer_timeout = (
+            self._timeout_seconds + 0.5 if use_fallback_headroom else self._timeout_seconds
+        )
         try:
+            inst_dict = getattr(self._provider, "__dict__", {}) or {}
+            transcribe_verbose_with_provider = getattr(
+                self._provider, "transcribe_verbose_with_provider", None
+            )
             transcribe_with_provider = getattr(self._provider, "transcribe_with_provider", None)
-            if callable(transcribe_with_provider):
-                text, active_provider = await asyncio.wait_for(
-                    transcribe_with_provider(audio, mime_type),
-                    timeout=self._timeout_seconds,
+            if (
+                callable(transcribe_verbose_with_provider)
+                and "transcribe_with_provider" not in inst_dict
+                and "transcribe" not in inst_dict
+            ):
+                if purpose is not None and _accepts_purpose_kwarg(
+                    transcribe_verbose_with_provider
+                ):
+                    coro = transcribe_verbose_with_provider(audio, mime_type, purpose=purpose)
+                else:
+                    coro = transcribe_verbose_with_provider(audio, mime_type)
+                details, active_provider = await asyncio.wait_for(
+                    coro,
+                    timeout=outer_timeout,
+                )
+            elif callable(transcribe_with_provider) and "transcribe" not in inst_dict:
+                if purpose is not None and _accepts_purpose_kwarg(transcribe_with_provider):
+                    coro = transcribe_with_provider(audio, mime_type, purpose=purpose)
+                else:
+                    coro = transcribe_with_provider(audio, mime_type)
+                raw_text, active_provider = await asyncio.wait_for(
+                    coro,
+                    timeout=outer_timeout,
+                )
+                details = (
+                    raw_text
+                    if isinstance(raw_text, SttProviderDetails)
+                    else SttProviderDetails(text=raw_text)
                 )
             else:
+                primary_timeout = (
+                    min(self._primary_timeout_seconds, self._timeout_seconds)
+                    if (
+                        self._fallback_provider is not None
+                        and self._primary_timeout_seconds is not None
+                    )
+                    else self._timeout_seconds
+                )
                 try:
-                    text = await asyncio.wait_for(
-                        self._provider.transcribe(audio, mime_type),
-                        timeout=self._timeout_seconds,
+                    details = await asyncio.wait_for(
+                        _call_provider_details(
+                            self._provider, audio, mime_type, purpose=purpose
+                        ),
+                        timeout=primary_timeout,
                     )
                     active_provider = self._provider.name
                 except Exception as primary_exc:
-                    mapped_primary = (
-                        primary_exc
-                        if isinstance(primary_exc, SttError)
-                        else map_provider_exception(primary_exc)
-                    )
+                    if isinstance(primary_exc, SttError):
+                        mapped_primary = primary_exc
+                    elif isinstance(primary_exc, TimeoutError):
+                        mapped_primary = SttError(SttErrorCode.TIMEOUT, "primary_timeout")
+                    else:
+                        mapped_primary = map_provider_exception(primary_exc)
                     if self._fallback_provider is not None and (
                         mapped_primary.retryable
                         or mapped_primary.code == SttErrorCode.PROVIDER_UNAVAILABLE
@@ -418,9 +1123,13 @@ class VoiceService:
                             mapped_primary.code,
                             self._fallback_provider.name,
                         )
-                        text = await asyncio.wait_for(
-                            self._fallback_provider.transcribe(audio, mime_type),
-                            timeout=self._timeout_seconds,
+                        details = await _call_fallback_within_budget(
+                            self._fallback_provider,
+                            audio,
+                            mime_type,
+                            purpose=purpose,
+                            started=started,
+                            total_timeout_seconds=self._timeout_seconds,
                         )
                         active_provider = self._fallback_provider.name
                     else:
@@ -434,14 +1143,52 @@ class VoiceService:
             raise mapped from exc
 
         latency_ms = int((time.perf_counter() - started) * 1000)
-        cleaned = (text or "").strip()
-        if not cleaned:
+        cleaned = (details.text or "").strip()
+        if _is_no_speech_sentinel(cleaned):
+            sentinel_err = SttError(SttErrorCode.NO_SPEECH, "no_speech_sentinel")
+            self._log_failure(sentinel_err, started)
+            raise sentinel_err
+
+        if not cleaned or not _HALLUCINATION_PUNCT_RE.sub("", cleaned).strip():
             no_speech = SttError(SttErrorCode.NO_SPEECH, "empty_transcript")
             self._log_failure(no_speech, started)
             raise no_speech
 
-        logger.info("STT thành công: provider=%s latency_ms=%d", active_provider, latency_ms)
-        return SttResult(text=cleaned, provider=active_provider, latency_ms=latency_ms)
+        if active_provider != "gemini" and _is_whisper_hallucination(cleaned):
+            hallucinated = SttError(SttErrorCode.NO_SPEECH, "hallucination_filtered")
+            self._log_failure(hallucinated, started)
+            raise hallucinated
+
+        is_acoustically_silent = (
+            details.all_segments_silent
+            if details.all_segments_silent is not None
+            else _is_segment_silent(details.no_speech_prob, details.avg_logprob)
+        )
+        if is_acoustically_silent:
+            silent = SttError(SttErrorCode.NO_SPEECH, "high_no_speech_prob")
+            self._log_failure(silent, started)
+            raise silent
+
+        if active_provider == "gemini":
+            low_confidence = False
+        else:
+            low_confidence = bool(
+                (details.no_speech_prob is not None and details.no_speech_prob > 0.7)
+                or (details.avg_logprob is not None and details.avg_logprob < -1.0)
+            )
+
+        logger.info(
+            "STT thành công: provider=%s latency_ms=%d low_confidence=%s",
+            active_provider,
+            latency_ms,
+            low_confidence,
+        )
+        return SttResult(
+            text=cleaned,
+            provider=active_provider,
+            latency_ms=latency_ms,
+            low_confidence=low_confidence,
+        )
 
     def _log_failure(self, exc: SttError, started: float) -> None:
         elapsed_ms = int((time.perf_counter() - started) * 1000)
@@ -460,6 +1207,10 @@ def _build_gemini_stt_provider(cfg: Settings) -> GeminiSttProvider:
         model=cfg.GEMINI_STT_MODEL,
         mode=cfg.GEMINI_STT_MODE,
         language_code=cfg.VOICE_STT_LANGUAGE,
+        transport=cfg.GEMINI_STT_TRANSPORT,
+        credentials_file=cfg.resolved_google_credentials_file,
+        project=cfg.GOOGLE_CLOUD_PROJECT,
+        location=cfg.GOOGLE_CLOUD_LOCATION,
     )
 
 
@@ -483,8 +1234,13 @@ def build_voice_service(app_settings: Settings | None = None) -> VoiceService:
         provider = _build_groq_stt_provider(cfg)
     elif cfg.VOICE_STT_PROVIDER == "auto":
         provider = FallbackSttProvider(
-            primary=_build_groq_stt_provider(cfg),
-            fallback=_build_gemini_stt_provider(cfg),
+            primary=_build_gemini_stt_provider(cfg),
+            fallback=_build_groq_stt_provider(cfg),
+            prefer_fallback_purposes=(
+                frozenset({"uf5_checkin"}) if cfg.VOICE_STT_UF5_PREFER_GROQ else frozenset()
+            ),
+            primary_timeout_seconds=cfg.VOICE_STT_PRIMARY_TIMEOUT_SECONDS,
+            total_timeout_seconds=cfg.VOICE_STT_TIMEOUT_SECONDS,
         )
     else:
         provider = _build_gemini_stt_provider(cfg)
@@ -494,6 +1250,7 @@ def build_voice_service(app_settings: Settings | None = None) -> VoiceService:
         timeout_seconds=cfg.VOICE_STT_TIMEOUT_SECONDS,
         max_audio_bytes=cfg.VOICE_MAX_AUDIO_BYTES,
         fallback_provider=fallback,
+        primary_timeout_seconds=cfg.VOICE_STT_PRIMARY_TIMEOUT_SECONDS,
     )
 
 
@@ -661,7 +1418,15 @@ class FakeTtsProvider:
 
 
 class TtsService:
-    """Điều phối tổng hợp giọng nói: chuẩn hóa văn bản, cache LRU theo hash, áp timeout."""
+    """Điều phối tổng hợp giọng nói: chuẩn hóa văn bản, cache LRU, áp timeout và giảm độ trễ đuôi.
+
+    Tối ưu thời gian (đo 23/11: Edge-TTS ~0,6s/câu nhưng có đợt chậm 4–10s; hedge: TB 6,24s → 5,43s, hết timeout):
+    - Hedged request: sau ``hedge_delay_seconds`` chưa có kết quả thì gửi thêm 1 request song song,
+      lấy cái về trước, hủy cái còn lại → giảm ~1s và tránh lỗi timeout khi Edge vào đợt chậm.
+    - Gộp request trùng (cùng giọng + câu) đang chạy → chỉ tổng hợp 1 lần.
+    - Kết quả về sau khi người gọi đã hết timeout vẫn được lưu cache cho lần sau.
+    - ``prewarm``: tổng hợp sẵn các câu cố định (câu hỏi Check-in UF5) lúc khởi động.
+    """
 
     def __init__(
         self,
@@ -671,6 +1436,7 @@ class TtsService:
         timeout_seconds: float = 10.0,
         max_chars: int = 600,
         cache_size: int = 64,
+        hedge_delay_seconds: float = 0.0,
     ) -> None:
         self._provider = provider
         self._default_voice = default_voice
@@ -678,10 +1444,24 @@ class TtsService:
         self._max_chars = max_chars
         self._cache_size = max(0, cache_size)
         self._cache: OrderedDict[str, tuple[bytes, str, str]] = OrderedDict()
+        self._hedge_delay_seconds = max(0.0, hedge_delay_seconds)
+        self._inflight: dict[str, asyncio.Future[tuple[bytes, str]]] = {}
+        self.hedges_started = 0
 
     @property
     def provider_name(self) -> str:
         return self._provider.name
+
+    def _cache_key(self, normalized: str, voice: str) -> str:
+        return hashlib.sha256(f"{self._provider.name}|{voice}|{normalized}".encode()).hexdigest()
+
+    def _cache_put(self, cache_key: str, audio_bytes: bytes, mime_type: str, voice: str) -> None:
+        if self._cache_size <= 0:
+            return
+        self._cache.pop(cache_key, None)
+        self._cache[cache_key] = (audio_bytes, mime_type, voice)
+        while len(self._cache) > self._cache_size:
+            self._cache.popitem(last=False)
 
     async def synthesize(
         self,
@@ -696,9 +1476,7 @@ class TtsService:
             raise TtsError(TtsErrorCode.TEXT_TOO_LONG, f"chars={len(normalized)}")
 
         target_voice = (voice or self._default_voice).strip() or self._default_voice
-        cache_key = hashlib.sha256(
-            f"{self._provider.name}|{target_voice}|{normalized}".encode()
-        ).hexdigest()
+        cache_key = self._cache_key(normalized, target_voice)
 
         if self._cache_size > 0 and cache_key in self._cache:
             cached_bytes, cached_mime, cached_voice = self._cache.pop(cache_key)
@@ -713,10 +1491,15 @@ class TtsService:
             )
 
         started = time.perf_counter()
+        task = self._inflight.get(cache_key)
+        if task is None:
+            task = asyncio.ensure_future(self._produce(cache_key, normalized, target_voice))
+            self._inflight[cache_key] = task
+            task.add_done_callback(lambda t, key=cache_key: self._on_produce_done(key, t))
         try:
+            # shield: người gọi hết timeout không hủy task dùng chung; task chạy tiếp để lưu cache.
             audio_bytes, mime_type = await asyncio.wait_for(
-                self._provider.synthesize(normalized, target_voice),
-                timeout=self._timeout_seconds,
+                asyncio.shield(task), timeout=self._timeout_seconds
             )
         except TtsError as exc:
             self._log_tts_failure(exc, started, target_voice)
@@ -730,17 +1513,7 @@ class TtsService:
             self._log_tts_failure(mapped, started, target_voice)
             raise mapped from exc
 
-        if not audio_bytes:
-            empty_err = TtsError(TtsErrorCode.EMPTY_AUDIO, "empty_audio")
-            self._log_tts_failure(empty_err, started, target_voice)
-            raise empty_err
-
         latency_ms = int((time.perf_counter() - started) * 1000)
-        if self._cache_size > 0:
-            self._cache[cache_key] = (audio_bytes, mime_type, target_voice)
-            if len(self._cache) > self._cache_size:
-                self._cache.popitem(last=False)
-
         logger.info(
             "TTS thành công: provider=%s voice=%s latency_ms=%d bytes=%d",
             self._provider.name,
@@ -756,6 +1529,66 @@ class TtsService:
             cached=False,
             latency_ms=latency_ms,
         )
+
+    def _on_produce_done(self, cache_key: str, task: asyncio.Future[tuple[bytes, str]]) -> None:
+        self._inflight.pop(cache_key, None)
+        if not task.cancelled():
+            task.exception()  # đánh dấu đã đọc lỗi, tránh cảnh báo "never retrieved"
+
+    async def _produce(self, cache_key: str, normalized: str, voice: str) -> tuple[bytes, str]:
+        audio_bytes, mime_type = await self._hedged_synthesize(normalized, voice)
+        if not audio_bytes:
+            raise TtsError(TtsErrorCode.EMPTY_AUDIO, "empty_audio")
+        self._cache_put(cache_key, audio_bytes, mime_type, voice)
+        return audio_bytes, mime_type
+
+    async def _hedged_synthesize(self, normalized: str, voice: str) -> tuple[bytes, str]:
+        """Gọi provider; nếu quá ``hedge_delay`` chưa xong thì gửi thêm 1 request, lấy cái về trước."""
+        if self._hedge_delay_seconds <= 0:
+            return await self._provider.synthesize(normalized, voice)
+
+        tasks: set[asyncio.Future[tuple[bytes, str]]] = {
+            asyncio.ensure_future(self._provider.synthesize(normalized, voice))
+        }
+        try:
+            done, _ = await asyncio.wait(tasks, timeout=self._hedge_delay_seconds)
+            if done:
+                return done.pop().result()  # xong (hoặc lỗi nhanh) trước mốc hedge
+            self.hedges_started += 1
+            logger.info("TTS chậm hơn %.2fs → gửi request dự phòng (hedge).", self._hedge_delay_seconds)
+            tasks.add(asyncio.ensure_future(self._provider.synthesize(normalized, voice)))
+            last_error: BaseException | None = None
+            while tasks:
+                done, tasks = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+                winner: asyncio.Future[tuple[bytes, str]] | None = None
+                for finished in done:
+                    if finished.cancelled():
+                        continue
+                    error = finished.exception()
+                    if error is None:
+                        if winner is None:
+                            winner = finished
+                    else:
+                        last_error = error
+                if winner is not None:
+                    return winner.result()
+            assert last_error is not None
+            raise last_error
+        finally:
+            for pending in tasks:
+                if not pending.done():
+                    pending.cancel()
+
+    async def prewarm(self, texts: list[str], *, voice: str | None = None) -> int:
+        """Tổng hợp sẵn các câu cố định vào cache (tuần tự, lỗi bỏ qua). Trả về số câu sẵn sàng."""
+        ready = 0
+        for text in texts:
+            try:
+                await self.synthesize(text, voice=voice)
+                ready += 1
+            except TtsError as exc:
+                logger.warning("Prewarm TTS bỏ qua 1 câu: code=%s", exc.code)
+        return ready
 
     def _log_tts_failure(self, exc: TtsError, started: float, voice: str) -> None:
         elapsed_ms = int((time.perf_counter() - started) * 1000)
@@ -784,6 +1617,7 @@ def build_tts_service(app_settings: Settings | None = None) -> TtsService:
         timeout_seconds=cfg.VOICE_TTS_TIMEOUT_SECONDS,
         max_chars=cfg.VOICE_TTS_MAX_CHARS,
         cache_size=cfg.VOICE_TTS_CACHE_SIZE,
+        hedge_delay_seconds=cfg.VOICE_TTS_HEDGE_DELAY_SECONDS,
     )
 
 

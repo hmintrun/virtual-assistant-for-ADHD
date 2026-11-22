@@ -1,0 +1,329 @@
+{
+  "contract_source": "schema.md sections 14–15; backend 23e856b; auth target ba16055",
+  "cases": [
+    {
+      "name": "preferences_after_reject",
+      "scope": "runtime",
+      "method": "GET",
+      "path": "/api/v1/preferences",
+      "response": {
+        "status": 200,
+        "body": {
+          "data": {
+            "revision": 5,
+            "effective_revision": 3,
+            "requested_revision": null,
+            "work_interval_seconds": 1500,
+            "rest_interval_seconds": 300,
+            "micro_task_seconds": 120,
+            "reminder_offsets": [
+              900,
+              600,
+              300
+            ],
+            "buffer_multiplier": 1.2,
+            "reminder_style": "gentle",
+            "requested_changes": null,
+            "pending_proposal_id": null
+          },
+          "meta": {
+            "request_id": "w4-example",
+            "server_time": "2026-11-20T03:00:00Z"
+          }
+        }
+      }
+    },
+    {
+      "name": "settings_pending",
+      "scope": "runtime",
+      "method": "POST",
+      "path": "/api/v1/settings/change-requests",
+      "response": {
+        "status": 200,
+        "body": {
+          "data": {
+            "change_request_id": "change-1",
+            "request_revision": 1,
+            "application_state": "pending_review",
+            "requested_revision": 4,
+            "effective_revision": 3,
+            "requested_availability_revision": null,
+            "effective_availability_revision": null,
+            "requested_changes": {
+              "availability": null,
+              "preferences": {
+                "work_interval_seconds": null,
+                "rest_interval_seconds": null,
+                "reminder_offsets": null,
+                "buffer_multiplier": 1.5,
+                "reminder_style": null
+              }
+            },
+            "pending_proposal_id": "proposal-1",
+            "target_draft_id": null,
+            "target_task_id": null,
+            "summary_revision": null,
+            "planning_input_revision": null
+          },
+          "meta": {
+            "request_id": "w4-example",
+            "server_time": "2026-11-20T03:00:00Z"
+          }
+        }
+      },
+      "request": {
+        "expected_preferences_revision": 3,
+        "changes": {
+          "preferences": {
+            "buffer_multiplier": 1.5
+          }
+        }
+      }
+    },
+    {
+      "name": "settings_conflict",
+      "scope": "runtime",
+      "method": "POST",
+      "path": "/api/v1/settings/change-requests",
+      "response": {
+        "status": 409,
+        "body": {
+          "error": {
+            "code": "REVISION_CONFLICT",
+            "message": "Cấu hình đã thay đổi.",
+            "field_errors": [],
+            "retryable": false,
+            "current_revisions": {
+              "preferences": 3
+            },
+            "next_action": "reload_and_review"
+          },
+          "meta": {
+            "request_id": "w4-example",
+            "server_time": "2026-11-20T03:00:00Z"
+          }
+        }
+      },
+      "request": {
+        "expected_preferences_revision": 5,
+        "changes": {
+          "preferences": {
+            "buffer_multiplier": 1.5
+          }
+        }
+      }
+    },
+    {
+      "name": "settings_buffer_low",
+      "scope": "runtime",
+      "method": "POST",
+      "path": "/api/v1/settings/change-requests",
+      "response": {
+        "status": 422,
+        "body": {
+          "error": {
+            "code": "VALIDATION_ERROR",
+            "message": "Cấu hình không hợp lệ.",
+            "field_errors": [],
+            "retryable": false,
+            "current_revisions": {},
+            "next_action": "fix_fields"
+          },
+          "meta": {
+            "request_id": "w4-example",
+            "server_time": "2026-11-20T03:00:00Z"
+          }
+        }
+      },
+      "request": {
+        "expected_preferences_revision": 3,
+        "changes": {
+          "preferences": {
+            "buffer_multiplier": 0.5
+          }
+        }
+      }
+    },
+    {
+      "name": "settings_buffer_boundary_1",
+      "scope": "runtime",
+      "method": "POST",
+      "path": "/api/v1/settings/change-requests",
+      "response": {
+        "status": 200,
+        "body": {
+          "data": {
+            "change_request_id": "change-1",
+            "request_revision": 1,
+            "application_state": "pending_review",
+            "requested_revision": 4,
+            "effective_revision": 3,
+            "requested_availability_revision": null,
+            "effective_availability_revision": null,
+            "requested_changes": {
+              "availability": null,
+              "preferences": {
+                "work_interval_seconds": null,
+                "rest_interval_seconds": null,
+                "reminder_offsets": null,
+                "buffer_multiplier": 1.0,
+                "reminder_style": null
+              }
+            },
+            "pending_proposal_id": "proposal-1",
+            "target_draft_id": null,
+            "target_task_id": null,
+            "summary_revision": null,
+            "planning_input_revision": null
+          },
+          "meta": {
+            "request_id": "w4-example",
+            "server_time": "2026-11-20T03:00:00Z"
+          }
+        }
+      },
+      "request": {
+        "expected_preferences_revision": 3,
+        "changes": {
+          "preferences": {
+            "buffer_multiplier": 1.0
+          }
+        }
+      }
+    },
+    {
+      "name": "settings_buffer_boundary_2",
+      "scope": "runtime",
+      "method": "POST",
+      "path": "/api/v1/settings/change-requests",
+      "response": {
+        "status": 200,
+        "body": {
+          "data": {
+            "change_request_id": "change-1",
+            "request_revision": 1,
+            "application_state": "pending_review",
+            "requested_revision": 4,
+            "effective_revision": 3,
+            "requested_availability_revision": null,
+            "effective_availability_revision": null,
+            "requested_changes": {
+              "availability": null,
+              "preferences": {
+                "work_interval_seconds": null,
+                "rest_interval_seconds": null,
+                "reminder_offsets": null,
+                "buffer_multiplier": 2.0,
+                "reminder_style": null
+              }
+            },
+            "pending_proposal_id": "proposal-1",
+            "target_draft_id": null,
+            "target_task_id": null,
+            "summary_revision": null,
+            "planning_input_revision": null
+          },
+          "meta": {
+            "request_id": "w4-example",
+            "server_time": "2026-11-20T03:00:00Z"
+          }
+        }
+      },
+      "request": {
+        "expected_preferences_revision": 3,
+        "changes": {
+          "preferences": {
+            "buffer_multiplier": 2.0
+          }
+        }
+      }
+    },
+    {
+      "name": "settings_buffer_high",
+      "scope": "runtime",
+      "method": "POST",
+      "path": "/api/v1/settings/change-requests",
+      "response": {
+        "status": 422,
+        "body": {
+          "error": {
+            "code": "VALIDATION_ERROR",
+            "message": "Cấu hình không hợp lệ.",
+            "field_errors": [],
+            "retryable": false,
+            "current_revisions": {},
+            "next_action": "fix_fields"
+          },
+          "meta": {
+            "request_id": "w4-example",
+            "server_time": "2026-11-20T03:00:00Z"
+          }
+        }
+      },
+      "request": {
+        "expected_preferences_revision": 3,
+        "changes": {
+          "preferences": {
+            "buffer_multiplier": 2.01
+          }
+        }
+      }
+    },
+    {
+      "name": "settings_cancel",
+      "scope": "runtime",
+      "method": "POST",
+      "path": "/api/v1/settings/change-requests/change-1/cancel",
+      "response": {
+        "status": 200,
+        "body": {
+          "data": {
+            "change_request_id": "change-1",
+            "application_state": "cancelled",
+            "effective_revision": 3
+          },
+          "meta": {
+            "request_id": "w4-example",
+            "server_time": "2026-11-20T03:00:00Z"
+          }
+        }
+      },
+      "request": {
+        "expected_request_revision": 1
+      }
+    },
+    {
+      "name": "suggestion_accept",
+      "scope": "runtime",
+      "method": "POST",
+      "path": "/api/v1/suggestions/suggestion-1/response",
+      "response": {
+        "status": 200,
+        "body": {
+          "data": {
+            "suggestion_id": "suggestion-1",
+            "suggestion_revision": 2,
+            "kind": "buffer_multiplier",
+            "action": "accept",
+            "status": "accepted",
+            "accepted_value": 1.5,
+            "application_state": "pending_review",
+            "effective_revision": 3,
+            "requested_revision": 4,
+            "change_request_id": "change-1",
+            "pending_proposal_id": "proposal-1"
+          },
+          "meta": {
+            "request_id": "w4-example",
+            "server_time": "2026-11-20T03:00:00Z"
+          }
+        }
+      },
+      "request": {
+        "expected_suggestion_revision": 1,
+        "expected_preference_revision": 3,
+        "action": "accept"
+      }
+    }
+  ]
+}

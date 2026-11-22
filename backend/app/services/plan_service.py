@@ -82,6 +82,7 @@ from app.services.scheduler_engine import (
     compute_effective_free_intervals,
     ingest_calendar_sources,
     schedule_candidate_sessions,
+    subtract_fixed_session_gaps,
     validate_planning_prerequisites,
 )
 
@@ -648,13 +649,14 @@ async def _sources(
     *,
     create_manual: bool = False,
     context_ref: CalendarContextRef | None = None,
+    read_only: bool = False,
 ) -> PlanningSources:
     owner = draft_service.resolve_user_uuid(user_id)
     inline = draft.summary.availability
     ref = draft.summary.availability_ref
     legacy = None
     if inline is None:
-        legacy = await _availability(db, user_id)
+        legacy = await _availability(db, user_id, for_update=not read_only)
         availability = legacy
         if (
             ref is None
@@ -675,7 +677,11 @@ async def _sources(
             ],
             next_action="fix_fields",
         )
-    preferences = await get_preferences(user_id=user_id, db=db)
+    preferences = await get_preferences(
+        user_id=user_id,
+        db=db,
+        commit_if_created=(create_manual and not read_only),
+    )
     query = select(PlanningContext).where(
         PlanningContext.user_id == owner,
         PlanningContext.query_start <= horizon.start_at,
@@ -701,11 +707,10 @@ async def _sources(
             PlanningContext.id == _uuid(context_ref.context_id),
             PlanningContext.revision == context_ref.revision,
         )
-    row = await db.scalar(
-        query.order_by(PlanningContext.created_at.desc(), PlanningContext.id.desc())
-        .limit(1)
-        .with_for_update()
-    )
+    ctx_stmt = query.order_by(PlanningContext.created_at.desc(), PlanningContext.id.desc()).limit(1)
+    if not read_only:
+        ctx_stmt = ctx_stmt.with_for_update()
+    row = await db.scalar(ctx_stmt)
     if row is None:
         # Context ngắn/hết hạn vẫn có thể chứa lịch bận đã khai báo. Không biến
         # việc thiếu coverage thành một lịch trống và ghi đè hiểu biết đó.
@@ -792,7 +797,10 @@ async def _sources(
         )
     fixed = (
         await db.scalars(
-            select(SessionRow).where(SessionRow.user_id == owner, SessionRow.status != "cancelled")
+            select(SessionRow).where(
+                SessionRow.user_id == owner,
+                SessionRow.status.notin_(("cancelled", "skipped")),
+            )
         )
     ).all()
     return PlanningSources(
@@ -829,6 +837,16 @@ def _horizon(draft: PlanningDraft, requested: TimeInterval | None) -> TimeInterv
     if start >= end:
         raise _invalid("Phạm vi lập lịch không còn thời gian hợp lệ.", "planning_horizon")
     return TimeInterval(start_at=start, end_at=end)
+
+
+def _full_project_end(draft: PlanningDraft) -> datetime:
+    tc = draft.summary.time_constraint
+    if tc is None:
+        raise _invalid("Thiếu ràng buộc thời gian.")
+    terminal = tc.deadline_at if tc.kind == "deadline" else tc.finish_by_at
+    if terminal is None:
+        raise _invalid("Thiếu mốc kết thúc.")
+    return terminal.astimezone(UTC)
 
 
 def _candidate_payload(data: dict[str, Any]) -> dict[str, Any]:
@@ -943,6 +961,7 @@ async def get_candidate_by_id(
             draft,
             candidate.planning_horizon,
             context_ref=candidate.source_revisions.calendar_context,
+            read_only=True,
         )
         stale = candidate.stale or source.revisions != candidate.source_revisions
     except AppError:
@@ -1003,6 +1022,10 @@ def _reschedule(
     source: PlanningSources,
     micro_tasks: dict[str, str],
     selected: list[str],
+    *,
+    full_end: datetime | None = None,
+    extra_requirements: Sequence[str] | None = None,
+    allow_horizon_slice: bool = False,
 ) -> PlanCandidate:
     horizon = candidate.planning_horizon
     steps = [item for item in candidate.steps if item.client_step_key in selected]
@@ -1028,7 +1051,113 @@ def _reschedule(
         source.preferences,
         horizon_days=max(1, math.ceil((horizon.end_at - horizon.start_at).total_seconds() / 86400)),
         min_gap_seconds=candidate.min_inter_session_gap_seconds,
+        extra_requirements=extra_requirements,
     )
+    if (
+        allow_horizon_slice
+        and full_end is not None
+        and full_end > horizon.end_at
+        and not report.fully_scheduled
+    ):
+        full_free = compute_effective_free_intervals(
+            source.availability,
+            horizon.start_at,
+            full_end,
+            calendar_context=source.context,
+            manual_busy=source.context.manual_busy_intervals,
+            fixed_sessions=source.fixed_sessions,
+        )
+        full_tc = TimeConstraint(
+            kind="window",
+            start_at=horizon.start_at,
+            finish_by_at=full_end,
+            input_timezone=source.availability.timezone,
+        )
+        _, full_report = schedule_candidate_sessions(
+            steps,
+            full_free,
+            source.fixed_sessions,
+            full_tc,
+            source.preferences,
+            horizon_days=max(1, math.ceil((full_end - horizon.start_at).total_seconds() / 86400)),
+            min_gap_seconds=candidate.min_inter_session_gap_seconds,
+            extra_requirements=extra_requirements,
+        )
+        ordered_steps = sorted(steps, key=lambda item: item.order_index)
+        visible_step_keys: list[str] = []
+        for step in ordered_steps:
+            expected_work = (
+                calculate_buffered_work(step.remaining_base_seconds, step.buffer_multiplier)
+                if step.remaining_base_seconds
+                else 0
+            )
+            scheduled_work = sum(
+                item.work_seconds
+                for item in sessions
+                if item.client_step_key == step.client_step_key
+            )
+            if scheduled_work == expected_work:
+                visible_step_keys.append(step.client_step_key)
+            else:
+                break
+        visible_sessions = [
+            item for item in sessions if item.client_step_key in visible_step_keys
+        ]
+        if full_report.fully_scheduled and visible_step_keys:
+            sessions = visible_sessions
+            report = report.model_copy(
+                update={
+                    "status": "feasible",
+                    "fully_scheduled": True,
+                    "verification_scope": CandidateVerificationScope(
+                        client_step_keys=visible_step_keys,
+                        planning_horizon=horizon,
+                    ),
+                    "required_seconds": sum(item.duration_seconds for item in visible_sessions),
+                    "available_seconds": report.available_seconds,
+                    "deficit_seconds": 0,
+                    "unscheduled_seconds": 0,
+                    "blocking_reasons": [],
+                    "unscheduled_step_keys": [],
+                    "extension_candidate_at": visible_sessions[-1].scheduled_end
+                    if visible_sessions
+                    else None,
+                }
+            )
+        else:
+            sessions = visible_sessions
+            if full_report.fully_scheduled and not visible_step_keys:
+                fallback_status = "search_inconclusive"
+                fallback_reasons = [
+                    BlockingReason(
+                        code="FRAGMENTED_FREE_SLOTS",
+                        message="Bước đầu tiên vượt quá quỹ thời gian của chặng 14 ngày đầu; cần chia nhỏ bước đầu tiên hơn nữa.",
+                    )
+                ]
+                fallback_unscheduled = report.unscheduled_seconds
+                fallback_unscheduled_keys = report.unscheduled_step_keys
+            else:
+                fallback_status = full_report.status
+                fallback_reasons = full_report.blocking_reasons
+                fallback_unscheduled = full_report.unscheduled_seconds
+                fallback_unscheduled_keys = full_report.unscheduled_step_keys
+            report = report.model_copy(
+                update={
+                    "status": fallback_status,
+                    "fully_scheduled": False,
+                    "required_seconds": None,
+                    "verification_scope": CandidateVerificationScope(
+                        client_step_keys=visible_step_keys or selected,
+                        planning_horizon=horizon,
+                    ),
+                    "available_seconds": report.available_seconds,
+                    "deficit_seconds": full_report.deficit_seconds,
+                    "unscheduled_seconds": fallback_unscheduled,
+                    "unscheduled_step_keys": fallback_unscheduled_keys,
+                    "blocking_reasons": fallback_reasons,
+                    "extension_candidate_at": None,
+                }
+            )
     sessions = [
         item.model_copy(
             update={
@@ -1082,6 +1211,28 @@ async def create_candidate(
     source = await _sources(
         db, user_id, draft, horizon, create_manual=True, context_ref=payload.calendar_context_ref
     )
+    full_end = max(horizon.end_at, _full_project_end(draft))
+    planning_horizon_days = max(
+        1, math.ceil((horizon.end_at - horizon.start_at).total_seconds() / 86400)
+    )
+    total_project_days = max(1, math.ceil((full_end - horizon.start_at).total_seconds() / 86400))
+    full_effective = compute_effective_free_intervals(
+        source.availability,
+        horizon.start_at,
+        full_end,
+        calendar_context=source.context,
+        manual_busy=source.context.manual_busy_intervals,
+        fixed_sessions=source.fixed_sessions,
+    )
+    full_free_with_gaps = subtract_fixed_session_gaps(
+        full_effective,
+        source.fixed_sessions,
+        horizon.start_at,
+        full_end,
+        min_gap_seconds=900,
+    )
+    total_free_seconds = int(sum((b - a).total_seconds() for a, b in full_free_with_gaps))
+    total_free_hours = round(total_free_seconds / 3600.0, 2)
     previous = None
     if payload.selected_step_keys is not None:
         previous = await db.scalar(
@@ -1130,27 +1281,40 @@ async def create_candidate(
         micro_tasks, tier, unexpanded = {}, "manual_user", payload.unexpanded_scope
         selected = _selection(steps, None)
     elif previous is None:
+        task_title_text = draft.summary.title or draft.summary.description or ""
+        task_scope_text = "\n".join(
+            v
+            for v in (
+                draft.summary.description,
+                draft.summary.scope,
+                draft.summary.goal,
+            )
+            if v
+        )
+        focus_minutes = max(1, source.preferences.work_interval_seconds // 60)
         try:
-            decomposition = TaskDecompositionResult.model_validate(
-                await ai_service.decompose_task(
-                    task_title=draft.summary.title or draft.summary.description or "",
-                    scope="\n".join(
-                        v
-                        for v in (
-                            draft.summary.description,
-                            draft.summary.scope,
-                            draft.summary.goal,
-                        )
-                        if v
-                    ),
+            if total_free_seconds == 0:
+                raw_decomposition = ai_service._fallback_decompose_task(
+                    task_title_text,
+                    user_focus_duration=focus_minutes,
+                    scope=task_scope_text,
+                    user_step_proposal=draft.user_step_proposal,
+                    extra_requirements=draft.summary.extra_requirements,
+                    planning_horizon_days=planning_horizon_days,
+                    total_project_days=total_project_days,
+                )
+            else:
+                raw_decomposition = await ai_service.decompose_task(
+                    task_title=task_title_text,
+                    scope=task_scope_text,
                     extra_requirements=draft.summary.extra_requirements,
                     user_step_proposal=draft.user_step_proposal,
-                    user_focus_duration=max(1, source.preferences.work_interval_seconds // 60),
-                    planning_horizon_days=max(
-                        1, math.ceil((horizon.end_at - horizon.start_at).total_seconds() / 86400)
-                    ),
+                    user_focus_duration=focus_minutes,
+                    planning_horizon_days=planning_horizon_days,
+                    total_project_days=total_project_days,
+                    total_free_hours=total_free_hours,
                 )
-            )
+            decomposition = TaskDecompositionResult.model_validate(raw_decomposition)
             if any(
                 not item.expected_output or not item.expected_output.strip()
                 for item in decomposition.steps
@@ -1232,7 +1396,15 @@ async def create_candidate(
             stale=False,
             user_step_proposal=current.user_step_proposal,
         )
-        candidate = _reschedule(candidate, current_source, micro_tasks, selected)
+        candidate = _reschedule(
+            candidate,
+            current_source,
+            micro_tasks,
+            selected,
+            full_end=max(horizon.end_at, _full_project_end(current)),
+            extra_requirements=current.summary.extra_requirements,
+            allow_horizon_slice=(payload.selected_step_keys is None and not unexpanded),
+        )
         db.add(
             CandidateRow(
                 id=_uuid(candidate.candidate_id),
@@ -1302,9 +1474,12 @@ def _concrete_issues(candidate: PlanCandidate, source: PlanningSources) -> list[
                 "Buffer của bước không khớp cấu hình có hiệu lực; cần tính lại phương án.",
             )
         children = [item for item in sessions if item.client_step_key == step.client_step_key]
-        if sum(item.work_seconds for item in children) != calculate_buffered_work(
-            step.remaining_base_seconds, step.buffer_multiplier
-        ):
+        expected_work = (
+            calculate_buffered_work(step.remaining_base_seconds, step.buffer_multiplier)
+            if step.remaining_base_seconds
+            else 0
+        )
+        if sum(item.work_seconds for item in children) != expected_work:
             issue(
                 "UNSCHEDULED_WORK",
                 "Chưa xếp đủ thời gian làm việc của các bước trong phạm vi duyệt.",
@@ -1330,7 +1505,10 @@ def _concrete_issues(candidate: PlanCandidate, source: PlanningSources) -> list[
             issue(
                 "OUTSIDE_AVAILABILITY", "Phiên phải nằm trọn trong giờ rảnh và không đè lịch bận."
             )
-        if [segment.order_index for segment in item.segments] != list(range(len(item.segments))):
+        rest_int = source.preferences.rest_interval_seconds
+        if not item.segments or [
+            segment.order_index for segment in item.segments
+        ] != list(range(len(item.segments))):
             issue("INVALID_SEGMENTS", "Thứ tự các quãng làm/nghỉ không hợp lệ.")
         work_segments = [
             segment.duration_seconds for segment in item.segments if segment.kind == "work"
@@ -1338,13 +1516,31 @@ def _concrete_issues(candidate: PlanCandidate, source: PlanningSources) -> list[
         rest_segments = [
             segment.duration_seconds for segment in item.segments if segment.kind == "rest"
         ]
-        if (
-            any(value > source.preferences.work_interval_seconds for value in work_segments)
-            or any(value != source.preferences.rest_interval_seconds for value in rest_segments)
-            or [segment.kind for segment in item.segments]
-            != ["work" if index % 2 == 0 else "rest" for index in range(len(item.segments))]
-            or item.segments[-1].kind != "work"
-        ):
+        common_segments_ok = (
+            bool(item.segments)
+            and all(segment.duration_seconds > 0 for segment in item.segments)
+            and sum(work_segments) == item.work_seconds
+            and sum(rest_segments) == item.rest_seconds
+            and item.work_seconds + item.rest_seconds == item.duration_seconds
+            and bool(work_segments)
+            and all(
+                0 < value <= source.preferences.work_interval_seconds for value in work_segments
+            )
+            and item.segments[-1].kind == "work"
+        )
+        if rest_int == 0:
+            rest_segments_ok = (
+                not rest_segments
+                and item.rest_seconds == 0
+                and [segment.kind for segment in item.segments] == ["work"] * len(item.segments)
+            )
+        else:
+            rest_segments_ok = (
+                all(value == rest_int for value in rest_segments)
+                and [segment.kind for segment in item.segments]
+                == ["work" if index % 2 == 0 else "rest" for index in range(len(item.segments))]
+            )
+        if not (common_segments_ok and rest_segments_ok):
             issue(
                 "INVALID_SEGMENTS", "Các quãng phải tuân theo cấu hình làm việc/nghỉ có hiệu lực."
             )
@@ -1365,23 +1561,30 @@ def _concrete_issues(candidate: PlanCandidate, source: PlanningSources) -> list[
 
 def _review_feasibility(candidate: PlanCandidate, source: PlanningSources) -> PlanCandidate:
     reasons = _concrete_issues(candidate, source)
+    scope = candidate.feasibility.verification_scope
+    all_steps_in_scope = isinstance(scope, CandidateVerificationScope) and {
+        step.client_step_key for step in candidate.steps
+    }.issubset(set(scope.client_step_keys))
+    global_codes = {"TOTAL_DEFICIT", "FRAGMENTED_FREE_SLOTS"}
+    global_reasons = [
+        item for item in candidate.feasibility.blocking_reasons if item.code in global_codes
+    ]
     if not reasons:
-        has_deficit = (candidate.feasibility.deficit_seconds or 0) > 0
-        is_partial = (
-            not candidate.feasibility.fully_scheduled
-            or (candidate.feasibility.unscheduled_seconds or 0) > 0
-            or any(
-                r.code in ("TOTAL_DEFICIT", "FRAGMENTED_FREE_SLOTS")
-                for r in candidate.feasibility.blocking_reasons
-            )
+        has_global_deficit = (candidate.feasibility.deficit_seconds or 0) > 0
+        has_global_unscheduled = (candidate.feasibility.unscheduled_seconds or 0) > 0 or bool(
+            candidate.feasibility.unscheduled_step_keys
         )
-        if has_deficit or is_partial:
+        if (source is None or not all_steps_in_scope) and (
+            has_global_deficit or has_global_unscheduled
+        ):
+            preserved_status = "infeasible" if has_global_deficit else "search_inconclusive"
             return candidate.model_copy(
                 update={
                     "feasibility": candidate.feasibility.model_copy(
                         update={
-                            "status": "infeasible" if has_deficit else candidate.feasibility.status,
+                            "status": preserved_status,
                             "fully_scheduled": False,
+                            "blocking_reasons": global_reasons,
                             "required_seconds": candidate.feasibility.required_seconds
                             or sum(item.duration_seconds for item in candidate.sessions),
                             "deficit_seconds": candidate.feasibility.deficit_seconds or 0,
@@ -1403,32 +1606,51 @@ def _review_feasibility(candidate: PlanCandidate, source: PlanningSources) -> Pl
                         ),
                         "unscheduled_seconds": 0,
                         "deficit_seconds": 0,
+                        "unscheduled_step_keys": [],
                     }
                 )
             }
         )
-    existing = list(candidate.feasibility.blocking_reasons)
-    existing.extend(
-        item for item in reasons if item.code not in {reason.code for reason in existing}
+
+    carry_global = any(item.code == "UNSCHEDULED_WORK" for item in reasons) or (
+        (source is None or not all_steps_in_scope)
+        and (candidate.feasibility.deficit_seconds or 0) > 0
     )
+    merged_reasons = list(global_reasons) if carry_global else []
+    seen_codes = {reason.code for reason in merged_reasons}
+    for item in reasons:
+        if item.code not in seen_codes:
+            seen_codes.add(item.code)
+            merged_reasons.append(item)
+
+    deficit_val = candidate.feasibility.deficit_seconds or 0
+    has_deficit = deficit_val > 0 or any(item.code == "TOTAL_DEFICIT" for item in merged_reasons)
+    has_unscheduled_work = any(item.code == "UNSCHEDULED_WORK" for item in reasons)
+    infeasible_codes = {
+        "SESSION_COLLISION",
+        "OUTSIDE_AVAILABILITY",
+        "STEP_ORDER",
+        "PAST_SESSION",
+        "INVALID_SEGMENTS",
+    }
+    if (
+        any(item.code in infeasible_codes for item in reasons)
+        or has_deficit
+        or (has_unscheduled_work and deficit_val > 0)
+    ):
+        new_status = "infeasible"
+    elif candidate.feasibility.status in {"feasible", "not_checked"}:
+        new_status = "search_inconclusive"
+    else:
+        new_status = candidate.feasibility.status
+
     report = candidate.feasibility.model_copy(
         update={
-            "status": "infeasible"
-            if any(
-                item.code
-                in {
-                    "SESSION_COLLISION",
-                    "OUTSIDE_AVAILABILITY",
-                    "STEP_ORDER",
-                    "PAST_SESSION",
-                    "INVALID_SEGMENTS",
-                }
-                for item in reasons
-            )
-            else candidate.feasibility.status,
+            "status": new_status,
             "fully_scheduled": False,
-            "blocking_reasons": existing,
-            "deficit_seconds": candidate.feasibility.deficit_seconds or 0,
+            "required_seconds": None,
+            "blocking_reasons": merged_reasons,
+            "deficit_seconds": deficit_val,
             "unscheduled_seconds": candidate.feasibility.unscheduled_seconds or 0,
         }
     )
@@ -1591,6 +1813,11 @@ async def patch_candidate(
                 {"estimated_base_seconds", "order_index"} & edit.model_fields_set
                 for edit in edits.steps or []
             )
+            if changed_timing and edits.sessions:
+                raise _invalid(
+                    "Không thể đồng thời đổi thời lượng/thứ tự bước và chỉnh giờ phiên trong cùng một yêu cầu; hãy áp thay đổi bước trước.",
+                    "edits",
+                )
             updated = PlanCandidate.model_validate(
                 {
                     **candidate.model_dump(),
@@ -1601,9 +1828,33 @@ async def patch_candidate(
             scope = candidate.feasibility.verification_scope
             if not isinstance(scope, CandidateVerificationScope):
                 raise _invalid("Phạm vi Candidate không hợp lệ.")
-            selected = _selection(steps, list(scope.client_step_keys))
+            full_end = max(candidate.planning_horizon.end_at, _full_project_end(draft))
+            is_horizon_sliced = (
+                full_end > candidate.planning_horizon.end_at
+                and not candidate.unexpanded_scope
+                and (
+                    candidate.feasibility.extension_candidate_at is not None
+                    or len(scope.client_step_keys) < len(steps)
+                )
+            )
+            selected = (
+                [step.client_step_key for step in steps]
+                if is_horizon_sliced
+                else _selection(steps, list(scope.client_step_keys))
+            )
             if changed_timing:
-                updated = _reschedule(updated, source, micro_tasks, selected)
+                updated = _reschedule(
+                    updated,
+                    source,
+                    micro_tasks,
+                    selected,
+                    full_end=full_end,
+                    extra_requirements=draft.summary.extra_requirements,
+                    allow_horizon_slice=(
+                        not candidate.unexpanded_scope
+                        and full_end > candidate.planning_horizon.end_at
+                    ),
+                )
                 sessions = list(updated.sessions)
             seen = set()
             for edit in edits.sessions or []:
@@ -1892,21 +2143,24 @@ async def confirm_candidate(
             db.add(session)
             persisted_sessions.append(session)
         await db.flush()
+        approved_at = datetime.now(UTC)
         for session in persisted_sessions:
             for offset in source.preferences.reminder_offsets:
+                fire_at = session.scheduled_start - timedelta(seconds=offset)
+                if fire_at < approved_at:
+                    continue
                 db.add(
                     Reminder(
                         user_id=owner,
                         session_id=session.id,
                         schedule_revision=next_version,
                         kind="pre_session",
-                        fire_at=session.scheduled_start - timedelta(seconds=offset),
+                        fire_at=fire_at,
                         dedupe_key=f"session:{session.id}:version:{next_version}:reminder:{offset}",
                         delivery_state="scheduled",
                     )
                 )
         calendar_state = await _enqueue_calendar(db, owner, persisted_sessions, next_version)
-        approved_at = datetime.now(UTC)
         db.add(
             VersionRow(
                 user_id=owner,

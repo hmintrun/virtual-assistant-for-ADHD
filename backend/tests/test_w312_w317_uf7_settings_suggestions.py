@@ -1187,3 +1187,150 @@ async def test_suggestion_response_accept_edit_validation_conflicts_and_uf6(monk
     finally:
         app.dependency_overrides.clear()
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_finding6_non_scheduling_pref_update_keeps_pending_proposal_fresh_and_approvable(
+    monkeypatch,
+):
+    """PR #22 Finding #6: Đổi reminder_style/reminder_offsets khi có proposal pending không làm stale=True và approve giữ nguyên giá trị mới."""
+    engine, sf = await _make_client_env()
+    fixed_now = datetime(2026, 11, 2, 10, 30, 0, tzinfo=TZ_VN)
+    monkeypatch.setattr(reschedule_service, "_current_utc_now", lambda now=None: now or fixed_now)
+    monkeypatch.setattr(settings_service, "_utc_now", lambda now=None: now or fixed_now)
+
+    try:
+        async with sf() as db:
+            user_id = await _seed_user_with_prefs(db, buffer_multiplier=1.2, effective_revision=1)
+            await _seed_future_task_and_session(db, user_id, session_status="scheduled")
+
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            # 1) Tạo thay đổi có ảnh hưởng lịch (kèm reminder_style='gentle' trong requested_changes) -> sinh RescheduleProposal pending
+            resp_sched = await client.post(
+                "/api/v1/settings/change-requests",
+                headers=_auth_headers(user_id, "idem-f6-sched"),
+                json={
+                    "expected_preferences_revision": 1,
+                    "changes": {
+                        "preferences": {
+                            "work_interval_seconds": 1800,
+                            "reminder_style": "gentle",
+                        }
+                    },
+                },
+            )
+            assert resp_sched.status_code == 200, resp_sched.text
+            sched_data = resp_sched.json()["data"]
+            proposal_id = sched_data["pending_proposal_id"]
+            req_id = sched_data["change_request_id"]
+            assert proposal_id is not None
+
+            # 2) Khi proposal đang pending, đổi chỉ reminder_style & reminder_offsets
+            resp_non_sched = await client.post(
+                "/api/v1/settings/change-requests",
+                headers=_auth_headers(user_id, "idem-f6-non-sched"),
+                json={
+                    "expected_preferences_revision": 1,
+                    "changes": {
+                        "preferences": {
+                            "reminder_style": "firm",
+                            "reminder_offsets": [600, 300],
+                        }
+                    },
+                },
+            )
+            assert resp_non_sched.status_code == 200, resp_non_sched.text
+            non_sched_data = resp_non_sched.json()["data"]
+            assert non_sched_data["application_state"] == "effective_from_next_session"
+            new_eff = non_sched_data["effective_revision"]
+            assert new_eff == 3
+
+            # 3) GET /proposals/current phải giữ stale=False và đồng bộ source_revisions["settings"]
+            prop_resp = await client.get("/api/v1/proposals/current", headers=_auth_headers(user_id))
+            assert prop_resp.status_code == 200, prop_resp.text
+            prop = prop_resp.json()["data"]
+            assert prop["proposal_id"] == proposal_id
+            assert prop["stale"] is False
+            assert prop["source_revisions"]["settings"] == new_eff
+
+            async with sf() as db:
+                s_req = await db.get(SettingChangeRow, UUID(req_id))
+                pref_row = await db.scalar(
+                    select(UserPreferenceRow).where(UserPreferenceRow.user_id == user_id)
+                )
+                assert s_req is not None and pref_row is not None
+                assert s_req.effective_revision == new_eff
+                assert s_req.requested_revision == pref_row.requested_revision
+                # Key phi-lịch vừa cập nhật ("reminder_style") phải bị gỡ khỏi requested_changes để approve không hoàn tác
+                assert pref_row.requested_changes == {"work_interval_seconds": 1800}
+
+            # 4) Approve proposal -> 200 OK, giữ reminder_style='firm' & reminder_offsets=[600, 300], áp dụng work=1800
+            app_resp = await client.post(
+                f"/api/v1/proposals/{proposal_id}/approve",
+                headers=_auth_headers(user_id, "idem-f6-approve"),
+                json={
+                    "expected_proposal_revision": prop["proposal_revision"],
+                    "expected_base_schedule_revision": prop["base_schedule_revision"],
+                    "expected_source_revisions": prop["source_revisions"],
+                },
+            )
+            assert app_resp.status_code == 200, app_resp.text
+
+            pref_after = (
+                await client.get("/api/v1/preferences", headers=_auth_headers(user_id))
+            ).json()["data"]
+            assert pref_after["work_interval_seconds"] == 1800
+            assert pref_after["reminder_style"] == "firm"
+            assert pref_after["reminder_offsets"] == [600, 300]
+            assert pref_after["pending_proposal_id"] is None
+            assert pref_after["requested_revision"] is None
+
+            # 5) Edge case: effective đã là "firm", Request 1b gói work=1500 + reminder_style="gentle",
+            # Request 2b gửi lại reminder_style="firm" vẫn phải gỡ "reminder_style" khỏi requested_changes.
+            resp_sched_2 = await client.post(
+                "/api/v1/settings/change-requests",
+                headers=_auth_headers(user_id, "idem-f6-sched-2"),
+                json={
+                    "expected_preferences_revision": pref_after["effective_revision"],
+                    "changes": {
+                        "preferences": {
+                            "work_interval_seconds": 1500,
+                            "reminder_style": "gentle",
+                        }
+                    },
+                },
+            )
+            assert resp_sched_2.status_code == 200, resp_sched_2.text
+            proposal_2_id = resp_sched_2.json()["data"]["pending_proposal_id"]
+            assert proposal_2_id is not None
+
+            resp_non_sched_2 = await client.post(
+                "/api/v1/settings/change-requests",
+                headers=_auth_headers(user_id, "idem-f6-non-sched-2"),
+                json={
+                    "expected_preferences_revision": pref_after["effective_revision"],
+                    "changes": {"preferences": {"reminder_style": "firm"}},
+                },
+            )
+            assert resp_non_sched_2.status_code == 200, resp_non_sched_2.text
+            prop_2 = (
+                await client.get("/api/v1/proposals/current", headers=_auth_headers(user_id))
+            ).json()["data"]
+            app_2_resp = await client.post(
+                f"/api/v1/proposals/{proposal_2_id}/approve",
+                headers=_auth_headers(user_id, "idem-f6-approve-2"),
+                json={
+                    "expected_proposal_revision": prop_2["proposal_revision"],
+                    "expected_base_schedule_revision": prop_2["base_schedule_revision"],
+                    "expected_source_revisions": prop_2["source_revisions"],
+                },
+            )
+            assert app_2_resp.status_code == 200, app_2_resp.text
+            pref_after_2 = (
+                await client.get("/api/v1/preferences", headers=_auth_headers(user_id))
+            ).json()["data"]
+            assert pref_after_2["work_interval_seconds"] == 1500
+            assert pref_after_2["reminder_style"] == "firm"
+    finally:
+        app.dependency_overrides.clear()
+        await engine.dispose()

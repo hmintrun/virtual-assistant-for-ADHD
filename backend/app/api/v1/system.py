@@ -1,13 +1,16 @@
 """Support endpoints for persisted planning contexts and command receipts."""
 
+import hmac
 from typing import Annotated
 
 from fastapi import APIRouter, Header, Path, Request
+from fastapi.responses import PlainTextResponse
 from sqlalchemy import text
 
 from app.api.deps import CurrentUserDep, DbSessionDep
 from app.core.config import settings
 from app.core.errors import AppError
+from app.core.metrics import PROMETHEUS_CONTENT_TYPE, collect_prometheus_metrics
 from app.schemas.calendar import CalendarContext, PlanningContextCreateRequest
 from app.schemas.common import (
     CapabilitiesData,
@@ -40,6 +43,17 @@ _DEFAULT_CAPABILITIES = CapabilitiesData(
 )
 
 
+def _build_capabilities() -> CapabilitiesData:
+    """Tạo bản sao CapabilitiesData phản ánh cấu hình VOICE_MAX_AUDIO_BYTES hiện hành."""
+    return _DEFAULT_CAPABILITIES.model_copy(
+        update={
+            "configured_parameters": _DEFAULT_CAPABILITIES.configured_parameters.model_copy(
+                update={"audio_max_bytes": int(settings.VOICE_MAX_AUDIO_BYTES)}
+            )
+        }
+    )
+
+
 @router.get("/health", summary="Kiểm tra trạng thái hoạt động Backend & Database")
 async def health_check(db: DbSessionDep) -> dict[str, str]:
     try:
@@ -55,12 +69,57 @@ async def health_check(db: DbSessionDep) -> dict[str, str]:
     return {"status": "ok", "database": "ok"}
 
 
+def _authorize_metrics_scrape(request: Request) -> None:
+    """Bảo vệ /metrics và /api/v1/metrics bằng Bearer token trong staging/production."""
+    if not settings.is_deployed:
+        return
+    expected_token = settings.METRICS_AUTH_TOKEN.strip()
+    if not expected_token:
+        raise AppError(
+            status_code=403,
+            code="FORBIDDEN",
+            message="Metrics endpoint chưa cấu hình METRICS_AUTH_TOKEN cho môi trường deploy.",
+            next_action="authenticate",
+        )
+    auth_header = request.headers.get("authorization", "")
+    scheme, _, provided_token = auth_header.partition(" ")
+    provided_clean = provided_token.strip()
+    if (
+        scheme.lower() != "bearer"
+        or not provided_clean
+        or not hmac.compare_digest(
+            provided_clean.encode("utf-8"),
+            expected_token.encode("utf-8"),
+        )
+    ):
+        raise AppError(
+            status_code=401,
+            code="UNAUTHENTICATED",
+            message="Vui lòng cung cấp Bearer token hợp lệ cho metrics.",
+            next_action="authenticate",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+
+@router.get(
+    "/metrics",
+    summary="Xuất số liệu giám sát chuẩn Prometheus",
+    response_class=PlainTextResponse,
+)
+async def metrics_endpoint(request: Request, db: DbSessionDep) -> PlainTextResponse:
+    _authorize_metrics_scrape(request)
+    return PlainTextResponse(
+        content=await collect_prometheus_metrics(db),
+        media_type=PROMETHEUS_CONTENT_TYPE,
+    )
+
+
 @router.get("/capabilities", response_model=SuccessEnvelope[CapabilitiesData])
 async def get_capabilities(
     request: Request, current_user: CurrentUserDep
 ) -> SuccessEnvelope[CapabilitiesData]:
     return SuccessEnvelope(
-        data=_DEFAULT_CAPABILITIES,
+        data=_build_capabilities(),
         meta=build_response_meta(getattr(request.state, "request_id", None)),
     )
 

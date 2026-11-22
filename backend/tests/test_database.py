@@ -4,7 +4,7 @@ import os
 import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from threading import Barrier
 from uuid import uuid4
@@ -31,6 +31,7 @@ from app.models import (
     User,
     UserPreference,
 )
+from app.models import Session as FocusSession
 from app.services import command_service
 from app.services.plan_service import get_command_result
 from app.services.task_state_service import get_task_planning_states
@@ -252,6 +253,51 @@ async def test_batched_task_derived_states_and_owner_filter():
             assert await get_task_planning_states(db, uuid4(), [task_id]) == {}
             assert "decomposition_state" in Task.__table__.c
             assert "planning_parts" not in Base.metadata.tables
+
+            # PR #22 Finding #5A: Phiên duy nhất bị skipped không được tính là scheduling_state == "complete"
+            skipped_task = Task(
+                user_id=user_id,
+                title="Skipped Task",
+                time_constraint={},
+                decomposition_state="complete",
+            )
+            db.add(skipped_task)
+            await db.flush()
+            skipped_step = Step(
+                user_id=user_id,
+                task_id=skipped_task.id,
+                title="Bước bị skip phiên",
+                order_index=0,
+                estimated_base_seconds=1500,
+                remaining_base_seconds=1500,
+                buffer_multiplier=1.0,
+                estimate_source="user_confirmed",
+                status="pending",
+            )
+            db.add(skipped_step)
+            await db.flush()
+            now_utc = datetime.now(UTC)
+            db.add(
+                FocusSession(
+                    user_id=user_id,
+                    step_id=skipped_step.id,
+                    scheduled_start=now_utc + timedelta(hours=1),
+                    scheduled_end=now_utc + timedelta(hours=1, minutes=25),
+                    micro_task_text="Bắt đầu",
+                    work_seconds=1500,
+                    rest_seconds=0,
+                    segments=[{"order_index": 0, "kind": "work", "duration_seconds": 1500}],
+                    duration_seconds=1500,
+                    schedule_revision=1,
+                    status="skipped",
+                    start_state="not_started",
+                    start_decision_due_at=now_utc + timedelta(hours=1, minutes=15),
+                )
+            )
+            await db.flush()
+            skipped_state = await get_task_planning_states(db, user_id, [skipped_task.id])
+            assert skipped_state[skipped_task.id].scheduling_state != "complete"
+            assert skipped_state[skipped_task.id].scheduling_state == "not_scheduled"
     finally:
         await engine.dispose()
 

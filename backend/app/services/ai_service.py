@@ -12,7 +12,7 @@ import re
 import time
 from collections.abc import Awaitable, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, timedelta
 from typing import Any, Literal, NamedTuple, TypeVar
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -34,6 +34,7 @@ from app.schemas.schedule import (
 from app.schemas.task import (
     CandidateAdjustmentResult,
     CandidateStepAdjustment,
+    ExtractedFreeWindowSchema,
     ExtractedTimeConstraint,
     GenerationTier,
     LLMCandidateAdjustmentPayload,
@@ -44,6 +45,8 @@ from app.schemas.task import (
     StepPromptItem,
     TaskDecompositionResult,
     TaskExtractionResult,
+    _extract_explicit_time_range,
+    _extract_single_spoken_weekday,
 )
 
 logger = logging.getLogger(__name__)
@@ -69,6 +72,18 @@ class ExecutionTimingProfile(NamedTuple):
     primary_priority_until: float
     warm_backup_at: float
     groq_hedge_at: float | None
+
+
+class _UF1DeadlineExceeded(TimeoutError):
+    """The UF1 request budget expired independently of the provider's timeout."""
+
+
+class _NoEligibleProvider(RuntimeError):
+    """None of the configured models can accept a request right now."""
+
+
+class _ProviderAttemptsExhausted(RuntimeError):
+    """The available branches ended without a usable response."""
 
 
 CircuitState = Literal["closed", "open", "half_open"]
@@ -99,6 +114,46 @@ class _ProbePingSchema(BaseModel):
 
 _RETRY_AFTER_SEC_RE = re.compile(r"try again in\s+(\d+(?:\.\d+)?)s", re.IGNORECASE)
 _RETRY_AFTER_MS_RE = re.compile(r"try again in\s+(\d+(?:\.\d+)?)ms", re.IGNORECASE)
+
+_UF1_RELATIVE_DATE_RE = re.compile(r"\b(?:hôm\s+nay|ngày\s+mai|mai|mốt|tuần\s+(?:này|sau)|cuối\s+tuần)\b", re.IGNORECASE)
+_UF1_EXCEPTION_RE = re.compile(r"\b(?:riêng|ngoại\s+lệ|trừ|chỉ\s+khi|bù\s+lại)\b", re.IGNORECASE)
+_UF1_CORRECTION_RE = re.compile(r"\b(?:à\s+nhầm|đính\s+chính|sửa\s+lại|thay\s+vì)\b", re.IGNORECASE)
+_UF1_TIME_RANGE_RE = re.compile(
+    r"\b\d{1,2}\s*(?::\d{2}|h(?:\d{2})?|giờ)\s*(?:–|-|đến|tới)\s*"
+    r"\d{1,2}\s*(?::\d{2}|h(?:\d{2})?|giờ)\b",
+    re.IGNORECASE,
+)
+_UF1_FOLLOWUP_FIELDS = (
+    re.compile(r"\b(?:phạm\s+vi|đầu\s+ra|\d+\s*(?:trang|slide|chương|mục|endpoint))\b", re.IGNORECASE),
+    re.compile(r"\b(?:rảnh|bận|khung\s+giờ)\b", re.IGNORECASE),
+    re.compile(r"\b(?:hạn(?:\s+chót)?|deadline|bắt\s+đầu|mốc\s+kết\s+thúc)\b", re.IGNORECASE),
+)
+
+_TIER3_CLAUSE_SPLIT_RE = re.compile(r"[,;\n]+|\.(?=\s|$)")
+_TIER3_DAILY_RE = re.compile(r"\b(?:hằng\s+ngày|hàng\s+ngày|mỗi\s+ngày)\b", re.IGNORECASE)
+_TIER3_WEEKDAYS_RE = re.compile(
+    r"\bthứ\s*(?:2|hai)\s*(?:đến|tới|-|–)\s*thứ\s*(?:6|sáu)\b", re.IGNORECASE
+)
+_TIER3_WEEKEND_RE = re.compile(r"\bcuối\s+tuần\b", re.IGNORECASE)
+_TIER3_BUSY_HINT_RE = re.compile(r"\b(?:bận|trừ|nghỉ|họp|không\s+rảnh)\b", re.IGNORECASE)
+_TIER3_DEADLINE_PREFIX_RE = re.compile(r"\b(?:hạn(?:\s+chót)?|trước|deadline)\b", re.IGNORECASE)
+_TIER3_NON_WEEKDAY_ORDINAL_RE = re.compile(
+    r"\b(?:lần|bước|chương|phần|tuần|ngày|buổi|mục|câu|bài)\s+thứ\s*\d+\b",
+    re.IGNORECASE,
+)
+_TIER3_EXPLICIT_DMY_RE = re.compile(r"(?<!\d)(\d{1,2})/(\d{1,2})/(\d{4})(?!\d)")
+_TIER3_EXPLICIT_TIME_RE = re.compile(
+    r"(?<!\d)(\d{1,2})\s*(?:(?::|h|g)\s*(\d{2})?|giờ\s*(\d{2})?)(?!\d)",
+    re.IGNORECASE,
+)
+_TIER3_EXTRA_REQ_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(
+        r"\btối\s+đa\s+\d+\s*(?:phút|p|giờ|tiếng)(?:\s*/\s*ngày|\s+mỗi\s+ngày)?\b",
+        re.IGNORECASE,
+    ),
+    re.compile(r"\bít\s+nhất\s+\d+\s*(?:phút|p)\s+trống\s+liền\b", re.IGNORECASE),
+    re.compile(r"\bưu\s+tiên\s+sau\s+\d{1,2}\s*(?:h|:|g)\s*\d{0,2}\b", re.IGNORECASE),
+)
 
 
 def _extract_error_http_status(exc: BaseException) -> int | None:
@@ -249,6 +304,8 @@ class ProviderHealthTracker:
         exc: BaseException,
         *,
         latency_ms: int | None = None,
+        failure_threshold_override: int | None = None,
+        cooldown_override: float | None = None,
     ) -> tuple[ErrorCategory, bool]:
         """Ghi nhận lỗi provider; bỏ qua `CancelledError` vì đó là hủy tác vụ sau khi có winner."""
         category, retryable, explicit_cooldown = _classify_provider_error(exc)
@@ -261,11 +318,16 @@ class ProviderHealthTracker:
         rec.last_error_type = type(exc).__name__
         rec.last_error_category = category
 
+        threshold = (
+            max(1, failure_threshold_override)
+            if failure_threshold_override is not None
+            else self._failure_threshold
+        )
         should_open = (
             was_half_open
             or category == "auth"
             or (category == "rate_limit" and explicit_cooldown is not None)
-            or rec.consecutive_failures >= self._failure_threshold
+            or rec.consecutive_failures >= threshold
         )
         if should_open:
             cooldown = (
@@ -274,7 +336,11 @@ class ProviderHealthTracker:
                 else (
                     min(60.0, max(1.0, explicit_cooldown))
                     if explicit_cooldown is not None
-                    else self._cooldown_seconds
+                    else (
+                        max(0.05, cooldown_override)
+                        if cooldown_override is not None
+                        else self._cooldown_seconds
+                    )
                 )
             )
             rec.state = "open"
@@ -328,42 +394,37 @@ class ProviderHealthTracker:
 # SYSTEM PROMPTS TIẾNG VIỆT CHUẨN NGHIỆP VỤ ADHD-I (UF1, UF2, UF6)
 # ==============================================================================
 
-UF1_EXTRACTION_SYSTEM_PROMPT = """Bạn là trợ lý lập kế hoạch chuyên biệt dành cho người trưởng thành mắc hội chứng giảm chú ý (ADHD-I) trên ứng dụng ProPlan VA.
-Nhiệm vụ của bạn ở bước UF1 là đọc nội dung công việc người dùng vừa nói/nhập (kết hợp với bản nháp `previous_draft` nếu đang ở lượt trả lời bổ sung) và trích xuất chính xác 4 thông tin bắt buộc:
-1. `content`: Nội dung công việc cần làm.
-2. `scope`: Phạm vi hoặc đầu ra cụ thể mong muốn (ví dụ: bao nhiêu trang, bao nhiêu slide, tiêu chuẩn hoàn thành).
-   Nếu người dùng đã nêu số lượng và phần cần làm (ví dụ báo cáo 2 trang chỉ gồm kết quả và kết luận), phải giữ thông tin đó trong scope dù đang thiếu giờ rảnh; không bắt cung cấp thêm định dạng file hay bảng số liệu khi user chưa yêu cầu.
-3. `free_time_slots` & `structured_free_windows`: Các khung giờ rảnh người dùng dành cho việc này, đồng thời chuẩn hóa sang dạng có cấu trúc (`weekday` 1=Thứ Hai..7=Chủ Nhật hoặc `date` YYYY-MM-DD, kèm `start_local` và `end_local` định dạng HH:mm 24h) để chuyển cho thuật toán Python.
-   Giờ rảnh thuộc yêu cầu lập kế hoạch hiện tại, không tự lấy cài đặt chung khi user chưa chọn. Khi trả lời bổ sung, giữ các khung rõ đã có và hoàn thiện khung đang hỏi. `availability_update_mode=merge` mặc định để bổ sung; chỉ dùng `replace` khi user chủ động thay/xóa khung cũ, khi đó trả toàn bộ danh sách còn lại (có thể rỗng). Nêu vấn đề giờ rảnh bằng clarification_issues với field_path="availability"; không tự xác nhận thay user.
-
-4. `deadline`: Thời hạn hoàn thành (ISO 8601 có múi giờ).
-
-QUY TẮC BẤT BIẾN (STRICT GUARDRAILS — TUYỆT ĐỐI TUÂN THỦ):
-- HỢP NHẤT BẢN NHÁP (`previous_draft`): Nếu `previous_draft` khác null, giữ nguyên toàn bộ thông tin hợp lệ đã có từ lượt trước và cập nhật/điền thêm các thông tin mới từ `user_raw_input`. Nếu người dùng chủ động sửa một trường đã có, ưu tiên giá trị mới nhất của người dùng.
-- KHÔNG TỰ ĐOÁN DỮ LIỆU (ZERO HALLUCINATION):
-  + Nếu chưa rõ `scope`, `free_time_slots` hoặc `deadline`, bắt buộc trả về `null` (hoặc mảng rỗng `[]`). Tuyệt đối không tự bịa hạn chót cuối tuần/cuối ngày.
-  + Chỉ kế thừa `default_free_windows` khi người dùng chủ động nói dùng khung giờ rảnh mặc định đã lưu.
-  + Nếu người dùng nêu buổi mơ hồ mà thiếu mốc giờ cụ thể (ví dụ chỉ nói "tối thứ 6", "chiều mai" mà không rõ từ mấy giờ đến mấy giờ và chưa chủ động xác nhận dùng một khung giờ cụ thể đã có), TUYỆT ĐỐI KHÔNG tự gán "19:00-21:00"; phải đặt `start_local = null`, `end_local = null`, `is_ambiguous = true`, `is_complete = false` và hỏi rõ mốc giờ trong `clarification_questions`.
-- PHÁT HIỆN MÂU THUẪN: Đối chiếu với `current_datetime` và `busy_intervals_from_calendar`. Đặt `has_conflict = true` nếu hạn chót nằm trong quá khứ (`<= current_datetime`), khung giờ rảnh rơi sau `deadline`, hoặc toàn bộ khung giờ rảnh bị trùng với lịch bận.
-- GỘP CÂU HỎI LÀM RÕ TRONG 1 VÒNG DUY NHẤT (SINGLE-ROUND CLARIFICATION): Nếu thiếu bất kỳ thông tin nào, còn khung giờ mơ hồ (`is_ambiguous = true`) hoặc có mâu thuẫn (`has_conflict = true`), đặt `is_complete = false` và gom TẤT CẢ câu hỏi vào `clarification_questions` một cách ngắn gọn, ấm áp trong 1 màn hình duy nhất.
-- CHỈ ĐẶT `is_complete = true` KHI VÀ CHỈ KHI đủ cả 4 trường rõ ràng, mọi `structured_free_windows` đều có `is_ambiguous = false`, và `has_conflict = false` (khi đó `clarification_questions` bắt buộc là `[]`; KHÔNG tự đặt thêm câu hỏi phụ ngoài 4 trường bắt buộc).
-- time_constraint dùng kind=deadline/window, start_at, input_timezone và đúng một mốc cuối deadline_at/finish_by_at. Nếu user chỉ nêu hạn chót mà không nêu mốc bắt đầu riêng, đặt `start_at = current_datetime`; chỉ để `null` khi thiếu hẳn hạn chót hoàn thành, không tự đoán hạn chót. Kế thừa thông tin đã rõ từ previous_draft. Trích goal chỉ khi user nêu.
-- Trả clarification_issues có code, field_path, message, question, blocking. Câu hỏi phải gắn đúng trường con nếu biết.
-- field_review_notes chứa giải thích bất lợi có căn cứ theo từng trường khi đề xuất khác previous_draft. Nếu user muốn giữ giá trị cũ, giải thích bất lợi có căn cứ rồi hỏi xác nhận; không ép đổi, không bịa số phút thiếu hoặc kết luận khả thi khi chưa có phép tính.
-- resolved_issue_keys chỉ chứa khóa code|field_path|question của AI_CLARIFICATION trong previous_draft mà câu trả lời mới thực sự giải quyết; không tự xóa field-review đã bảo vệ giá trị user.
-- Giọng điệu tiếng Việt ấm áp, súc tích, giảm tải nhận thức theo chuẩn W3C COGA."""
+UF1_EXTRACTION_SYSTEM_PROMPT = """UF1 ProPlan VA(ADHD-I):trích 4 trường từ `user_raw_input`(gộp `previous_draft` nếu có):
+1.`content`&`title`:việc cần làm;BẮT BUỘC sinh `title`<=100 ký tự từ `content`(CẤM `title=null` khi có việc);`goal` nếu nêu.
+2.`scope`:phạm vi/đầu ra.Giữ đủ số lượng,đơn vị,hạng mục và ràng buộc.VD:"10 trang Word","8 slide","3 module","4 bài"->nhận ngay làm `scope`,CẤM `null`(định dạng tùy chọn không chặn).Hai đầu ra rõ là chưa chọn->hỏi gộp với issue field_path="scope",blocking=true;không chốt thay user.
+3.`free_time_slots`&`structured_free_windows`:
+- `kind`:`'daily'`(mỗi/hằng ngày,tối nào cũng);`'weekly_rule'`(`weekday`/`weekdays`:`[1..5]`T2-T6,`[6,7]`cuối tuần);`'specific_date'`(`date` YYYY-MM-DD);`'date_range'`(`date_from`..`date_to`).
+- ISO Weekday("Thứ N"->N-1,CẤM Thứ Sáu=6):`1=T2,2=T3,3=T4,4=T5,5=T6(Thứ Sáu),6=T7(Thứ Bảy),7=CN`.
+- `op`:`'add'`(thêm/nối),`'replace_day'`(thay ngày/thứ),`'exclude'`(+`is_excluded=true`;nêu giờ bận cụ thể VD "bận 15h-16h" BẮT BUỘC điền `start_local`&`end_local`,chỉ `null` khi bận cả ngày),`'reset_override'`(xóa ngoại lệ về lịch tuần).
+- `duration_minutes`:phút khi có giờ đầu+thời lượng("19h30 rảnh 90p"->`start_local='19:30',duration_minutes=90`) hoặc sau sự kiện("sau họp rảnh 2 tiếng"->`duration_minutes=120,is_ambiguous=true`).
+- `window_timezone`:IANA TZ riêng(VD`'Asia/Tokyo'`).
+- Tra ngày từ `relative_calendar_anchor`;ngày thiếu năm PHẢI dùng đúng năm từ `relative_calendar_anchor.today`(CẤM năm quá khứ);"cũng giờ đó" kế thừa `start_local`/`end_local` khung trước;giờ nói("bảy rưỡi tối"=19:30,"chín kém mười lăm tối"=20:45);tự đính chính("à nhầm"->bỏ vế trước,giữ vế sau).
+- Ràng buộc("tối đa X phút/ngày","ít nhất X phút trống liền","ưu tiên sau Xh","T7/CN chọn 1 buổi","thiếu giờ mới dùng cuối tuần")->`extra_requirements`.
+- `availability_update_mode`:`'merge'` mặc định;`'replace'` khi thay/xóa lịch cũ.
+4.`deadline`&`time_constraint`:ISO 8601 có offset(`kind='deadline'|'window'`,chỉ nêu hạn thì `start_at=current_datetime`,`deadline_at`/`finish_by_at`,`input_timezone`).
+GUARDRAILS:
+- Merge `previous_draft`:giữ trường hợp lệ cũ,cập nhật mới;`locked_fields`:giữ nguyên từ `previous_draft` trừ khi user nói rõ muốn sửa trường đó;`field_review_notes` khi khác cũ;`resolved_issue_keys`(`code|field_path|question`) khi xong.
+- Zero Hallucination:thiếu để `null`/`[]`;nếu user yêu cầu dùng lịch/giờ rảnh mặc định và `default_free_windows` khác rỗng->BẮT BUỘC copy nguyên `default_free_windows` vào `structured_free_windows`(CẤM `[]`);nếu user nói giữ nguyên lịch mặc định hoặc không đòi thì không copy;giờ mơ hồ("tối thứ 6","tối rảnh","rảnh cả ngày","sau 19h30","sau họp...")->`null` đầu/cuối thiếu,`is_ambiguous=true`,`is_complete=false`.
+- Conflict(`has_conflict=true`):`deadline<=current_datetime`,giờ rảnh sau `deadline` hoặc trùng kín `busy_intervals_from_calendar`.
+- Single-Round:`is_complete=true` iff đủ 4 trường+không `is_ambiguous`+`has_conflict=false`(`clarification_questions=[]`);ngược lại `is_complete=false`,gộp câu hỏi ấm áp(W3C COGA) vào `clarification_questions`&`clarification_issues` đúng `field_path`."""
 
 UF2_DECOMPOSITION_SYSTEM_PROMPT = """Bạn là chuyên gia hỗ trợ chức năng điều hành (Executive Function Coach) cho người mắc ADHD-I trên ứng dụng ProPlan VA.
-Nhiệm vụ của bạn ở bước UF2 là bẻ nhỏ một công việc đã xác nhận thành phương án các bước tuần tự (Default Decomposition Proposal) để giúp người dùng vượt qua hội chứng Tê liệt khởi động (ADHD Blank Canvas / Task Initiation Paralysis).
-Nếu `user_step_proposal` khác null, hãy tôn trọng ý tưởng của người dùng. Nếu ý tưởng thiếu rõ ràng hoặc mâu thuẫn với phạm vi đã xác nhận, đặt requires_clarification=true, clarification_question là một câu hỏi gộp và steps=[]; không bịa Steps để lấp mâu thuẫn. Chỉ sinh Steps khi ý tưởng đủ rõ, với requires_clarification=false và clarification_question=null.
+Nhiệm vụ ở UF2: bẻ nhỏ công việc đã xác nhận thành các bước tuần tự (Default Decomposition Proposal) để phá vỡ tê liệt khởi động.
+Nếu `user_step_proposal` khác null, tôn trọng ý tưởng của người dùng. Nếu ý tưởng thiếu rõ ràng hoặc mâu thuẫn phạm vi, đặt requires_clarification=true, clarification_question là 1 câu hỏi gộp và steps=[]; ngược lại requires_clarification=false, clarification_question=null.
 
-Với việc dài hạn, chỉ chia Steps chi tiết cho phạm vi đầu phù hợp horizon được cung cấp. Giữ tổng quan chưa chia ở `unexpanded_scope` (null nếu đã chia đầy đủ). Không tạo Part, Steps giả hoặc khẳng định phần sau đã có lịch. Thuật toán Python kiểm khả thi, AI không tính giờ bắt đầu/kết thúc Session.
-
-QUY TẮC BẤT BIẾN (STRICT GUARDRAILS — TUYỆT ĐỐI TUÂN THỦ):
-1. SỐ LƯỢNG BƯỚC VỪA SỨC: Chia công việc thành từ 2 đến 5 bước tuần tự (`steps`, `order_index` đánh số liên tục từ 1), mỗi bước có đầu ra cụ thể (`expected_output`) và thời lượng làm chính dự kiến gốc hợp lý (`estimated_minutes`, thường từ 15 đến 60 phút, CHƯA nhân hệ số đệm buffer).
-2. BẮT BUỘC CÓ MICRO-TASK KHỞI ĐỘNG 2 PHÚT (`micro_task_prompt`): Mỗi bước phải đi kèm duy nhất 1 hành động vật lý siêu nhỏ, không đòi hỏi suy nghĩ phức tạp, làm xong trong 2 phút đầu để kích hoạt đà hành động (ví dụ: "Mở sẵn file báo cáo trên máy và gõ dòng tiêu đề", KHÔNG dùng câu mơ hồ như "Bắt đầu nghiên cứu tài liệu").
-3. GẮN NHÃN TẢI NHẬN THỨC NGẦM (`cognitive_load`): Đánh giá mức tiêu hao năng lượng nhận thức của từng bước là `"light"`, `"medium"`, hoặc `"heavy"`.
-4. RANH GIỚI KIẾN TRÚC: Bạn CHỈ phân rã ngữ nghĩa từ Task sang Steps. TUYỆT ĐỐI KHÔNG tự chia thành các phiên (Sessions), KHÔNG tự cộng/trừ ngày giờ lịch biểu hay nhân hệ số buffer (việc xếp lịch do thuật toán Python đảm nhận 100%)."""
+QUY TẮC BẤT BIẾN (STRICT GUARDRAILS):
+1. PHẠM VI TOÀN KỲ & SỐ BƯỚC:
+   - Nếu `total_project_days <= 14`: chia từ 2 đến 7 bước (`15–120` phút/bước).
+   - Nếu `total_project_days > 14`: bắt buộc chia TOÀN BỘ phạm vi tới Deadline theo Cột mốc / Chương / Tuần (`6–18` bước, tối đa `20` bước, `60–480` phút/bước) để thuật toán Python tự cắt thành các Session `25p/5p`; đặt `unexpanded_scope=null` khi đã bao phủ đủ phạm vi.
+   - `order_index` đánh số liên tục từ 1; viết `title`, `expected_output`, `micro_task_prompt`, `reasoning` súc tích 1 câu.
+2. BẮT BUỘC CÓ MICRO-TASK KHỞI ĐỘNG 2 PHÚT (`micro_task_prompt`): 1 hành động vật lý siêu nhỏ làm xong trong 2 phút đầu (VD: "Mở file báo cáo và gõ tiêu đề").
+3. GẮN NHÃN TẢI NHẬN THỨC (`cognitive_load`): `"light"`, `"medium"`, hoặc `"heavy"`.
+4. RANH GIỚI KIẾN TRÚC: CHỈ phân rã ngữ nghĩa Task -> Steps. TUYỆT ĐỐI KHÔNG tự chia Session, KHÔNG tự tính ngày giờ hay nhân hệ số buffer."""
 
 UF2_PLAN_ADJUSTMENT_SYSTEM_PROMPT = """Bạn là chuyên gia hỗ trợ lập kế hoạch linh hoạt cho người mắc ADHD-I trên ứng dụng ProPlan VA.
 Ở bước 4 của UF2, người dùng đang xem phương án chia bước (`current_steps`), khung giờ rảnh (`current_free_slots`) và hạn chót (`current_deadline`), sau đó đưa ra yêu cầu điều chỉnh bằng ngôn ngữ tự nhiên (`user_instruction`).
@@ -512,12 +573,36 @@ class AIService:
             )
         return self._groq_client
 
-    def _extraction_profile(self) -> ExecutionTimingProfile:
-        """UF1 dùng cùng một deadline cho Flash-Lite và nhánh Qwen dự phòng."""
+    def _extraction_profile(
+        self,
+        text: str = "",
+        *,
+        followup: bool = False,
+        edits_locked_field: bool = False,
+        needs_user_decision: bool = False,
+        retrying_fallback_edit: bool = False,
+    ) -> ExecutionTimingProfile:
+        """Budget semantic work from the current turn and cap every provider at the same deadline."""
         hard = self._settings.AI_UF1_TIMEOUT_SECONDS
+        if self._settings.AI_UF1_ADAPTIVE_TIMEOUT_ENABLED and hard >= 1.0 and not needs_user_decision:
+            spans = len(_UF1_TIME_RANGE_RE.findall(text))
+            exceptions = len(_UF1_EXCEPTION_RE.findall(text))
+            relative_dates = len(_UF1_RELATIVE_DATE_RE.findall(text))
+            if edits_locked_field or spans >= 3 or exceptions >= 2 or (exceptions and spans >= 2):
+                hard = min(15.0, hard + 4.0)
+            elif (
+                retrying_fallback_edit
+                or spans >= 2
+                or relative_dates >= 2
+                or (relative_dates and spans)
+                or _UF1_CORRECTION_RE.search(text)
+                or (followup and sum(bool(pattern.search(text)) for pattern in _UF1_FOLLOWUP_FIELDS) >= 2)
+            ):
+                hard = min(15.0, hard + 2.0)
         fast_fail = self._settings.AI_UF1_GROQ_FAST_FAIL_SECONDS
         groq_hedge_at = fast_fail if (fast_fail >= 1.0 and hard - fast_fail >= 1.0) else None
-        return ExecutionTimingProfile(hard, hard, hard, groq_hedge_at=groq_hedge_at)
+        priority = min(hard, self._settings.AI_UF1_PRIMARY_PRIORITY_SECONDS)
+        return ExecutionTimingProfile(hard, priority, hard, groq_hedge_at=groq_hedge_at)
 
     def _interactive_profile(self) -> ExecutionTimingProfile:
         """Khung thời gian A cho chỉnh kế hoạch bằng ngôn ngữ tự nhiên và UF6."""
@@ -529,14 +614,35 @@ class AIService:
             groq_hedge_at=min(hard, self._settings.AI_GROQ_HEDGE_DELAY_SECONDS),
         )
 
-    def _decomposition_profile(self) -> ExecutionTimingProfile:
-        """Khung thời gian B cho luồng bẻ nhỏ công việc có màn hình Breathing Circle (UF2)."""
-        hard = self._settings.AI_UF2_TIMEOUT_SECONDS
+    def _decomposition_profile(
+        self,
+        *,
+        total_project_days: int = 14,
+        total_free_hours: float = 0.0,
+    ) -> ExecutionTimingProfile:
+        """Khung thời gian B 3 bậc theo quy mô công việc (RISK-UF2-03)."""
+        base_hard = self._settings.AI_UF2_TIMEOUT_SECONDS
+        if base_hard < 1.0 or (total_project_days <= 14 and total_free_hours <= 20.0):
+            return ExecutionTimingProfile(
+                hard_timeout=base_hard,
+                primary_priority_until=min(base_hard, self._settings.AI_UF2_PRIMARY_PRIORITY_SECONDS),
+                warm_backup_at=min(base_hard, self._settings.AI_UF2_WARM_BACKUP_DELAY_SECONDS),
+                groq_hedge_at=min(base_hard, self._settings.AI_UF2_GROQ_HEDGE_DELAY_SECONDS),
+            )
+        if total_project_days >= 46 or total_free_hours > 60.0:
+            hard = min(25.0, max(base_hard, 20.0))
+            return ExecutionTimingProfile(
+                hard_timeout=hard,
+                primary_priority_until=min(hard, 7.0),
+                warm_backup_at=min(hard, 3.0),
+                groq_hedge_at=min(hard, 6.5),
+            )
+        hard = min(25.0, max(base_hard, 14.0))
         return ExecutionTimingProfile(
             hard_timeout=hard,
-            primary_priority_until=min(hard, self._settings.AI_UF2_PRIMARY_PRIORITY_SECONDS),
-            warm_backup_at=min(hard, self._settings.AI_UF2_WARM_BACKUP_DELAY_SECONDS),
-            groq_hedge_at=min(hard, self._settings.AI_UF2_GROQ_HEDGE_DELAY_SECONDS),
+            primary_priority_until=min(hard, 5.5),
+            warm_backup_at=min(hard, 2.5),
+            groq_hedge_at=min(hard, 5.5),
         )
 
     async def _call_gemini_structured(
@@ -657,7 +763,9 @@ class AIService:
         if client is None:
             raise RuntimeError("GROQ_API_KEY chưa được cấu hình.")
 
-        schema_json = json.dumps(schema_cls.model_json_schema(), ensure_ascii=False)
+        schema_json = json.dumps(
+            schema_cls.model_json_schema(), ensure_ascii=False, separators=(",", ":")
+        )
         strict_system_prompt = (
             f"{system_prompt}\n\n"
             "BẮT BUỘC chỉ trả về duy nhất một đối tượng JSON hợp lệ khớp chính xác với JSON Schema sau "
@@ -666,15 +774,30 @@ class AIService:
 
         eligible = self._eligible_groq_models(allow_secondary=allow_secondary)
         available_models = [m for m in eligible if self._health.can_attempt("groq", m)]
+        if not available_models and not allow_secondary:
+            primary_groq = self._settings.GROQ_FALLBACK_MODEL.strip()
+            rec = self._health._records.get(("groq", primary_groq))
+            secondary = self._settings.GROQ_SECONDARY_FALLBACK_MODEL.strip()
+            if (
+                rec is not None
+                and rec.last_error_category == "rate_limit"
+                and "ratelimit" in (rec.last_error_type or "").lower()
+                and secondary
+                and self._health.can_attempt("groq", secondary)
+            ):
+                available_models = [secondary]
         if not available_models:
             raise RuntimeError("Toàn bộ model Groq đang tạm ngưng (Circuit Breaker OPEN).")
 
         loop = asyncio.get_running_loop()
         last_exc: Exception | None = None
-        for idx, groq_model in enumerate(available_models):
+        idx = 0
+        while idx < len(available_models):
+            groq_model = available_models[idx]
+            idx += 1
             if not self._health.acquire_attempt("groq", groq_model):
                 continue
-            is_last_model = idx == len(available_models) - 1
+            is_last_model = idx == len(available_models)
             max_attempts = 1 + (
                 self._max_transient_retries if (allow_retry and is_last_model) else 0
             )
@@ -683,15 +806,20 @@ class AIService:
                 if active_model_ref is not None:
                     active_model_ref[:] = [groq_model]
                 try:
-                    completion = await client.chat.completions.create(
-                        model=groq_model,
-                        messages=[
+                    create_kwargs: dict[str, Any] = {
+                        "model": groq_model,
+                        "messages": [
                             {"role": "system", "content": strict_system_prompt},
                             {"role": "user", "content": user_prompt},
                         ],
-                        response_format={"type": "json_object"},
-                        temperature=0.2,
-                    )
+                        "response_format": {"type": "json_object"},
+                        "temperature": 0.2,
+                    }
+                    if "gpt-oss" in groq_model.lower():
+                        create_kwargs["reasoning_effort"] = "low"
+                    if deadline is not None:
+                        create_kwargs["timeout"] = max(1.0, deadline - loop.time())
+                    completion = await client.chat.completions.create(**create_kwargs)
                     content = completion.choices[0].message.content
                     if not content:
                         raise ValueError(f"Groq ({groq_model}) trả về message content rỗng.")
@@ -720,6 +848,32 @@ class AIService:
                         category,
                         type(exc).__name__,
                     )
+                    rec_after = self._health._records.get(("groq", groq_model))
+                    is_sdk_rate_limit = (
+                        _extract_error_http_status(exc) == 429
+                        or "ratelimit" in type(exc).__name__.lower()
+                        or _extract_retry_after_s(exc) is not None
+                    )
+                    if (
+                        not allow_secondary
+                        and category == "rate_limit"
+                        and (
+                            is_sdk_rate_limit
+                            or (
+                                rec_after is not None
+                                and rec_after.consecutive_failures
+                                < self._health._failure_threshold
+                            )
+                        )
+                    ):
+                        secondary = self._settings.GROQ_SECONDARY_FALLBACK_MODEL.strip()
+                        if (
+                            secondary
+                            and secondary not in available_models
+                            and self._health.can_attempt("groq", secondary)
+                        ):
+                            available_models.append(secondary)
+                            break
                     remaining = (deadline - loop.time()) if deadline is not None else 0.0
                     if (
                         attempt < max_attempts
@@ -897,9 +1051,10 @@ class AIService:
         user_prompt: str,
         schema_cls: type[SchemaT],
         profile: ExecutionTimingProfile,
+        force_minimal_thinking: bool = False,
     ) -> tuple[SchemaT, GenerationTier]:
         """
-        UF1 chỉ gọi Flash-Lite và cho phép Qwen khi thiếu Gemini hoặc Gemini lỗi sớm.
+        UF1 chạy Gemini và có thể hedge sang Groq trong cùng ngân sách.
         Các luồng còn lại dùng điều phối ưu tiên chất lượng:
         0. Pre-check Circuit Breaker (<0.01ms): bỏ qua model/provider đang OPEN để không chờ vô ích.
         1. `0.0s`: Chạy Primary. Nếu xong trước `primary_priority_until` -> nhận ngay.
@@ -934,15 +1089,32 @@ class AIService:
             and self._health.can_attempt("gemini", backup_model)
         )
         eligible_groq = self._eligible_groq_models(allow_secondary=not is_uf1)
+        if is_uf1:
+            primary_groq = self._settings.GROQ_FALLBACK_MODEL.strip()
+            secondary_groq = self._settings.GROQ_SECONDARY_FALLBACK_MODEL.strip()
+            rec_groq = self._health._records.get(("groq", primary_groq))
+            if (
+                not any(self._health.can_attempt("groq", m) for m in eligible_groq)
+                and rec_groq is not None
+                and rec_groq.last_error_category == "rate_limit"
+                and "ratelimit" in (rec_groq.last_error_type or "").lower()
+                and secondary_groq
+                and secondary_groq not in eligible_groq
+                and self._health.can_attempt("groq", secondary_groq)
+            ):
+                eligible_groq = [*eligible_groq, secondary_groq]
         has_groq = has_groq_client and any(
             self._health.can_attempt("groq", m) for m in eligible_groq
         )
 
         # Trường hợp cả Gemini lẫn Groq đều không có chứng thực hoặc đang OPEN toàn bộ -> thoát ngay <1ms
         if not primary_available and not can_use_backup and not has_groq:
-            raise RuntimeError(
+            raise _NoEligibleProvider(
                 f"{flow_name}: Toàn bộ provider AI chưa cấu hình hoặc đang tạm ngưng (Circuit Breaker OPEN)."
             )
+
+        uf1_timeout_threshold = max(4, self._health._failure_threshold * 2) if is_uf1 else None
+        uf1_timeout_cooldown = min(15.0, self._health._cooldown_seconds) if is_uf1 else None
 
         def _record_groq_timeout(active_model_ref: list[str]) -> None:
             targets = active_model_ref or [
@@ -950,7 +1122,11 @@ class AIService:
             ]
             for gm in targets:
                 self._health.record_failure(
-                    "groq", gm, TimeoutError(f"{flow_name} timeout")
+                    "groq",
+                    gm,
+                    TimeoutError(f"{flow_name} timeout"),
+                    failure_threshold_override=uf1_timeout_threshold,
+                    cooldown_override=uf1_timeout_cooldown,
                 )
 
         # Không có Gemini khả dụng (chưa cấu hình hoặc cả Primary+Backup đều OPEN) -> chạy thẳng Groq ở 0.0s
@@ -973,13 +1149,15 @@ class AIService:
                     return groq_only.result(), "tier_2_groq"
                 if not groq_only.done():
                     _record_groq_timeout(groq_only_active_model)
+                if is_uf1:
+                    raise _UF1DeadlineExceeded(f"UF1 vượt trần {profile.hard_timeout}s.")
                 raise TimeoutError(f"{flow_name} vượt trần thời gian xử lý ({profile.hard_timeout}s).")
             finally:
                 self._cancel_provider_task(groq_only)
 
         primary_thinking_level = (
             types.ThinkingLevel.MINIMAL
-            if is_uf1 or "flash-lite" in primary_model.lower()
+            if force_minimal_thinking or is_uf1 or "flash-lite" in primary_model.lower()
             else types.ThinkingLevel.LOW
         )
         primary_task: asyncio.Task[SchemaT] | None = None
@@ -1056,14 +1234,26 @@ class AIService:
                         return warm_result
                     if primary_task is not None and not primary_task.done():
                         self._health.record_failure(
-                            "gemini", primary_model, TimeoutError(f"{flow_name} timeout")
+                            "gemini",
+                            primary_model,
+                            TimeoutError(f"{flow_name} timeout"),
+                            failure_threshold_override=uf1_timeout_threshold,
+                            cooldown_override=uf1_timeout_cooldown,
                         )
                     if backup_task is not None and not backup_task.done():
                         self._health.record_failure(
-                            "gemini", backup_model, TimeoutError(f"{flow_name} timeout")
+                            "gemini",
+                            backup_model,
+                            TimeoutError(f"{flow_name} timeout"),
+                            failure_threshold_override=uf1_timeout_threshold,
+                            cooldown_override=uf1_timeout_cooldown,
                         )
                     if groq_task is not None and not groq_task.done():
                         _record_groq_timeout(groq_active_model)
+                    if is_uf1:
+                        # Local deadline cancels valid in-flight work; only prolonged
+                        # repeated UF1 timeouts should trip the breaker (threshold >= 4).
+                        raise _UF1DeadlineExceeded(f"UF1 vượt trần {profile.hard_timeout}s.")
                     raise TimeoutError(
                         f"{flow_name} vượt trần thời gian xử lý ({profile.hard_timeout}s)."
                     )
@@ -1150,7 +1340,7 @@ class AIService:
                 )
                 groq_exhausted = not has_groq or groq_harvested or (is_uf1 and groq_task is None)
                 if primary_failed and backup_exhausted and groq_exhausted and warm_result is None:
-                    raise RuntimeError(f"{flow_name}: Toàn bộ các tầng AI đều thất bại.")
+                    raise _ProviderAttemptsExhausted(f"{flow_name}: Toàn bộ các tầng AI đều thất bại.")
 
                 # 7. Tính mốc đánh thức gần nhất để không dùng vòng lặp bận (no busy-polling)
                 next_wake = deadline
@@ -1204,6 +1394,30 @@ class AIService:
             return target_dt.replace(tzinfo=reference_dt.tzinfo)
         return target_dt.astimezone(reference_dt.tzinfo)
 
+    @staticmethod
+    def _build_relative_calendar_anchor(current_dt: datetime) -> dict[str, Any]:
+        """Sinh bảng neo ngày tương đối 14 ngày tới để AI đối chiếu chính xác 'hôm nay/mai/mốt/tuần này/tuần sau' (#6)."""
+        base_date = current_dt.date()
+        days_until_sunday = 7 - base_date.isoweekday()
+        upcoming: list[dict[str, Any]] = []
+        for offset in range(14):
+            d = base_date + timedelta(days=offset)
+            upcoming.append(
+                {
+                    "date": d.isoformat(),
+                    "weekday": d.isoweekday(),
+                    "week_offset": 0 if offset <= days_until_sunday else 1,
+                }
+            )
+        return {
+            "today": base_date.isoformat(),
+            "today_weekday_iso": base_date.isoweekday(),
+            "tomorrow_mai": (base_date + timedelta(days=1)).isoformat(),
+            "day_after_tomorrow_mot": (base_date + timedelta(days=2)).isoformat(),
+            "end_of_this_week_sunday": (base_date + timedelta(days=days_until_sunday)).isoformat(),
+            "upcoming_14_days": upcoming,
+        }
+
     # ==========================================================================
     # UF1: TRÍCH XUẤT MỤC TIÊU, HỢP NHẤT NHÁP & GỘP CÂU HỎI LÀM RÕ 1 VÒNG
     # ==========================================================================
@@ -1216,7 +1430,12 @@ class AIService:
         busy_intervals: list[dict[str, str]] | None = None,
         previous_draft: LLMTaskExtractionPayload | dict[str, Any] | None = None,
         default_free_windows: list[dict[str, Any]] | None = None,
+        locked_fields: list[str] | None = None,
         reference_now: datetime | None = None,
+        followup_message: str | None = None,
+        requested_edit_fields: tuple[str, ...] = (),
+        needs_user_decision: bool = False,
+        retrying_fallback_edit: bool = False,
     ) -> TaskExtractionResult:
         """
         Trích xuất 4 trường bắt buộc ở UF1 (hỗ trợ hợp nhất `previous_draft` khi người dùng trả lời
@@ -1230,21 +1449,39 @@ class AIService:
             parsed_draft = LLMTaskExtractionPayload.model_validate(previous_draft)
 
         cleaned_input = user_input.strip()
-        if not cleaned_input:
-            return self._fallback_extract_task("", previous_draft=parsed_draft)
-
         current_dt = self._resolve_current_dt(timezone, reference_now)
+        if not cleaned_input:
+            return self._fallback_extract_task(
+                "",
+                previous_draft=parsed_draft,
+                timezone=timezone,
+                reference_now=current_dt,
+            )
+
         context_payload: dict[str, Any] = {
             "current_datetime": current_dt.isoformat(),
             "user_timezone": timezone,
+            "relative_calendar_anchor": self._build_relative_calendar_anchor(current_dt),
             "previous_draft": (
-                parsed_draft.model_dump(mode="json") if parsed_draft is not None else None
+                parsed_draft.model_dump(mode="json", exclude_none=True)
+                if parsed_draft is not None
+                else None
             ),
             "default_free_windows": default_free_windows or [],
             "busy_intervals_from_calendar": busy_intervals or [],
             "user_raw_input": cleaned_input,
         }
-        user_prompt = json.dumps(context_payload, ensure_ascii=False)
+        if locked_fields:
+            context_payload["locked_fields"] = list(locked_fields)
+        user_prompt = json.dumps(context_payload, ensure_ascii=False, separators=(",", ":"))
+        profile = self._extraction_profile(
+            followup_message if followup_message is not None else cleaned_input,
+            followup=followup_message is not None,
+            edits_locked_field=bool(set(locked_fields or ()).intersection(requested_edit_fields)),
+            needs_user_decision=needs_user_decision,
+            retrying_fallback_edit=retrying_fallback_edit,
+        )
+        started = time.perf_counter()
 
         try:
             llm_payload, winner_tier = await self._execute_hedged_structured(
@@ -1252,26 +1489,50 @@ class AIService:
                 system_prompt=UF1_EXTRACTION_SYSTEM_PROMPT,
                 user_prompt=user_prompt,
                 schema_cls=LLMTaskExtractionPayload,
-                profile=self._extraction_profile(),
+                profile=profile,
             )
             result = TaskExtractionResult(
                 **llm_payload.model_dump(),
                 generation_tier=winner_tier,
             )
-            return self._enforce_uf1_temporal_guardrails(
+            verified = self._enforce_uf1_temporal_guardrails(
                 result,
                 current_dt=current_dt,
                 timezone=timezone,
                 previous_time_constraint=(
                     parsed_draft.time_constraint if parsed_draft is not None else None
                 ),
+                user_input=cleaned_input,
             )
+            logger.info(
+                "UF1 extraction tier=%s budget_s=%.2f latency_ms=%d",
+                winner_tier,
+                profile.hard_timeout,
+                round((time.perf_counter() - started) * 1000),
+            )
+            return verified
         except Exception as exc:
+            if isinstance(exc, _UF1DeadlineExceeded):
+                reason = "deadline_exhausted"
+            elif isinstance(exc, _NoEligibleProvider):
+                reason = "no_eligible_provider"
+            elif isinstance(exc, _ProviderAttemptsExhausted):
+                reason = "provider_attempts_exhausted"
+            else:
+                reason = _classify_provider_error(exc)[0]
             logger.warning(
-                "UF1 chuyển sang Tier 3 Rule-based do lỗi: %s",
+                "UF1 fallback reason=%s error=%s budget_s=%.2f latency_ms=%d",
+                reason,
                 type(exc).__name__,
+                profile.hard_timeout,
+                round((time.perf_counter() - started) * 1000),
             )
-            return self._fallback_extract_task(cleaned_input, previous_draft=parsed_draft)
+            return self._fallback_extract_task(
+                cleaned_input,
+                previous_draft=parsed_draft,
+                timezone=timezone,
+                reference_now=current_dt,
+            )
 
     @classmethod
     def _enforce_uf1_temporal_guardrails(
@@ -1281,12 +1542,53 @@ class AIService:
         current_dt: datetime,
         timezone: str = "Asia/Ho_Chi_Minh",
         previous_time_constraint: ExtractedTimeConstraint | None = None,
+        user_input: str = "",
     ) -> TaskExtractionResult:
         """
         Kiểm chứng thời gian bằng Python thuần túy (Hybrid Architecture Guardrail):
-        CẤM tin mù quáng phép so sánh ngày giờ của LLM — nếu deadline rơi vào quá khứ,
-        bắt buộc bật cờ has_conflict=True và is_complete=False.
+        1. Tự chỉnh năm quá khứ khi LLM điền nhầm năm cũ cho ngày không ghi năm (TC-LIVE-05 T2).
+        2. CẤM tin mù quáng phép so sánh ngày giờ của LLM — nếu deadline rơi vào quá khứ,
+           bắt buộc bật cờ has_conflict=True và is_complete=False.
         """
+        if result.structured_free_windows:
+            fixed_windows: list[ExtractedFreeWindowSchema] = []
+            windows_changed = False
+            for w in result.structured_free_windows:
+                w_updates: dict[str, Any] = {}
+                for attr in ("date", "date_from", "date_to"):
+                    raw_d = getattr(w, attr)
+                    if isinstance(raw_d, str) and len(raw_d) == 10:
+                        try:
+                            parsed_d = date.fromisoformat(raw_d)
+                        except ValueError:
+                            continue
+                        year_str = f"{parsed_d.year:04d}"
+                        if (
+                            parsed_d.year < current_dt.year
+                            and year_str not in w.raw_phrase
+                            and year_str not in user_input
+                        ):
+                            try:
+                                replaced_d = parsed_d.replace(year=current_dt.year)
+                                w_updates[attr] = replaced_d.isoformat()
+                            except ValueError:
+                                pass
+                if w_updates:
+                    w_payload = w.model_dump()
+                    w_payload.update(w_updates)
+                    if (
+                        w.is_ambiguous
+                        and w.clarification_hint
+                        and "mâu thuẫn giữa thứ và ngày" in w.clarification_hint
+                    ):
+                        w_payload["clarification_hint"] = None
+                    fixed_windows.append(ExtractedFreeWindowSchema.model_validate(w_payload))
+                    windows_changed = True
+                else:
+                    fixed_windows.append(w)
+            if windows_changed:
+                result = result.model_copy(update={"structured_free_windows": fixed_windows})
+
         tc = result.time_constraint
         tc_deadline = tc.deadline_at if tc is not None else None
         tc_finish_by = tc.finish_by_at if tc is not None else None
@@ -1374,11 +1676,14 @@ class AIService:
         user_input: str,
         *,
         previous_draft: LLMTaskExtractionPayload | None = None,
+        timezone: str = "Asia/Ho_Chi_Minh",
+        reference_now: datetime | None = None,
     ) -> TaskExtractionResult:
         """
         Tầng 3 (Rule-based Fallback cho UF1):
         Bảo toàn nguyên vẹn nội dung người dùng vừa nhập + mọi trường hợp lệ đã có trong
-        `previous_draft`, đánh dấu chưa đủ thông tin và chỉ hỏi gộp các phần còn thiếu.
+        `previous_draft`, trích nhẹ các mẫu 100% tường minh khi `prev_*` đang trống,
+        luôn giữ `is_complete=False` và chỉ hỏi gộp các phần còn thiếu.
         """
         cleaned = user_input.strip()
 
@@ -1400,6 +1705,7 @@ class AIService:
         prev_slots = list(previous_draft.free_time_slots) if previous_draft else []
         prev_windows = list(previous_draft.structured_free_windows) if previous_draft else []
         prev_deadline = previous_draft.deadline if previous_draft else None
+        prev_tc = previous_draft.time_constraint if previous_draft else None
         prev_extra = list(previous_draft.extra_requirements) if previous_draft else []
 
         if prev_content:
@@ -1410,6 +1716,132 @@ class AIService:
         else:
             content_val = cleaned if cleaned else None
             short_title = prev_title or (cleaned[:80] if cleaned else None)
+
+        if cleaned:
+            current_dt = self._resolve_current_dt(timezone, reference_now)
+            clauses = [c.strip() for c in _TIER3_CLAUSE_SPLIT_RE.split(cleaned) if c.strip()]
+
+            # 1. Trích khung giờ tường minh 100% (chỉ khi chưa có giờ rảnh)
+            if not prev_windows and not prev_slots:
+                extracted_windows: list[ExtractedFreeWindowSchema] = []
+                for clause in clauses:
+                    if _TIER3_BUSY_HINT_RE.search(clause):
+                        continue
+                    time_range = _extract_explicit_time_range(clause)
+                    if time_range is None:
+                        continue
+                    s_local, e_local = time_range
+                    phrase = clause[:200]
+                    candidate: ExtractedFreeWindowSchema | None = None
+                    if _TIER3_DAILY_RE.search(clause):
+                        candidate = ExtractedFreeWindowSchema(
+                            kind="daily",
+                            start_local=s_local,
+                            end_local=e_local,
+                            raw_phrase=phrase,
+                        )
+                    elif _TIER3_WEEKDAYS_RE.search(clause):
+                        candidate = ExtractedFreeWindowSchema(
+                            kind="weekly_rule",
+                            weekdays=[1, 2, 3, 4, 5],
+                            start_local=s_local,
+                            end_local=e_local,
+                            raw_phrase=phrase,
+                        )
+                    elif _TIER3_WEEKEND_RE.search(clause):
+                        candidate = ExtractedFreeWindowSchema(
+                            kind="weekly_rule",
+                            weekdays=[6, 7],
+                            start_local=s_local,
+                            end_local=e_local,
+                            raw_phrase=phrase,
+                        )
+                    elif (
+                        not _TIER3_DEADLINE_PREFIX_RE.search(clause)
+                        and (dmy := _TIER3_EXPLICIT_DMY_RE.search(clause)) is not None
+                    ):
+                        try:
+                            d_obj = date(int(dmy.group(3)), int(dmy.group(2)), int(dmy.group(1)))
+                            candidate = ExtractedFreeWindowSchema(
+                                kind="specific_date",
+                                date=d_obj.isoformat(),
+                                start_local=s_local,
+                                end_local=e_local,
+                                raw_phrase=phrase,
+                            )
+                        except ValueError:
+                            candidate = None
+                    elif (
+                        not _TIER3_DEADLINE_PREFIX_RE.search(clause)
+                        and not _UF1_RELATIVE_DATE_RE.search(clause)
+                        and (
+                            single_wd := _extract_single_spoken_weekday(
+                                _TIER3_NON_WEEKDAY_ORDINAL_RE.sub(" ", clause)
+                            )
+                        )
+                        is not None
+                    ):
+                        candidate = ExtractedFreeWindowSchema(
+                            kind="weekly_rule",
+                            weekday=single_wd,
+                            start_local=s_local,
+                            end_local=e_local,
+                            raw_phrase=phrase,
+                        )
+                    if candidate is not None and not candidate.is_ambiguous:
+                        extracted_windows.append(candidate)
+                if extracted_windows:
+                    prev_windows = extracted_windows
+                    prev_slots = [w.raw_phrase for w in extracted_windows]
+
+            # 2. Trích hạn chót tường minh 100% (từ khóa + DD/MM/YYYY + giờ rõ, chỉ khi chưa có deadline)
+            has_prev_tc_end = prev_tc is not None and (
+                prev_tc.deadline_at is not None or prev_tc.finish_by_at is not None
+            )
+            if prev_deadline is None and not has_prev_tc_end:
+                for clause in clauses:
+                    if not _TIER3_DEADLINE_PREFIX_RE.search(clause):
+                        continue
+                    dmy = _TIER3_EXPLICIT_DMY_RE.search(clause)
+                    if dmy is None:
+                        continue
+                    clause_without_date = clause[: dmy.start()] + " " + clause[dmy.end() :]
+                    tm = _TIER3_EXPLICIT_TIME_RE.search(clause_without_date)
+                    if tm is None:
+                        continue
+                    hh = int(tm.group(1))
+                    mm = int(tm.group(2) or tm.group(3) or 0)
+                    if hh == 24 and mm == 0:
+                        hh, mm = 23, 59
+                    if not (0 <= hh <= 23 and 0 <= mm <= 59):
+                        continue
+                    try:
+                        dl_dt = datetime(
+                            int(dmy.group(3)),
+                            int(dmy.group(2)),
+                            int(dmy.group(1)),
+                            hh,
+                            mm,
+                            tzinfo=current_dt.tzinfo,
+                        )
+                    except ValueError:
+                        continue
+                    prev_deadline = dl_dt
+                    if dl_dt > current_dt:
+                        prev_tc = ExtractedTimeConstraint(
+                            kind="deadline",
+                            start_at=current_dt,
+                            deadline_at=dl_dt,
+                            input_timezone=timezone,
+                        )
+                    break
+
+            # 3. Trích extra_requirements số học tường minh
+            for pattern in _TIER3_EXTRA_REQ_PATTERNS:
+                for match in pattern.finditer(cleaned):
+                    req = match.group(0).strip()
+                    if req and req not in prev_extra:
+                        prev_extra.append(req)
 
         questions: list[str] = []
         if not content_val:
@@ -1436,7 +1868,7 @@ class AIService:
             free_time_slots=prev_slots,
             structured_free_windows=prev_windows,
             goal=previous_draft.goal if previous_draft else None,
-            time_constraint=previous_draft.time_constraint if previous_draft else None,
+            time_constraint=prev_tc,
             clarification_issues=previous_draft.clarification_issues if previous_draft else [],
             deadline=prev_deadline,
             extra_requirements=prev_extra,
@@ -1451,6 +1883,44 @@ class AIService:
     # UF2 (BƯỚC 1): PHÂN RÃ CÔNG VIỆC CHỦ ĐỘNG & GỢI Ý MICRO-TASK 2 PHÚT
     # ==========================================================================
 
+    _UF2_PROPOSAL_INLINE_SPLIT_RE = re.compile(
+        r"(?:^|(?<=\s))(?=(?:bước\s*\d+\s*[:.)\-]?|\d+[.)](?=\s*[^\d\s])|[•](?=\s*\S)|-(?=\s+\S)))",
+        re.IGNORECASE,
+    )
+    _UF2_PROPOSAL_PREFIX_RE = re.compile(
+        r"^(?:bước\s*\d+\s*[:.)\-]?|\d+[.)]|[•\-])\s*",
+        re.IGNORECASE,
+    )
+    _UF2_DURATION_RE = re.compile(
+        r"(?:(\d+)\s*(?:h|giờ|tiếng)\s*(\d{1,2})\s*(?:p|phút)?|(\d+(?:[.,]\d+)?)\s*(phút|p|giờ|tiếng|h)(?![a-zà-ỹ0-9_]))",
+        re.IGNORECASE,
+    )
+    _UF2_TRAILING_DUR_RE = re.compile(
+        r"\s*(?:\(|[-–:])?\s*(?:\d+\s*(?:h|giờ|tiếng)\s*\d{1,2}\s*(?:p|phút)?|\d+(?:[.,]\d+)?\s*(?:phút|p|giờ|tiếng|h))\s*\)?\s*$",
+        re.IGNORECASE,
+    )
+    _UF2_DRAFT_UPDATE_RE = re.compile(
+        r"(?:giờ\s*rảnh|khung\s*giờ|thời\s*hạn|deadline|hạn\s*chót|lùi\s*hạn|dời\s*hạn|ngày\s*bắt\s*đầu|mốc\s*bắt\s*đầu|múi\s*giờ|timezone)",
+        re.IGNORECASE,
+    )
+
+    @classmethod
+    def _extract_duration_minutes(cls, text: str) -> list[int]:
+        minutes: list[int] = []
+        for match in cls._UF2_DURATION_RE.finditer(text):
+            h_str, m_str, num_str, unit_str = match.groups()
+            if h_str is not None and m_str is not None:
+                val_min = int(h_str) * 60 + int(m_str)
+            elif num_str is not None and unit_str is not None:
+                num = float(num_str.replace(",", "."))
+                unit = unit_str.lower()
+                val_min = round(num * 60) if unit in {"giờ", "tiếng", "h"} else round(num)
+            else:
+                continue
+            if val_min > 0:
+                minutes.append(val_min)
+        return minutes
+
     async def decompose_task(
         self,
         *,
@@ -1460,11 +1930,12 @@ class AIService:
         user_step_proposal: str | None = None,
         user_focus_duration: int = 25,
         planning_horizon_days: int = 14,
+        total_project_days: int | None = None,
+        total_free_hours: float | None = None,
     ) -> TaskDecompositionResult:
         """
-        Sinh Default Decomposition Proposal (2–5 bước + Micro-task 2 phút) ở UF2
-        theo khung thời gian B (trần 9.0s, ưu tiên 3.8-flash tới 7.5s, Warm Backup 3.5-flash-lite từ 3.1s).
-        Hỗ trợ `user_step_proposal` (O05) nếu người dùng chủ động gợi ý cách chia bước.
+        Sinh Default Decomposition Proposal (2–7 bước <= 14d hoặc toàn kỳ tối đa 20 bước) ở UF2
+        theo khung thời gian B 3 bậc. Hỗ trợ `user_step_proposal` (O05).
         """
         cleaned_title = task_title.strip() or "Công việc cần thực hiện"
         cleaned_proposal = (
@@ -1472,6 +1943,8 @@ class AIService:
             if user_step_proposal and user_step_proposal.strip()
             else None
         )
+        eff_days = total_project_days if total_project_days is not None else planning_horizon_days
+        eff_free_hours = float(total_free_hours) if total_free_hours is not None else 0.0
         context_payload: dict[str, Any] = {
             "task_title": cleaned_title,
             "scope": scope,
@@ -1479,6 +1952,8 @@ class AIService:
             "user_step_proposal": cleaned_proposal,
             "preferred_focus_duration_minutes": user_focus_duration,
             "planning_horizon_days": planning_horizon_days,
+            "total_project_days": eff_days,
+            "total_free_hours": eff_free_hours,
         }
         user_prompt = json.dumps(context_payload, ensure_ascii=False)
 
@@ -1488,7 +1963,11 @@ class AIService:
                 system_prompt=UF2_DECOMPOSITION_SYSTEM_PROMPT,
                 user_prompt=user_prompt,
                 schema_cls=LLMTaskDecompositionPayload,
-                profile=self._decomposition_profile(),
+                profile=self._decomposition_profile(
+                    total_project_days=eff_days,
+                    total_free_hours=eff_free_hours,
+                ),
+                force_minimal_thinking=(eff_days > 14),
             )
             if not llm_payload.requires_clarification and any(
                 not step.expected_output or not step.expected_output.strip()
@@ -1505,7 +1984,13 @@ class AIService:
                 type(exc).__name__,
             )
             return self._fallback_decompose_task(
-                cleaned_title, user_focus_duration=user_focus_duration, scope=scope
+                cleaned_title,
+                user_focus_duration=user_focus_duration,
+                scope=scope,
+                user_step_proposal=cleaned_proposal,
+                extra_requirements=extra_requirements,
+                planning_horizon_days=planning_horizon_days,
+                total_project_days=eff_days,
             )
 
     def _fallback_decompose_task(
@@ -1513,16 +1998,66 @@ class AIService:
         task_title: str,
         user_focus_duration: int = 25,
         scope: str | None = None,
+        *,
+        user_step_proposal: str | None = None,
+        extra_requirements: list[str] | None = None,
+        planning_horizon_days: int = 14,
+        total_project_days: int | None = None,
     ) -> TaskDecompositionResult:
         """
         Tầng 3 (Rule-based Fallback cho UF2):
-        Khi mất kết nối tới cả 2 tầng AI, tự động chia thành 3 bước chuẩn theo thời lượng
-        tập trung mặc định của người dùng kèm Micro-task khởi động 2 phút cụ thể.
+        Ưu tiên tách theo `user_step_proposal` nếu có danh sách bước phân tách được (tối đa 20 bước),
+        ngược lại tự động chia thành 3 bước chuẩn theo thời lượng mặc định kèm Micro-task 2 phút.
         """
+        _ = extra_requirements, planning_horizon_days, total_project_days
         cleaned_title = (task_title.strip() or "Công việc hiện tại")[:100]
-        safe_duration = max(5, min(180, user_focus_duration))
-        scope_hint = f" ({scope.strip()[:80]})" if scope and scope.strip() else ""
+        safe_duration = max(5, min(480, user_focus_duration))
 
+        if user_step_proposal and user_step_proposal.strip():
+            normalized = self._UF2_PROPOSAL_INLINE_SPLIT_RE.sub(
+                "\n", user_step_proposal.strip()
+            )
+            raw_chunks = [
+                part.strip(" \t\r\n.,")
+                for line in normalized.splitlines()
+                for part in line.split(";")
+                if part.strip(" \t\r\n.,")
+            ]
+            parsed_items: list[tuple[str, int]] = []
+            for idx, chunk in enumerate(raw_chunks):
+                cleaned_chunk = self._UF2_PROPOSAL_PREFIX_RE.sub("", chunk).strip()
+                if not cleaned_chunk:
+                    continue
+                if idx == 0 and len(raw_chunks) >= 3 and cleaned_chunk.endswith(":"):
+                    continue
+                durations = self._extract_duration_minutes(cleaned_chunk)
+                est_min = max(5, min(480, durations[0])) if durations else safe_duration
+                stripped_title = self._UF2_TRAILING_DUR_RE.sub("", cleaned_chunk).strip(" -–:,.")
+                step_title = stripped_title if len(stripped_title) >= 3 else cleaned_chunk
+                parsed_items.append((step_title[:255], est_min))
+
+            if len(parsed_items) >= 2:
+                proposal_steps = [
+                    StepPromptItem(
+                        order_index=idx + 1,
+                        title=step_title,
+                        expected_output=f"Hoàn thành đầu ra của bước: {step_title[:160]}",
+                        estimated_minutes=est_min,
+                        micro_task_prompt=f"Mở tài liệu và bắt đầu 2 phút cho: {step_title[:180]}",
+                        cognitive_load="medium",
+                    )
+                    for idx, (step_title, est_min) in enumerate(parsed_items[:20])
+                ]
+                return TaskDecompositionResult(
+                    task_title=cleaned_title,
+                    steps=proposal_steps,
+                    reasoning=(
+                        f"Đã giữ đúng {len(proposal_steps)} bước theo gợi ý của bạn ở chế độ dự phòng ngoại tuyến."
+                    ),
+                    generation_tier="tier_3_rule_based",
+                )
+
+        scope_hint = f" ({scope.strip()[:80]})" if scope and scope.strip() else ""
         steps = [
             StepPromptItem(
                 order_index=1,
@@ -1563,6 +2098,29 @@ class AIService:
             ),
             generation_tier="tier_3_rule_based",
         )
+
+    @classmethod
+    def _fallback_adjust_candidate_by_nl(
+        cls,
+        instruction: str,
+        snapshots: list[dict[str, Any]],
+    ) -> CandidateAdjustmentResult | None:
+        """Fallback offline an toàn cho `adjust_candidate_by_nl` (Option 2A: chỉ giữ DRAFT_UPDATE_REQUIRED)."""
+        _ = snapshots
+        if cls._UF2_DRAFT_UPDATE_RE.search(instruction):
+            return CandidateAdjustmentResult(
+                step_edits=[],
+                requires_clarification=True,
+                clarification_question=(
+                    "Yêu cầu có liên quan tới thay đổi giờ rảnh hoặc thời hạn, "
+                    "hãy sửa trực tiếp trên bản tóm tắt và xác nhận lại UF1 giúp mình nhé."
+                ),
+                requires_draft_update=True,
+                unsupported_changes=[],
+                assistant_note="Mình chưa thay đổi phương án hiện tại.",
+                generation_tier="tier_3_rule_based",
+            )
+        return None
 
     # ==========================================================================
     # UF2 (BƯỚC 4): ĐIỀU CHỈNH KẾ HOẠCH BẰNG NGÔN NGỮ TỰ NHIÊN ("TÙY CHỈNH THEO Ý TÔI")
@@ -1628,6 +2186,9 @@ class AIService:
             return CandidateAdjustmentResult(**values, generation_tier=tier)
         except Exception as exc:
             logger.warning("UF2 Candidate edit chưa hợp lệ: %s", type(exc).__name__)
+            fallback = self._fallback_adjust_candidate_by_nl(instruction, snapshots)
+            if fallback is not None:
+                return fallback
             raise TimeoutError(
                 "AI Candidate adjustment unavailable; keep the current plan"
             ) from exc
@@ -1842,10 +2403,17 @@ class AIService:
         raw_reason = (trigger_reason or "").strip().lower()
         reason_aliases = {
             "partial": "incomplete",
+            "checkin_incomplete": "incomplete",
+            "checkin_busy": "busy",
+            "checkin_skipped": "skipped",
             "settings_change": "setting_changed",
             "no_response": "missed_session",
             "no_respond": "missed_session",
+            "missed_start": "missed_session",
+            "early_completion_pull_forward": "step_completed_early",
+            "expand_next_horizon": "expand_horizon",
             "user_requested": "manual",
+            "user_reschedule": "manual",
         }
         reason = reason_aliases.get(raw_reason, raw_reason)
 

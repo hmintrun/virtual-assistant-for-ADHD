@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from typing import Annotated
-from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
+from urllib.parse import parse_qsl, urlencode, urlparse, urlsplit, urlunparse
 from uuid import UUID
 
 from fastapi import APIRouter, Query, status
@@ -24,8 +24,9 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
 from app.api.deps import CurrentUserDep, DbSessionDep
+from app.core.config import settings
 from app.core.errors import AppError
-from app.models.calendar import CalendarPreview, CalendarSyncJob
+from app.models.calendar import CalendarConnection, CalendarPreview, CalendarSyncJob
 from app.schemas.calendar import (
     CalendarAuthorizationRequest,
     CalendarAuthorizationResponse,
@@ -44,9 +45,13 @@ from app.schemas.calendar import (
     EventChangePreviewResponse,
     OAuthAuthUrlResponse,
 )
-from app.schemas.common import SuccessEnvelope, build_response_meta
-from app.services.calendar_service import CalendarService, _resolve_uuid
-from app.services.calendar_sync_worker import process_calendar_sync_jobs
+from app.schemas.common import FieldError, SuccessEnvelope, build_response_meta
+from app.services import command_service
+from app.services.calendar_service import CalendarService, _resolve_uuid, get_owner_calendar_lock
+from app.services.calendar_sync_worker import (
+    get_connection_sync_lock,
+    process_calendar_sync_jobs,
+)
 from app.services.google_calendar_client import CalendarAuthError, CalendarClientError
 from app.services.planning.calendar_ingestion import normalize_google_event
 
@@ -69,11 +74,26 @@ def _calendar_client_error(exc: CalendarClientError) -> AppError:
         code = "RESOURCE_NOT_FOUND"
         next_action = "check_calendar_connection"
     elif exc.status_code == 409:
-        code = "CALENDAR_CONFLICT"
-        next_action = "reload_and_review"
+        if exc.error_code in {
+            "REVISION_CONFLICT",
+            "PREVIEW_EXPIRED",
+            "PREVIEW_ALREADY_PROCESSED",
+            "CALENDAR_CONFLICT",
+        }:
+            code = exc.error_code
+        else:
+            code = "CALENDAR_CONFLICT"
+        next_action = (
+            "create_preview"
+            if code in {"PREVIEW_EXPIRED", "PREVIEW_ALREADY_PROCESSED"}
+            else "reload_and_review"
+        )
     elif exc.status_code == 400:
         code = "VALIDATION_ERROR"
         next_action = "fix_request"
+    elif exc.status_code == 422:
+        code = "VALIDATION_ERROR"
+        next_action = "fix_fields"
     elif exc.status_code == 403:
         code = "CALENDAR_PERMISSION_DENIED"
         next_action = "reconnect_google_calendar"
@@ -139,6 +159,26 @@ async def get_authorization_url(
     return SuccessEnvelope(data=OAuthAuthUrlResponse(auth_url=auth_url), meta=build_response_meta())
 
 
+MOBILE_RETURN_TARGET = "proplan://calendar/connected"
+
+
+def _allowed_return_target(target: str | None) -> str | None:
+    """Chỉ nhận deep link của app hoặc route Calendar trên origin Web đã cấu hình."""
+    if not target or any(ord(char) <= 32 or ord(char) == 127 or char == "\\" for char in target):
+        return None
+    try:
+        parsed = urlsplit(target)
+    except ValueError:
+        return None
+    base = parsed._replace(query="", fragment="").geturl()
+    if base == MOBILE_RETURN_TARGET:
+        return target
+    web_target = parsed.geturl()
+    if any(web_target == f"{origin}/#/google-calendar" for origin in settings.browser_origins):
+        return target
+    return None
+
+
 def _append_query_params(url: str, params: dict[str, str | None]) -> str:
     """Nối các tham số query vào deep-link/redirect URL mà vẫn giữ nguyên query cũ."""
     parsed = urlparse(url)
@@ -168,7 +208,7 @@ async def oauth_callback(
             return_target = await service.handle_oauth_error(state=state)
         except CalendarAuthError as exc:
             raise _calendar_auth_error(exc) from exc
-        base_target = return_target or "proplan://calendar/connected"
+        base_target = _allowed_return_target(return_target) or MOBILE_RETURN_TARGET
         target_url = _append_query_params(
             base_target,
             {"error": error or "missing_code", "error_description": error_description},
@@ -186,7 +226,10 @@ async def oauth_callback(
     except CalendarClientError as exc:
         raise _calendar_client_error(exc) from exc
 
-    target_url = return_target or f"proplan://calendar/connected?connection_id={conn.id}"
+    # Các yêu cầu OAuth đã lưu trước khi triển khai vẫn phải qua allowlist.
+    target_url = _allowed_return_target(return_target) or _append_query_params(
+        MOBILE_RETURN_TARGET, {"connection_id": str(conn.id)}
+    )
     return RedirectResponse(url=target_url, status_code=302)
 
 
@@ -311,6 +354,8 @@ async def create_configuration_preview(
         write_calendar_id=payload.write_calendar_id,
         existing_event_action=payload.existing_event_action,
         status=preview.status,
+        preview_revision=preview.revision,
+        base_connection_revision=preview.base_connection_revision,
     )
     return SuccessEnvelope(data=data, meta=build_response_meta())
 
@@ -514,9 +559,13 @@ async def create_event_change_preview(
         user_id=_resolve_uuid(current_user.user_id),
         connection_id=conn_id,
         kind="event_change",
+        base_connection_revision=conn.revision,
         payload=preview_payload,
         status="pending",
-        source_revisions={},
+        source_revisions={
+            "connection_revision": conn.revision,
+            "preview_revision": 1,
+        },
         expires_at=datetime.now(UTC) + timedelta(minutes=15),
     )
     db.add(preview)
@@ -530,6 +579,8 @@ async def create_event_change_preview(
         operation=payload.operation,
         status="pending",
         payload=preview_payload,
+        preview_revision=preview.revision,
+        base_connection_revision=preview.base_connection_revision,
     )
     return SuccessEnvelope(data=data, meta=build_response_meta())
 
@@ -546,91 +597,126 @@ async def confirm_event_change_preview(
     current_user: CurrentUserDep,
     db: DbSessionDep,
 ) -> SuccessEnvelope[CalendarSyncJobRead]:
-    preview = await db.get(CalendarPreview, preview_id)
-    if not preview or preview.user_id != _resolve_uuid(current_user.user_id):
-        raise _not_found("Bản xem trước thay đổi không tồn tại.")
-
-    if (
-        payload.expected_preview_revision is not None
-        and preview.base_connection_revision is not None
-        and preview.base_connection_revision != payload.expected_preview_revision
-    ):
-        raise AppError(
-            status_code=409,
-            code="REVISION_CONFLICT",
-            message="Phiên bản bản xem trước không khớp (đã bị cập nhật).",
-            next_action="reload_and_review",
-        )
-
-    now_utc = datetime.now(UTC)
-    if preview.expires_at and preview.expires_at < now_utc:
-        preview.status = "expired"
-        await db.commit()
-        raise AppError(
-            status_code=409,
-            code="PREVIEW_EXPIRED",
-            message="Bản xem trước thay đổi đã hết hạn (15 phút). Vui lòng tạo bản xem trước mới.",
-            next_action="create_preview",
-        )
-
     uid = _resolve_uuid(current_user.user_id)
-    idempotency_key = f"manual_event_change_{preview.id}"
-
-    # BUG-12: Kiểm tra idempotent job đã tồn tại chưa (phòng ngừa double-click)
-    existing_job = (
-        await db.scalars(
-            select(CalendarSyncJob).where(
-                CalendarSyncJob.user_id == uid,
-                CalendarSyncJob.idempotency_key == idempotency_key,
+    async with get_owner_calendar_lock(str(uid)):
+        await command_service.lock_owner(db, str(uid))
+        preview = (
+            await db.execute(
+                select(CalendarPreview)
+                .where(CalendarPreview.id == preview_id)
+                .execution_options(populate_existing=True)
             )
-        )
-    ).first()
+        ).scalar_one_or_none()
+        if not preview or preview.user_id != uid:
+            raise _not_found("Bản xem trước thay đổi không tồn tại.")
 
-    if existing_job:
-        data = CalendarSyncJobRead(
-            job_id=str(existing_job.id),
-            connection_id=str(existing_job.connection_id),
-            target_kind=existing_job.target_kind,
-            target_ref=existing_job.target_ref,
-            operation=existing_job.operation,
-            job_state=existing_job.job_state,
-            attempt_count=existing_job.attempt_count,
-            next_retry_at=existing_job.next_retry_at,
-            last_error_code=existing_job.last_error_code,
-        )
-        return SuccessEnvelope(data=data, meta=build_response_meta())
+        # Bước 2 (UF6-BUG-04 / RG05): bắt buộc expected_preview_revision không được null
+        if payload.expected_preview_revision is None:
+            raise AppError(
+                status_code=422,
+                code="VALIDATION_ERROR",
+                message="Thiếu expected_preview_revision khi xác nhận bản xem trước.",
+                field_errors=[
+                    FieldError(
+                        field_path="expected_preview_revision",
+                        message="expected_preview_revision là bắt buộc và không được để trống.",
+                    )
+                ],
+                next_action="fix_fields",
+            )
 
-    if preview.status != "pending":
-        raise AppError(
-            status_code=409,
-            code="PREVIEW_ALREADY_PROCESSED",
-            message="Bản xem trước đã được xử lý hoặc hết hạn.",
-            next_action="create_preview",
-        )
+        if preview.status == "pending" and payload.expected_preview_revision != preview.revision:
+            raise AppError(
+                status_code=409,
+                code="REVISION_CONFLICT",
+                message="Phiên bản bản xem trước không khớp (đã bị cập nhật).",
+                current_revisions={"preview_revision": preview.revision},
+                next_action="reload_and_review",
+            )
 
-    preview_data = preview.payload or {}
-    op = preview_data.get("operation", "create")
-    conn_id = _resolve_uuid(preview_data.get("connection_id", preview.connection_id))
+        # Bước 3: kiểm tra hết hạn TRƯỚC kiểm tra stale connection để giữ đúng 409 PREVIEW_EXPIRED
+        now_utc = datetime.now(UTC)
+        if preview.status == "pending" and preview.expires_at and preview.expires_at < now_utc:
+            preview.status = "expired"
+            await db.commit()
+            raise AppError(
+                status_code=409,
+                code="PREVIEW_EXPIRED",
+                message="Bản xem trước thay đổi đã hết hạn (15 phút). Vui lòng tạo bản xem trước mới.",
+                next_action="create_preview",
+            )
 
-    job = CalendarSyncJob(
-        user_id=uid,
-        connection_id=conn_id,
-        target_kind="event",
-        target_ref=preview_data.get("google_event_id") or str(preview.id),
-        operation=op,
-        idempotency_key=idempotency_key,
-        payload_snapshot=preview_data.get("payload", {}),
-        expected_google_etag=preview_data.get("expected_google_etag"),
-        job_state="queued",
-        attempt_count=0,
-    )
-    preview.status = "confirmed"
-    try:
-        db.add(job)
-        await db.commit()
-        await db.refresh(job)
-    except IntegrityError:
-        await db.rollback()
+        idempotency_key = f"manual_event_change_{preview.id}"
+
+        # Bước 4 (Idempotent replay khi đã confirmed): chấp nhận preview.revision hoặc preview.revision - 1
+        if preview.status == "confirmed":
+            valid_replay_revisions = {preview.revision, max(1, preview.revision - 1)}
+            if payload.expected_preview_revision not in valid_replay_revisions:
+                raise AppError(
+                    status_code=409,
+                    code="REVISION_CONFLICT",
+                    message="Phiên bản bản xem trước không khớp (đã bị cập nhật).",
+                    current_revisions={"preview_revision": preview.revision},
+                    next_action="reload_and_review",
+                )
+            existing_job = (
+                await db.scalars(
+                    select(CalendarSyncJob).where(
+                        CalendarSyncJob.user_id == uid,
+                        CalendarSyncJob.idempotency_key == idempotency_key,
+                    )
+                )
+            ).first()
+            if existing_job:
+                data = CalendarSyncJobRead(
+                    job_id=str(existing_job.id),
+                    connection_id=str(existing_job.connection_id),
+                    target_kind=existing_job.target_kind,
+                    target_ref=existing_job.target_ref,
+                    operation=existing_job.operation,
+                    job_state=existing_job.job_state,
+                    attempt_count=existing_job.attempt_count,
+                    next_retry_at=existing_job.next_retry_at,
+                    last_error_code=existing_job.last_error_code,
+                )
+                return SuccessEnvelope(data=data, meta=build_response_meta())
+
+        if preview.status != "pending":
+            raise AppError(
+                status_code=409,
+                code="PREVIEW_ALREADY_PROCESSED",
+                message="Bản xem trước đã được xử lý hoặc hết hạn.",
+                next_action="create_preview",
+            )
+
+        # Bước 5: kiểm tra stale connection (base_connection_revision == conn.revision)
+        preview_data = preview.payload or {}
+        conn_id = _resolve_uuid(preview_data.get("connection_id", preview.connection_id))
+        conn = (
+            await db.execute(
+                select(CalendarConnection)
+                .where(CalendarConnection.id == conn_id)
+                .execution_options(populate_existing=True)
+            )
+        ).scalar_one_or_none()
+        if not conn or conn.user_id != uid:
+            raise _not_found("Không tìm thấy kết nối lịch tương ứng.")
+        if (
+            preview.base_connection_revision is None
+            or conn.revision != preview.base_connection_revision
+        ):
+            raise AppError(
+                status_code=409,
+                code="REVISION_CONFLICT",
+                message="Kết nối lịch đã thay đổi kể từ khi tạo bản xem trước. Vui lòng tạo lại bản xem trước.",
+                current_revisions={
+                    "connection_revision": conn.revision,
+                    "preview_revision": preview.revision,
+                },
+                next_action="reload_and_review",
+            )
+
+        # Phòng ngừa double-click trước commit
         existing_job = (
             await db.scalars(
                 select(CalendarSyncJob).where(
@@ -640,22 +726,65 @@ async def confirm_event_change_preview(
             )
         ).first()
         if existing_job:
-            job = existing_job
-        else:
-            raise
+            data = CalendarSyncJobRead(
+                job_id=str(existing_job.id),
+                connection_id=str(existing_job.connection_id),
+                target_kind=existing_job.target_kind,
+                target_ref=existing_job.target_ref,
+                operation=existing_job.operation,
+                job_state=existing_job.job_state,
+                attempt_count=existing_job.attempt_count,
+                next_retry_at=existing_job.next_retry_at,
+                last_error_code=existing_job.last_error_code,
+            )
+            return SuccessEnvelope(data=data, meta=build_response_meta())
 
-    data = CalendarSyncJobRead(
-        job_id=str(job.id),
-        connection_id=str(job.connection_id),
-        target_kind=job.target_kind,
-        target_ref=job.target_ref,
-        operation=job.operation,
-        job_state=job.job_state,
-        attempt_count=job.attempt_count,
-        next_retry_at=job.next_retry_at,
-        last_error_code=job.last_error_code,
-    )
-    return SuccessEnvelope(data=data, meta=build_response_meta())
+        op = preview_data.get("operation", "create")
+
+        job = CalendarSyncJob(
+            user_id=uid,
+            connection_id=conn_id,
+            target_kind="event",
+            target_ref=preview_data.get("google_event_id") or str(preview.id),
+            operation=op,
+            idempotency_key=idempotency_key,
+            payload_snapshot=preview_data.get("payload", {}),
+            expected_google_etag=preview_data.get("expected_google_etag"),
+            job_state="queued",
+            attempt_count=0,
+        )
+        preview.status = "confirmed"
+        try:
+            db.add(job)
+            await db.commit()
+            await db.refresh(job)
+        except IntegrityError:
+            await db.rollback()
+            existing_job = (
+                await db.scalars(
+                    select(CalendarSyncJob).where(
+                        CalendarSyncJob.user_id == uid,
+                        CalendarSyncJob.idempotency_key == idempotency_key,
+                    )
+                )
+            ).first()
+            if existing_job:
+                job = existing_job
+            else:
+                raise
+
+        data = CalendarSyncJobRead(
+            job_id=str(job.id),
+            connection_id=str(job.connection_id),
+            target_kind=job.target_kind,
+            target_ref=job.target_ref,
+            operation=job.operation,
+            job_state=job.job_state,
+            attempt_count=job.attempt_count,
+            next_retry_at=job.next_retry_at,
+            last_error_code=job.last_error_code,
+        )
+        return SuccessEnvelope(data=data, meta=build_response_meta())
 
 
 # 57 | POST /api/v1/calendar/connections/{connection_id}/refresh
@@ -675,15 +804,23 @@ async def refresh_calendar(
     if not conn:
         raise _not_found("Không tìm thấy kết nối lịch.")
 
-    processed = await process_calendar_sync_jobs(db, user_id=current_user.user_id, limit=20)
-    try:
-        reconciled = await service.reconcile_external_link_changes(
-            current_user.user_id, connection_id
+    async with get_connection_sync_lock(connection_id):
+        db.expire_all()
+        processed = await process_calendar_sync_jobs(
+            db,
+            user_id=current_user.user_id,
+            connection_id=connection_id,
+            limit=20,
+            connection_lock_held=True,
         )
-    except CalendarAuthError as exc:
-        raise _calendar_auth_error(exc) from exc
-    except CalendarClientError as exc:
-        raise _calendar_client_error(exc) from exc
+        try:
+            reconciled = await service.reconcile_external_link_changes(
+                current_user.user_id, connection_id
+            )
+        except CalendarAuthError as exc:
+            raise _calendar_auth_error(exc) from exc
+        except CalendarClientError as exc:
+            raise _calendar_client_error(exc) from exc
 
     return SuccessEnvelope(
         data={
@@ -751,9 +888,17 @@ async def retry_sync_job(
     job.lease_expires_at = None
     await db.commit()
     await db.refresh(job)
+    job_connection_id = job.connection_id
 
-    # Thử xử lý ngay lập tức
-    await process_calendar_sync_jobs(db, user_id=current_user.user_id, limit=5)
+    # Thử xử lý ngay lập tức trong lock theo connection_id để tránh xung đột với background loop
+    async with get_connection_sync_lock(job_connection_id):
+        await process_calendar_sync_jobs(
+            db,
+            user_id=current_user.user_id,
+            connection_id=job_connection_id,
+            limit=5,
+            connection_lock_held=True,
+        )
     await db.refresh(job)
 
     data = CalendarSyncJobRead(

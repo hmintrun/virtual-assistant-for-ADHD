@@ -19,12 +19,13 @@ from app.models.step import Step
 from app.models.system import AuditEvent, CommandReceipt, Reminder
 from app.models.task import Task
 from app.models.thought import Thought
-from app.models.user import User, UserPreference
+from app.models.user import RefreshToken, User, UserPreference
 
 __all__ = [
     "Base",
     "User",
     "UserPreference",
+    "RefreshToken",
     "Task",
     "Step",
     "Session",

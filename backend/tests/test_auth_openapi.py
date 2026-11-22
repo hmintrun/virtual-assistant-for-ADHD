@@ -51,6 +51,7 @@ def test_login_and_calendar_callbacks_stay_public():
     for path, method in (
         ("/api/v1/auth/google", "post"),
         ("/api/v1/auth/refresh", "post"),
+        ("/api/v1/auth/logout", "post"),
         ("/api/v1/calendar/oauth/callback", "get"),
     ):
         assert not schema["paths"][path][method].get("security")
