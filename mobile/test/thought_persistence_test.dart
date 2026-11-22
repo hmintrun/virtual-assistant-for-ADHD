@@ -1,6 +1,9 @@
+import 'dart:convert';
 import 'dart:io';
 import 'package:dio/dio.dart';
+import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:provider/provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 import 'package:path/path.dart' as p;
@@ -10,10 +13,12 @@ import 'package:proplan_va/core/api_session.dart';
 import 'package:proplan_va/models/outbox_record.dart';
 import 'package:proplan_va/models/thought_model.dart';
 import 'package:proplan_va/providers/focus_provider.dart';
+import 'package:proplan_va/providers/task_provider.dart';
 import 'package:proplan_va/repositories/local_database_manager.dart';
 import 'package:proplan_va/repositories/local_outbox_repository.dart';
 import 'package:proplan_va/repositories/local_run_repository.dart';
 import 'package:proplan_va/repositories/local_thought_repository.dart';
+import 'package:proplan_va/screens/focus_screen.dart';
 import 'package:proplan_va/services/audio_recorder_service.dart';
 import 'package:proplan_va/services/outbox_replay_worker.dart';
 import 'package:proplan_va/services/timer_service.dart';
@@ -1120,6 +1125,375 @@ void main() {
       expect(record?.status, OutboxStatus.failed);
       expect(record?.lastError, 'Server 503 Service Unavailable');
       expect(record?.holdUntil, futureHoldUntil.toUtc());
+    });
+  });
+
+  group('Group 6: FocusProvider.loadThoughts Server Sync & Tombstone Reconciliation', () {
+    test(
+        'loadThoughts syncs remote items, reconciles local audio paths, and keeps pending thoughts',
+        () async {
+      final clock = TestClock(DateTime.utc(2026, 11, 22, 10, 0, 0));
+      final thoughtRepo = InMemoryThoughtRepository();
+      final outboxRepo = InMemoryOutboxRepository();
+      final runRepo = InMemoryRunRepository();
+      const userId = 'user_sync_test';
+
+      // 1. Existing synced local audio thought (only on device with localAudioPath)
+      final localAudio = ThoughtRecord(
+        clientThoughtId: 'c_local_audio',
+        createdAt: clock.now().subtract(const Duration(minutes: 10)),
+        undoDeadlineAt: clock.now().subtract(const Duration(minutes: 9)),
+        sourceRunId: 'run_1',
+        serverRunId: 'run_1',
+        inputType: 'audio',
+        localAudioPath: '/local/audio/c_local_audio.m4a',
+        isPendingSync: false,
+        serverThoughtId: 'srv_audio_1',
+      );
+      // 2. Unsynced local pending thought (not yet on server)
+      final pendingLocal = ThoughtRecord(
+        clientThoughtId: 'c_pending_local',
+        createdAt: clock.now(),
+        undoDeadlineAt: clock.now().add(const Duration(seconds: 5)),
+        inputType: 'text',
+        textContent: 'Suy nghĩ đang chờ đồng bộ',
+        isPendingSync: true,
+      );
+      await runRepo.saveThoughts([pendingLocal, localAudio]);
+
+      final dio = Dio();
+      dio.httpClientAdapter = _MockHttpClientAdapter((options) {
+        expect(options.path, '/thoughts');
+        return ResponseBody.fromString(
+          jsonEncode({
+            'data': {
+              'items': [
+                {
+                  'thought_id': 'srv_audio_1',
+                  'thought_revision': 1,
+                  'client_thought_id': 'c_local_audio',
+                  'source_run_id': 'run_1',
+                  'input_type': 'audio',
+                  'capture_state': 'raw_saved',
+                  'attempt_count': 1,
+                  'text_content': 'Ghi âm đã chép lời trên server',
+                },
+                {
+                  // Remote-only thought without created_at (matches backend ThoughtData)
+                  'thought_id': 'srv_remote_2',
+                  'thought_revision': 1,
+                  'client_thought_id': 'c_remote_2',
+                  'source_run_id': 'run_2',
+                  'input_type': 'text',
+                  'capture_state': 'saved',
+                  'attempt_count': 1,
+                  'text_content': 'Ghi chú từ máy khác',
+                },
+              ],
+              'next_cursor': null,
+            },
+          }),
+          200,
+          headers: {
+            Headers.contentTypeHeader: [Headers.jsonContentType],
+          },
+        );
+      });
+
+      final provider = FocusProvider(
+        ownerId: userId,
+        clock: clock,
+        api: ApiClient(dio: dio),
+        thoughtRepository: thoughtRepo,
+        outboxRepository: outboxRepo,
+        repository: runRepo,
+      );
+      addTearDown(provider.dispose);
+
+      await provider.loadThoughts();
+
+      expect(provider.thoughts.length, 3);
+      final pending = provider.thoughts
+          .firstWhere((t) => t.clientThoughtId == 'c_pending_local');
+      expect(pending.isPendingSync, isTrue);
+
+      final audioItem = provider.thoughts
+          .firstWhere((t) => t.clientThoughtId == 'c_local_audio');
+      expect(audioItem.localAudioPath, '/local/audio/c_local_audio.m4a');
+      expect(audioItem.textContent, 'Ghi âm đã chép lời trên server');
+      expect(audioItem.serverThoughtId, 'srv_audio_1');
+      expect(audioItem.isPendingSync, isFalse);
+
+      final remoteItem =
+          provider.thoughts.firstWhere((t) => t.clientThoughtId == 'c_remote_2');
+      expect(remoteItem.textContent, 'Ghi chú từ máy khác');
+      expect(remoteItem.serverThoughtId, 'srv_remote_2');
+      expect(remoteItem.isPendingSync, isFalse);
+
+      final storedRemote = await thoughtRepo.getThought('c_remote_2');
+      expect(storedRemote?.state, LocalThoughtState.synced);
+      expect(storedRemote?.serverThoughtId, 'srv_remote_2');
+    });
+
+    test(
+        'loadThoughts filters tombstoned items from server response (DEFECT-W4-01)',
+        () async {
+      final clock = TestClock(DateTime.utc(2026, 11, 22, 10, 5, 0));
+      final thoughtRepo = InMemoryThoughtRepository();
+      final outboxRepo = InMemoryOutboxRepository();
+      final runRepo = InMemoryRunRepository();
+      const userId = 'user_tombstone_sync';
+
+      await thoughtRepo.insertThought(
+        LocalThought(
+          id: 'c_deleted_ghost',
+          ownerId: userId,
+          title: 'Đã xóa cục bộ',
+          audioPath: '',
+          state: LocalThoughtState.tombstone,
+          serverThoughtId: 'srv_deleted_ghost',
+          createdAt: clock.now(),
+          updatedAt: clock.now(),
+        ),
+      );
+
+      final dio = Dio();
+      dio.httpClientAdapter = _MockHttpClientAdapter((options) {
+        return ResponseBody.fromString(
+          jsonEncode({
+            'data': {
+              'items': [
+                {
+                  'thought_id': 'srv_deleted_ghost',
+                  'thought_revision': 1,
+                  'client_thought_id': 'c_deleted_ghost',
+                  'input_type': 'text',
+                  'capture_state': 'saved',
+                  'attempt_count': 1,
+                  'text_content': 'Thẻ ma không được hồi sinh',
+                },
+                {
+                  'thought_id': 'srv_keep_me',
+                  'thought_revision': 1,
+                  'client_thought_id': 'c_keep_me',
+                  'input_type': 'text',
+                  'capture_state': 'saved',
+                  'attempt_count': 1,
+                  'text_content': 'Thẻ hợp lệ',
+                },
+              ],
+              'next_cursor': null,
+            },
+          }),
+          200,
+          headers: {
+            Headers.contentTypeHeader: [Headers.jsonContentType],
+          },
+        );
+      });
+
+      final provider = FocusProvider(
+        ownerId: userId,
+        clock: clock,
+        api: ApiClient(dio: dio),
+        thoughtRepository: thoughtRepo,
+        outboxRepository: outboxRepo,
+        repository: runRepo,
+      );
+      addTearDown(provider.dispose);
+
+      await provider.loadThoughts();
+
+      expect(
+        provider.thoughts.any((t) =>
+            t.clientThoughtId == 'c_deleted_ghost' ||
+            t.serverThoughtId == 'srv_deleted_ghost'),
+        isFalse,
+      );
+      expect(provider.thoughts.map((t) => t.clientThoughtId), ['c_keep_me']);
+    });
+
+    test(
+        'loadThoughts removes stale synced items missing on server when next_cursor is null while keeping pending items',
+        () async {
+      final clock = TestClock(DateTime.utc(2026, 11, 22, 10, 10, 0));
+      final thoughtRepo = InMemoryThoughtRepository();
+      final outboxRepo = InMemoryOutboxRepository();
+      final runRepo = InMemoryRunRepository();
+      const userId = 'user_stale_cleanup';
+
+      final staleSynced = ThoughtRecord(
+        clientThoughtId: 'c_stale_remote_del',
+        createdAt: clock.now().subtract(const Duration(minutes: 30)),
+        undoDeadlineAt: clock.now().subtract(const Duration(minutes: 29)),
+        inputType: 'text',
+        textContent: 'Đã bị xóa ở máy khác',
+        isPendingSync: false,
+        serverThoughtId: 'srv_deleted_remotely',
+      );
+      final pendingUnsynced = ThoughtRecord(
+        clientThoughtId: 'c_still_pending',
+        createdAt: clock.now(),
+        undoDeadlineAt: clock.now().add(const Duration(seconds: 5)),
+        inputType: 'text',
+        textContent: 'Chưa đẩy lên server',
+        isPendingSync: true,
+      );
+      await runRepo.saveThoughts([pendingUnsynced, staleSynced]);
+      await thoughtRepo.insertThought(
+        LocalThought(
+          id: 'c_stale_remote_del',
+          ownerId: userId,
+          title: 'Đã bị xóa ở máy khác',
+          audioPath: '',
+          state: LocalThoughtState.synced,
+          serverThoughtId: 'srv_deleted_remotely',
+          createdAt: clock.now(),
+          updatedAt: clock.now(),
+        ),
+      );
+
+      final dio = Dio();
+      dio.httpClientAdapter = _MockHttpClientAdapter((options) {
+        return ResponseBody.fromString(
+          jsonEncode({
+            'data': {
+              'items': const <Map<String, dynamic>>[],
+              'next_cursor': null,
+            },
+          }),
+          200,
+          headers: {
+            Headers.contentTypeHeader: [Headers.jsonContentType],
+          },
+        );
+      });
+
+      final provider = FocusProvider(
+        ownerId: userId,
+        clock: clock,
+        api: ApiClient(dio: dio),
+        thoughtRepository: thoughtRepo,
+        outboxRepository: outboxRepo,
+        repository: runRepo,
+      );
+      addTearDown(provider.dispose);
+
+      await provider.loadThoughts();
+
+      expect(provider.thoughts.map((t) => t.clientThoughtId), ['c_still_pending']);
+      expect(await thoughtRepo.getThought('c_stale_remote_del'), isNull);
+    });
+
+    test('loadThoughts preserves local thoughts when offline or server fails',
+        () async {
+      final clock = TestClock(DateTime.utc(2026, 11, 22, 10, 15, 0));
+      final thoughtRepo = InMemoryThoughtRepository();
+      final outboxRepo = InMemoryOutboxRepository();
+      final runRepo = InMemoryRunRepository();
+      const userId = 'user_offline_thoughts';
+
+      final offlineThought = ThoughtRecord(
+        clientThoughtId: 'c_offline_keep',
+        createdAt: clock.now(),
+        undoDeadlineAt: clock.now().add(const Duration(seconds: 5)),
+        inputType: 'text',
+        textContent: 'Giữ lại khi mất mạng',
+        isPendingSync: true,
+      );
+      await runRepo.saveThoughts([offlineThought]);
+
+      final dio = Dio();
+      dio.httpClientAdapter = _MockHttpClientAdapter((options) {
+        throw DioException(
+          requestOptions: options,
+          type: DioExceptionType.connectionError,
+          message: 'Offline',
+        );
+      });
+
+      final provider = FocusProvider(
+        ownerId: userId,
+        clock: clock,
+        api: ApiClient(dio: dio),
+        thoughtRepository: thoughtRepo,
+        outboxRepository: outboxRepo,
+        repository: runRepo,
+      );
+      addTearDown(provider.dispose);
+
+      await provider.loadThoughts();
+
+      expect(provider.thoughts.map((t) => t.clientThoughtId), ['c_offline_keep']);
+    });
+
+    testWidgets(
+        'ThoughtInboxScreen calls GET /thoughts on open and displays remote thoughts',
+        (tester) async {
+      final clock = TestClock(DateTime.utc(2026, 11, 22, 10, 20, 0));
+      final thoughtRepo = InMemoryThoughtRepository();
+      final outboxRepo = InMemoryOutboxRepository();
+      final runRepo = InMemoryRunRepository();
+      const userId = 'user_widget_thoughts';
+
+      var requestedPath = '';
+      final dio = Dio();
+      dio.httpClientAdapter = _MockHttpClientAdapter((options) {
+        requestedPath = options.path;
+        return ResponseBody.fromString(
+          jsonEncode({
+            'data': {
+              'items': [
+                {
+                  'thought_id': 'srv_ui_1',
+                  'thought_revision': 1,
+                  'client_thought_id': 'c_ui_1',
+                  'input_type': 'text',
+                  'capture_state': 'saved',
+                  'attempt_count': 1,
+                  'text_content': 'Ý tưởng đồng bộ từ server',
+                },
+              ],
+              'next_cursor': null,
+            },
+          }),
+          200,
+          headers: {
+            Headers.contentTypeHeader: [Headers.jsonContentType],
+          },
+        );
+      });
+
+      final focusProvider = FocusProvider(
+        ownerId: userId,
+        clock: clock,
+        api: ApiClient(dio: dio),
+        thoughtRepository: thoughtRepo,
+        outboxRepository: outboxRepo,
+        repository: runRepo,
+      );
+      final taskProvider = TaskProvider(ownerId: userId);
+      addTearDown(() {
+        focusProvider.dispose();
+        taskProvider.dispose();
+      });
+
+      await tester.pumpWidget(
+        MultiProvider(
+          providers: [
+            ChangeNotifierProvider<FocusProvider>.value(value: focusProvider),
+            ChangeNotifierProvider<TaskProvider>.value(value: taskProvider),
+          ],
+          child: const MaterialApp(
+            home: ThoughtInboxScreen(),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(requestedPath, '/thoughts');
+      expect(find.text('Ý tưởng đồng bộ từ server'), findsOneWidget);
+      expect(tester.takeException(), isNull);
     });
   });
 }

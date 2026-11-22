@@ -107,15 +107,22 @@ class AdaptationApi {
   Future<Map<String, dynamic>?> suggestion() =>
       _api.getOptionalData('/suggestions/current');
 
-  Future<void> respond(
-      Map<String, dynamic> suggestion, int revision, String action,
-      {Object? editedValue}) async {
+  Future<Map<String, dynamic>> respond(
+    Map<String, dynamic> suggestion,
+    int revision,
+    String action, {
+    Object? editedValue,
+    String? annoyanceFeedback,
+  }) {
     final id = Uri.encodeComponent(suggestion['suggestion_id'] as String);
-    await _command('/suggestions/$id/response', {
+    final feedback = annoyanceFeedback?.trim();
+    return _command('/suggestions/$id/response', {
       'expected_suggestion_revision': suggestion['suggestion_revision'],
       'expected_preference_revision': revision,
       'action': action,
       if (editedValue != null) 'edited_value': editedValue,
+      if (feedback != null && feedback.isNotEmpty)
+        'annoyance_feedback': feedback,
     });
   }
 

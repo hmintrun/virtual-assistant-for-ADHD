@@ -1178,6 +1178,14 @@ class _ThoughtInboxScreenState extends State<ThoughtInboxScreen> {
   bool _isConverting = false;
 
   @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) unawaited(context.read<FocusProvider>().loadThoughts());
+    });
+  }
+
+  @override
   void dispose() {
     _audioPlayer.dispose();
     super.dispose();

@@ -143,6 +143,7 @@ class ThoughtRecord {
   ThoughtRecord copyWith({
     bool? isPendingSync,
     String? serverThoughtId,
+    String? serverRunId,
     int? attemptCount,
     String? captureState,
     String? textContent,
@@ -153,7 +154,7 @@ class ThoughtRecord {
         createdAt: createdAt,
         undoDeadlineAt: undoDeadlineAt,
         sourceRunId: sourceRunId,
-        serverRunId: serverRunId,
+        serverRunId: serverRunId ?? this.serverRunId,
         inputType: inputType,
         textContent: textContent ?? this.textContent,
         localAudioPath: localAudioPath ?? this.localAudioPath,
@@ -394,6 +395,7 @@ class FocusProvider extends ChangeNotifier {
   Timer? _deleteUndoExpiry;
   Timer? _toastExpiry;
   bool _isFlushingOutbox = false;
+  bool _isLoadingThoughts = false;
   final Set<String> _undoneThoughtIds = {};
   ThoughtRecord? _pendingDeletedThought;
   bool _disposed = false;
@@ -1622,15 +1624,21 @@ class FocusProvider extends ChangeNotifier {
     if (_thoughtRepository != null) {
       tombstoneIds = (await _thoughtRepository.getTombstoneIds(_ownerId)).toSet();
     }
+    final pendingDeleteId = _pendingDeletedThought?.clientThoughtId;
 
     _thoughts
       ..clear()
-      ..addAll(loaded.where((t) => !tombstoneIds.contains(t.clientThoughtId)));
+      ..addAll(loaded.where((t) =>
+          !tombstoneIds.contains(t.clientThoughtId) &&
+          !_undoneThoughtIds.contains(t.clientThoughtId) &&
+          t.clientThoughtId != pendingDeleteId));
 
     if (_thoughtRepository != null) {
       final activeLocal = await _thoughtRepository.getActiveThoughts(_ownerId);
       for (final lt in activeLocal) {
-        if (!_thoughts.any((t) => t.clientThoughtId == lt.id)) {
+        if (!_undoneThoughtIds.contains(lt.id) &&
+            lt.id != pendingDeleteId &&
+            !_thoughts.any((t) => t.clientThoughtId == lt.id)) {
           _thoughts.add(
             ThoughtRecord(
               clientThoughtId: lt.id,
@@ -1676,6 +1684,178 @@ class FocusProvider extends ChangeNotifier {
     }
 
     _scheduleOutboxFlush();
+  }
+
+  /// Nạp suy nghĩ từ local rồi đồng bộ `GET /thoughts` kèm đối soát Tombstone.
+  Future<void> loadThoughts() async {
+    if (_disposed || _isLoadingThoughts) return;
+    _isLoadingThoughts = true;
+    try {
+      await _loadThoughts();
+      if (_disposed) return;
+
+      final serverItems = <Map<String, dynamic>>[];
+      String? cursor;
+      var reachedEnd = false;
+      for (var page = 0; page < 5; page++) {
+        final data = await _api.getData(
+          '/thoughts',
+          queryParameters: {
+            'limit': 100,
+            if (cursor != null) 'cursor': cursor,
+          },
+        );
+        final items = data['items'];
+        if (items is List) {
+          serverItems.addAll(items.whereType<Map<String, dynamic>>());
+        }
+        final nextCursor = data['next_cursor'] as String?;
+        if (nextCursor == null || nextCursor.isEmpty) {
+          reachedEnd = true;
+          break;
+        }
+        cursor = nextCursor;
+      }
+      if (_disposed) return;
+
+      final rawServerThoughtIds = <String>{};
+      final rawServerClientIds = <String>{};
+      for (final item in serverItems) {
+        final serverId = item['thought_id']?.toString();
+        final clientId = item['client_thought_id']?.toString();
+        if (serverId != null && serverId.isNotEmpty) {
+          rawServerThoughtIds.add(serverId);
+        }
+        if (clientId != null && clientId.isNotEmpty) {
+          rawServerClientIds.add(clientId);
+        }
+      }
+
+      var reconciled = _thoughtRepository != null
+          ? await _thoughtRepository.reconcileWithServer(_ownerId, serverItems)
+          : serverItems;
+      if (_disposed) return;
+
+      final pendingDeleteClientId = _pendingDeletedThought?.clientThoughtId;
+      final pendingDeleteServerId = _pendingDeletedThought?.serverThoughtId;
+      reconciled = reconciled.where((item) {
+        final serverId = item['thought_id']?.toString();
+        final clientId = item['client_thought_id']?.toString();
+        if (clientId != null &&
+            (_undoneThoughtIds.contains(clientId) ||
+                clientId == pendingDeleteClientId)) {
+          return false;
+        }
+        if (serverId != null &&
+            (_undoneThoughtIds.contains(serverId) ||
+                serverId == pendingDeleteServerId)) {
+          return false;
+        }
+        return true;
+      }).toList();
+
+      for (final item in reconciled) {
+        final serverId = item['thought_id'] as String?;
+        final clientId = (item['client_thought_id'] as String?) ?? serverId;
+        if (clientId == null || clientId.isEmpty) continue;
+
+        final rawType = item['input_type'] as String?;
+        final normalizedType =
+            rawType == 'raw_audio' ? 'audio' : (rawType ?? 'text');
+        final rawState = item['capture_state'] as String?;
+        final normalizedState =
+            rawState == 'raw_saved' ? 'saved' : (rawState ?? 'saved');
+        final textContent = item['text_content'] as String?;
+        final sourceRunId = item['source_run_id'] as String?;
+        final attemptCount = (item['attempt_count'] as int?) ?? 1;
+        final createdAt =
+            DateTime.tryParse(item['created_at'] as String? ?? '') ??
+                _clock.now().toUtc();
+
+        final existingIndex = _thoughts.indexWhere(
+          (t) =>
+              t.clientThoughtId == clientId ||
+              (serverId != null && t.serverThoughtId == serverId),
+        );
+        if (existingIndex >= 0) {
+          final existing = _thoughts[existingIndex];
+          final updated = existing.copyWith(
+            serverThoughtId: serverId ?? existing.serverThoughtId,
+            serverRunId: sourceRunId ?? existing.serverRunId,
+            isPendingSync: false,
+            textContent: existing.textContent ?? textContent,
+            captureState: normalizedState,
+          );
+          _thoughts[existingIndex] = updated;
+          if (_thoughtRepository != null && serverId != null) {
+            await _thoughtRepository.markSynced(
+              existing.clientThoughtId,
+              serverThoughtId: serverId,
+              asOf: _clock.now(),
+            );
+          }
+        } else {
+          final record = ThoughtRecord(
+            clientThoughtId: clientId,
+            createdAt: createdAt,
+            undoDeadlineAt: createdAt,
+            sourceRunId: sourceRunId,
+            serverRunId: sourceRunId,
+            inputType: normalizedType,
+            textContent: textContent,
+            localAudioPath: null,
+            attemptCount: attemptCount,
+            captureState: normalizedState,
+            isPendingSync: false,
+            serverThoughtId: serverId,
+          );
+          _thoughts.add(record);
+          if (_thoughtRepository != null) {
+            await _thoughtRepository.insertThought(
+              LocalThought(
+                id: clientId,
+                ownerId: _ownerId,
+                title: textContent,
+                audioPath: '',
+                sourceRunId: sourceRunId,
+                state: LocalThoughtState.synced,
+                serverThoughtId: serverId,
+                createdAt: createdAt.toUtc(),
+                updatedAt: _clock.now().toUtc(),
+              ),
+            );
+          }
+        }
+      }
+
+      if (reachedEnd) {
+        final toRemove = _thoughts
+            .where((t) =>
+                !t.isPendingSync &&
+                t.serverThoughtId != null &&
+                !rawServerThoughtIds.contains(t.serverThoughtId) &&
+                !rawServerClientIds.contains(t.clientThoughtId))
+            .toList();
+        for (final stale in toRemove) {
+          _thoughts.remove(stale);
+          if (_thoughtRepository != null) {
+            await _thoughtRepository.markTombstone(
+              stale.clientThoughtId,
+              asOf: _clock.now(),
+              ownerId: _ownerId,
+            );
+            await _thoughtRepository.purgeTombstone(stale.clientThoughtId);
+          }
+        }
+      }
+
+      await _repository.saveThoughts(List<ThoughtRecord>.from(_thoughts));
+    } catch (_) {
+      // Ngoại tuyến hoặc server tạm bận: giữ nguyên dữ liệu local đã nạp.
+    } finally {
+      _isLoadingThoughts = false;
+      if (!_disposed) _notify();
+    }
   }
 
   /// Đồng bộ hàng đợi Outbox lên Backend khi có kết nối mạng:

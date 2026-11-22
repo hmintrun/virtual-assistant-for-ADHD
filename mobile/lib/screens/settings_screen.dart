@@ -10,15 +10,18 @@ import '../widgets/shimmer_loading.dart';
 import 'focus_review_screens.dart';
 
 class SettingsScreen extends StatefulWidget {
-  const SettingsScreen({super.key});
+  const SettingsScreen({this.api, this.adaptation, super.key});
+
+  final ApiClient? api;
+  final AdaptationApi? adaptation;
 
   @override
   State<SettingsScreen> createState() => _SettingsScreenState();
 }
 
 class _SettingsScreenState extends State<SettingsScreen> {
-  final _api = ApiClient();
-  late final _adaptation = AdaptationApi(_api);
+  late final _api = widget.api ?? ApiClient();
+  late final _adaptation = widget.adaptation ?? AdaptationApi(_api);
   Map<String, dynamic>? _suggestion;
   String? _suggestionError;
   Map<String, dynamic>? _preferences;
@@ -81,19 +84,128 @@ class _SettingsScreenState extends State<SettingsScreen> {
     }
   }
 
-  Future<void> _respond(String action, {Object? editedValue}) async {
+  Future<void> _respond(
+    String action, {
+    Object? editedValue,
+    String? annoyanceFeedback,
+  }) async {
     final suggestion = _suggestion;
     final revision = _effectiveRevision;
     if (_busy || suggestion == null || revision == null) return;
     setState(() => _busy = true);
     try {
-      await _adaptation.respond(suggestion, revision, action,
-          editedValue: editedValue);
-      if (mounted) await _load();
+      final result = await _adaptation.respond(
+        suggestion,
+        revision,
+        action,
+        editedValue: editedValue,
+        annoyanceFeedback: annoyanceFeedback,
+      );
+      if (!mounted) return;
+      await _load();
+      if (!mounted) return;
+      if (result['pending_proposal_id'] case final String proposalId
+          when proposalId.isNotEmpty) {
+        await _reviewProposal(proposalId);
+        return;
+      }
+      if (action == 'accept' || action == 'edit') {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Đã áp dụng gợi ý cho phiên sau.'),
+            behavior: SnackBarBehavior.floating,
+          ),
+        );
+      }
     } on ApiException catch (error) {
       if (mounted) await _handleCommandError(error);
     } finally {
       if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Future<void> _rejectSuggestion() async {
+    if (_busy || _suggestion == null || _effectiveRevision == null) return;
+    final palette = context.melbel;
+    final textTheme = Theme.of(context).textTheme;
+    const options = [
+      (
+        value: '',
+        label: 'Chỉ bỏ qua lần này',
+        subtitle: 'Tạm ẩn gợi ý trong 7 ngày',
+        icon: Icons.schedule_rounded,
+      ),
+      (
+        value: 'too_frequent',
+        label: 'Gợi ý quá thường xuyên',
+        subtitle: 'Tạm ẩn gợi ý trong 14 ngày',
+        icon: Icons.notifications_paused_outlined,
+      ),
+      (
+        value: 'not_helpful',
+        label: 'Gợi ý chưa hữu ích',
+        subtitle: 'Tạm ẩn gợi ý trong 14 ngày',
+        icon: Icons.thumb_down_off_alt_rounded,
+      ),
+      (
+        value: 'interrupted_me',
+        label: 'Đang làm phiền tôi',
+        subtitle: 'Tạm ẩn gợi ý trong 14 ngày',
+        icon: Icons.do_not_disturb_on_outlined,
+      ),
+    ];
+
+    final selected = await showModalBottomSheet<String>(
+      context: context,
+      showDragHandle: true,
+      backgroundColor: palette.surface,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(28)),
+      ),
+      builder: (sheetContext) => SafeArea(
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.fromLTRB(16, 4, 16, 16),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Padding(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                child: Text(
+                  'Bỏ qua gợi ý này?',
+                  style: textTheme.titleMedium?.copyWith(
+                    color: palette.onSurface,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ),
+              const SizedBox(height: 6),
+              for (final option in options)
+                ListTile(
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(18),
+                  ),
+                  leading: Icon(option.icon, color: palette.sage),
+                  title: Text(option.label),
+                  subtitle: Text(
+                    option.subtitle,
+                    style: textTheme.bodySmall?.copyWith(
+                      color: palette.onSurfaceVariant,
+                    ),
+                  ),
+                  onTap: () => Navigator.of(sheetContext).pop(option.value),
+                ),
+            ],
+          ),
+        ),
+      ),
+    );
+    if (!mounted || selected == null) return;
+    if (selected.isEmpty) {
+      await _respond('reject');
+    } else {
+      await _respond('reject', annoyanceFeedback: selected);
     }
   }
 
@@ -102,6 +214,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       builder: (_) => ScheduleComparisonScreen(
         reason: 'Thay đổi cài đặt',
         proposalId: id,
+        api: _adaptation,
       ),
     ));
     if (mounted) await _load();
@@ -463,7 +576,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                           child: const Text('Tùy chỉnh'),
                         ),
                       TextButton(
-                        onPressed: _busy ? null : () => _respond('reject'),
+                        onPressed: _busy ? null : _rejectSuggestion,
                         child: const Text('Bỏ qua'),
                       ),
                     ],
