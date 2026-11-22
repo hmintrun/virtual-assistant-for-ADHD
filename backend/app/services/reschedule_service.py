@@ -3061,6 +3061,11 @@ async def _build_normal_proposal_plan(
         (calc_now + timedelta(days=14)) if trigger_reason == "expand_next_horizon" else None
     )
     expanded_steps_count = 0
+    remaining_unexpanded_scope: str | None = (
+        ((target_row.unexpanded_scope or "").strip() or None)
+        if target_row is not None
+        else None
+    )
 
     if trigger_reason == "expand_next_horizon" and target_row is not None:
         target_row_id = target_row.id
@@ -3184,15 +3189,17 @@ async def _build_normal_proposal_plan(
                 max((st.order_index for st in existing_task_steps), default=-1) + 1
             )
             raw_unexpanded = (target_row.unexpanded_scope or "").strip()
-            raw_parts = [
+            all_parts = [
                 seg.strip(" -•\t")
                 for line in raw_unexpanded.splitlines()
                 for seg in line.split(";")
                 if seg.strip(" -•\t")
             ]
-            if not raw_parts:
-                raw_parts = [raw_unexpanded]
-            raw_parts = raw_parts[:6]
+            if not all_parts and raw_unexpanded:
+                all_parts = [raw_unexpanded]
+            raw_parts = all_parts[:6]
+            leftover_parts = all_parts[6:]
+            remaining_unexpanded_scope = "; ".join(leftover_parts) if leftover_parts else None
 
             base_est_per_step = max(300, round(new_work_int / max(new_buffer, 1.0)))
             for idx, part_title in enumerate(raw_parts):
@@ -3253,7 +3260,7 @@ async def _build_normal_proposal_plan(
         {
             "expanded_steps_count": expanded_steps_count,
             "added_sessions_count": len(adds),
-            "unexpanded_scope": None,
+            "unexpanded_scope": remaining_unexpanded_scope,
         }
         if trigger_reason == "expand_next_horizon"
         else None
@@ -4706,12 +4713,19 @@ async def approve_proposal(
             except ValueError:
                 pass
         if changes.steps_to_add:
+            raw_feas = row.feasibility if isinstance(row.feasibility, dict) else {}
+            raw_preview = raw_feas.get("next_horizon_preview")
+            next_unexpanded: str | None = None
+            if isinstance(raw_preview, dict) and "unexpanded_scope" in raw_preview:
+                raw_rem = raw_preview.get("unexpanded_scope")
+                if isinstance(raw_rem, str) and raw_rem.strip():
+                    next_unexpanded = raw_rem.strip()
             for exp_tid in expanded_task_uuids:
                 exp_task = await db.scalar(
                     select(TaskRow).where(TaskRow.id == exp_tid, TaskRow.user_id == owner)
                 )
                 if exp_task is not None:
-                    exp_task.unexpanded_scope = None
+                    exp_task.unexpanded_scope = next_unexpanded
     await db.flush()
 
     # 2. Áp dụng sessions_to_cancel

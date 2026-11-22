@@ -41,6 +41,11 @@ class Settings(BaseSettings):
     # App authentication is separate from Calendar OAuth/credential encryption.
     AUTH_MODE: Literal["dev_user", "google"] = "dev_user"
     JWT_SECRET_KEY: str = Field(default="", repr=False)
+    METRICS_AUTH_TOKEN: str = Field(
+        default="",
+        repr=False,
+        description="Bearer token bảo vệ endpoint /metrics và /api/v1/metrics khi ENVIRONMENT là staging/production.",
+    )
     JWT_ISSUER: str = "proplan-va"
     JWT_AUDIENCE: str = "proplan-va-api"
     ACCESS_TOKEN_TTL_SECONDS: int = Field(default=3600, ge=60, le=86400)

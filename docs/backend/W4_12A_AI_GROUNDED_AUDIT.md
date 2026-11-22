@@ -64,9 +64,9 @@
 ## 3. Ghi nhận Minh bạch 3 Quyết định Kỹ thuật Đã Chốt
 
 1. **`BE-05` #3 — Model Gemini & Provider STT mặc định:**
-   - Giữ nguyên chuẩn `GEMINI_FLASH_MODEL="gemini-3.5-flash-lite"` (`backend/app/core/config.py#L70`, đồng bộ với `GEMINI_BACKUP_MODEL="gemini-3.5-flash-lite"`, `GEMINI_UF1_MODEL="gemini-3.5-flash-lite"`, `GEMINI_STT_MODEL="gemini-3.5-flash-lite"`) và `VOICE_STT_PROVIDER="auto"` (`backend/app/core/config.py#L108`, logic điều phối trong `backend/app/services/voice_service.py#L1145-L1166`, trong đó `VOICE_STT_UF5_PREFER_GROQ=True` ưu tiên Groq cho `uf5_checkin`), thay cho cấu hình `3.8-flash` / `groq` trong bản đặc tả ngày 16/11.
+   - Giữ nguyên chuẩn LLM `GEMINI_FLASH_MODEL="gemini-3.5-flash-lite"` (`backend/app/core/config.py#L75`, đồng bộ với `GEMINI_BACKUP_MODEL="gemini-3.5-flash-lite"` ở `#L76`, `GEMINI_UF1_MODEL="gemini-3.5-flash-lite"` ở `#L77`); riêng STT dùng mặc định `GEMINI_STT_MODEL="gemini-3.5-transcribe"` (`GEMINI_STT_TRANSPORT="auto"`, `GEMINI_STT_MODE="verbatim"`), `GROQ_STT_MODEL="whisper-large-v3"` và `VOICE_STT_PROVIDER="auto"` (`backend/app/core/config.py#L82`, `#L118-L123`, logic điều phối trong `backend/app/services/voice_service.py#L937-L944`, `#L1226-L1254`, trong đó `VOICE_STT_UF5_PREFER_GROQ=True` ưu tiên Groq cho `uf5_checkin`), thay cho cấu hình `3.8-flash` / `groq` trong bản đặc tả ngày 16/11.
 2. **`BE-05` #5 — Múi giờ mặc định:**
-   - Giữ cố định `DEFAULT_TIMEZONE: str = "Asia/Ho_Chi_Minh"` (`backend/app/core/config.py#L155`) theo xác nhận phạm vi người dùng tại Việt Nam của chủ dự án.
+   - Giữ cố định `DEFAULT_TIMEZONE: str = "Asia/Ho_Chi_Minh"` (`backend/app/core/config.py#L169`) theo xác nhận phạm vi người dùng tại Việt Nam của chủ dự án.
 3. **`BE-07` — Endpoint danh sách `GET /api/v1/calendar/sync-jobs`:**
    - Chốt đẩy sang hạng mục **Để sau Tuần 4** vì ứng dụng Mobile hiện không gọi endpoint danh sách. Kiểm chứng thực tế trên `app/api/v1/calendar.py#L837-L915` xác nhận router chỉ đăng ký `GET /api/v1/calendar/sync-jobs/{job_id}` và `POST /api/v1/calendar/sync-jobs/{job_id}/retry` (không có route list `/api/v1/calendar/sync-jobs`).
 

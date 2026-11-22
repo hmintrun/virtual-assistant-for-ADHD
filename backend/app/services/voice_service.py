@@ -891,6 +891,30 @@ class GroqWhisperSttProvider:
         return details.text
 
 
+async def _call_fallback_within_budget(
+    provider: SttProvider,
+    audio: bytes,
+    mime_type: str,
+    *,
+    purpose: str | None,
+    started: float,
+    total_timeout_seconds: float | None,
+) -> SttProviderDetails:
+    """Chạy nhánh STT dự phòng trong đúng phần ngân sách thời gian còn lại (không nới sàn 1.0s)."""
+    if total_timeout_seconds is None:
+        return await _call_provider_details(provider, audio, mime_type, purpose=purpose)
+    remaining = total_timeout_seconds - (time.perf_counter() - started)
+    if remaining <= 0.0:
+        raise SttError(SttErrorCode.TIMEOUT, "fallback_timeout")
+    try:
+        return await asyncio.wait_for(
+            _call_provider_details(provider, audio, mime_type, purpose=purpose),
+            timeout=remaining,
+        )
+    except TimeoutError as exc:
+        raise SttError(SttErrorCode.TIMEOUT, "fallback_timeout") from exc
+
+
 class FallbackSttProvider:
     """Điều phối STT 2 nhánh có định tuyến theo ``purpose`` và ngân sách timeout riêng cho nhánh chính."""
 
@@ -955,16 +979,14 @@ class FallbackSttProvider:
                 second.name,
             )
 
-        second_coro = _call_provider_details(second, audio, mime_type, purpose=purpose)
-        if self._total_timeout_seconds is not None:
-            elapsed = time.perf_counter() - started
-            remaining = max(1.0, self._total_timeout_seconds - elapsed)
-            try:
-                details = await asyncio.wait_for(second_coro, timeout=remaining)
-            except TimeoutError as exc:
-                raise SttError(SttErrorCode.TIMEOUT, "fallback_timeout") from exc
-        else:
-            details = await second_coro
+        details = await _call_fallback_within_budget(
+            second,
+            audio,
+            mime_type,
+            purpose=purpose,
+            started=started,
+            total_timeout_seconds=self._total_timeout_seconds,
+        )
         return details, second.name
 
     async def transcribe_with_provider(
@@ -1101,13 +1123,13 @@ class VoiceService:
                             mapped_primary.code,
                             self._fallback_provider.name,
                         )
-                        elapsed = time.perf_counter() - started
-                        fallback_timeout = max(1.0, self._timeout_seconds - elapsed)
-                        details = await asyncio.wait_for(
-                            _call_provider_details(
-                                self._fallback_provider, audio, mime_type, purpose=purpose
-                            ),
-                            timeout=fallback_timeout,
+                        details = await _call_fallback_within_budget(
+                            self._fallback_provider,
+                            audio,
+                            mime_type,
+                            purpose=purpose,
+                            started=started,
+                            total_timeout_seconds=self._timeout_seconds,
                         )
                         active_provider = self._fallback_provider.name
                     else:
@@ -1132,7 +1154,7 @@ class VoiceService:
             self._log_failure(no_speech, started)
             raise no_speech
 
-        if _is_whisper_hallucination(cleaned):
+        if active_provider != "gemini" and _is_whisper_hallucination(cleaned):
             hallucinated = SttError(SttErrorCode.NO_SPEECH, "hallucination_filtered")
             self._log_failure(hallucinated, started)
             raise hallucinated
@@ -1538,11 +1560,18 @@ class TtsService:
             last_error: BaseException | None = None
             while tasks:
                 done, tasks = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+                winner: asyncio.Future[tuple[bytes, str]] | None = None
                 for finished in done:
+                    if finished.cancelled():
+                        continue
                     error = finished.exception()
                     if error is None:
-                        return finished.result()
-                    last_error = error
+                        if winner is None:
+                            winner = finished
+                    else:
+                        last_error = error
+                if winner is not None:
+                    return winner.result()
             assert last_error is not None
             raise last_error
         finally:

@@ -35,7 +35,6 @@ from app.schemas.schedule import (
 )
 from app.schemas.task import (
     CandidateAdjustmentResult,
-    CandidateStepAdjustment,
     ExtractedFreeWindowSchema,
     ExtractedTimeConstraint,
     LLMPlanAdjustmentPayload,
@@ -2365,18 +2364,36 @@ class TestAIService(unittest.TestCase):
         self.assertEqual(draft_fb.step_edits, [])
         self.assertEqual(draft_fb.generation_tier, "tier_3_rule_based")
 
-        edit_fb = service._fallback_adjust_candidate_by_nl("Chỉnh bước 2 thành 40 phút", snapshots)
-        self.assertIsInstance(edit_fb, CandidateAdjustmentResult)
-        assert edit_fb is not None
-        self.assertFalse(edit_fb.requires_draft_update)
-        self.assertFalse(edit_fb.requires_clarification)
-        self.assertEqual(edit_fb.generation_tier, "tier_3_rule_based")
-        self.assertEqual(
-            edit_fb.step_edits,
-            [CandidateStepAdjustment(client_step_key="step-2", estimated_base_seconds=2400)],
+        self.assertIsNone(
+            service._fallback_adjust_candidate_by_nl("Chỉnh bước 2 thành 40 phút", snapshots)
         )
-
+        self.assertIsNone(
+            service._fallback_adjust_candidate_by_nl("giảm bước 1 đi 15 phút", snapshots)
+        )
+        self.assertIsNone(
+            service._fallback_adjust_candidate_by_nl(
+                "sửa nội dung bước 1 thành Viết mở bài và làm trong 45 phút", snapshots
+            )
+        )
         self.assertIsNone(service._fallback_adjust_candidate_by_nl("Xóa bước 2", snapshots))
+
+        with patch.object(
+            service,
+            "_execute_hedged_structured",
+            new=AsyncMock(side_effect=RuntimeError("llm_down")),
+        ):
+            for step_instr in (
+                "Chỉnh bước 2 thành 40 phút",
+                "giảm bước 1 đi 15 phút",
+                "sửa nội dung bước 1 thành Viết mở bài và làm trong 45 phút",
+            ):
+                with self.assertRaises(TimeoutError):
+                    asyncio.run(
+                        service.adjust_candidate_by_nl(
+                            step_instr,
+                            current_steps=snapshots,
+                        )
+                    )
 
 
 if __name__ == "__main__":

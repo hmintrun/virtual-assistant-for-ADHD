@@ -1202,17 +1202,33 @@ def _availability_proposal(
     weekly_map: dict[int, list[LocalInterval]] = {}
     dates: dict[str, list[LocalInterval]] = {}
     daily_generated_dates: set[str] = set()
+    closed_base_dates: set[str] = set()
 
     # Bảo toàn các ngày ngoại lệ đóng (intervals=[]) từ base trước khi chạy Lớp 3 & Lớp 4
     if base is not None and extracted.availability_update_mode != "replace":
         for override in base.date_overrides:
             if not override.intervals:
-                dates[override.date.isoformat()] = []
+                d_key = override.date.isoformat()
+                dates[d_key] = []
+                closed_base_dates.add(d_key)
 
     eff_dates = _effective_time_dates(
         effective_time or draft.summary.time_constraint,
         timezone_name,
     )
+
+    def _sync_weekly_to_daily_dates(
+        target_w: int, ivs: list[LocalInterval], *, replace_day: bool
+    ) -> None:
+        for d_key in daily_generated_dates:
+            if d_key in closed_base_dates:
+                continue
+            if date.fromisoformat(d_key).isoweekday() != target_w:
+                continue
+            if replace_day:
+                dates[d_key] = list(ivs)
+            else:
+                dates[d_key] = _merge_intervals_1d(dates.get(d_key, []) + ivs)
 
     # ── LỚP 1: Khung nền dương (daily & weekly_rule với op in ("add", "replace_day")) ──
     for item in valid_windows:
@@ -1242,34 +1258,47 @@ def _availability_proposal(
                         weekly_map[w] = _merge_intervals_1d(weekly_map.get(w, []) + day_ivs)
                 for d in eff_dates:
                     d_key = d.isoformat()
-                    daily_generated_dates.add(d_key)
                     if item.op == "replace_day":
+                        closed_base_dates.discard(d_key)
+                        daily_generated_dates.add(d_key)
                         dates[d_key] = list(day_ivs)
                     else:
-                        dates[d_key] = _merge_intervals_1d(dates.get(d_key, []) + day_ivs)
+                        if d_key in closed_base_dates:
+                            continue
+                        daily_generated_dates.add(d_key)
+                        base_ivs = (
+                            dates[d_key]
+                            if d_key in dates
+                            else list(weekly_map.get(d.isoweekday(), []))
+                        )
+                        dates[d_key] = _merge_intervals_1d(base_ivs + day_ivs)
             elif item.kind == "weekly_rule":
                 target_wds = _item_weekdays(item)
+                is_replace_day = item.op == "replace_day"
                 if s_time < e_time:
                     iv = LocalInterval(start_local=s_time, end_local=e_time)
                     for w in target_wds:
-                        if item.op == "replace_day":
+                        if is_replace_day:
                             weekly_map[w] = [iv]
                         else:
                             weekly_map[w] = _merge_intervals_1d(weekly_map.get(w, []) + [iv])
+                        _sync_weekly_to_daily_dates(w, [iv], replace_day=is_replace_day)
                 else:
                     for w in target_wds:
                         if s_time < time(23, 59):
                             iv1 = LocalInterval(start_local=s_time, end_local=time(23, 59))
-                            if item.op == "replace_day":
+                            if is_replace_day:
                                 weekly_map[w] = [iv1]
                             else:
                                 weekly_map[w] = _merge_intervals_1d(weekly_map.get(w, []) + [iv1])
+                            _sync_weekly_to_daily_dates(w, [iv1], replace_day=is_replace_day)
                         next_w = (w % 7) + 1
                         if e_time > time(0, 0):
                             iv2 = LocalInterval(start_local=time(0, 0), end_local=e_time)
                             weekly_map[next_w] = _merge_intervals_1d(
                                 weekly_map.get(next_w, []) + [iv2]
                             )
+                            _sync_weekly_to_daily_dates(next_w, [iv2], replace_day=False)
         except (ValidationError, ValueError):
             item.is_ambiguous = True
             unresolved.append(item.model_dump(mode="json"))

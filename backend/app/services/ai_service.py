@@ -1903,30 +1903,6 @@ class AIService:
         r"(?:giờ\s*rảnh|khung\s*giờ|thời\s*hạn|deadline|hạn\s*chót|lùi\s*hạn|dời\s*hạn|ngày\s*bắt\s*đầu|mốc\s*bắt\s*đầu|múi\s*giờ|timezone)",
         re.IGNORECASE,
     )
-    _UF2_ADJUST_UNSUPPORTED_RE = re.compile(
-        r"(?:thêm|bớt|xóa|xoá|gộp|tách|chia\s*đôi|chia\s*nhỏ|đổi\s*thứ\s*tự|đảo\s*thứ\s*tự|sắp\s*(?:xếp\s*)?lại|lên\s*trước|ra\s*sau|đổi\s*tên|tiêu\s*đề|đầu\s*ra|kết\s*quả)",
-        re.IGNORECASE,
-    )
-    _UF2_STEP_REF_RE = re.compile(
-        r"\bbước\s+(\d+|đầu(?:\s+tiên)?|nhất|một|hai|ba|tư|bốn|năm|sáu|bảy|tám|chín|mười)\b",
-        re.IGNORECASE,
-    )
-    _UF2_ORDINAL_MAP = {
-        "đầu": 1,
-        "đầu tiên": 1,
-        "nhất": 1,
-        "một": 1,
-        "hai": 2,
-        "ba": 3,
-        "tư": 4,
-        "bốn": 4,
-        "năm": 5,
-        "sáu": 6,
-        "bảy": 7,
-        "tám": 8,
-        "chín": 9,
-        "mười": 10,
-    }
 
     @classmethod
     def _extract_duration_minutes(cls, text: str) -> list[int]:
@@ -2129,7 +2105,8 @@ class AIService:
         instruction: str,
         snapshots: list[dict[str, Any]],
     ) -> CandidateAdjustmentResult | None:
-        """Fallback offline an toàn cho `adjust_candidate_by_nl` (RISK-UF2-04)."""
+        """Fallback offline an toàn cho `adjust_candidate_by_nl` (Option 2A: chỉ giữ DRAFT_UPDATE_REQUIRED)."""
+        _ = snapshots
         if cls._UF2_DRAFT_UPDATE_RE.search(instruction):
             return CandidateAdjustmentResult(
                 step_edits=[],
@@ -2143,36 +2120,7 @@ class AIService:
                 assistant_note="Mình chưa thay đổi phương án hiện tại.",
                 generation_tier="tier_3_rule_based",
             )
-        if cls._UF2_ADJUST_UNSUPPORTED_RE.search(instruction):
-            return None
-        step_matches = list(cls._UF2_STEP_REF_RE.finditer(instruction))
-        if len(step_matches) != 1:
-            return None
-        raw_idx = " ".join(step_matches[0].group(1).lower().split())
-        step_num = int(raw_idx) if raw_idx.isdigit() else cls._UF2_ORDINAL_MAP.get(raw_idx)
-        if step_num is None or not (1 <= step_num <= len(snapshots)):
-            return None
-        durations = cls._extract_duration_minutes(instruction)
-        if len(durations) != 1 or durations[0] <= 0:
-            return None
-        secs = durations[0] * 60
-        target_key = snapshots[step_num - 1]["client_step_key"]
-        return CandidateAdjustmentResult(
-            step_edits=[
-                CandidateStepAdjustment(
-                    client_step_key=target_key,
-                    estimated_base_seconds=secs,
-                )
-            ],
-            requires_clarification=False,
-            clarification_question=None,
-            requires_draft_update=False,
-            unsupported_changes=[],
-            assistant_note=(
-                f"Đề xuất chỉnh thời lượng bước {step_num} thành {durations[0]} phút để bạn xem lại."
-            ),
-            generation_tier="tier_3_rule_based",
-        )
+        return None
 
     # ==========================================================================
     # UF2 (BƯỚC 4): ĐIỀU CHỈNH KẾ HOẠCH BẰNG NGÔN NGỮ TỰ NHIÊN ("TÙY CHỈNH THEO Ý TÔI")

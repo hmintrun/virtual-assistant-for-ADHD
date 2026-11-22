@@ -868,3 +868,207 @@ async def test_legacy_selected_calendar_ids_with_manual_only_rejected(api):
     )
     assert resp.status_code == 409, resp.text
     assert resp.json()["error"]["code"] == "CALENDAR_CONTEXT_UNAVAILABLE"
+
+
+async def test_finding3_same_link_queued_update_waits_when_create_hits_transient_error(
+    monkeypatch,
+):
+    """PR #22 Finding #3: j1 (create) & j2 (update) cùng event_link_id; j1 lỗi mạng tạm thời -> j2 chưa bị claim/execute."""
+    from app.models.session import Session as SessionRow
+    from app.models.step import Step as StepRow
+    from app.models.task import Task as TaskRow
+
+    engine = make_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    strict_factory = async_sessionmaker(engine, expire_on_commit=True, class_=AsyncSession)
+
+    try:
+        uid = uuid4()
+        now = datetime.now(UTC)
+        async with strict_factory() as db:
+            db.add(User(id=uid, email="f3_link@example.com", display_name="F3", is_active=True))
+            await db.flush()
+            conn = _seed_connection(user_id=uid, write_calendar_id="focus_cal")
+            db.add(conn)
+            await db.flush()
+            task = TaskRow(
+                id=uuid4(),
+                user_id=uid,
+                title="T",
+                time_constraint={},
+                decomposition_state="complete",
+            )
+            db.add(task)
+            await db.flush()
+            step = StepRow(
+                id=uuid4(),
+                user_id=uid,
+                task_id=task.id,
+                title="S",
+                order_index=0,
+                estimated_base_seconds=1500,
+                remaining_base_seconds=1500,
+                buffer_multiplier=1.0,
+                estimate_source="user_confirmed",
+            )
+            db.add(step)
+            await db.flush()
+            sess = SessionRow(
+                id=uuid4(),
+                user_id=uid,
+                step_id=step.id,
+                scheduled_start=now + timedelta(hours=1),
+                scheduled_end=now + timedelta(hours=1, minutes=30),
+                micro_task_text="M",
+                work_seconds=1500,
+                rest_seconds=300,
+                segments=[],
+                duration_seconds=1800,
+                schedule_revision=1,
+                status="scheduled",
+                start_state="not_started",
+                start_decision_due_at=now + timedelta(hours=1, minutes=15),
+            )
+            db.add(sess)
+            await db.flush()
+            link = CalendarEventLink(
+                id=uuid4(),
+                user_id=uid,
+                session_id=sess.id,
+                connection_id=conn.id,
+                google_calendar_id="focus_cal",
+                google_event_id=None,
+                desired_schedule_revision=2,
+                sync_state="pending",
+                is_current=True,
+            )
+            db.add(link)
+            await db.flush()
+
+            j1 = CalendarSyncJob(
+                id=uuid4(),
+                user_id=uid,
+                connection_id=conn.id,
+                event_link_id=link.id,
+                target_kind="session_event",
+                target_ref=str(sess.id),
+                operation="create",
+                target_schedule_revision=1,
+                payload_snapshot={"summary": "Focus 1"},
+                idempotency_key="f3-create-1",
+                job_state="queued",
+                attempt_count=0,
+                created_at=now - timedelta(seconds=10),
+            )
+            j2 = CalendarSyncJob(
+                id=uuid4(),
+                user_id=uid,
+                connection_id=conn.id,
+                event_link_id=link.id,
+                target_kind="session_event",
+                target_ref=str(sess.id),
+                operation="update",
+                target_schedule_revision=2,
+                payload_snapshot={"summary": "Focus 1 moved"},
+                idempotency_key="f3-update-2",
+                job_state="queued",
+                attempt_count=0,
+                created_at=now - timedelta(seconds=5),
+            )
+            db.add_all([j1, j2])
+            j1_id, j2_id, link_id = j1.id, j2.id, link.id
+            await db.commit()
+
+        from app.services import google_calendar_client as gcc
+
+        fake_client = gcc.get_calendar_client()
+        orig_create = fake_client.create_event
+
+        async def _transient_create(*args, **kwargs):
+            raise RuntimeError("transient network failure")
+
+        monkeypatch.setattr(fake_client, "create_event", _transient_create)
+
+        async with strict_factory() as db:
+            processed = await process_calendar_sync_jobs(db, user_id=uid, limit=10)
+        assert processed == 1
+
+        # Poll lần 2 ngay trong lúc j1 đang đợi backoff: j2 vẫn KHÔNG được vượt mặt j1!
+        async with strict_factory() as db:
+            processed_during_backoff = await process_calendar_sync_jobs(db, user_id=uid, limit=10)
+        assert processed_during_backoff == 0
+
+        async with strict_factory() as db:
+            r1 = await db.get(CalendarSyncJob, j1_id)
+            r2 = await db.get(CalendarSyncJob, j2_id)
+            assert r1 is not None and r1.job_state == "queued" and r1.attempt_count == 1
+            assert r2 is not None and r2.job_state == "queued" and r2.attempt_count == 0
+            assert r2.last_error_code is None
+            # Cho phép j1 hết backoff và khôi phục mạng -> j1 hoàn tất rồi j2 chạy tiếp thành công
+            r1.next_retry_at = datetime.now(UTC) - timedelta(seconds=1)
+            await db.commit()
+
+        monkeypatch.setattr(fake_client, "create_event", orig_create)
+        async with strict_factory() as db:
+            assert await process_calendar_sync_jobs(db, user_id=uid, limit=10) == 2
+        async with strict_factory() as db:
+            r1_ok = await db.get(CalendarSyncJob, j1_id)
+            r2_ok = await db.get(CalendarSyncJob, j2_id)
+            lk_ok = await db.get(CalendarEventLink, link_id)
+            assert r1_ok is not None and r1_ok.job_state == "completed"
+            assert r2_ok is not None and r2_ok.job_state == "completed"
+            assert lk_ok is not None and lk_ok.sync_state == "synced"
+    finally:
+        reset_fake_calendar_client()
+        await engine.dispose()
+
+
+async def test_p3_1_refcounted_calendar_locks_cleanup_after_release():
+    """PR #22 P3.1: _OWNER_CALENDAR_LOCKS & _CONNECTION_SYNC_LOCKS tự dọn sạch sau khi giải phóng."""
+    import asyncio
+
+    from app.services.calendar_service import _OWNER_CALENDAR_LOCKS, get_owner_calendar_lock
+    from app.services.calendar_sync_worker import (
+        _CONNECTION_SYNC_LOCKS,
+        _busy_connection_ids_for_current_loop,
+        get_connection_sync_lock,
+    )
+
+    _OWNER_CALENDAR_LOCKS.clear()
+    _CONNECTION_SYNC_LOCKS.clear()
+    owner_id = f"owner-{uuid4().hex}"
+    conn_id = uuid4()
+    events: list[str] = []
+
+    async def _owner_worker(tag: str, hold: float) -> None:
+        async with get_owner_calendar_lock(owner_id):
+            events.append(f"enter-{tag}")
+            await asyncio.sleep(hold)
+            events.append(f"exit-{tag}")
+
+    await asyncio.gather(_owner_worker("a", 0.03), _owner_worker("b", 0.01))
+    assert events in (
+        ["enter-a", "exit-a", "enter-b", "exit-b"],
+        ["enter-b", "exit-b", "enter-a", "exit-a"],
+    )
+    assert _OWNER_CALENDAR_LOCKS == {}
+
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def _conn_holder() -> None:
+        async with get_connection_sync_lock(conn_id):
+            entered.set()
+            await release.wait()
+
+    async def _conn_waiter() -> None:
+        await entered.wait()
+        assert conn_id in _busy_connection_ids_for_current_loop()
+        release.set()
+        async with get_connection_sync_lock(conn_id):
+            pass
+
+    await asyncio.gather(_conn_holder(), _conn_waiter())
+    assert _busy_connection_ids_for_current_loop() == []
+    assert _CONNECTION_SYNC_LOCKS == {}

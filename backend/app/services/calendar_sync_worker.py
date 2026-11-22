@@ -12,41 +12,46 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import case, exists, or_, select, update
+from sqlalchemy import and_, case, exists, or_, select, update
 from sqlalchemy import inspect as sa_inspect
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
 from app.models.calendar import CalendarConnection, CalendarEventLink, CalendarSyncJob
-from app.services.calendar_service import CalendarService, _resolve_uuid
+from app.services.calendar_service import (
+    CalendarService,
+    _acquire_refcounted_lock,
+    _RefCountedLock,
+    _resolve_uuid,
+)
 from app.services.google_calendar_client import CalendarAuthError, CalendarConflictError
 
 logger = logging.getLogger(__name__)
 
-_CONNECTION_SYNC_LOCKS: dict[tuple[int, str], asyncio.Lock] = {}
+_CONNECTION_SYNC_LOCKS: dict[tuple[int, str], _RefCountedLock] = {}
 
 
-def get_connection_sync_lock(connection_id: UUID | str) -> asyncio.Lock:
-    """Trả về asyncio.Lock theo cặp (event_loop_id, connection_id) để tuần tự hóa đồng bộ theo từng kết nối."""
+@asynccontextmanager
+async def get_connection_sync_lock(connection_id: UUID | str) -> AsyncGenerator[None]:
+    """Tuần tự hóa đồng bộ theo cặp (event_loop_id, connection_id) và tự dọn entry khi hết người chờ."""
     loop = asyncio.get_running_loop()
     key = (id(loop), str(_resolve_uuid(connection_id)))
-    lock = _CONNECTION_SYNC_LOCKS.get(key)
-    if lock is None:
-        lock = asyncio.Lock()
-        _CONNECTION_SYNC_LOCKS[key] = lock
-    return lock
+    async with _acquire_refcounted_lock(_CONNECTION_SYNC_LOCKS, key):
+        yield
 
 
 def _busy_connection_ids_for_current_loop() -> list[UUID]:
     """Liệt kê các connection_id đang giữ sync lock trên event loop hiện tại."""
     loop_id = id(asyncio.get_running_loop())
     busy: list[UUID] = []
-    for (entry_loop_id, conn_id_str), lock in list(_CONNECTION_SYNC_LOCKS.items()):
-        if entry_loop_id == loop_id and lock.locked():
+    for (entry_loop_id, conn_id_str), entry in list(_CONNECTION_SYNC_LOCKS.items()):
+        if entry_loop_id == loop_id and entry.lock.locked():
             try:
                 busy.append(UUID(conn_id_str))
             except ValueError:
@@ -612,92 +617,127 @@ async def process_calendar_sync_jobs(
     connection_lock_held: bool = False,
 ) -> int:
     """Quét và xử lý các sync jobs đang chờ trong hàng đợi."""
-    now_utc = datetime.now(UTC)
     other_job = aliased(CalendarSyncJob)
-    active_same_link_exists = exists(
-        select(1).where(
-            other_job.id != CalendarSyncJob.id,
-            other_job.event_link_id == CalendarSyncJob.event_link_id,
-            other_job.job_state == "queued",
-            other_job.lease_expires_at.is_not(None),
-            other_job.lease_expires_at > now_utc,
-        )
-    )
-    stmt = select(CalendarSyncJob).where(
-        CalendarSyncJob.job_state == "queued",
-        CalendarSyncJob.attempt_count < 5,
-        or_(
-            CalendarSyncJob.next_retry_at.is_(None),
-            CalendarSyncJob.next_retry_at <= now_utc,
-        ),
-        or_(
-            CalendarSyncJob.lease_expires_at.is_(None),
-            CalendarSyncJob.lease_expires_at <= now_utc,
-        ),
-        or_(
-            CalendarSyncJob.event_link_id.is_(None),
-            ~active_same_link_exists,
-        ),
-    )
-    if user_id is not None:
-        uid = _resolve_uuid(user_id)
-        stmt = stmt.where(CalendarSyncJob.user_id == uid)
-    if connection_id is not None:
-        cid = _resolve_uuid(connection_id)
-        stmt = stmt.where(CalendarSyncJob.connection_id == cid)
-    if skip_busy_connections:
-        busy_conn_ids = _busy_connection_ids_for_current_loop()
-        if busy_conn_ids:
-            stmt = stmt.where(CalendarSyncJob.connection_id.notin_(busy_conn_ids))
 
-    stmt = stmt.order_by(CalendarSyncJob.created_at.asc(), CalendarSyncJob.id.asc()).limit(
-        limit
-    )
-    dialect_name = db.bind.dialect.name if getattr(db, "bind", None) else ""
-    if dialect_name == "postgresql":
-        stmt = stmt.with_for_update(skip_locked=True)
-
-    jobs = (await db.scalars(stmt)).all()
-    if not jobs:
-        return 0
-
-    # Claim toàn bộ batch ngay lập tức bằng Core SQL để tránh tranh chấp / duplicate execution / StaleDataError
-    claimed_by_conn: dict[UUID, list[UUID]] = {}
-    claimed_order: list[tuple[UUID, UUID]] = []
-    for job in jobs:
-        job_id = job.id
-        job_conn_id = job.connection_id
-        claim_res = await db.execute(
-            update(CalendarSyncJob)
-            .where(
-                CalendarSyncJob.id == job_id,
-                CalendarSyncJob.job_state == "queued",
+    def _build_query(
+        pass_now: datetime,
+        remaining_limit: int,
+        only_link_ids: set[UUID] | None = None,
+    ):
+        active_same_link_exists = exists(
+            select(1).where(
+                other_job.id != CalendarSyncJob.id,
+                other_job.event_link_id == CalendarSyncJob.event_link_id,
+                other_job.job_state == "queued",
+                other_job.attempt_count < 5,
                 or_(
-                    CalendarSyncJob.lease_expires_at.is_(None),
-                    CalendarSyncJob.lease_expires_at <= now_utc,
+                    and_(
+                        other_job.lease_expires_at.is_not(None),
+                        other_job.lease_expires_at > pass_now,
+                    ),
+                    and_(
+                        other_job.next_retry_at.is_not(None),
+                        other_job.next_retry_at > pass_now,
+                        or_(
+                            other_job.created_at < CalendarSyncJob.created_at,
+                            and_(
+                                other_job.created_at == CalendarSyncJob.created_at,
+                                other_job.id < CalendarSyncJob.id,
+                            ),
+                        ),
+                    ),
                 ),
             )
-            .values(
-                claimed_at=now_utc,
-                lease_expires_at=now_utc + timedelta(minutes=2),
-                updated_at=now_utc,
-                revision=CalendarSyncJob.revision + 1,
-            )
-            .execution_options(synchronize_session=False)
         )
-        if (getattr(claim_res, "rowcount", 0) or 0) > 0:
-            claimed_by_conn.setdefault(job_conn_id, []).append(job_id)
-            claimed_order.append((job_id, job_conn_id))
-    await db.commit()
+        stmt = select(CalendarSyncJob).where(
+            CalendarSyncJob.job_state == "queued",
+            CalendarSyncJob.attempt_count < 5,
+            or_(
+                CalendarSyncJob.next_retry_at.is_(None),
+                CalendarSyncJob.next_retry_at <= pass_now,
+            ),
+            or_(
+                CalendarSyncJob.lease_expires_at.is_(None),
+                CalendarSyncJob.lease_expires_at <= pass_now,
+            ),
+            or_(
+                CalendarSyncJob.event_link_id.is_(None),
+                ~active_same_link_exists,
+            ),
+        )
+        if only_link_ids is not None:
+            stmt = stmt.where(CalendarSyncJob.event_link_id.in_(only_link_ids))
+        if user_id is not None:
+            uid = _resolve_uuid(user_id)
+            stmt = stmt.where(CalendarSyncJob.user_id == uid)
+        if connection_id is not None:
+            cid = _resolve_uuid(connection_id)
+            stmt = stmt.where(CalendarSyncJob.connection_id == cid)
+        if skip_busy_connections:
+            busy_conn_ids = _busy_connection_ids_for_current_loop()
+            if busy_conn_ids:
+                stmt = stmt.where(CalendarSyncJob.connection_id.notin_(busy_conn_ids))
 
-    if not claimed_order:
-        return 0
+        stmt = stmt.order_by(CalendarSyncJob.created_at.asc(), CalendarSyncJob.id.asc()).limit(
+            remaining_limit
+        )
+        dialect_name = db.bind.dialect.name if getattr(db, "bind", None) else ""
+        if dialect_name == "postgresql":
+            stmt = stmt.with_for_update(skip_locked=True)
+        return stmt
 
     cal_service = CalendarService(db)
     processed_count = 0
+    only_link_ids: set[UUID] | None = None
 
-    if connection_lock_held:
-        for jid, _ in claimed_order:
+    while processed_count < limit:
+        now_utc = datetime.now(UTC)
+        jobs = (await db.scalars(_build_query(now_utc, limit - processed_count, only_link_ids))).all()
+        if not jobs:
+            break
+
+        # Claim toàn bộ batch ngay lập tức bằng Core SQL để tránh tranh chấp / duplicate execution / StaleDataError.
+        # Tối đa 1 job cho mỗi event_link_id khác null trong cùng 1 batch để job sau (update/delete) chờ job trước hoàn tất.
+        claimed_by_conn: dict[UUID, list[UUID]] = {}
+        claimed_order: list[tuple[UUID, UUID]] = []
+        claimed_link_ids: set[UUID] = set()
+        for job in jobs:
+            job_id = job.id
+            job_conn_id = job.connection_id
+            job_link_id = job.event_link_id
+            if job_link_id is not None:
+                if job_link_id in claimed_link_ids:
+                    continue
+                claimed_link_ids.add(job_link_id)
+            claim_res = await db.execute(
+                update(CalendarSyncJob)
+                .where(
+                    CalendarSyncJob.id == job_id,
+                    CalendarSyncJob.job_state == "queued",
+                    or_(
+                        CalendarSyncJob.lease_expires_at.is_(None),
+                        CalendarSyncJob.lease_expires_at <= now_utc,
+                    ),
+                )
+                .values(
+                    claimed_at=now_utc,
+                    lease_expires_at=now_utc + timedelta(minutes=2),
+                    updated_at=now_utc,
+                    revision=CalendarSyncJob.revision + 1,
+                )
+                .execution_options(synchronize_session=False)
+            )
+            if (getattr(claim_res, "rowcount", 0) or 0) > 0:
+                claimed_by_conn.setdefault(job_conn_id, []).append(job_id)
+                claimed_order.append((job_id, job_conn_id))
+        await db.commit()
+
+        if not claimed_order:
+            break
+
+        completed_link_ids: set[UUID] = set()
+
+        async def _run_claimed_job(jid: UUID, done_links: set[UUID]) -> int:
             current_job = (
                 await db.execute(
                     select(CalendarSyncJob)
@@ -706,24 +746,24 @@ async def process_calendar_sync_jobs(
                 )
             ).scalar_one_or_none()
             if current_job is None or current_job.job_state != "queued":
-                continue
-            await process_sync_job(db, current_job, cal_service)
-            processed_count += 1
-        return processed_count
+                return 0
+            job_link_id = current_job.event_link_id
+            outcome = await process_sync_job(db, current_job, cal_service)
+            if outcome == "completed" and job_link_id is not None:
+                done_links.add(job_link_id)
+            return 1
 
-    for conn_id_key, conn_job_ids in claimed_by_conn.items():
-        async with get_connection_sync_lock(conn_id_key):
-            for jid in conn_job_ids:
-                current_job = (
-                    await db.execute(
-                        select(CalendarSyncJob)
-                        .where(CalendarSyncJob.id == jid)
-                        .execution_options(populate_existing=True)
-                    )
-                ).scalar_one_or_none()
-                if current_job is None or current_job.job_state != "queued":
-                    continue
-                await process_sync_job(db, current_job, cal_service)
-                processed_count += 1
+        if connection_lock_held:
+            for jid, _ in claimed_order:
+                processed_count += await _run_claimed_job(jid, completed_link_ids)
+        else:
+            for conn_id_key, conn_job_ids in claimed_by_conn.items():
+                async with get_connection_sync_lock(conn_id_key):
+                    for jid in conn_job_ids:
+                        processed_count += await _run_claimed_job(jid, completed_link_ids)
+
+        if not completed_link_ids:
+            break
+        only_link_ids = completed_link_ids
 
     return processed_count

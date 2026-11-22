@@ -396,12 +396,15 @@ async def _apply_final_checkin_projection(
 
         if other_step_wins_completed or (
             not other_step_wins_deny
+            and not other_step_wins_skipped
             and not this_explicit_step_deny
             and (this_explicit_step_complete or this_auto_step_complete)
         ):
             step.status = "completed"
             step.remaining_base_seconds = 0
-        elif other_step_wins_skipped or this_explicit_step_skip:
+        elif other_step_wins_skipped or (
+            this_explicit_step_skip and not other_step_wins_deny
+        ):
             step.status = "skipped"
             step.remaining_base_seconds = 0
         elif step.status in ("completed", "skipped"):

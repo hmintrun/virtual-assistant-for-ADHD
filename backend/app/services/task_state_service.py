@@ -37,7 +37,7 @@ async def get_task_planning_states(
                     Session.user_id == user_id,
                     Step.user_id == user_id,
                     Step.task_id.in_(task_ids),
-                    Session.status != "cancelled",
+                    Session.status.notin_(("cancelled", "skipped")),
                 )
                 .group_by(Session.step_id)
             )

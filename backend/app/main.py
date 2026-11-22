@@ -3,7 +3,7 @@ import asyncio
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse
 
@@ -94,5 +94,5 @@ async def root_health_check(db: DbSessionDep) -> dict[str, str]:
 
 
 @app.get("/metrics", include_in_schema=False, response_class=PlainTextResponse)
-async def root_metrics(db: DbSessionDep) -> PlainTextResponse:
-    return await metrics_endpoint(db=db)
+async def root_metrics(request: Request, db: DbSessionDep) -> PlainTextResponse:
+    return await metrics_endpoint(request=request, db=db)

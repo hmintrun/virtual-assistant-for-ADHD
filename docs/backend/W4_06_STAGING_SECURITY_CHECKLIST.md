@@ -26,10 +26,11 @@ Nguồn đối chiếu mã nguồn: `backend/app/core/config.py`, `backend/app/c
 | `CALENDAR_PROVIDER_MODE` | `real` *(hoặc `fake` nếu staging không nối Google thật)* | Khi đặt `real`, bắt buộc cấu hình đủ cặp OAuth Client ID/Secret thật. Lưu ý: nếu thiếu Client ID/Secret, app không ném `ValueError` fail-fast lúc khởi động mà `settings.is_calendar_real_mode` trả `False` và tự động rơi về `FakeCalendarClient`. |
 | `GOOGLE_OAUTH_CLIENT_ID` | `<REDACTED>.apps.googleusercontent.com` | OAuth 2.0 Client ID trên Google Cloud Console; không dùng giá trị mẫu `.env.example`. |
 | `GOOGLE_OAUTH_CLIENT_SECRET` | `<REDACTED>` | OAuth 2.0 Client Secret trên Google Cloud Console; ẩn khỏi log/repr. |
-| `GOOGLE_OAUTH_REDIRECT_URI` | `https://virtual-assistant-for-adhd.onrender.com/api/v1/calendar/oauth/callback` | URL HTTPS callback khớp chính xác Authorized Redirect URI trên Google Cloud Console. Mặc định trong `config.py#L91` đã trỏ sẵn về `https://virtual-assistant-for-adhd.onrender.com/api/v1/calendar/oauth/callback`; khi `ENVIRONMENT=staging`/`production`, `validate_secret_configuration()` chặn fail-fast nếu giá trị rỗng, không phải `https://`, hoặc trỏ về `localhost`/`127.0.0.1` (còn ở `ENVIRONMENT=development` vẫn cho phép override `http://localhost:8000/api/v1/calendar/oauth/callback` khi dev local). |
+| `GOOGLE_OAUTH_REDIRECT_URI` | `https://virtual-assistant-for-adhd.onrender.com/api/v1/calendar/oauth/callback` | URL HTTPS callback khớp chính xác Authorized Redirect URI trên Google Cloud Console. Mặc định trong `config.py#L98-L100` đã trỏ sẵn về `https://virtual-assistant-for-adhd.onrender.com/api/v1/calendar/oauth/callback`; khi `ENVIRONMENT=staging`/`production`, `validate_secret_configuration()` chặn fail-fast nếu giá trị rỗng, không phải `https://`, hoặc trỏ về `localhost`/`127.0.0.1` (còn ở `ENVIRONMENT=development` vẫn cho phép override `http://localhost:8000/api/v1/calendar/oauth/callback` khi dev local). |
 | `GEMINI_API_KEY` *(hoặc `GOOGLE_CREDENTIALS_PATH`)* | `<REDACTED>` *(hoặc đường dẫn JSON Service Account + `GOOGLE_CLOUD_PROJECT`)* | Tối thiểu có 1 phương thức xác thực Gemini hợp lệ (`has_gemini_auth == True`). |
-| `GROQ_API_KEY` | `<REDACTED>` | Khóa Groq Cloud phục vụ fallback LLM (`qwen/qwen3.8-27b` / `openai/gpt-oss-20b`) và Whisper STT (`whisper-large-v3-turbo`). |
-| Cấu hình AI/Voice/TZ mặc định | `GEMINI_FLASH_MODEL="gemini-3.5-flash-lite"`, `VOICE_STT_PROVIDER="auto"`, `DEFAULT_TIMEZONE="Asia/Ho_Chi_Minh"` | **Giữ nguyên mặc định** theo cấu hình hiện hành (`GEMINI_BACKUP_MODEL="gemini-3.5-flash-lite"`, `GEMINI_UF1_MODEL="gemini-3.5-flash-lite"`, `GEMINI_STT_MODEL="gemini-3.5-flash-lite"`, `VOICE_STT_UF5_PREFER_GROQ=true`). |
+| `GROQ_API_KEY` | `<REDACTED>` | Khóa Groq Cloud phục vụ fallback LLM (`qwen/qwen3.8-27b` / `openai/gpt-oss-20b`) và Whisper STT (`whisper-large-v3`). |
+| `METRICS_AUTH_TOKEN` | `<32+ random bytes>` (`<REDACTED>`) | Bearer token bắt buộc trên header `Authorization: Bearer <METRICS_AUTH_TOKEN>` khi scrape `/metrics` hoặc `/api/v1/metrics` ở `ENVIRONMENT=staging`/`production` (thiếu cấu hình trả `403`, sai/thiếu token trả `401`). |
+| Cấu hình AI/Voice/TZ mặc định | `GEMINI_FLASH_MODEL="gemini-3.5-flash-lite"`, `VOICE_STT_PROVIDER="auto"`, `DEFAULT_TIMEZONE="Asia/Ho_Chi_Minh"` | **Giữ nguyên mặc định** theo cấu hình hiện hành (`GEMINI_BACKUP_MODEL="gemini-3.5-flash-lite"`, `GEMINI_UF1_MODEL="gemini-3.5-flash-lite"`, `GEMINI_STT_MODEL="gemini-3.5-transcribe"`, `GEMINI_STT_TRANSPORT="auto"`, `GEMINI_STT_MODE="verbatim"`, `GROQ_STT_MODEL="whisper-large-v3"`, `VOICE_STT_UF5_PREFER_GROQ=true`). |
 
 ---
 
@@ -109,12 +110,12 @@ Thay `<STAGING_BASE_URL>` bằng URL staging thật (ví dụ `https://virtual-a
 - [ ] **Health & Prometheus Metrics:**
   ```bash
   curl -i -sS "<STAGING_BASE_URL>/api/v1/health"
-  curl -i -sS "<STAGING_BASE_URL>/metrics"
-  curl -i -sS "<STAGING_BASE_URL>/api/v1/metrics"
+  curl -i -sS "<STAGING_BASE_URL>/metrics" -H "Authorization: Bearer <METRICS_AUTH_TOKEN>"
+  curl -i -sS "<STAGING_BASE_URL>/api/v1/metrics" -H "Authorization: Bearer <METRICS_AUTH_TOKEN>"
   ```
   - **Kỳ vọng:**
     - `GET /api/v1/health` (và `/health`): HTTP `200`, JSON `{"status":"ok","database":"ok"}`.
-    - `GET /api/v1/metrics` (và `/metrics`): HTTP `200`, `content-type: text/plain; version=0.0.4; charset=utf-8`, chứa các metric HTTP/DB/Outbox/AI mà không chứa thông tin nhạy cảm.
+    - `GET /api/v1/metrics` (và `/metrics`) khi `ENVIRONMENT=staging`/`production`: không có/sai Bearer token trả `401 UNAUTHENTICATED` (`www-authenticate: Bearer`), thiếu `METRICS_AUTH_TOKEN` trả `403 FORBIDDEN`; đủ token hợp lệ trả HTTP `200`, `content-type: text/plain; version=0.0.4; charset=utf-8`, chứa các metric HTTP/DB/Outbox/AI mà không chứa thông tin nhạy cảm.
 
 ---
 

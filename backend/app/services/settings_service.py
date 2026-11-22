@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Iterable
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
@@ -198,6 +199,65 @@ async def _ensure_preference_row(
     db.add(created)
     await db.flush()
     return created
+
+
+async def _bump_pref_revision_and_sync_pending_proposal(
+    db: AsyncSession,
+    *,
+    owner: UUID,
+    preferences: PreferenceRow,
+    now: datetime,
+    updated_keys: Iterable[str] = (),
+) -> None:
+    """Tăng effective_revision khi đổi cấu hình không ảnh hưởng lịch; đồng bộ proposal/change_request pending."""
+    if preferences.pending_proposal_id is None:
+        preferences.effective_revision += 1
+        preferences.updated_at = now
+        return
+
+    updated_key_set = set(updated_keys)
+    if updated_key_set and isinstance(preferences.requested_changes, dict):
+        if any(k in preferences.requested_changes for k in updated_key_set):
+            preferences.requested_changes = {
+                k: v
+                for k, v in preferences.requested_changes.items()
+                if k not in updated_key_set
+            }
+
+    new_eff_rev = max(preferences.effective_revision, preferences.requested_revision or 0) + 1
+    preferences.effective_revision = new_eff_rev
+    if preferences.requested_revision is not None and preferences.requested_revision <= new_eff_rev:
+        preferences.requested_revision = new_eff_rev + 1
+    preferences.updated_at = now
+
+    linked_proposal = await db.scalar(
+        select(ProposalRow).where(
+            ProposalRow.id == preferences.pending_proposal_id,
+            ProposalRow.user_id == owner,
+            ProposalRow.status == "pending",
+        )
+    )
+    if linked_proposal is not None and isinstance(linked_proposal.source_revisions, dict):
+        linked_proposal.source_revisions = {
+            **linked_proposal.source_revisions,
+            "settings": new_eff_rev,
+        }
+        linked_proposal.updated_at = now
+
+    active_reqs = list(
+        await db.scalars(
+            select(SettingChangeRow).where(
+                SettingChangeRow.user_id == owner,
+                SettingChangeRow.pending_proposal_id == preferences.pending_proposal_id,
+                SettingChangeRow.application_state.in_(("pending_review", "pending_proposal")),
+            )
+        )
+    )
+    for s_req in active_reqs:
+        s_req.effective_revision = new_eff_rev
+        if s_req.requested_revision is not None:
+            s_req.requested_revision = preferences.requested_revision
+        s_req.updated_at = now
 
 
 def _validate_preferences_payload(
@@ -544,17 +604,22 @@ async def apply_settings_change(
                 **pref_values,
             )
             db.add(preferences)
-        elif any(getattr(preferences, k) != v for k, v in pref_values.items()):
-            for k, v in pref_values.items():
-                setattr(preferences, k, v)
-            if preferences.pending_proposal_id is not None:
-                new_eff_rev = max(preferences.effective_revision, preferences.requested_revision or 0) + 1
-                preferences.effective_revision = new_eff_rev
-                if preferences.requested_revision is not None and preferences.requested_revision <= new_eff_rev:
-                    preferences.requested_revision = new_eff_rev + 1
-            else:
-                preferences.effective_revision += 1
-            preferences.updated_at = now
+        else:
+            has_pending_override = (
+                preferences.pending_proposal_id is not None
+                and isinstance(preferences.requested_changes, dict)
+                and any(k in preferences.requested_changes for k in pref_values)
+            )
+            if any(getattr(preferences, k) != v for k, v in pref_values.items()) or has_pending_override:
+                for k, v in pref_values.items():
+                    setattr(preferences, k, v)
+                await _bump_pref_revision_and_sync_pending_proposal(
+                    db,
+                    owner=owner,
+                    preferences=preferences,
+                    now=now,
+                    updated_keys=pref_values.keys(),
+                )
 
         new_offsets = pref_values.get("reminder_offsets")
         offsets_actually_changed = (
@@ -1164,14 +1229,13 @@ async def respond_to_suggestion(
     has_future_sessions = await _has_future_confirmed_sessions(db, owner)
     if not has_future_sessions or kind == "reminder_offset":
         setattr(pref_row, pref_field, accepted_value)
-        if pref_row.pending_proposal_id is not None:
-            new_eff_rev = max(pref_row.effective_revision, pref_row.requested_revision or 0) + 1
-            pref_row.effective_revision = new_eff_rev
-            if pref_row.requested_revision is not None and pref_row.requested_revision <= new_eff_rev:
-                pref_row.requested_revision = new_eff_rev + 1
-        else:
-            pref_row.effective_revision += 1
-        pref_row.updated_at = now
+        await _bump_pref_revision_and_sync_pending_proposal(
+            db,
+            owner=owner,
+            preferences=pref_row,
+            now=now,
+            updated_keys=(pref_field,),
+        )
 
         if kind == "reminder_offset" and isinstance(accepted_value, list):
             future_sessions = list(

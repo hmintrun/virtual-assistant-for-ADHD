@@ -85,7 +85,7 @@ Tốc độ như nhau. Chọn **verbatim** làm mặc định vì:
 | `backend/app/services/tts_prewarm.py` (mới), `TtsService` | Tối ưu độ trễ TTS: prewarm, hedge, gộp request — xem §8. |
 | `backend/tests/test_tts_latency_optimizations.py` | 11 test cho §8. |
 
-**Không đổi:** router `/api/v1/voice/transcriptions`, schema response, mobile, luồng fallback/purpose routing, prompt Groq và bộ lọc ảo giác Groq của vqh.
+**Không đổi:** router `/api/v1/voice/transcriptions`, schema response, mobile, luồng fallback/purpose routing và prompt Groq; riêng bộ lọc ảo giác Whisper (`_is_whisper_hallucination`, `voice_service.py#L1157`) chỉ áp dụng cho Groq Whisper (Gemini bỏ qua để tránh lọc nhầm câu ngắn).
 
 Quay lại cấu hình cũ chỉ cần `.env`:
 
@@ -101,7 +101,7 @@ GROQ_STT_MODEL=whisper-large-v3-turbo
    Đề xuất tiếp: thêm `gemini-3.1-flash-lite` làm tầng 2 trước Groq (cần mở rộng `FallbackSttProvider` lên 3 tầng).
 2. **Mẫu đo nhỏ** (1–2 lần/clip). Google có lúc chậm bất thường (từng thấy 16 s với flash-lite) → nên đo lặp 3–5 lần
    và cân nhắc giảm `VOICE_STT_PRIMARY_TIMEOUT_SECONDS` từ 8 s xuống ~5 s để rơi sang Groq sớm hơn.
-3. **Lệch Project.md / AGENTS.md §3.3** (ghi Groq `whisper-large-v3-turbo` là STT ưu tiên). Cần nhóm đồng ý và cập nhật tài liệu.
+3. **Đồng bộ tài liệu (`Project.md` & `AGENTS.md §3.3`):** Đã cập nhật `Project.md`, `AGENTS.md §3.3` và các báo cáo liên quan khớp cấu hình STT mới (`GEMINI_STT_MODEL=gemini-3.5-transcribe` inline `verbatim`, `GROQ_STT_MODEL=whisper-large-v3`, riêng `uf5_checkin` ưu tiên Groq khi `VOICE_STT_UF5_PREFER_GROQ=true`).
 4. UF5 check-in ưu tiên Groq: v3 chậm hơn turbo một chút với câu ngắn (~0,5 s vs ~0,4 s) — chấp nhận được, nhưng nên đo lại khi Groq ổn định.
 
 ## 6. Groq với prompt mới của nhánh vqh

@@ -7,6 +7,9 @@ import hashlib
 import json
 import logging
 import secrets
+from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import NAMESPACE_DNS, UUID, uuid4, uuid5
@@ -43,18 +46,41 @@ from app.services.google_calendar_client import (
 
 logger = logging.getLogger(__name__)
 
-_OWNER_CALENDAR_LOCKS: dict[tuple[int, str], asyncio.Lock] = {}
+@dataclass
+class _RefCountedLock:
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    ref_count: int = 0
 
 
-def get_owner_calendar_lock(owner_id: str) -> asyncio.Lock:
-    """Trả về asyncio.Lock theo cặp (event_loop_id, owner_id) để tuần tự hóa thao tác confirm song song."""
+_OWNER_CALENDAR_LOCKS: dict[tuple[int, str], _RefCountedLock] = {}
+
+
+@asynccontextmanager
+async def _acquire_refcounted_lock(
+    lock_map: dict[tuple[int, str], _RefCountedLock],
+    key: tuple[int, str],
+) -> AsyncGenerator[None]:
+    entry = lock_map.get(key)
+    if entry is None:
+        entry = _RefCountedLock()
+        lock_map[key] = entry
+    entry.ref_count += 1
+    try:
+        async with entry.lock:
+            yield
+    finally:
+        entry.ref_count -= 1
+        if entry.ref_count <= 0 and lock_map.get(key) is entry:
+            lock_map.pop(key, None)
+
+
+@asynccontextmanager
+async def get_owner_calendar_lock(owner_id: str) -> AsyncGenerator[None]:
+    """Tuần tự hóa thao tác confirm song song theo (event_loop_id, owner_id) và tự dọn entry khi hết người chờ."""
     loop = asyncio.get_running_loop()
     key = (id(loop), str(owner_id))
-    lock = _OWNER_CALENDAR_LOCKS.get(key)
-    if lock is None:
-        lock = asyncio.Lock()
-        _OWNER_CALENDAR_LOCKS[key] = lock
-    return lock
+    async with _acquire_refcounted_lock(_OWNER_CALENDAR_LOCKS, key):
+        yield
 
 
 def _hash_state(state: str) -> str:

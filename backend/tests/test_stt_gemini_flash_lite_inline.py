@@ -894,3 +894,149 @@ async def test_wav_corrupt_header_skips_precheck_and_calls_provider(
     )
     assert res.text == "Provider vẫn được gọi"
     provider_mock.assert_awaited_once()
+
+
+# ------------------------------------------------------------------------------
+# PR #22 Finding #7A & #7B: Gemini skips Whisper hallucination filter & strict timeout budget
+# ------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "verbatim_text",
+    [
+        "Cảm ơn các bạn đã xem",
+        "ừ ừ ừ ừ",
+    ],
+)
+@pytest.mark.asyncio
+async def test_finding7a_gemini_provider_does_not_run_whisper_hallucination_filter(
+    verbatim_text: str,
+) -> None:
+    """PR #22 #7A: Gemini giữ nguyên transcript thực tế (kể cả verbatim/cụm thường gặp), còn Groq vẫn lọc hallucination."""
+    fake_client, _, _, _, _ = _make_mock_gemini_client(
+        generate_content_mock=AsyncMock(return_value=SimpleNamespace(text=verbatim_text))
+    )
+    gemini = GeminiSttProvider(
+        api_key="test-gemini-key",
+        model="gemini-3.5-flash-lite",
+        mode="verbatim",
+        language_code="vi-VN",
+    )
+    gemini._client = fake_client
+
+    gemini_service = VoiceService(
+        gemini,
+        timeout_seconds=5.0,
+        max_audio_bytes=1024 * 1024,
+    )
+    res = await gemini_service.transcribe(
+        b"M4A-verbatim",
+        content_type="audio/m4a",
+        filename="verbatim.m4a",
+        purpose="uf1_input",
+    )
+    assert res.provider == "gemini"
+    assert res.text == verbatim_text
+
+    groq_create = AsyncMock(
+        return_value={
+            "text": verbatim_text,
+            "segments": [{"no_speech_prob": 0.05, "avg_logprob": -0.2}],
+        }
+    )
+    groq = GroqWhisperSttProvider(
+        api_key="test-groq-key",
+        model="whisper-large-v3",
+        language_code="vi-VN",
+        timeout_seconds=5.0,
+    )
+    cast(Any, groq)._client = SimpleNamespace(
+        audio=SimpleNamespace(transcriptions=SimpleNamespace(create=groq_create))
+    )
+    groq_service = VoiceService(
+        groq,
+        timeout_seconds=5.0,
+        max_audio_bytes=1024 * 1024,
+    )
+    with pytest.raises(SttError) as exc_info:
+        await groq_service.transcribe(
+            b"M4A-verbatim",
+            content_type="audio/m4a",
+            filename="verbatim.m4a",
+            purpose="uf5_checkin",
+        )
+    assert exc_info.value.code == SttErrorCode.NO_SPEECH
+    assert exc_info.value.detail == "hallucination_filtered"
+
+
+@pytest.mark.asyncio
+async def test_finding7b_fallback_enforces_remaining_budget_without_1s_floor() -> None:
+    """PR #22 #7B: Không có sàn max(1.0, ...); hết tổng ngân sách -> TIMEOUT fallback_timeout ngay, còn <1.0s -> cắt đúng phần còn lại."""
+    # Case 1: Primary tốn hết ngân sách 0.15s -> fallback KHÔNG được gọi, ném TIMEOUT(fallback_timeout) ngay
+    async def _slow_primary_exceeds(_audio: bytes, _mime: str) -> str:
+        await asyncio.sleep(0.18)
+        raise SttError(SttErrorCode.PROVIDER_ERROR, "late_fail")
+
+    fallback_called = False
+
+    class _SlowFailPrimary:
+        name = "gemini"
+
+        async def transcribe(self, audio: bytes, mime_type: str) -> str:
+            return await _slow_primary_exceeds(audio, mime_type)
+
+    class _SpyFallback:
+        name = "groq"
+
+        async def transcribe(self, audio: bytes, mime_type: str) -> str:
+            nonlocal fallback_called
+            fallback_called = True
+            await asyncio.sleep(0.35)
+            return "Không kịp"
+
+    svc_exhausted = VoiceService(
+        FallbackSttProvider(
+            primary=_SlowFailPrimary(),
+            fallback=_SpyFallback(),
+            primary_timeout_seconds=0.25,
+            total_timeout_seconds=0.15,
+        ),
+        timeout_seconds=0.15,
+        max_audio_bytes=1024 * 1024,
+    )
+    with pytest.raises(SttError) as exc1:
+        await svc_exhausted.transcribe(b"M4A", content_type="audio/m4a", filename="a.m4a")
+    assert exc1.value.code == SttErrorCode.TIMEOUT
+    assert exc1.value.detail == "fallback_timeout"
+    assert fallback_called is False
+
+    # Case 2: Nhánh fallback chỉ còn ~0.12s (< 1.0s) nhưng fallback mất 0.35s -> phải timeout theo ~0.12s, không được nới lên 1.0s!
+    class _FastFailPrimary:
+        name = "gemini"
+
+        async def transcribe(self, _audio: bytes, _mime_type: str) -> str:
+            await asyncio.sleep(0.05)
+            raise SttError(SttErrorCode.PROVIDER_ERROR, "boom")
+
+    class _SlowFallback:
+        name = "groq"
+
+        async def transcribe(self, _audio: bytes, _mime_type: str) -> str:
+            await asyncio.sleep(0.35)
+            return "Quá hạn"
+
+    # Kiểm tra trên cả FallbackSttProvider và legacy VoiceService(fallback_provider=...)
+    svc_legacy_budget = VoiceService(
+        _FastFailPrimary(),
+        fallback_provider=_SlowFallback(),
+        primary_timeout_seconds=0.2,
+        timeout_seconds=0.18,
+        max_audio_bytes=1024 * 1024,
+    )
+    started = asyncio.get_running_loop().time()
+    with pytest.raises(SttError) as exc2:
+        await svc_legacy_budget.transcribe(b"M4A", content_type="audio/m4a", filename="b.m4a")
+    elapsed = asyncio.get_running_loop().time() - started
+    assert exc2.value.code == SttErrorCode.TIMEOUT
+    assert exc2.value.detail == "fallback_timeout"
+    assert elapsed < 0.35

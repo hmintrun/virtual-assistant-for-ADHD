@@ -826,3 +826,138 @@ async def test_TC_UF6_EDGE_05_continuation_calendar_collision_block(
     finally:
         app.dependency_overrides.clear()
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_finding4_late_run1_skip_step_does_not_override_subsequent_run2_step_deny(
+    sqlite_migration: tuple[str, Any],
+) -> None:
+    """PR #22 Finding #4: Run 2 báo step_completed=False, sau đó Run 1 đến muộn báo skip_step -> Step KHÔNG bị chuyển skipped và remaining > 0."""
+    from app.models.session import Session as SessionRow
+
+    url, alembic = sqlite_migration
+    alembic("upgrade", "head")
+    engine = make_engine(url)
+    sf = session_factory(engine)
+
+    async def _override_db():
+        async with sf() as session:
+            yield session
+
+    app.dependency_overrides[get_db] = _override_db
+
+    try:
+        async with sf() as db:
+            ids = await _seed_uf5_uf6_environment(db, run_state="awaiting_checkin")
+            user_id = ids["user_id"]
+            run1_id = ids["run1_id"]
+            step1_id = ids["step1_id"]
+            t1_end = ids["t_sess1_end"]
+
+            # Tạo thêm Session 2 & Run 2 (kết thúc muộn hơn Run 1) trên cùng Step 1
+            t2_start = t1_end + timedelta(minutes=30)
+            t2_end = t2_start + timedelta(minutes=25)
+            sess2 = SessionRow(
+                id=uuid4(),
+                user_id=user_id,
+                step_id=step1_id,
+                scheduled_start=t2_start,
+                scheduled_end=t2_end,
+                micro_task_text="Tiếp tục Step 1",
+                micro_task_seconds=0,
+                work_seconds=1500,
+                rest_seconds=0,
+                segments=[{"order_index": 0, "kind": "work", "duration_seconds": 1500}],
+                duration_seconds=1500,
+                schedule_revision=1,
+                status="in_progress",
+                start_state="started",
+                start_decision_due_at=t2_start + timedelta(minutes=15),
+            )
+            db.add(sess2)
+            await db.flush()
+            run2 = SessionRun(
+                id=uuid4(),
+                user_id=user_id,
+                session_id=sess2.id,
+                device_id="device-test",
+                started_at=t2_start,
+                ended_at=t2_end,
+                run_state="awaiting_checkin",
+                active_phase="work",
+                segment_index=0,
+                work_elapsed_seconds=1500,
+                rest_elapsed_seconds=0,
+                actual_work_seconds=1500,
+                actual_source="timer",
+                outcome="unknown",
+                settings_snapshot={"effective_revision": 1},
+            )
+            db.add(run2)
+            await db.commit()
+            run2_id = run2.id
+
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            # 1) Mở và trả lời check-in Run 2 TRƯỚC: completed nhưng step_completed=False
+            r_open2 = await client.post(
+                f"/api/v1/runs/{run2_id}/check-ins",
+                headers=_auth_headers(user_id, idem_key=f"f4-open2-{uuid4().hex[:6]}"),
+                json={
+                    "kind": "final",
+                    "asked_at": t2_end.isoformat(),
+                    "expected_run_revision": 1,
+                },
+            )
+            assert r_open2.status_code == 201, r_open2.text
+            ci2_id = r_open2.json()["data"]["checkin_id"]
+
+            r_ans2 = await client.put(
+                f"/api/v1/check-ins/{ci2_id}/response",
+                headers=_auth_headers(user_id, idem_key=f"f4-ans2-{uuid4().hex[:6]}"),
+                json={
+                    "expected_response_revision": 0,
+                    "responded_at": (t2_end + timedelta(seconds=10)).isoformat(),
+                    "session_outcome": "completed",
+                    "step_completed": False,
+                    "task_completed": False,
+                },
+            )
+            assert r_ans2.status_code == 200, r_ans2.text
+
+            # 2) Run 1 (kết thúc sớm hơn Run 2) gửi check-in muộn với skip_scope="skip_step"
+            r_open1 = await client.post(
+                f"/api/v1/runs/{run1_id}/check-ins",
+                headers=_auth_headers(user_id, idem_key=f"f4-open1-{uuid4().hex[:6]}"),
+                json={
+                    "kind": "final",
+                    "asked_at": t1_end.isoformat(),
+                    "expected_run_revision": 1,
+                },
+            )
+            assert r_open1.status_code == 201, r_open1.text
+            ci1_id = r_open1.json()["data"]["checkin_id"]
+
+            r_ans1 = await client.put(
+                f"/api/v1/check-ins/{ci1_id}/response",
+                headers=_auth_headers(user_id, idem_key=f"f4-ans1-{uuid4().hex[:6]}"),
+                json={
+                    "expected_response_revision": 0,
+                    "responded_at": (t2_end + timedelta(seconds=30)).isoformat(),
+                    "session_outcome": "skipped",
+                    "step_completed": False,
+                    "task_completed": False,
+                    "skip_scope": "skip_step",
+                },
+            )
+            assert r_ans1.status_code == 200, r_ans1.text
+
+            async with sf() as db:
+                step = await db.get(StepRow, step1_id)
+                assert step is not None
+                assert step.status != "skipped"
+                assert step.remaining_base_seconds > 0
+    finally:
+        app.dependency_overrides.clear()
+        await engine.dispose()

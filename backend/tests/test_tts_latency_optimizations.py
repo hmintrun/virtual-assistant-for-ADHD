@@ -150,3 +150,46 @@ def test_settings_defaults_enable_hedge_and_prewarm() -> None:
     assert cfg.VOICE_TTS_HEDGE_DELAY_SECONDS == 1.2
     assert cfg.VOICE_TTS_PREWARM is True
     assert build_tts_service(cfg)._hedge_delay_seconds == 1.2
+
+
+@pytest.mark.asyncio
+async def test_hedge_consumes_sibling_exception_on_same_tick_win() -> None:
+    """PR #22 Minor #4: Nếu winner và task lỗi xong cùng tick, .exception() của sibling phải được thu hồi."""
+    import gc
+
+    class _SameTickRaceProvider:
+        name = "same-tick-race"
+
+        def __init__(self) -> None:
+            self.calls = 0
+            self.release = asyncio.Event()
+
+        async def synthesize(self, text: str, voice: str) -> tuple[bytes, str]:
+            del text, voice
+            call_idx = self.calls
+            self.calls += 1
+            if call_idx == 0:
+                await self.release.wait()
+                return b"winner-audio", "audio/mpeg"
+            self.release.set()
+            raise TtsError(TtsErrorCode.PROVIDER_ERROR, "sibling-boom")
+
+    loop = asyncio.get_running_loop()
+    loop_errors: list[dict[str, object]] = []
+    prev_handler = loop.get_exception_handler()
+
+    def _capture_handler(_loop, context: dict[str, object]) -> None:
+        loop_errors.append(context)
+
+    loop.set_exception_handler(_capture_handler)
+    try:
+        provider = _SameTickRaceProvider()
+        svc = TtsService(provider, timeout_seconds=2.0, hedge_delay_seconds=0.02)
+        res = await svc.synthesize("Kiểm tra hedge cùng tick")
+        assert res.audio_bytes == b"winner-audio"
+        assert svc.hedges_started == 1
+        await asyncio.sleep(0.01)
+        gc.collect()
+        assert not loop_errors
+    finally:
+        loop.set_exception_handler(prev_handler)
