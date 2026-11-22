@@ -197,6 +197,7 @@ class PlanningApi {
     required String scope,
     required DateTime? deadline,
     JsonMap? availability,
+    bool clearAvailability = false,
     List<String>? extraRequirements,
   }) async {
     final oldTime = draft.summary['time_constraint'] as Map<String, dynamic>?;
@@ -207,6 +208,10 @@ class PlanningApi {
     final changes = <String, dynamic>{
       if (title != draft.title) 'title': title,
       if (scope != draft.scope) 'scope': scope,
+      if (clearAvailability) ...{
+        'availability': null,
+        'availability_ref': null,
+      },
       if (availability != null) 'availability': availability,
       if (extraRequirements != null) 'extra_requirements': extraRequirements,
       if (deadlineChanged)
@@ -225,6 +230,7 @@ class PlanningApi {
       'title': title,
       'scope': scope,
       'deadline': deadline?.toUtc().toIso8601String(),
+      'clear_availability': clearAvailability,
       if (availability != null) 'availability': availability,
       'previous_time_constraint': oldTime,
       if (extraRequirements != null) 'extra_requirements': extraRequirements,

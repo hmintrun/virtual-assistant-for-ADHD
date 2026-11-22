@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:url_launcher/url_launcher.dart';
@@ -91,10 +93,25 @@ class _GoogleCalendarScreenState extends State<GoogleCalendarScreen>
       });
 
   Future<void> _open(Map<String, dynamic> connection) async {
-    await Navigator.of(context).push<void>(MaterialPageRoute(
-      builder: (_) => _GoogleCalendarAccount(api: _api, connection: connection),
-    ));
-    if (mounted) await _load();
+    final disconnected = await Navigator.of(context).push<bool>(
+      MaterialPageRoute(
+        builder: (_) =>
+            _GoogleCalendarAccount(api: _api, connection: connection),
+      ),
+    );
+    if (!mounted) return;
+    await _load();
+    if (disconnected == true && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        duration: const Duration(seconds: 5),
+        content: const Text(
+            'Đã ngắt Google Calendar. Hoàn tác sẽ mở Google để cấp lại quyền.'),
+        action: SnackBarAction(
+          label: 'Hoàn tác',
+          onPressed: () => unawaited(_connect()),
+        ),
+      ));
+    }
   }
 
   @override
@@ -550,7 +567,7 @@ class _GoogleCalendarAccountState extends State<_GoogleCalendarAccount> {
                     ? null
                     : () => _perform(() async {
                           await widget.api.disconnect(_id);
-                          if (mounted) Navigator.pop(context);
+                          if (mounted) Navigator.pop(context, true);
                         }),
                 child: const Text('Ngắt kết nối'),
               ),

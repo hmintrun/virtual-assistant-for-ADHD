@@ -751,9 +751,11 @@ class CandidateReviewScreen extends StatelessWidget {
       await _reviseDeadline(context);
       return;
     }
-    await Navigator.push<void>(
+    await Navigator.push<bool>(
       context,
-      MaterialPageRoute(builder: (_) => const TaskSummaryScreen()),
+      MaterialPageRoute(
+        builder: (_) => const TaskSummaryScreen(returnToReview: true),
+      ),
     );
   }
 

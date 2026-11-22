@@ -1,10 +1,13 @@
 import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
 
 import '../core/api_client.dart';
 import '../core/responsive_layout.dart';
 import '../core/theme.dart';
 import '../models/focus_session_model.dart';
+import '../providers/focus_provider.dart';
 import '../services/adaptation_api.dart';
+import '../services/schedule_service.dart';
 import '../services/voice_service.dart';
 import '../widgets/melbel_ui.dart';
 
@@ -278,29 +281,112 @@ class _UnfinishedReviewScreenState extends State<UnfinishedReviewScreen> {
       );
 }
 
-class NextFocusActionScreen extends StatelessWidget {
+class NextFocusActionScreen extends StatefulWidget {
   const NextFocusActionScreen({required this.session, super.key});
 
   final FocusSessionInfo session;
 
   @override
-  Widget build(BuildContext context) => FocusReviewPage(
-        title: 'Tiếp theo',
-        children: [
-          const ReviewHeader('Đã ghi nhận phiên', 'Bạn muốn làm gì tiếp theo?',
-              expression: CatExpression.happy),
-          ReviewSessionCard(session: session),
-          PrimaryCta(
+  State<NextFocusActionScreen> createState() => _NextFocusActionScreenState();
+}
+
+class _NextFocusActionScreenState extends State<NextFocusActionScreen> {
+  late Future<FocusSessionInfo?> _nextSession;
+  bool _starting = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _nextSession = _loadNextSession();
+  }
+
+  Future<FocusSessionInfo?> _loadNextSession() async {
+    final now = DateTime.now();
+    final rows = await ScheduleService(ApiClient()).loadSessions(
+      now,
+      now.add(const Duration(days: 21)),
+      includeTitles: true,
+    );
+    final candidates = rows
+        .where((row) => row['status'] == 'scheduled')
+        .map(FocusSessionInfo.fromJson)
+        .where((session) =>
+            session.sessionId != widget.session.sessionId &&
+            session.scheduledEnd.isAfter(now))
+        .toList()
+      ..sort((a, b) => a.scheduledStart.compareTo(b.scheduledStart));
+    return candidates.isEmpty ? null : candidates.first;
+  }
+
+  Future<void> _continue(FocusSessionInfo next) async {
+    if (_starting) return;
+    setState(() => _starting = true);
+    final focus = context.read<FocusProvider>();
+    await focus.startSession(next, continueImmediately: true);
+    await focus.startRun();
+    if (!mounted) return;
+    if (focus.isActiveRun) {
+      Navigator.of(context).pop();
+      return;
+    }
+    await focus.restAfterCheckIn();
+    if (!mounted) return;
+    setState(() => _starting = false);
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      content: Text(focus.runError ?? 'Chưa bắt đầu được phiên tiếp theo.'),
+      duration: const Duration(seconds: 5),
+    ));
+  }
+
+  @override
+  Widget build(BuildContext context) => FutureBuilder<FocusSessionInfo?>(
+        future: _nextSession,
+        builder: (context, snapshot) => FocusReviewPage(
+          title: 'Tiếp theo',
+          children: [
+            const ReviewHeader(
+                'Đã ghi nhận phiên', 'Bạn muốn làm gì tiếp theo?',
+                expression: CatExpression.happy),
+            ReviewSessionCard(session: widget.session),
+            if (snapshot.hasData && snapshot.data != null)
+              PrimaryCta(
+                label: 'Làm tiếp ngay phiên kế',
+                icon: Icons.play_arrow_rounded,
+                onPressed: _starting ? null : () => _continue(snapshot.data!),
+              ),
+            if (snapshot.hasError)
+              TextButton(
+                onPressed: () => setState(() {
+                  _nextSession = _loadNextSession();
+                }),
+                child: const Text('Chưa tải được phiên kế · Thử lại'),
+              ),
+            PrimaryCta(
               label: 'Nghỉ giải lao',
               icon: Icons.coffee_outlined,
-              onPressed: () => Navigator.of(context).pushReplacement(
-                  MaterialPageRoute<void>(
-                      builder: (_) => const FocusRestScreen()))),
-          SecondaryCta(
+              onPressed: _starting
+                  ? null
+                  : () async {
+                      await context.read<FocusProvider>().restAfterCheckIn();
+                      if (!mounted) return;
+                      Navigator.of(context).pushReplacement(
+                        MaterialPageRoute<void>(
+                            builder: (_) => const FocusRestScreen()),
+                      );
+                    },
+            ),
+            SecondaryCta(
               label: 'Xem lịch',
-              onPressed: () =>
-                  Navigator.of(context).pushReplacementNamed('/calendar')),
-        ],
+              onPressed: _starting
+                  ? null
+                  : () async {
+                      await context.read<FocusProvider>().restAfterCheckIn();
+                      if (!mounted) return;
+                      Navigator.of(context).pushReplacementNamed('/calendar');
+                    },
+            ),
+          ],
+        ),
       );
 }
 
@@ -477,7 +563,7 @@ class _ScheduleComparisonScreenState extends State<ScheduleComparisonScreen>
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed &&
         _proposal?['status'] == 'pending') {
-      _load();
+      _load(forceCurrent: true);
     }
   }
 
@@ -496,6 +582,31 @@ class _ScheduleComparisonScreenState extends State<ScheduleComparisonScreen>
     try {
       await operation();
     } on ApiException catch (error) {
+      if (error.statusCode == 409 &&
+          error.code == 'REVISION_CONFLICT' &&
+          _proposal != null) {
+        try {
+          var latest = await _api.currentProposal();
+          if (latest?['status'] == 'pending' && latest?['stale'] == true) {
+            latest = await _api.updateProposal('rebuild', latest!);
+          }
+          await _api.cacheProposal(latest);
+          if (mounted) {
+            setState(() {
+              _proposal = latest;
+              _cached = false;
+              _error = latest == null
+                  ? 'Lịch đã thay đổi. Phương án cũ không còn để duyệt.'
+                  : 'Lịch đã thay đổi. Hãy xem lại phương án mới trước khi duyệt.';
+            });
+          }
+          return;
+        } on ApiException {
+          // Keep the original conflict visible; the Retry action reloads it.
+        } catch (_) {
+          // Keep the original conflict visible; the Retry action reloads it.
+        }
+      }
       final cached = error.statusCode == null && _proposal == null
           ? await _api.cachedProposal()
           : null;
@@ -515,9 +626,11 @@ class _ScheduleComparisonScreenState extends State<ScheduleComparisonScreen>
     }
   }
 
-  Future<void> _load() => _perform(() async {
-        final id = _proposal?['proposal_id'] as String? ?? widget.proposalId;
-        final run = id == null ? widget.runId : null;
+  Future<void> _load({bool forceCurrent = false}) => _perform(() async {
+        final id = forceCurrent
+            ? null
+            : (_proposal?['proposal_id'] as String? ?? widget.proposalId);
+        final run = id == null && !forceCurrent ? widget.runId : null;
         final current = id != null
             ? await _api.proposal(id)
             : run != null
@@ -555,6 +668,37 @@ class _ScheduleComparisonScreenState extends State<ScheduleComparisonScreen>
         )));
         Navigator.pop(context, true);
       });
+
+  Future<void> _openAvailabilityEditor() async {
+    final taskId = _proposal?['target_task_id'] as String?;
+    if (taskId == null) {
+      setState(() => _error = 'Phương án chưa chỉ rõ công việc cần điều chỉnh.');
+      return;
+    }
+    final proposalId = await Navigator.of(context).push<String>(
+      MaterialPageRoute(
+        builder: (_) => AvailabilityAdjustmentScreen(taskId: taskId),
+      ),
+    );
+    if (!mounted || proposalId == null) return;
+    await Navigator.of(context).push<void>(MaterialPageRoute(
+      builder: (_) => ScheduleComparisonScreen(
+        reason: 'Mở thêm giờ rảnh',
+        proposalId: proposalId,
+      ),
+    ));
+    if (mounted) await _load(forceCurrent: true);
+  }
+
+  void _explainDeadlineEditRequirement() {
+    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+      duration: Duration(seconds: 6),
+      content: Text(
+        'Contract hiện yêu cầu sửa hạn chót trong Draft rồi xác nhận lại. '
+        'Chưa có API sửa trực tiếp Task đã chốt.',
+      ),
+    ));
+  }
 
   String _timeRange(Object? startValue, Object? endValue) {
     DateTime? local(Object? value) =>
@@ -625,6 +769,21 @@ class _ScheduleComparisonScreenState extends State<ScheduleComparisonScreen>
               ),
           if (deficit != null && deficit > 0)
             Text('Còn thiếu ${(deficit / 60).ceil()} phút.'),
+          if ((deficit ?? 0) > 0 || feasibility?['confirmable'] != true)
+            Wrap(
+              spacing: 8,
+              runSpacing: 4,
+              children: [
+                ActionChip(
+                  label: const Text('Mở thêm giờ rảnh'),
+                  onPressed: _busy ? null : _openAvailabilityEditor,
+                ),
+                ActionChip(
+                  label: const Text('Lùi hạn chót'),
+                  onPressed: _busy ? null : _explainDeadlineEditRequirement,
+                ),
+              ],
+            ),
           for (final item in items('steps_to_add'))
             MelbelCard(
               borderRadius: 22,
@@ -664,7 +823,10 @@ class _ScheduleComparisonScreenState extends State<ScheduleComparisonScreen>
               label: 'Tính lại phương án',
               onPressed: _busy ? null : () => _act('rebuild')),
         if (_error != null)
-          SecondaryCta(label: 'Thử lại', onPressed: _busy ? null : _load),
+          SecondaryCta(
+              label: 'Thử lại',
+              onPressed:
+                  _busy ? null : () => _load(forceCurrent: true)),
         if (widget.session == null &&
             proposal == null &&
             widget.trigger != 'resume')
@@ -681,4 +843,207 @@ class _ScheduleComparisonScreenState extends State<ScheduleComparisonScreen>
       ],
     );
   }
+}
+
+class AvailabilityAdjustmentScreen extends StatefulWidget {
+  const AvailabilityAdjustmentScreen({required this.taskId, super.key});
+
+  final String taskId;
+
+  @override
+  State<AvailabilityAdjustmentScreen> createState() =>
+      _AvailabilityAdjustmentScreenState();
+}
+
+class _AvailabilityAdjustmentScreenState
+    extends State<AvailabilityAdjustmentScreen> {
+  final _api = ApiClient();
+  DateTime _date = DateUtils.dateOnly(DateTime.now().add(const Duration(days: 1)));
+  TimeOfDay _start = const TimeOfDay(hour: 18, minute: 0);
+  TimeOfDay _end = const TimeOfDay(hour: 19, minute: 0);
+  bool _busy = false;
+  String? _error;
+
+  String _clock(TimeOfDay time) =>
+      '${time.hour.toString().padLeft(2, '0')}:${time.minute.toString().padLeft(2, '0')}';
+
+  Future<void> _save() async {
+    if (_busy) return;
+    final startMinutes = _start.hour * 60 + _start.minute;
+    final endMinutes = _end.hour * 60 + _end.minute;
+    if (endMinutes <= startMinutes) {
+      setState(() => _error = 'Giờ kết thúc phải sau giờ bắt đầu.');
+      return;
+    }
+    setState(() {
+      _busy = true;
+      _error = null;
+    });
+    try {
+      final task = await _api.getData(
+        '/tasks/${Uri.encodeComponent(widget.taskId)}',
+      );
+      final availability = await _availabilityForTask(task);
+      final dateKey =
+          '${_date.year.toString().padLeft(4, '0')}-${_date.month.toString().padLeft(2, '0')}-${_date.day.toString().padLeft(2, '0')}';
+      final weekdayRules = (availability['weekly_rules'] as List? ?? const [])
+          .whereType<Map>()
+          .where((rule) => rule['weekday'] == _date.weekday)
+          .map((rule) => {
+                'start_local': rule['start_local'],
+                'end_local': rule['end_local'],
+              })
+          .toList();
+      final overrides = (availability['date_overrides'] as List? ?? const [])
+          .whereType<Map>()
+          .map((item) => Map<String, dynamic>.from(item))
+          .toList();
+      final existingIndex = overrides.indexWhere(
+        (item) => item['date'] == dateKey,
+      );
+      final baseIntervals = existingIndex >= 0
+          ? (overrides[existingIndex]['intervals'] as List? ?? const [])
+              .whereType<Map>()
+              .map((interval) => {
+                    'start_local': interval['start_local'],
+                    'end_local': interval['end_local'],
+                  })
+              .toList()
+          : weekdayRules;
+      final addedInterval = {
+        'start_local': _clock(_start),
+        'end_local': _clock(_end),
+      };
+      if (baseIntervals.any((item) =>
+          item['start_local'] == addedInterval['start_local'] &&
+          item['end_local'] == addedInterval['end_local'])) {
+        throw const ApiException('Khung giờ này đã có trong lịch rảnh.');
+      }
+      final mergedIntervals = [...baseIntervals, addedInterval]
+        ..sort((a, b) => (a['start_local'] as String)
+            .compareTo(b['start_local'] as String));
+      final override = {'date': dateKey, 'intervals': mergedIntervals};
+      if (existingIndex >= 0) {
+        overrides[existingIndex] = override;
+      } else {
+        overrides.add(override);
+      }
+      final updatedAvailability = {
+        'timezone': availability['timezone'],
+        'weekly_rules': availability['weekly_rules'],
+        'date_overrides': overrides,
+      };
+      final payload = {
+        'target_task_id': widget.taskId,
+        'expected_task_revision': task['revision'],
+        'changes': {'availability': updatedAvailability},
+      };
+      final path = '/settings/change-requests';
+      final result = await _api.postData(
+        path,
+        data: payload,
+        idempotencyKey: ApiClient.stableIdempotencyKey(
+          'task_availability_${widget.taskId}',
+          payload.toString(),
+        ),
+      );
+      final proposalId = result['pending_proposal_id'] as String?;
+      if (proposalId == null || proposalId.isEmpty) {
+        throw const ApiException('Chưa nhận được phương án UF6 để xem lại.');
+      }
+      if (mounted) Navigator.of(context).pop(proposalId);
+    } on ApiException catch (error) {
+      if (mounted) setState(() => _error = error.message);
+    } catch (_) {
+      if (mounted) setState(() => _error = 'Chưa cập nhật được giờ rảnh.');
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Future<Map<String, dynamic>> _availabilityForTask(
+    Map<String, dynamic> task,
+  ) async {
+    final scoped = task['availability'];
+    if (scoped is Map<String, dynamic>) return scoped;
+    final reference = task['availability_ref'];
+    if (reference is! Map) {
+      throw const ApiException(
+        'Công việc chưa có cấu hình giờ rảnh để mở rộng an toàn.',
+      );
+    }
+    final shared = await _api.getData('/availability');
+    if (shared['availability_id'] != reference['availability_id'] ||
+        shared['revision'] != reference['revision']) {
+      throw const ApiException(
+        'Nguồn giờ rảnh đã đổi. Hãy tải lại phương án trước khi sửa.',
+      );
+    }
+    return shared;
+  }
+
+  Future<void> _pickDate() async {
+    final value = await showDatePicker(
+      context: context,
+      initialDate: _date,
+      firstDate: DateUtils.dateOnly(DateTime.now()),
+      lastDate: DateTime.now().add(const Duration(days: 365)),
+    );
+    if (value != null && mounted) setState(() => _date = value);
+  }
+
+  Future<void> _pickTime({required bool start}) async {
+    final value = await showTimePicker(
+      context: context,
+      initialTime: start ? _start : _end,
+    );
+    if (value == null || !mounted) return;
+    setState(() {
+      if (start) {
+        _start = value;
+      } else {
+        _end = value;
+      }
+      _error = null;
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) => FocusReviewPage(
+        title: 'Mở thêm giờ rảnh',
+        children: [
+          const ReviewHeader(
+            'Thêm một khung giờ',
+            'Khung mới chỉ áp dụng cho công việc này. Lịch cũ được giữ đến khi bạn duyệt phương án.',
+          ),
+          TextButton.icon(
+            onPressed: _busy ? null : _pickDate,
+            icon: const Icon(Icons.calendar_today_outlined),
+            label: Text(MaterialLocalizations.of(context).formatMediumDate(_date)),
+          ),
+          Wrap(
+            spacing: 8,
+            children: [
+              OutlinedButton(
+                onPressed: _busy ? null : () => _pickTime(start: true),
+                child: Text('Từ ${_clock(_start)}'),
+              ),
+              OutlinedButton(
+                onPressed: _busy ? null : () => _pickTime(start: false),
+                child: Text('Đến ${_clock(_end)}'),
+              ),
+            ],
+          ),
+          if (_error != null) Text(_error!),
+          if (_busy) const LinearProgressIndicator(),
+          PrimaryCta(
+            label: 'Tạo phương án giờ rảnh',
+            onPressed: _busy ? null : _save,
+          ),
+          SecondaryCta(
+            label: 'Quay lại',
+            onPressed: _busy ? null : () => Navigator.pop(context),
+          ),
+        ],
+      );
 }

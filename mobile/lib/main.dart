@@ -7,6 +7,7 @@ import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 
 import 'core/api_session.dart';
+import 'core/api_client.dart';
 import 'core/responsive_layout.dart';
 import 'core/theme.dart';
 import 'repositories/local_run_repository.dart';
@@ -65,7 +66,6 @@ class _AuthGateState extends State<_AuthGate> {
     context.watch<ThemeProvider>();
     final auth = context.watch<AuthService>();
     final session = auth.session;
-
     final Widget child;
     if (!_splashDone || auth.loading) {
       child = MaterialApp(
@@ -86,7 +86,11 @@ class _AuthGateState extends State<_AuthGate> {
     } else {
       child = session == null
           ? const ProPlanApp(key: ValueKey('login'), signedIn: false)
-          : _OwnerApp(key: ObjectKey(session), session: session);
+          : _OwnerApp(
+              key: ObjectKey(session),
+              session: session,
+              onboardingRequired: auth.onboardingRequired,
+            );
     }
 
     return AnimatedSwitcher(
@@ -100,41 +104,123 @@ class _AuthGateState extends State<_AuthGate> {
   }
 }
 
-class _OwnerApp extends StatelessWidget {
-  const _OwnerApp({super.key, required this.session});
+class _OwnerApp extends StatefulWidget {
+  const _OwnerApp({
+    super.key,
+    required this.session,
+    required this.onboardingRequired,
+  });
   final ApiSession session;
+  final bool onboardingRequired;
 
   @override
-  Widget build(BuildContext context) => MultiProvider(
-        providers: [
-          ChangeNotifierProvider(
-              lazy: false,
-              create: (_) {
-                final task = TaskProvider(ownerId: session.ownerId);
-                unawaited(task.restoreCurrentDraft());
-                return task;
-              }),
-          ChangeNotifierProvider(
-              lazy: false,
-              create: (_) {
-                final focus = FocusProvider(
-                    repository: SecureStorageRunRepository(
-                  runKey: 'proplan.uf3.active_run.v1.${session.ownerId}',
-                  thoughtsKey:
-                      'proplan.uf4.local_thoughts.v1.${session.ownerId}',
-                ));
-                unawaited(focus.restore());
-                return focus;
-              }),
-        ],
-        child: const ProPlanApp(signedIn: true),
+  State<_OwnerApp> createState() => _OwnerAppState();
+}
+
+class _OwnerAppState extends State<_OwnerApp> {
+  late Future<FocusProvider> _focusProvider;
+  bool _restoreStarted = false;
+  FocusProvider? _initializedFocus;
+
+  @override
+  void initState() {
+    super.initState();
+    _focusProvider = _createFocusProvider();
+  }
+
+  Future<FocusProvider> _createFocusProvider() async {
+    if (kIsWeb) {
+      return FocusProvider(
+        ownerId: widget.session.ownerId,
+        api: ApiClient(),
+        repository: SecureStorageRunRepository(
+          runKey: 'proplan.uf3.active_run.v1.${widget.session.ownerId}',
+          thoughtsKey: 'proplan.uf4.local_thoughts.v1.${widget.session.ownerId}',
+        ),
+      );
+    }
+    return FocusProvider.createOfflineAware(
+      ownerId: widget.session.ownerId,
+      apiClient: ApiClient(),
+    );
+  }
+
+  @override
+  void dispose() {
+    _initializedFocus?.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => FutureBuilder<FocusProvider>(
+        future: _focusProvider,
+        builder: (context, snapshot) {
+          if (snapshot.hasError) {
+            return MaterialApp(
+              home: Scaffold(
+                body: Center(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const Text('Chưa mở được dữ liệu ngoại tuyến.'),
+                      const SizedBox(height: 12),
+                      FilledButton(
+                        onPressed: () => setState(() {
+                          _restoreStarted = false;
+                          _focusProvider = _createFocusProvider();
+                        }),
+                        child: const Text('Thử lại'),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            );
+          }
+          if (!snapshot.hasData) {
+            return const MaterialApp(
+              home: Scaffold(
+                body: Center(child: CircularProgressIndicator()),
+              ),
+            );
+          }
+          final focus = snapshot.data!;
+          _initializedFocus = focus;
+          if (!_restoreStarted) {
+            _restoreStarted = true;
+            WidgetsBinding.instance.addPostFrameCallback((_) {
+              if (mounted) unawaited(focus.restore());
+            });
+          }
+          return MultiProvider(
+            providers: [
+              ChangeNotifierProvider(
+                  lazy: false,
+                  create: (_) {
+                    final task = TaskProvider(ownerId: widget.session.ownerId);
+                    unawaited(task.restoreCurrentDraft());
+                    return task;
+                  }),
+              ChangeNotifierProvider<FocusProvider>.value(value: focus),
+            ],
+            child: ProPlanApp(
+              signedIn: true,
+              onboardingRequired: widget.onboardingRequired,
+            ),
+          );
+        },
       );
 }
 
 class ProPlanApp extends StatefulWidget {
-  const ProPlanApp({super.key, required this.signedIn});
+  const ProPlanApp({
+    super.key,
+    required this.signedIn,
+    this.onboardingRequired = false,
+  });
 
   final bool signedIn;
+  final bool onboardingRequired;
 
   @override
   State<ProPlanApp> createState() => _ProPlanAppState();
@@ -260,7 +346,11 @@ class _ProPlanAppState extends State<ProPlanApp> {
           },
         ),
       ),
-      home: signedIn ? const HomeScreen() : const LoginScreen(),
+      home: signedIn
+          ? widget.onboardingRequired
+              ? const SetupFlowScreen()
+              : const HomeScreen()
+          : const LoginScreen(),
     );
   }
 }
