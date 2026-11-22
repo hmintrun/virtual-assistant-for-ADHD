@@ -4,11 +4,13 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
+import '../core/api_client.dart';
 import '../core/responsive_layout.dart';
 import '../core/theme.dart';
 import '../providers/task_provider.dart';
 import '../services/audio_recorder_service.dart';
 import '../services/voice_service.dart';
+import '../services/voice_two_tier_service.dart';
 import '../widgets/melbel_ui.dart';
 import 'drafts_screen.dart';
 import 'task_summary_screen.dart';
@@ -45,6 +47,19 @@ class _TaskEntryScreenState extends State<TaskEntryScreen> {
           : null);
   late final VoiceTranscriptionService _transcription =
       widget.transcriptionService ?? VoiceTranscriptionService();
+  late final TwoTierSttService _stt = TwoTierSttService(
+    backend: (path, {required recordingId, thoughtId}) async {
+      final result = await _transcription.transcribeM4aWithMetadata(
+        path,
+        recordingId: recordingId,
+        thoughtId: thoughtId,
+      );
+      return TwoTierTranscript(
+        text: result.text,
+        lowConfidence: result.lowConfidence,
+      );
+    },
+  );
   bool _useOnDevice = false;
   Future<void>? _recordingStart;
   int _voiceFailures = 0;
@@ -93,6 +108,7 @@ class _TaskEntryScreenState extends State<TaskEntryScreen> {
 
   @override
   void dispose() {
+    _stt.cancel();
     _speechService.dispose();
     final recorder = _recorder;
     if (recorder != null) {
@@ -253,12 +269,25 @@ class _TaskEntryScreenState extends State<TaskEntryScreen> {
     try {
       if (!mounted) return;
       setState(() => _startingSpeech = true);
-      final result = await _transcription.transcribeM4aWithMetadata(
+      final result = await _stt.transcribeTwoTier(
         recording.path,
         recordingId: recording.path,
       );
       _recognizedWords = result.text;
       _finishSpeechAttempt(lowConfidence: result.lowConfidence);
+    } on SttCancelled {
+      if (mounted) setState(() => _isListening = false);
+    } on SttNeedsOnDeviceFallback {
+      _offerOnDevice();
+    } on ApiException catch (error) {
+      if (mounted) {
+        setState(() {
+          _isListening = false;
+          _voiceFailures++;
+          if (_voiceFailures >= 3) _showEditor = true;
+          _voiceHint = error.message;
+        });
+      }
     } catch (_) {
       _offerOnDevice();
     } finally {

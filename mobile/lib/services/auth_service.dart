@@ -8,6 +8,7 @@ import 'package:google_sign_in/google_sign_in.dart';
 import '../core/api_client.dart';
 import '../core/api_session.dart';
 import '../repositories/local_database_manager.dart';
+import 'pre_session_reminder_sync.dart';
 
 class AuthService extends ChangeNotifier {
   static const isDev = String.fromEnvironment('AUTH_MODE') == 'dev_user';
@@ -300,6 +301,7 @@ class AuthService extends ChangeNotifier {
       try {
         await LocalDatabaseManager.instance.closeCurrentDatabase();
       } catch (_) {}
+      await PreSessionReminderSync.instance.cancelAll();
       await _storage.delete(key: _sessionKey);
       _refreshToken = null;
       _refreshExpiresAt = null;

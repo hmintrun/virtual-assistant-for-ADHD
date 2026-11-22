@@ -371,7 +371,7 @@ class VoiceTranscriptionService {
         'transcription',
         '$device:$purpose:$thoughtId:$recordingId',
       ),
-      receiveTimeout: const Duration(seconds: 25),
+      receiveTimeout: const Duration(seconds: 48),
       data: FormData.fromMap({
         'purpose': purpose,
         'device_id': device,

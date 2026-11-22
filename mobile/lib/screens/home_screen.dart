@@ -12,6 +12,7 @@ import '../providers/focus_provider.dart';
 import '../providers/streak_provider.dart';
 import '../providers/task_provider.dart';
 import '../services/adaptation_api.dart';
+import '../services/pre_session_reminder_sync.dart';
 import '../services/schedule_service.dart';
 import '../widgets/melbel_ui.dart';
 import '../widgets/shimmer_loading.dart';
@@ -171,6 +172,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     if (streak != null) {
       unawaited(streak.ingestCompletedSessions(items));
     }
+    unawaited(PreSessionReminderSync.instance.sync(api: _api, sessions: items));
     return items;
   }
 

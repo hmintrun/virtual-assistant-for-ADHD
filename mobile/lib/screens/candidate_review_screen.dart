@@ -1,9 +1,12 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
 import '../core/responsive_layout.dart';
 import '../core/theme.dart';
 import '../providers/task_provider.dart';
+import '../services/pre_session_reminder_sync.dart';
 import '../widgets/melbel_ui.dart';
 import 'task_summary_screen.dart';
 import 'uf2_screens.dart'
@@ -716,6 +719,7 @@ class CandidateReviewScreen extends StatelessWidget {
     final task = context.read<TaskProvider>();
     try {
       await task.confirmCandidateOnBackend();
+      unawaited(PreSessionReminderSync.instance.sync());
       if (!context.mounted) return;
       await Navigator.push(context,
           MaterialPageRoute<void>(builder: (_) => const PlanLockedScreen()));

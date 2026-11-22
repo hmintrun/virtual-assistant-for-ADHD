@@ -26,7 +26,9 @@ import '../services/focus_native_controller.dart';
 import '../services/outbox_replay_worker.dart';
 import '../services/reminder_api.dart';
 import '../services/timer_service.dart';
+import '../services/voice_playback_service.dart';
 import '../services/voice_service.dart';
+import '../services/voice_two_tier_service.dart';
 
 /// Interface cho phép kiểm tra và khôi phục trạng thái native khi mở lại app.
 abstract class NativeRecoveryChecker {
@@ -183,6 +185,7 @@ class FocusProvider extends ChangeNotifier {
     ClockSyncService? clockSync,
     NativeRecoveryChecker? nativeRecoveryChecker,
     ReminderApi? reminderApi,
+    VoicePlaybackService? voicePlayback,
     String? ownerId,
     ValueChanged<int>? onFocusRecorded,
   })  : _clock = clock ?? const SystemClock(),
@@ -201,6 +204,7 @@ class FocusProvider extends ChangeNotifier {
         _outboxWorker = outboxWorker,
         _clockSync = clockSync,
         _nativeRecoveryChecker = nativeRecoveryChecker,
+        _voicePlayback = voicePlayback,
         _onFocusRecorded = onFocusRecorded,
         _ownerId = ownerId ?? ApiSession.current?.ownerId ?? 'default' {
     _reminderApi = reminderApi ?? ReminderApi(_api);
@@ -229,6 +233,7 @@ class FocusProvider extends ChangeNotifier {
     required String ownerId,
     required ApiClient apiClient,
     NativeRecoveryChecker? nativeRecoveryChecker,
+    VoicePlaybackService? voicePlayback,
     ValueChanged<int>? onFocusRecorded,
   }) async {
     final dbManager = LocalDatabaseManager.instance;
@@ -252,6 +257,7 @@ class FocusProvider extends ChangeNotifier {
       outboxWorker: worker,
       clockSync: clockSync,
       nativeRecoveryChecker: nativeRecoveryChecker,
+      voicePlayback: voicePlayback,
       onFocusRecorded: onFocusRecorded,
     );
   }
@@ -273,9 +279,21 @@ class FocusProvider extends ChangeNotifier {
   final OutboxReplayWorker? _outboxWorker;
   final ClockSyncService? _clockSync;
   final NativeRecoveryChecker? _nativeRecoveryChecker;
+  VoicePlaybackService? _voicePlayback;
   late final ReminderApi _reminderApi;
   final List<ThoughtRecord> _thoughts = [];
   List<Map<String, dynamic>> _upcomingReminders = const [];
+
+  bool get hasVoicePlayback => _voicePlayback != null;
+  VoicePlaybackService get voicePlayback => _voicePlayback ??= VoicePlaybackService(
+        api: _api,
+        cache: kIsWeb ? MemoryTtsAudioCache() : null,
+      );
+
+  Future<void> stopVoicePlayback() async {
+    final voice = _voicePlayback;
+    if (voice != null) await voice.stop();
+  }
 
   String get ownerId => _ownerId;
   List<Map<String, dynamic>> get upcomingReminders =>
@@ -300,6 +318,8 @@ class FocusProvider extends ChangeNotifier {
 
   FocusSessionInfo? _session;
   DateTime? _runEndsAt;
+  DateTime? _lastRunEndsAt;
+  String? _handoffFromRunId;
   Map<String, dynamic>? _serverRun;
   Map<String, dynamic>? _pendingEnd;
   Map<String, dynamic>? _pendingResponse;
@@ -402,6 +422,7 @@ class FocusProvider extends ChangeNotifier {
   String? _lastError;
   Timer? _offlineProbe;
   Timer? _checkInDeadline;
+  Timer? _checkInExpiryTicker;
   int _offlineProbeGeneration = 0;
   Timer? _undoExpiry;
   Timer? _deleteUndoExpiry;
@@ -599,6 +620,7 @@ class FocusProvider extends ChangeNotifier {
       if (json['stage'] == FocusStage.ended.name) {
         _stage = FocusStage.ended;
         final runEndsAt = DateTime.tryParse(json['run_ends_at'] as String? ?? '');
+        _lastRunEndsAt = runEndsAt;
         final isNativeExpired = nativeRecovery?.state == FocusRecoveryState.checkInExpired;
         final secondsSinceEnd = runEndsAt != null
             ? nowUtc.difference(runEndsAt.toUtc()).inSeconds
@@ -757,6 +779,11 @@ class FocusProvider extends ChangeNotifier {
     bool continueImmediately = false,
   }) async {
     if (isActiveRun || hasUnfinishedServerRun || _runCommandBusy) return;
+    _handoffFromRunId = continueImmediately ? _focusOwnerId : null;
+    _checkInExpiryTicker?.cancel();
+    _checkInExpiryTicker = null;
+    _lastRunEndsAt = null;
+    unawaited(stopVoicePlayback().catchError((_) {}));
     microTaskTimer.stop();
     _checkInDeadline?.cancel();
     _serverRun = null;
@@ -896,7 +923,18 @@ class FocusProvider extends ChangeNotifier {
   Future<void> _beginLocalRun() async {
     _lastError = null;
     await _refreshDndPermission();
+    final phases = [
+      for (final segment in _segments.skip(_firstWorkIndex))
+        FocusPhase(kind: segment.kind, durationSeconds: segment.durationSeconds),
+    ];
+    final previousRunId = _handoffFromRunId;
+    _handoffFromRunId = null;
     if (_usesNativeFocus && _session != null) {
+      unawaited(
+        AlarmService.instance
+            .cancelPreSessionRemindersFor(_session!.sessionId)
+            .catchError((_) {}),
+      );
       final totalSeconds = _segments
           .skip(_firstWorkIndex)
           .fold<int>(0, (total, segment) => total + segment.durationSeconds);
@@ -907,11 +945,23 @@ class FocusProvider extends ChangeNotifier {
         } catch (_) {
           // Timer vẫn chạy nếu alarm permission chưa được cấp.
         }
-        final result = await FocusNativeController.instance.start(
-          runId: _focusOwnerId!,
-          duration: Duration(seconds: totalSeconds),
-          stepTitle: _session!.stepTitle,
-        );
+        final FocusStartResult result;
+        if (previousRunId != null && previousRunId != _focusOwnerId) {
+          result = await FocusNativeController.instance.continueToNextRun(
+            previousRunId: previousRunId,
+            runId: _focusOwnerId!,
+            duration: Duration(seconds: totalSeconds),
+            stepTitle: _session!.stepTitle,
+            phases: phases,
+          );
+        } else {
+          result = await FocusNativeController.instance.start(
+            runId: _focusOwnerId!,
+            duration: Duration(seconds: totalSeconds),
+            stepTitle: _session!.stepTitle,
+            phases: phases,
+          );
+        }
         _runEndsAt = result.endsAt;
         _dndApplied = result.dndApplied;
         _dndApplyState = _dndApplied ? 'applied' : 'not_applied';
@@ -939,6 +989,19 @@ class FocusProvider extends ChangeNotifier {
     _startOfflineProbe();
     _reportDeviceState();
     await _persistRun();
+    if (_serverRun != null &&
+        _session != null &&
+        (_usesNativeFocus || kIsWeb || _voicePlayback != null)) {
+      unawaited(
+        voicePlayback
+            .prefetchCheckInPrompt(
+              kind: 'final',
+              isFinalSessionOfStep: _session!.isLastSessionOfStep,
+              expectedOutput: _session!.expectedOutput,
+            )
+            .catchError((_) => false),
+      );
+    }
     _notify();
   }
 
@@ -1009,6 +1072,7 @@ class FocusProvider extends ChangeNotifier {
       _onFocusRecorded?.call(_actualWorkSeconds);
     }
     final endedAt = awaitCheckIn ? _runEndsAt ?? _clock.now() : _clock.now();
+    _lastRunEndsAt = awaitCheckIn ? endedAt : null;
     _runEndsAt = null;
     // Káº¿t thÃºc Ä‘áº¿m giá» cá»¥c bá»™ KHÃ”NG tá»± Ä‘á»™ng Ä‘Ã¡nh dáº¥u hoÃ n thÃ nh Session/Step/Task (UF5).
     final run = _serverRun;
@@ -1026,6 +1090,9 @@ class FocusProvider extends ChangeNotifier {
       await syncRunEnd();
     } else if (!(awaitCheckIn && _usesNativeFocus)) {
       await _repository.clearActiveRun();
+    }
+    if (awaitCheckIn && _pendingResponse == null) {
+      _watchCheckInDeadline();
     }
     if (_thoughts.any((thought) => thought.isPendingSync)) {
       _ensureOfflineProbe();
@@ -1061,19 +1128,90 @@ class FocusProvider extends ChangeNotifier {
 
   Future<void> restAfterCheckIn() async {
     if (_stage != FocusStage.ended || _runCommandBusy) return;
+    _checkInDeadline?.cancel();
+    _checkInExpiryTicker?.cancel();
+    _checkInExpiryTicker = null;
     await _restoreFocusMode();
     _notify();
   }
 
+  DateTime? _effectiveCheckInDeadline() {
+    final raw = _serverRun?['checkin_timeout_at'] as String?;
+    final serverDeadline = raw == null ? null : DateTime.tryParse(raw)?.toLocal();
+    if (serverDeadline != null) return serverDeadline;
+    return _lastRunEndsAt?.add(FocusNativeController.checkInDndTimeout);
+  }
+
   void _watchCheckInDeadline() {
     _checkInDeadline?.cancel();
-    if (!hasOpenCheckIn) return;
-    final deadline =
-        DateTime.tryParse(_serverRun?['checkin_timeout_at'] as String? ?? '');
+    _checkInExpiryTicker?.cancel();
+    _checkInExpiryTicker = null;
+    if (_disposed || _stage != FocusStage.ended || (!hasOpenCheckIn && !_awaitingCheckIn)) {
+      return;
+    }
+    final deadline = _effectiveCheckInDeadline();
     if (deadline == null) return;
-    final delay =
-        deadline.difference(_clock.now()) + const Duration(seconds: 1);
-    _checkInDeadline = Timer(delay, () => unawaited(refreshRunCheckIn()));
+    final remaining = deadline.difference(_clock.now());
+    if (remaining <= Duration.zero) {
+      unawaited(checkCheckInExpiry());
+      return;
+    }
+    _checkInDeadline = Timer(
+      remaining + const Duration(seconds: 1),
+      () => unawaited(checkCheckInExpiry()),
+    );
+    _checkInExpiryTicker = Timer.periodic(
+      const Duration(seconds: 15),
+      (_) => unawaited(checkCheckInExpiry()),
+    );
+  }
+
+  /// Kiểm tra quá hạn Check-in (ended_at + 300s) khi app đang mở ở màn Check-in:
+  /// giải phóng DND + Wakelock và ghi nhận `no_response` (KHÔNG tự hoàn thành).
+  Future<bool> checkCheckInExpiry() async {
+    if (_disposed || _stage != FocusStage.ended) return false;
+    var expired = false;
+    final ownerId = _focusOwnerId;
+    if (_usesNativeFocus && ownerId != null) {
+      try {
+        expired = await FocusNativeController.instance.releaseIfCheckInExpired(
+          runId: ownerId,
+          now: _clock.now(),
+        );
+      } catch (_) {}
+    }
+    final deadline = _effectiveCheckInDeadline();
+    if (!expired && deadline != null && !_clock.now().isBefore(deadline)) {
+      expired = true;
+    }
+    if (!expired || _disposed) return false;
+
+    _checkInDeadline?.cancel();
+    _checkInExpiryTicker?.cancel();
+    _checkInExpiryTicker = null;
+    _checkInExpired = true;
+    _awaitingCheckIn = false;
+    _dndApplied = false;
+
+    if (!needsEndSync && _serverRun != null) {
+      await refreshRunCheckIn();
+    }
+    if (_disposed) return true;
+
+    final run = _serverRun;
+    if (run != null && hasOpenCheckIn) {
+      final checkIn = Map<String, dynamic>.from(run['check_in'] as Map);
+      checkIn['response_state'] = 'no_respond';
+      checkIn['status'] = 'no_response';
+      _serverRun = {...run, 'check_in': checkIn};
+    }
+    if (needsEndSync) {
+      _enqueueExpiredNoResponseOutbox();
+    }
+    await _restoreFocusMode();
+    await _repository.clearActiveRun();
+    _notify();
+    return true;
   }
 
   Future<void> refreshRunCheckIn() async {
@@ -1130,6 +1268,8 @@ class FocusProvider extends ChangeNotifier {
     if (checkIn == null || !canAnswerCheckIn || _runCommandBusy || canUndoSkip)
       return;
     _skipUndoUntil = null;
+    _checkInExpiryTicker?.cancel();
+    _checkInExpiryTicker = null;
     _runCommandBusy = true;
     _runError = null;
     _notify();
@@ -2031,7 +2171,10 @@ class FocusProvider extends ChangeNotifier {
     }
   }
 
-  Future<String> transcribeThought(ThoughtRecord thought) async {
+  Future<String> transcribeThought(
+    ThoughtRecord thought, {
+    TwoTierSttService? stt,
+  }) async {
     if (isActiveRun || isRecording || runCommandBusy || needsEndSync) {
       throw const ApiException('Hãy kết thúc phiên trước khi chuyển ghi âm.');
     }
@@ -2041,11 +2184,14 @@ class FocusProvider extends ChangeNotifier {
       throw const ApiException(
           'Chưa có ghi âm đã đồng bộ để chuyển thành chữ.');
     }
-    return VoiceTranscriptionService(api: _api).transcribeM4a(
+    final service = stt ??
+        TwoTierSttService.fromVoiceService(VoiceTranscriptionService(api: _api));
+    final result = await service.transcribeTwoTier(
       path,
       recordingId: thought.clientThoughtId,
       thoughtId: id,
     );
+    return result.text;
   }
 
   Future<PlanningDraftModel> convertThoughtToDraft(
@@ -2237,10 +2383,15 @@ class FocusProvider extends ChangeNotifier {
     }
     _skipSendTimer?.cancel();
     _checkInDeadline?.cancel();
+    _checkInExpiryTicker?.cancel();
     _stopOfflineProbe();
     _undoExpiry?.cancel();
     _deleteUndoExpiry?.cancel();
     _toastExpiry?.cancel();
+    final voice = _voicePlayback;
+    if (voice != null) {
+      unawaited(voice.dispose().catchError((_) {}));
+    }
     if (identical(recorder.onAutoStopped, _recordingStopped)) {
       recorder.onAutoStopped = null;
       recorder.onAutoStopFailed = null;

@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
@@ -8,6 +10,7 @@ import '../models/focus_session_model.dart';
 import '../providers/focus_provider.dart';
 import '../providers/streak_provider.dart';
 import '../services/adaptation_api.dart';
+import '../services/pre_session_reminder_sync.dart';
 import '../services/schedule_service.dart';
 import '../services/voice_service.dart';
 import '../widgets/melbel_ui.dart';
@@ -205,6 +208,9 @@ class _UnfinishedReviewScreenState extends State<UnfinishedReviewScreen> {
     }
 
     try {
+      try {
+        await context.read<FocusProvider?>()?.stopVoicePlayback();
+      } catch (_) {}
       final started = await _speech.start(
         onWords: (words, isFinal) {
           if (!mounted) return;
@@ -662,6 +668,9 @@ class _ScheduleComparisonScreenState extends State<ScheduleComparisonScreen>
         final updated = await _api.updateProposal(action, _proposal!);
         if (!mounted) return;
         await _api.cacheProposal(action == 'rebuild' ? updated : null);
+        if (action == 'approve') {
+          unawaited(PreSessionReminderSync.instance.sync());
+        }
         if (!mounted) return;
         if (action == 'rebuild') {
           setState(() => _proposal = updated);

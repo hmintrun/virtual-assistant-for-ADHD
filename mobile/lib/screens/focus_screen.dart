@@ -1,22 +1,55 @@
 import 'dart:async';
 
 import 'package:audioplayers/audioplayers.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 
+import '../core/api_client.dart';
 import '../core/responsive_layout.dart';
 import '../core/theme.dart';
 import '../models/focus_session_model.dart';
 import '../providers/focus_provider.dart';
 import '../providers/task_provider.dart';
-import '../services/checkin_voice_service.dart';
+import '../services/audio_recorder_service.dart';
+import '../services/voice_service.dart';
+import '../services/voice_two_tier_service.dart';
 import '../widgets/focus_stage_widgets.dart';
 import '../widgets/melbel_ui.dart';
 import '../widgets/undo_snackbar.dart';
 import 'focus_review_screens.dart';
 import 'task_entry_screen.dart';
 import 'task_summary_screen.dart';
+
+/// Phán đoán lựa chọn Check-in UF5 từ lời nói tiếng Việt.
+String? parseCheckInVoiceOutcome(String transcript) {
+  final q = transcript.trim().toLowerCase();
+  if (q.isEmpty) return null;
+  if (q.contains('chưa xong') ||
+      q.contains('chưa hoàn thành') ||
+      q.contains('dang dở') ||
+      q.contains('còn thiếu') ||
+      q.contains('chưa kịp')) {
+    return 'incomplete';
+  }
+  if (q.contains('đột xuất') ||
+      q.contains('việc bận') ||
+      q.contains('bận rồi') ||
+      q.contains('bận việc')) {
+    return 'busy';
+  }
+  if (q.contains('bỏ qua') || q.contains('hoãn')) {
+    return 'skipped';
+  }
+  if (q.contains('hoàn thành') ||
+      q.contains('xong rồi') ||
+      q.contains('đã xong') ||
+      q.contains('xong hết')) {
+    return 'completed';
+  }
+  return null;
+}
 
 /// UF3–UF4 flow for an already scheduled Session. The session comes from the
 /// confirmed plan; this screen does not create or complete Tasks/Steps.
@@ -31,8 +64,17 @@ class _FocusScreenState extends State<FocusScreen> with WidgetsBindingObserver {
   final TextEditingController _thoughtText = TextEditingController();
   final _recordButtonKey = GlobalKey();
   String _breakWhisper = 'Chạm nhẹ Melbel để nghỉ ngơi cùng nhau nhé.';
-  final CheckInVoiceService _checkInVoice = CheckInVoiceService();
+  FocusProvider? _observedFocus;
   String? _spokenCheckInRunId;
+  String? _spokenPromptText;
+  bool _speakingCheckIn = false;
+  Uf1VoiceRecorderService? _checkInRecorder;
+  OnDeviceSpeechService? _checkInSpeech;
+  TwoTierSttService? _checkInStt;
+  bool _checkInListening = false;
+  bool _checkInTranscribing = false;
+  bool _checkInOnDeviceOnly = false;
+  String? _checkInVoiceHint;
 
   @override
   void initState() {
@@ -46,13 +88,22 @@ class _FocusScreenState extends State<FocusScreen> with WidgetsBindingObserver {
   }
 
   @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    _observedFocus = context.read<FocusProvider>();
+  }
+
+  @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
       final focus = context.read<FocusProvider>();
       focus.refreshDndPermission();
       focus.handleAppResume();
       focus.reportAppVisibility(foreground: true);
-      if (focus.stage == FocusStage.ended) focus.refreshRunCheckIn();
+      if (focus.stage == FocusStage.ended) {
+        focus.refreshRunCheckIn();
+        unawaited(focus.checkCheckInExpiry());
+      }
     } else if (state == AppLifecycleState.paused) {
       context.read<FocusProvider>().reportAppVisibility(foreground: false);
     }
@@ -61,9 +112,232 @@ class _FocusScreenState extends State<FocusScreen> with WidgetsBindingObserver {
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _checkInStt?.cancel();
+    unawaited(_checkInRecorder?.dispose().catchError((_) {}) ?? Future<void>.value());
+    _checkInSpeech?.dispose();
+    if (_observedFocus?.hasVoicePlayback == true) {
+      unawaited(_observedFocus!.stopVoicePlayback().catchError((_) {}));
+    }
     _thoughtText.dispose();
-    unawaited(_checkInVoice.dispose());
     super.dispose();
+  }
+
+  Future<void> _speakCheckInPrompt(
+    FocusProvider focus,
+    FocusSessionInfo? session,
+  ) async {
+    if (!mounted) return;
+    setState(() => _speakingCheckIn = true);
+    try {
+      final result = await focus.voicePlayback.speakCheckInPrompt(
+        fallbackText: 'Bạn làm đến đâu rồi? Chọn kết quả của phiên vừa rồi.',
+        kind: 'final',
+        isFinalSessionOfStep: session?.isLastSessionOfStep ?? false,
+        expectedOutput: session?.expectedOutput,
+      );
+      if (!mounted) return;
+      setState(() {
+        _spokenPromptText = result.promptText;
+        _speakingCheckIn = false;
+      });
+    } catch (_) {
+      if (mounted) setState(() => _speakingCheckIn = false);
+    }
+  }
+
+  Future<void> _replayOrStopPrompt(
+    FocusProvider focus,
+    FocusSessionInfo? session,
+  ) async {
+    if (_speakingCheckIn ||
+        (focus.hasVoicePlayback && focus.voicePlayback.isSpeaking)) {
+      await focus.stopVoicePlayback();
+      if (mounted) setState(() => _speakingCheckIn = false);
+      return;
+    }
+    await _speakCheckInPrompt(focus, session);
+  }
+
+  Future<void> _toggleCheckInVoice(
+    FocusProvider focus,
+    FocusSessionInfo session,
+  ) async {
+    if (_checkInTranscribing) return;
+    await focus.stopVoicePlayback();
+    if (mounted && _speakingCheckIn) {
+      setState(() => _speakingCheckIn = false);
+    }
+
+    final useNativeRecorder =
+        !kIsWeb && defaultTargetPlatform == TargetPlatform.android && !_checkInOnDeviceOnly;
+
+    if (useNativeRecorder) {
+      final recorder = _checkInRecorder ??= Uf1VoiceRecorderService();
+      recorder.onAutoStopped = (rec) {
+        if (mounted) unawaited(_transcribeCheckInRecording(focus, session, rec));
+      };
+      recorder.onAutoStopFailed = (_) {
+        if (!mounted) return;
+        setState(() {
+          _checkInListening = false;
+          _checkInOnDeviceOnly = true;
+          _checkInVoiceHint = 'Chưa thu được ghi âm. Thử nói trực tiếp trên máy nhé.';
+        });
+      };
+      if (_checkInListening) {
+        setState(() => _checkInListening = false);
+        try {
+          final recording = await recorder.stopAndFinalize();
+          if (mounted) {
+            await _transcribeCheckInRecording(focus, session, recording);
+          } else {
+            await recorder.deleteRecording(recording.path);
+          }
+        } catch (_) {
+          if (mounted) {
+            setState(() {
+              _checkInOnDeviceOnly = true;
+              _checkInVoiceHint = 'Bạn có thể nói trực tiếp trên máy hoặc chọn thẻ bên dưới.';
+            });
+          }
+        }
+        return;
+      }
+
+      setState(() {
+        _checkInListening = true;
+        _checkInVoiceHint = null;
+      });
+      try {
+        await recorder.start(maxDuration: const Duration(seconds: 25));
+      } catch (_) {
+        if (mounted) {
+          setState(() {
+            _checkInListening = false;
+            _checkInOnDeviceOnly = true;
+            _checkInVoiceHint = 'Chuyển sang nghe trực tiếp trên máy. Chạm mic để nói lại.';
+          });
+        }
+      }
+      return;
+    }
+
+    final speech = _checkInSpeech ??= OnDeviceSpeechService();
+    if (_checkInListening) {
+      await speech.stop();
+      if (mounted) setState(() => _checkInListening = false);
+      return;
+    }
+    setState(() {
+      _checkInListening = true;
+      _checkInVoiceHint = null;
+    });
+    String lastWords = '';
+    try {
+      final started = await speech.start(
+        onWords: (words, isFinal) {
+          if (!mounted) return;
+          if (words.trim().isNotEmpty) lastWords = words.trim();
+          if (isFinal && _checkInListening) {
+            setState(() => _checkInListening = false);
+            if (lastWords.isNotEmpty) {
+              unawaited(_handleCheckInTranscript(focus, session, lastWords));
+            }
+          }
+        },
+        onError: (msg) {
+          if (!mounted) return;
+          setState(() {
+            _checkInListening = false;
+            _checkInVoiceHint = 'Chưa nhận được giọng nói ($msg). Bạn chạm chọn thẻ bên dưới nhé.';
+          });
+        },
+        onDone: () {
+          if (!mounted || !_checkInListening) return;
+          setState(() => _checkInListening = false);
+          if (lastWords.isNotEmpty) {
+            unawaited(_handleCheckInTranscript(focus, session, lastWords));
+          }
+        },
+      );
+      if (!started && mounted) {
+        setState(() {
+          _checkInListening = false;
+          _checkInVoiceHint = 'Chưa bật được mic. Bạn chạm trực tiếp thẻ bên dưới nhé.';
+        });
+      }
+    } catch (_) {
+      if (mounted) {
+        setState(() {
+          _checkInListening = false;
+          _checkInVoiceHint = 'Chưa bật được mic. Bạn chạm trực tiếp thẻ bên dưới nhé.';
+        });
+      }
+    }
+  }
+
+  Future<void> _transcribeCheckInRecording(
+    FocusProvider focus,
+    FocusSessionInfo session,
+    ThoughtRecording recording,
+  ) async {
+    final recorder = _checkInRecorder;
+    final stt = _checkInStt ??=
+        TwoTierSttService.fromVoiceService(VoiceTranscriptionService());
+    setState(() {
+      _checkInListening = false;
+      _checkInTranscribing = true;
+      _checkInVoiceHint = null;
+    });
+    try {
+      final result = await stt.transcribeTwoTier(
+        recording.path,
+        recordingId: recording.path,
+      );
+      if (!mounted) return;
+      await _handleCheckInTranscript(focus, session, result.text);
+    } on SttCancelled {
+      if (mounted) setState(() => _checkInVoiceHint = null);
+    } on SttNeedsOnDeviceFallback catch (e) {
+      if (mounted) {
+        setState(() {
+          _checkInOnDeviceOnly = true;
+          _checkInVoiceHint = e.userMessage;
+        });
+      }
+    } on ApiException catch (e) {
+      if (mounted) setState(() => _checkInVoiceHint = e.message);
+    } catch (_) {
+      if (mounted) {
+        setState(() => _checkInVoiceHint = 'Chưa chuyển được lời nói. Bạn thử lại hoặc chọn thẻ nhé.');
+      }
+    } finally {
+      if (recorder != null) {
+        await recorder.deleteRecording(recording.path);
+      }
+      if (mounted) setState(() => _checkInTranscribing = false);
+    }
+  }
+
+  Future<void> _handleCheckInTranscript(
+    FocusProvider focus,
+    FocusSessionInfo session,
+    String transcript,
+  ) async {
+    final outcome = parseCheckInVoiceOutcome(transcript);
+    if (outcome == null) {
+      setState(() {
+        _checkInVoiceHint =
+            'Nghe được: "$transcript". Hãy nói "Hoàn thành", "Chưa xong", "Việc đột xuất" hoặc "Bỏ qua", hoặc chạm thẻ bên dưới.';
+      });
+      return;
+    }
+    setState(() => _checkInVoiceHint = null);
+    if (outcome == 'skipped') {
+      await _chooseSkip(focus);
+    } else {
+      await _reviewOutcome(focus, session, outcome);
+    }
   }
 
   @override
@@ -78,12 +352,10 @@ class _FocusScreenState extends State<FocusScreen> with WidgetsBindingObserver {
         runId != _spokenCheckInRunId) {
       _spokenCheckInRunId = runId;
       WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (mounted && context.read<FocusProvider>().canAnswerCheckIn) {
-          unawaited(_checkInVoice.speakFinalPrompt(
-            runId,
-            isFinalSessionOfStep: session?.isLastSessionOfStep ?? false,
-            expectedOutput: session?.expectedOutput,
-          ));
+        if (!mounted) return;
+        final currentFocus = context.read<FocusProvider>();
+        if (currentFocus.canAnswerCheckIn) {
+          unawaited(_speakCheckInPrompt(currentFocus, session));
         }
       });
     }
@@ -354,12 +626,12 @@ class _FocusScreenState extends State<FocusScreen> with WidgetsBindingObserver {
             icon: Icons.spa_outlined,
             title: 'Melbel · Sắp đến phiên',
             subtitle:
-                '${session.taskTitle}\nBắt đầu lúc ${formatFocusClock(session.scheduledStart)} · Còn khoảng 15 phút',
+                '${session.taskTitle}\nBắt đầu lúc ${formatFocusClock(session.scheduledStart)} · Còn khoảng 15 phút\nKhởi động 2 phút: ${session.microTaskText}',
             tone: MelbelCardTone.sage,
           ),
           const SizedBox(height: 10),
           Text(
-            'Đây là mô phỏng trong ứng dụng, chưa phải thông báo hệ thống đã được lên lịch.',
+            'Thông báo nhắc trước phiên (15 / 10 / 5 phút hoặc theo cài đặt của bạn) được đồng bộ với lịch nhắc hệ thống trên Android.',
             style: text.bodySmall?.copyWith(color: palette.onSurfaceVariant),
           ),
           const SizedBox(height: 24),
@@ -925,7 +1197,7 @@ class _FocusScreenState extends State<FocusScreen> with WidgetsBindingObserver {
             focus.missedCheckIn
                 ? 'Bạn có thể ghi nhận kết quả phiên khi sẵn sàng.'
                 : focus.hasOpenCheckIn
-                    ? 'Chọn kết quả của phiên vừa rồi.'
+                    ? (_spokenPromptText ?? 'Chọn kết quả của phiên vừa rồi.')
                     : 'Xem thời gian đã làm bên dưới.',
             expression: focus.missedCheckIn
                 ? CatExpression.sleepy
@@ -971,6 +1243,77 @@ class _FocusScreenState extends State<FocusScreen> with WidgetsBindingObserver {
             const SizedBox(height: 10),
           ],
           if (focus.canAnswerCheckIn && !focus.hasPendingCheckInResponse) ...[
+            MelbelCard(
+              borderRadius: 22,
+              tone: MelbelCardTone.muted,
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 8,
+                    alignment: WrapAlignment.spaceBetween,
+                    crossAxisAlignment: WrapCrossAlignment.center,
+                    children: [
+                      FilledButton.tonalIcon(
+                        onPressed: focus.runCommandBusy || _checkInTranscribing
+                            ? null
+                            : () => _toggleCheckInVoice(focus, session),
+                        icon: Icon(
+                          _checkInListening
+                              ? Icons.stop_rounded
+                              : Icons.mic_rounded,
+                        ),
+                        label: Text(
+                          _checkInListening
+                              ? 'Dừng nghe'
+                              : _checkInTranscribing
+                                  ? 'Đang chuyển lời…'
+                                  : _checkInOnDeviceOnly
+                                      ? 'Nói trên máy để trả lời'
+                                      : 'Trả lời bằng giọng nói',
+                        ),
+                      ),
+                      if (_checkInTranscribing)
+                        TextButton(
+                          onPressed: () => _checkInStt?.cancel(),
+                          child: const Text('Hủy chuyển lời'),
+                        ),
+                      TextButton.icon(
+                        onPressed: focus.runCommandBusy
+                            ? null
+                            : () => _replayOrStopPrompt(focus, session),
+                        icon: Icon(
+                          (_speakingCheckIn ||
+                                  (focus.hasVoicePlayback &&
+                                      focus.voicePlayback.isSpeaking))
+                              ? Icons.volume_off_rounded
+                              : Icons.volume_up_rounded,
+                        ),
+                        label: Text(
+                          (_speakingCheckIn ||
+                                  (focus.hasVoicePlayback &&
+                                      focus.voicePlayback.isSpeaking))
+                              ? 'Dừng đọc'
+                              : 'Nghe lại',
+                        ),
+                      ),
+                    ],
+                  ),
+                  if (_checkInVoiceHint != null) ...[
+                    const SizedBox(height: 8),
+                    Text(
+                      _checkInVoiceHint!,
+                      style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                            color: palette.onSurfaceVariant,
+                          ),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+            const SizedBox(height: 12),
             for (final (label, outcome, icon, toneAmber) in const [
               (
                 'Hoàn thành phiên',
@@ -1090,6 +1433,8 @@ class _FocusScreenState extends State<FocusScreen> with WidgetsBindingObserver {
   }
 
   Future<void> _chooseSkip(FocusProvider focus) async {
+    await focus.stopVoicePlayback();
+    if (!mounted) return;
     final session = focus.session;
     if (session == null) return;
     final scope = await Navigator.of(context).push<String>(
@@ -1136,6 +1481,8 @@ class _FocusScreenState extends State<FocusScreen> with WidgetsBindingObserver {
     FocusSessionInfo session,
     String outcome,
   ) async {
+    await focus.stopVoicePlayback();
+    if (!mounted) return;
     String? note;
     bool? stepCompleted;
     if (outcome == 'incomplete') {
@@ -1592,7 +1939,7 @@ class _ThoughtInboxScreenState extends State<ThoughtInboxScreen> {
           initialText: thought.text ?? '',
           transcribe: thought.localAudioPath == null
               ? null
-              : () => focus.transcribeThought(thought),
+              : (stt) => focus.transcribeThought(thought, stt: stt),
         ),
       ),
     );
@@ -1654,7 +2001,7 @@ class _ThoughtInboxScreenState extends State<ThoughtInboxScreen> {
 class _ThoughtDraftEntry extends StatefulWidget {
   const _ThoughtDraftEntry({required this.initialText, this.transcribe});
   final String initialText;
-  final Future<String> Function()? transcribe;
+  final Future<String> Function(TwoTierSttService stt)? transcribe;
 
   @override
   State<_ThoughtDraftEntry> createState() => _ThoughtDraftEntryState();
@@ -1662,13 +2009,31 @@ class _ThoughtDraftEntry extends StatefulWidget {
 
 class _ThoughtDraftEntryState extends State<_ThoughtDraftEntry> {
   late final _text = TextEditingController(text: widget.initialText);
+  final TwoTierSttService _stt =
+      TwoTierSttService.fromVoiceService(VoiceTranscriptionService());
+  OnDeviceSpeechService? _speech;
   bool _transcribing = false;
+  bool _listeningFallback = false;
+  bool _showOnDeviceMic = false;
+  String? _hint;
 
   Future<void> _transcribe() async {
-    setState(() => _transcribing = true);
+    setState(() {
+      _transcribing = true;
+      _hint = null;
+    });
     try {
-      final text = await widget.transcribe!();
+      final text = await widget.transcribe!(_stt);
       if (mounted) _text.text = text;
+    } on SttCancelled {
+      if (mounted) setState(() => _hint = null);
+    } on SttNeedsOnDeviceFallback catch (e) {
+      if (mounted) {
+        setState(() {
+          _showOnDeviceMic = true;
+          _hint = e.userMessage;
+        });
+      }
     } catch (_) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -1682,8 +2047,51 @@ class _ThoughtDraftEntryState extends State<_ThoughtDraftEntry> {
     }
   }
 
+  Future<void> _toggleOnDeviceMic() async {
+    final speech = _speech ??= OnDeviceSpeechService();
+    if (_listeningFallback) {
+      await speech.stop();
+      if (mounted) setState(() => _listeningFallback = false);
+      return;
+    }
+    setState(() {
+      _listeningFallback = true;
+      _hint = null;
+    });
+    try {
+      final started = await speech.start(
+        onWords: (words, isFinal) {
+          if (!mounted) return;
+          if (words.trim().isNotEmpty) _text.text = words;
+          if (isFinal) setState(() => _listeningFallback = false);
+        },
+        onError: (_) {
+          if (mounted) {
+            setState(() {
+              _listeningFallback = false;
+              _hint = 'Chưa nhận được giọng nói. Bạn có thể nhập chữ bên dưới.';
+            });
+          }
+        },
+        onDone: () {
+          if (mounted) setState(() => _listeningFallback = false);
+        },
+      );
+      if (!started && mounted) {
+        setState(() {
+          _listeningFallback = false;
+          _hint = 'Chưa bật được mic trên máy. Bạn có thể nhập chữ bên dưới.';
+        });
+      }
+    } catch (_) {
+      if (mounted) setState(() => _listeningFallback = false);
+    }
+  }
+
   @override
   void dispose() {
+    _stt.cancel();
+    _speech?.dispose();
     _text.dispose();
     super.dispose();
   }
@@ -1693,9 +2101,38 @@ class _ThoughtDraftEntryState extends State<_ThoughtDraftEntry> {
         title: 'Tạo việc từ suy nghĩ',
         children: [
           if (widget.transcribe != null)
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              crossAxisAlignment: WrapCrossAlignment.center,
+              children: [
+                SecondaryCta(
+                  label: _transcribing
+                      ? 'Đang chuyển…'
+                      : 'Chuyển ghi âm thành chữ',
+                  onPressed: _transcribing ? null : _transcribe,
+                ),
+                if (_transcribing)
+                  TextButton(
+                    onPressed: _stt.cancel,
+                    child: const Text('Hủy'),
+                  ),
+              ],
+            ),
+          if (_showOnDeviceMic)
             SecondaryCta(
-              label: _transcribing ? 'Đang chuyển…' : 'Chuyển ghi âm thành chữ',
-              onPressed: _transcribing ? null : _transcribe,
+              label: _listeningFallback
+                  ? 'Dừng nói trên máy'
+                  : 'Nói lại bằng mic trên máy',
+              icon: _listeningFallback ? Icons.stop_rounded : Icons.mic_rounded,
+              onPressed: _transcribing ? null : _toggleOnDeviceMic,
+            ),
+          if (_hint != null)
+            Text(
+              _hint!,
+              style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                    color: context.melbel.onSurfaceVariant,
+                  ),
             ),
           TextField(
             enabled: !_transcribing,

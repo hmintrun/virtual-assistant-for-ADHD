@@ -1,3 +1,6 @@
+import 'dart:async';
+
+import 'package:flutter/foundation.dart';
 import '../services/google_calendar_api.dart';
 import '../services/auth_service.dart';
 import '../providers/focus_provider.dart';
@@ -5,8 +8,11 @@ import '../providers/streak_provider.dart';
 import '../providers/task_provider.dart';
 import '../widgets/google_login_button.dart';
 import '../core/api_client.dart';
+import '../services/audio_recorder_service.dart';
 import '../services/schedule_service.dart';
+import '../services/voice_playback_service.dart';
 import '../services/voice_service.dart';
+import '../services/voice_two_tier_service.dart';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
@@ -521,20 +527,108 @@ class _CalendarVoiceQuestionScreenState
   final _controller = TextEditingController();
   final _speech = OnDeviceSpeechService();
   final _schedule = ScheduleService(ApiClient());
+  final _stt = TwoTierSttService.fromVoiceService(VoiceTranscriptionService());
+  Uf1VoiceRecorderService? _recorder;
+  VoicePlaybackService? _voice;
   Future<List<Map<String, dynamic>>>? _result;
   bool _listening = false;
   bool _starting = false;
+  bool _transcribing = false;
+  bool _useOnDevice = false;
+  bool _speaking = false;
   String? _hint;
+
+  VoicePlaybackService _ensureVoice() =>
+      _voice ??= VoicePlaybackService(cache: kIsWeb ? MemoryTtsAudioCache() : null);
 
   @override
   void dispose() {
+    _stt.cancel();
+    if (_voice != null) {
+      unawaited(_voice!.dispose().catchError((_) {}));
+    }
+    if (_recorder != null) {
+      unawaited(_recorder!.dispose().catchError((_) {}));
+    }
     _controller.dispose();
     _speech.dispose();
     super.dispose();
   }
 
+  Future<void> _stopPlaybackIfAny() async {
+    if (_voice != null) {
+      await _voice!.stop();
+    }
+    if (mounted && _speaking) {
+      setState(() => _speaking = false);
+    }
+  }
+
   Future<void> _toggleMic() async {
-    if (_starting) return;
+    if (_starting || _transcribing) return;
+    await _stopPlaybackIfAny();
+
+    final useNative =
+        !kIsWeb && defaultTargetPlatform == TargetPlatform.android && !_useOnDevice;
+    if (useNative) {
+      final recorder = _recorder ??= Uf1VoiceRecorderService();
+      recorder.onAutoStopped = (rec) {
+        if (mounted) unawaited(_transcribeRecording(rec));
+      };
+      recorder.onAutoStopFailed = (_) {
+        if (!mounted) return;
+        setState(() {
+          _listening = false;
+          _useOnDevice = true;
+          _hint = 'Chuyển sang nghe trực tiếp trên máy. Chạm mic để nói lại.';
+        });
+      };
+      if (_listening) {
+        setState(() {
+          _starting = true;
+          _listening = false;
+        });
+        try {
+          final recording = await recorder.stopAndFinalize();
+          if (mounted) {
+            await _transcribeRecording(recording);
+          } else {
+            await recorder.deleteRecording(recording.path);
+          }
+        } catch (_) {
+          if (mounted) {
+            setState(() {
+              _useOnDevice = true;
+              _hint = 'Chưa thu được ghi âm. Bạn có thể chạm mic để nói trên máy hoặc nhập chữ.';
+            });
+          }
+        } finally {
+          if (mounted) setState(() => _starting = false);
+        }
+        return;
+      }
+
+      setState(() {
+        _starting = true;
+        _listening = true;
+        _hint = null;
+      });
+      try {
+        await recorder.start(maxDuration: const Duration(seconds: 25));
+      } catch (_) {
+        if (mounted) {
+          setState(() {
+            _listening = false;
+            _useOnDevice = true;
+            _hint = 'Chuyển sang nghe trực tiếp trên máy. Chạm mic để nói.';
+          });
+        }
+      } finally {
+        if (mounted) setState(() => _starting = false);
+      }
+      return;
+    }
+
     if (_listening) {
       setState(() => _listening = false);
       try {
@@ -559,8 +653,13 @@ class _CalendarVoiceQuestionScreenState
 
     try {
       final started = await _speech.start(
-        onWords: (words, _) {
-          if (mounted && _listening) setState(() => _controller.text = words);
+        onWords: (words, isFinal) {
+          if (!mounted || !_listening) return;
+          setState(() => _controller.text = words);
+          if (isFinal && words.trim().isNotEmpty) {
+            done();
+            _lookup();
+          }
         },
         onError: (_) =>
             done('Chưa nhận được giọng nói. Bạn có thể nhập bằng chữ.'),
@@ -571,6 +670,66 @@ class _CalendarVoiceQuestionScreenState
       done('Chưa bật được mic. Bạn có thể nhập bằng chữ.');
     } finally {
       if (mounted) setState(() => _starting = false);
+    }
+  }
+
+  Future<void> _transcribeRecording(ThoughtRecording recording) async {
+    final recorder = _recorder;
+    setState(() {
+      _listening = false;
+      _transcribing = true;
+      _hint = null;
+    });
+    try {
+      final transcript = await _stt.transcribeTwoTier(
+        recording.path,
+        recordingId: recording.path,
+      );
+      if (!mounted) return;
+      _controller.text = transcript.text;
+      if (transcript.text.trim().isNotEmpty) _lookup();
+    } on SttCancelled {
+      if (mounted) setState(() => _hint = null);
+    } on SttNeedsOnDeviceFallback catch (e) {
+      if (mounted) {
+        setState(() {
+          _useOnDevice = true;
+          _hint = e.userMessage;
+        });
+      }
+    } on ApiException catch (e) {
+      if (mounted) setState(() => _hint = e.message);
+    } catch (_) {
+      if (mounted) setState(() => _hint = 'Chưa chuyển được lời nói. Bạn có thể nhập chữ.');
+    } finally {
+      if (recorder != null) {
+        await recorder.deleteRecording(recording.path);
+      }
+      if (mounted) setState(() => _transcribing = false);
+    }
+  }
+
+  Future<void> _speakSessionsSummary(
+    BuildContext context,
+    List<Map<String, dynamic>> sessions,
+  ) async {
+    if (_speaking || (_voice?.isSpeaking ?? false)) {
+      await _stopPlaybackIfAny();
+      return;
+    }
+    if (sessions.isEmpty) return;
+    final first = sessions.first;
+    final firstTitle = (first['step_title'] as String?)?.trim().isNotEmpty == true
+        ? (first['step_title'] as String).trim()
+        : 'phiên tập trung';
+    final firstStart = _time(context, first['scheduled_start']);
+    final summary =
+        'Ngày này bạn có ${sessions.length} phiên trong lịch. Phiên đầu tiên là $firstTitle lúc $firstStart.';
+    setState(() => _speaking = true);
+    try {
+      await _ensureVoice().speakText(summary);
+    } finally {
+      if (mounted) setState(() => _speaking = false);
     }
   }
 
@@ -677,7 +836,8 @@ class _CalendarVoiceQuestionScreenState
                               backgroundColor: Colors.transparent,
                               foregroundColor: palette.onSage,
                             ),
-                            onPressed: _starting ? null : _toggleMic,
+                            onPressed:
+                                _starting || _transcribing ? null : _toggleMic,
                             icon: Icon(
                               _listening
                                   ? Icons.stop_rounded
@@ -690,12 +850,23 @@ class _CalendarVoiceQuestionScreenState
                   ),
                   const SizedBox(height: 10),
                   Text(
-                    _listening ? 'Đang lắng nghe…' : 'Chạm để hỏi lịch',
+                    _transcribing
+                        ? 'Đang chuyển giọng nói…'
+                        : _listening
+                            ? 'Đang lắng nghe…'
+                            : 'Chạm để hỏi lịch',
                     style: theme.textTheme.titleMedium?.copyWith(
                       fontWeight: FontWeight.w700,
                       color: palette.onSurface,
                     ),
                   ),
+                  if (_transcribing) ...[
+                    const SizedBox(height: 6),
+                    TextButton(
+                      onPressed: _stt.cancel,
+                      child: const Text('Hủy'),
+                    ),
+                  ],
                   const SizedBox(height: 16),
                   TextField(
                     controller: _controller,
@@ -795,6 +966,26 @@ class _CalendarVoiceQuestionScreenState
                               '${_time(context, session['scheduled_start'])} – ${_time(context, session['scheduled_end'])}',
                             ),
                           ),
+                        Padding(
+                          padding: const EdgeInsets.fromLTRB(12, 4, 12, 8),
+                          child: Align(
+                            alignment: Alignment.centerRight,
+                            child: TextButton.icon(
+                              onPressed: () =>
+                                  _speakSessionsSummary(context, sessions),
+                              icon: Icon(
+                                _speaking
+                                    ? Icons.volume_off_rounded
+                                    : Icons.volume_up_rounded,
+                              ),
+                              label: Text(
+                                _speaking
+                                    ? 'Dừng đọc'
+                                    : 'Nghe Melbel đọc lịch',
+                              ),
+                            ),
+                          ),
+                        ),
                       ],
                     ),
                   );

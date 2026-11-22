@@ -330,7 +330,7 @@ void main() {
         for (final req in requests) {
           expect(req.method, 'POST');
           expect(req.path, '/voice/transcriptions');
-          expect(req.receiveTimeout, const Duration(seconds: 25));
+          expect(req.receiveTimeout, const Duration(seconds: 48));
           expect(req.data, isA<FormData>());
           final formData = req.data as FormData;
           final fields = Map.fromEntries(formData.fields);

@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
@@ -5,6 +7,7 @@ import '../core/api_client.dart';
 import '../core/theme.dart';
 import '../providers/theme_provider.dart';
 import '../services/adaptation_api.dart';
+import '../services/pre_session_reminder_sync.dart';
 import '../widgets/melbel_ui.dart';
 import '../widgets/shimmer_loading.dart';
 import 'focus_review_screens.dart';
@@ -417,6 +420,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
       );
       if (!mounted) return;
       _pendingChange = result;
+      unawaited(
+        PreSessionReminderSync.instance.sync(
+          api: _api,
+          offsetsSeconds: _reminders,
+        ),
+      );
       await _load();
       if (!mounted) return;
       if (result['pending_proposal_id'] case final String proposalId) {

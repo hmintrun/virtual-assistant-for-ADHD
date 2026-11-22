@@ -9,6 +9,7 @@ import '../core/api_client.dart';
 import '../providers/theme_provider.dart';
 import '../services/alarm_service.dart';
 import '../services/auth_service.dart';
+import '../services/pre_session_reminder_sync.dart';
 import '../widgets/google_login_button.dart';
 import '../services/dnd_service.dart';
 import '../widgets/melbel_ui.dart';
@@ -379,6 +380,12 @@ class _SetupFlowScreenState extends State<SetupFlowScreen>
         );
       }
       await auth?.completeOnboarding();
+      unawaited(
+        PreSessionReminderSync.instance.sync(
+          api: _api,
+          offsetsSeconds: offsets,
+        ),
+      );
     } on ApiException catch (error) {
       if (error.code == 'REVISION_CONFLICT') unawaited(_restoreSetup());
       if (mounted)

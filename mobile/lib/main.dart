@@ -10,8 +10,10 @@ import 'core/api_session.dart';
 import 'core/api_client.dart';
 import 'core/responsive_layout.dart';
 import 'core/theme.dart';
+import 'models/focus_session_model.dart';
 import 'repositories/local_run_repository.dart';
 import 'services/auth_service.dart';
+import 'services/schedule_service.dart';
 import 'providers/focus_provider.dart';
 import 'providers/streak_provider.dart';
 import 'providers/task_provider.dart';
@@ -283,6 +285,71 @@ class ProPlanApp extends StatefulWidget {
 class _ProPlanAppState extends State<ProPlanApp> {
   final _navigatorKey = GlobalKey<NavigatorState>();
   bool _reauthAccountOpen = false;
+  StreamSubscription<String>? _notificationTapSub;
+  bool _handlingNotificationNav = false;
+
+  @override
+  void initState() {
+    super.initState();
+    if (widget.signedIn &&
+        !kIsWeb &&
+        defaultTargetPlatform == TargetPlatform.android) {
+      _notificationTapSub = AlarmService.instance.notificationTaps.listen(
+        _handleNotificationPayload,
+      );
+      WidgetsBinding.instance.addPostFrameCallback((_) async {
+        final payload = await AlarmService.instance.launchPayload();
+        if (mounted) await _handleNotificationPayload(payload);
+      });
+    }
+  }
+
+  @override
+  void dispose() {
+    unawaited(_notificationTapSub?.cancel());
+    super.dispose();
+  }
+
+  Future<void> _handleNotificationPayload(String? payload) async {
+    if (!mounted || payload == null || _handlingNotificationNav) return;
+    if (!payload.startsWith(AlarmService.preSessionPayloadPrefix)) return;
+    final sessionId =
+        payload.substring(AlarmService.preSessionPayloadPrefix.length).trim();
+    if (sessionId.isEmpty) return;
+    final nav = _navigatorKey.currentState;
+    final navContext = _navigatorKey.currentContext;
+    if (nav == null || navContext == null) return;
+    _handlingNotificationNav = true;
+    try {
+      final focus = navContext.read<FocusProvider>();
+      if (!focus.isActiveRun && !focus.hasUnfinishedServerRun) {
+        final now = DateTime.now();
+        final rows = await ScheduleService(ApiClient()).loadSessions(
+          DateTime(now.year, now.month, now.day)
+              .subtract(const Duration(days: 1)),
+          now.add(const Duration(days: 14)),
+          includeTitles: true,
+        );
+        Map<String, dynamic>? matched;
+        for (final row in rows) {
+          if (row['session_id'] == sessionId) {
+            matched = row;
+            break;
+          }
+        }
+        if (matched == null || !mounted) return;
+        await focus.startSession(FocusSessionInfo.fromJson(matched));
+      }
+      if (!mounted) return;
+      await nav.push(
+        MaterialPageRoute<void>(builder: (_) => const FocusScreen()),
+      );
+    } catch (_) {
+      // Giữ nguyên màn hiện tại nếu mạng lỗi hoặc phiên không còn.
+    } finally {
+      _handlingNotificationNav = false;
+    }
+  }
 
   Future<void> _openAccount() async {
     final navigator = _navigatorKey.currentState;
