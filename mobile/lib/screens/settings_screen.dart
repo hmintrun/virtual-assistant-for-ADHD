@@ -2,9 +2,11 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
 import '../core/api_client.dart';
+import '../core/theme.dart';
 import '../providers/theme_provider.dart';
 import '../services/adaptation_api.dart';
 import '../widgets/melbel_ui.dart';
+import '../widgets/shimmer_loading.dart';
 import 'focus_review_screens.dart';
 
 class SettingsScreen extends StatefulWidget {
@@ -282,24 +284,33 @@ class _SettingsScreenState extends State<SettingsScreen> {
     }
   }
 
-  Widget _minutes(String label, List<int> options, int? selected,
-      ValueChanged<int> choose) {
+  String _duration(int seconds) =>
+      seconds % 60 == 0 ? '${seconds ~/ 60} phút' : '$seconds giây';
+
+  Widget _minutes(
+    String label,
+    List<int> options,
+    int? selected,
+    ValueChanged<int> choose,
+  ) {
     final values = <int>{
       ...options.map((minutes) => minutes * 60),
-      if (selected != null) selected
+      if (selected != null) selected,
     };
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text(label),
+        Text(label, style: Theme.of(context).textTheme.titleSmall),
+        const SizedBox(height: 8),
         Wrap(
           spacing: 8,
+          runSpacing: 6,
           children: [
             for (final seconds in values)
               ChoiceChip(
-                label: Text(seconds % 60 == 0
-                    ? '${seconds ~/ 60} phút'
-                    : '$seconds giây'),
+                label: Text(
+                  _duration(seconds),
+                ),
                 selected: seconds == selected,
                 onSelected: _busy ? null : (_) => choose(seconds),
               ),
@@ -312,111 +323,226 @@ class _SettingsScreenState extends State<SettingsScreen> {
   @override
   Widget build(BuildContext context) {
     final theme = context.watch<ThemeProvider>();
+    final palette = context.melbel;
+    final textTheme = Theme.of(context).textTheme;
     final pending = _preferences?['pending_proposal_id'] as String?;
     final change =
         pending != null && pending == _pendingChange?['pending_proposal_id']
             ? _pendingChange
             : null;
+
     return FocusReviewPage(
       title: 'Cài đặt',
       children: [
         const ReviewHeader(
-            'Nhịp làm việc của bạn', 'Cấu hình mới áp dụng từ phiên sau.'),
-        if (_busy) const LinearProgressIndicator(),
-        if (_error != null) Text(_error!),
-        if (_preferences == null && !_busy)
-          SecondaryCta(label: 'Tải lại cài đặt', onPressed: _load),
-        if (_preferences != null) ...[
+          'Nhịp làm việc của bạn',
+          'Chọn mục muốn chỉnh. Nhịp mới áp dụng từ phiên sau.',
+        ),
+        if (_busy && _preferences == null)
+          const MelbelLoadingSkeleton(
+            cardCount: 3,
+            caption: 'Đang tải cài đặt của bạn...',
+          )
+        else if (_busy)
+          const ClipRRect(
+            borderRadius: BorderRadius.all(Radius.circular(99)),
+            child: LinearProgressIndicator(minHeight: 4),
+          ),
+        if (_error != null)
           MelbelCard(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
+            tone: MelbelCardTone.amber,
+            padding: const EdgeInsets.all(14),
+            child: Row(
               children: [
-                Text('Giọng nhắc',
-                    style: Theme.of(context).textTheme.titleMedium),
-                Wrap(
-                  spacing: 8,
-                  children: [
-                    for (final entry in const {
-                      'gentle': 'Nhẹ nhàng',
-                      'upbeat': 'Tươi vui',
-                    }.entries)
-                      ChoiceChip(
-                        label: Text(entry.value),
-                        selected: _reminderStyle == entry.key,
-                        onSelected: _busy
-                            ? null
-                            : (_) => setState(() => _reminderStyle = entry.key),
-                      ),
-                  ],
-                ),
-                if (_bufferMultiplier case final buffer?)
-                  TextButton(
-                    onPressed: _busy ? null : () => _editBuffer(buffer),
-                    child: Text('Hệ số đệm: ×$buffer'),
+                Icon(Icons.info_outline_rounded,
+                    size: 18, color: palette.amber),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Text(
+                    _error!,
+                    style: textTheme.bodySmall?.copyWith(
+                      color: palette.onAmberSoft,
+                    ),
                   ),
+                ),
               ],
             ),
           ),
+        if (_preferences == null && !_busy)
+          SecondaryCta(
+            label: 'Tải lại cài đặt',
+            icon: Icons.refresh_rounded,
+            onPressed: _load,
+          ),
+        if (_preferences != null) ...[
           if (pending != null)
-            SecondaryCta(
-                label: 'Xem thay đổi chờ duyệt',
-                onPressed: _busy ? null : () => _reviewProposal(pending)),
-          if (change?['change_request_id'] case final String id)
-            if (change?['request_revision'] case final int revision)
-              TextButton(
-                onPressed: _busy ? null : () => _cancelChange(id, revision),
-                child: const Text('Hủy yêu cầu đổi cài đặt'),
+            MelbelCard(
+              tone: MelbelCardTone.amber,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Eyebrow('Chờ duyệt lịch', color: palette.amber),
+                  const SizedBox(height: 6),
+                  Text(
+                    'Thay đổi nhịp làm việc ảnh hưởng tới lịch tương lai.',
+                    style: textTheme.bodySmall?.copyWith(
+                      color: palette.onAmberSoft,
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  SecondaryCta(
+                    label: 'Xem thay đổi chờ duyệt',
+                    icon: Icons.event_repeat_rounded,
+                    onPressed: _busy ? null : () => _reviewProposal(pending),
+                  ),
+                  if (change?['change_request_id'] case final String id)
+                    if (change?['request_revision'] case final int revision)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 6),
+                        child: TextButton(
+                          onPressed:
+                              _busy ? null : () => _cancelChange(id, revision),
+                          child: const Text('Hủy yêu cầu đổi cài đặt'),
+                        ),
+                      ),
+                ],
               ),
-          if (_suggestionError != null) Text(_suggestionError!),
+            ),
+          if (_suggestionError != null)
+            MelbelCard(
+              tone: MelbelCardTone.muted,
+              padding: const EdgeInsets.all(12),
+              child: Text(
+                _suggestionError!,
+                style: textTheme.bodySmall?.copyWith(
+                  color: palette.onSurfaceVariant,
+                ),
+              ),
+            ),
           if (_suggestion case final suggestion?)
             MelbelCard(
-                child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text('Gợi ý cho phiên sau',
-                    style: Theme.of(context).textTheme.titleMedium),
-                Text(
-                    '${_suggestionValue(suggestion['current_value'])} → ${_suggestionValue(suggestion['suggested_value'])}'),
-                if (suggestion['reason'] case final String reason) Text(reason),
-                Wrap(spacing: 8, children: [
-                  TextButton(
-                      onPressed: _busy ? null : () => _respond('accept'),
-                      child: const Text('Áp dụng')),
-                  if (suggestion['suggested_value'] case final Object value)
-                    TextButton(
-                        onPressed: _busy ? null : () => _editSuggestion(value),
-                        child: const Text('Tùy chỉnh')),
-                  TextButton(
-                      onPressed: _busy ? null : () => _respond('reject'),
-                      child: const Text('Bỏ qua')),
-                ]),
-              ],
-            )),
-          MelbelCard(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                _minutes('Tập trung', [15, 25, 40], _work,
-                    (value) => setState(() => _work = value)),
-                const SizedBox(height: 8),
-                _minutes('Nghỉ', [0, 5, 10], _rest,
-                    (value) => setState(() => _rest = value)),
-              ],
-            ),
-          ),
-          MelbelCard(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                const Text('Mốc nhắc trước phiên'),
-                if (_reminders != null && _reminders!.isNotEmpty)
+              tone: MelbelCardTone.sage,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const MelbelStatusPill(
+                    label: 'Gợi ý cho phiên sau',
+                    icon: Icons.auto_awesome_outlined,
+                    tone: MelbelCardTone.neutral,
+                  ),
+                  const SizedBox(height: 10),
                   Text(
-                      'Đang chọn: ${_reminders!.map((seconds) => '${seconds ~/ 60} phút').join(', ')}'),
-                Wrap(spacing: 8, children: [
+                    '${_suggestionValue(suggestion['current_value'])} → ${_suggestionValue(suggestion['suggested_value'])}',
+                    style: textTheme.titleMedium?.copyWith(
+                      color: palette.onSageSoft,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                  if (suggestion['reason'] case final String reason) ...[
+                    const SizedBox(height: 6),
+                    Text(
+                      reason,
+                      style: textTheme.bodySmall?.copyWith(
+                        color: palette.onSageSoft.withValues(alpha: 0.9),
+                      ),
+                    ),
+                  ],
+                  const SizedBox(height: 12),
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 8,
+                    children: [
+                      FilledButton.tonal(
+                        onPressed: _busy ? null : () => _respond('accept'),
+                        child: const Text('Áp dụng'),
+                      ),
+                      if (suggestion['suggested_value'] case final Object value)
+                        OutlinedButton(
+                          onPressed:
+                              _busy ? null : () => _editSuggestion(value),
+                          child: const Text('Tùy chỉnh'),
+                        ),
+                      TextButton(
+                        onPressed: _busy ? null : () => _respond('reject'),
+                        child: const Text('Bỏ qua'),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+          MelbelDisclosure(
+            title: 'Tập trung và nghỉ',
+            icon: Icons.timer_outlined,
+            summary: [
+              if (_work != null) 'Làm ${_duration(_work!)}',
+              if (_rest != null) 'Nghỉ ${_duration(_rest!)}',
+            ].join(' · '),
+            children: [
+              _minutes(
+                'Tập trung',
+                [15, 25, 40],
+                _work,
+                (value) => setState(() => _work = value),
+              ),
+              const Padding(
+                padding: EdgeInsets.symmetric(vertical: 12),
+                child: Divider(),
+              ),
+              _minutes(
+                'Nghỉ',
+                [0, 5, 10],
+                _rest,
+                (value) => setState(() => _rest = value),
+              ),
+            ],
+          ),
+          MelbelDisclosure(
+            title: 'Nhắc nhở và thời gian dự phòng',
+            icon: Icons.notifications_none_rounded,
+            children: [
+              Text('Giọng nhắc', style: textTheme.titleSmall),
+              const SizedBox(height: 8),
+              Wrap(
+                spacing: 8,
+                runSpacing: 6,
+                children: [
                   for (final entry in const {
-                    'Ít': [300],
-                    'Vừa': [600, 300],
-                    'Nhiều': [900, 600, 300],
+                    'gentle': 'Nhẹ nhàng',
+                    'upbeat': 'Tươi vui',
+                  }.entries)
+                    ChoiceChip(
+                      label: Text(entry.value),
+                      selected: _reminderStyle == entry.key,
+                      onSelected: _busy
+                          ? null
+                          : (_) => setState(() => _reminderStyle = entry.key),
+                    ),
+                ],
+              ),
+              const Padding(
+                padding: EdgeInsets.symmetric(vertical: 12),
+                child: Divider(),
+              ),
+              Text('Mốc nhắc trước phiên', style: textTheme.titleSmall),
+              if (_reminders != null && _reminders!.isNotEmpty) ...[
+                const SizedBox(height: 4),
+                Text(
+                  'Đang chọn: ${_reminders!.map((seconds) => '${seconds ~/ 60} phút').join(', ')}',
+                  style: textTheme.bodySmall?.copyWith(
+                    color: palette.onSurfaceVariant,
+                  ),
+                ),
+              ],
+              const SizedBox(height: 8),
+              Wrap(
+                spacing: 8,
+                runSpacing: 6,
+                children: [
+                  for (final entry in const {
+                    '5 phút': [300],
+                    '10 và 5 phút': [600, 300],
+                    '15, 10 và 5 phút': [900, 600, 300],
                   }.entries)
                     ChoiceChip(
                       label: Text(entry.key),
@@ -425,35 +551,61 @@ class _SettingsScreenState extends State<SettingsScreen> {
                           ? null
                           : (_) => setState(() => _reminders = entry.value),
                     ),
-                ]),
+                ],
+              ),
+              if (_bufferMultiplier case final buffer?) ...[
+                const Padding(
+                  padding: EdgeInsets.symmetric(vertical: 12),
+                  child: Divider(),
+                ),
+                ListTile(
+                  contentPadding: EdgeInsets.zero,
+                  leading: Icon(Icons.shield_outlined, color: palette.sage),
+                  title: Text('Hệ số đệm: ×$buffer'),
+                  subtitle: const Text('Dự phòng thời gian khi xếp phiên'),
+                  trailing: const MelbelStatusPill(
+                    label: 'Chỉnh',
+                    tone: MelbelCardTone.sage,
+                  ),
+                  onTap: _busy ? null : () => _editBuffer(buffer),
+                ),
               ],
-            ),
+            ],
           ),
         ],
-        MelbelCard(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              const Text('Giao diện'),
-              Wrap(spacing: 8, children: [
+        MelbelDisclosure(
+          title: 'Giao diện',
+          icon: Icons.contrast_rounded,
+          summary: switch (theme.appearance) {
+            'dark' => 'Tối',
+            'light' => 'Sáng',
+            _ => 'Tự động theo giờ địa phương',
+          },
+          children: [
+            Wrap(
+              spacing: 8,
+              runSpacing: 6,
+              children: [
                 for (final entry in const {
                   'dark': 'Tối',
                   'light': 'Sáng',
-                  'system': 'Tự động'
+                  'system': 'Tự động',
                 }.entries)
                   ChoiceChip(
                     label: Text(entry.value),
                     selected: theme.appearance == entry.key,
                     onSelected: (_) => theme.setAppearance(entry.key),
                   ),
-              ]),
-            ],
-          ),
+              ],
+            ),
+          ],
         ),
-        if (_preferences != null)
+        if (_preferences != null && _changes.isNotEmpty)
           PrimaryCta(
-              label: 'Lưu cài đặt',
-              onPressed: _busy || _changes.isEmpty ? null : _save),
+            label: 'Lưu cài đặt',
+            icon: Icons.check_rounded,
+            onPressed: _busy ? null : _save,
+          ),
       ],
     );
   }

@@ -7,6 +7,7 @@ import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 
 import 'core/api_session.dart';
+import 'core/responsive_layout.dart';
 import 'core/theme.dart';
 import 'repositories/local_run_repository.dart';
 import 'services/auth_service.dart';
@@ -14,6 +15,7 @@ import 'providers/focus_provider.dart';
 import 'providers/task_provider.dart';
 import 'providers/theme_provider.dart';
 import 'screens/onboarding_screens.dart';
+import 'screens/splash_screen.dart';
 import 'screens/support_screens.dart';
 import 'screens/home_screen.dart';
 import 'screens/calendar_screen.dart';
@@ -27,6 +29,10 @@ import 'services/focus_native_controller.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  LicenseRegistry.addLicense(() async* {
+    final license = await rootBundle.loadString('assets/fonts/OFL.txt');
+    yield LicenseEntryWithLineBreaks(const ['Be Vietnam Pro'], license);
+  });
   if (!kIsWeb && defaultTargetPlatform == TargetPlatform.android) {
     await AlarmService.instance.init();
     await FocusNativeController.instance.init();
@@ -44,21 +50,53 @@ Future<void> main() async {
   );
 }
 
-class _AuthGate extends StatelessWidget {
+class _AuthGate extends StatefulWidget {
   const _AuthGate();
 
   @override
+  State<_AuthGate> createState() => _AuthGateState();
+}
+
+class _AuthGateState extends State<_AuthGate> {
+  bool _splashDone = false;
+
+  @override
   Widget build(BuildContext context) {
+    context.watch<ThemeProvider>();
     final auth = context.watch<AuthService>();
-    if (auth.loading) {
-      return const MaterialApp(
-        home: Scaffold(body: Center(child: CircularProgressIndicator())),
-      );
-    }
     final session = auth.session;
-    return session == null
-        ? const ProPlanApp(key: ValueKey('login'), signedIn: false)
-        : _OwnerApp(key: ObjectKey(session), session: session);
+
+    final Widget child;
+    if (!_splashDone || auth.loading) {
+      child = MaterialApp(
+        key: const ValueKey('splash'),
+        debugShowCheckedModeBanner: false,
+        title: 'ProPlan VA',
+        theme: MelbelTheme.currentTheme,
+        themeAnimationDuration: Duration.zero,
+        home: MelbelSplashScreen(
+          canSkip: !auth.loading,
+          onComplete: () {
+            if (mounted && !_splashDone) {
+              setState(() => _splashDone = true);
+            }
+          },
+        ),
+      );
+    } else {
+      child = session == null
+          ? const ProPlanApp(key: ValueKey('login'), signedIn: false)
+          : _OwnerApp(key: ObjectKey(session), session: session);
+    }
+
+    return AnimatedSwitcher(
+      duration: (MediaQuery.maybeOf(context)?.disableAnimations ?? false)
+          ? Duration.zero
+          : const Duration(milliseconds: 280),
+      switchInCurve: Curves.easeOutCubic,
+      switchOutCurve: Curves.easeInCubic,
+      child: child,
+    );
   }
 }
 
@@ -166,33 +204,60 @@ class _ProPlanAppState extends State<ProPlanApp> {
               MelbelColors.isDark ? Brightness.light : Brightness.dark,
           systemNavigationBarDividerColor: MelbelColors.kOutline,
         ),
-        child: ColoredBox(
-          color: MelbelColors.kBackground,
-          child: Center(
-            child: ConstrainedBox(
-              constraints: const BoxConstraints(maxWidth: 430),
-              child: Column(
-                children: [
-                  Expanded(child: child ?? const SizedBox.shrink()),
-                  if (needsSignIn)
-                    Material(
-                      color: MelbelColors.kSurface,
-                      child: SafeArea(
-                        top: false,
-                        child: ListTile(
-                          leading: const Icon(Icons.info_outline),
-                          title: const Text('Phiên đăng nhập đã hết hạn'),
-                          trailing: TextButton(
-                            onPressed: _openAccount,
-                            child: const Text('Đăng nhập lại'),
-                          ),
+        child: LayoutBuilder(
+          builder: (context, constraints) {
+            final isWide =
+                constraints.maxWidth > MelbelLayout.maxContentWidth + 16;
+            final frameBackdrop = MelbelColors.isDark
+                ? const Color(0xFF0F0C15)
+                : const Color(0xFFE9E2D4);
+            final shell = Column(
+              children: [
+                Expanded(child: child ?? const SizedBox.shrink()),
+                if (needsSignIn)
+                  Material(
+                    color: MelbelColors.kSurface,
+                    child: SafeArea(
+                      top: false,
+                      child: ListTile(
+                        leading: const Icon(Icons.info_outline),
+                        title: const Text('Phiên đăng nhập đã hết hạn'),
+                        trailing: TextButton(
+                          onPressed: _openAccount,
+                          child: const Text('Đăng nhập lại'),
                         ),
                       ),
                     ),
-                ],
+                  ),
+              ],
+            );
+
+            if (!isWide) {
+              return ColoredBox(color: MelbelColors.kBackground, child: shell);
+            }
+
+            return ColoredBox(
+              color: frameBackdrop,
+              child: Center(
+                child: Container(
+                  width: MelbelLayout.maxContentWidth,
+                  decoration: BoxDecoration(
+                    color: MelbelColors.kBackground,
+                    boxShadow: [
+                      BoxShadow(
+                        color: Colors.black.withValues(
+                          alpha: MelbelColors.isDark ? 0.42 : 0.08,
+                        ),
+                        blurRadius: 34,
+                      ),
+                    ],
+                  ),
+                  clipBehavior: Clip.antiAlias,
+                  child: shell,
+                ),
               ),
-            ),
-          ),
+            );
+          },
         ),
       ),
       home: signedIn ? const HomeScreen() : const LoginScreen(),

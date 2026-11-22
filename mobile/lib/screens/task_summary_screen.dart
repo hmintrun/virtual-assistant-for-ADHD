@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
 import '../core/api_client.dart';
+import '../core/responsive_layout.dart';
 import '../core/theme.dart';
 import '../models/planning_models.dart';
 import '../providers/task_provider.dart';
@@ -310,88 +311,224 @@ class _TaskSummaryScreenState extends State<TaskSummaryScreen> {
             issue['code'] == 'AI_FALLBACK_NOTICE' &&
             issue['blocking'] != true) ??
         false;
+    final blockers =
+        issues.where((issue) => issue['blocking'] == true).toList();
+    final onlyAvailabilityIsMissing = blockers.isNotEmpty &&
+        blockers.every((issue) => const {
+              'availability',
+              'availability_ref',
+            }.contains(issue['field_path']));
+    final quickOptions = <String>[
+      for (final issue in blockers)
+        for (final key in const ['options', 'quick_options'])
+          if (issue[key] is List)
+            for (final item in issue[key] as List)
+              if (item is String && item.trim().isNotEmpty) item.trim(),
+      if (onlyAvailabilityIsMissing) ...const [
+        'Tối nay 20:00–22:00',
+        'Sáng mai 09:00–11:00',
+        'Tối mai 19:30–21:30',
+      ],
+    ].toSet().toList(growable: false);
 
-    return Scaffold(
-      appBar: const MelbelAppBar(title: 'Tóm tắt công việc', showBack: true),
-      body: SafeArea(
-        top: false,
-        child: ListView(
-          padding: const EdgeInsets.fromLTRB(20, 12, 20, 32),
+    final palette = context.melbel;
+    final textTheme = Theme.of(context).textTheme;
+
+    Widget fieldBadge(IconData icon, {bool ready = true}) => Container(
+          width: 40,
+          height: 40,
+          decoration: BoxDecoration(
+            color: ready ? palette.sageSoft : palette.amberSoft,
+            borderRadius: BorderRadius.circular(14),
+          ),
+          alignment: Alignment.center,
+          child: Icon(
+            icon,
+            size: 20,
+            color: ready ? palette.sage : palette.amber,
+          ),
+        );
+
+    return MelbelPageBackdrop(
+      showTopCloud: false,
+      showBottomClouds: true,
+      child: Scaffold(
+        backgroundColor: Colors.transparent,
+        appBar: const MelbelAppBar(
+          title: 'Tóm tắt công việc',
+          showBack: true,
+          showTitleRays: true,
+        ),
+        body: SafeArea(
+          top: false,
+          child: ListView(
+          padding: MelbelLayout.pageInsets(context, top: 12, bottom: 32),
           children: [
             const PlanningStageHeader(step: 2, label: 'Kiểm tra thông tin'),
             if (usedFallback) ...[
-              const SizedBox(height: 8),
-              const Text('AI đang gián đoạn. Bạn vẫn có thể sửa thông tin.'),
+              const SizedBox(height: 10),
+              MelbelCard(
+                tone: MelbelCardTone.amber,
+                borderRadius: 24,
+                padding: const EdgeInsets.all(14),
+                child: Row(
+                  children: [
+                    Icon(Icons.info_outline_rounded,
+                        size: 18, color: palette.amber),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        'AI đang gián đoạn. Bạn vẫn có thể sửa thông tin.',
+                        style: textTheme.bodySmall?.copyWith(
+                          color: palette.onAmberSoft,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
             ],
             const SizedBox(height: 16),
-            MelbelCard(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  const Row(
-                    children: [
-                      SizedBox(width: 48, height: 48, child: MelbelMascot()),
-                      SizedBox(width: 12),
-                      Expanded(
-                          child:
-                              Text('Xem lại bốn thông tin để lập kế hoạch.')),
-                    ],
-                  ),
-                  const Divider(),
-                  ExpansionTile(
-                    tilePadding: EdgeInsets.zero,
-                    title: const Text('Tên công việc'),
-                    subtitle: Text(
-                        displayTitle.isEmpty ? 'Chưa có tên' : displayTitle),
-                    children: [
-                      TextFormField(
-                        initialValue: title,
-                        decoration: const InputDecoration(
-                          labelText: 'Sửa tên công việc',
-                          border: OutlineInputBorder(),
+            MelbelEntrance(
+              child: MelbelChatBlock(
+                senderLabel: 'Melbel',
+                badge: task.canPlan ? 'Sẵn sàng chia việc' : 'Kiểm tra nhẹ',
+                title: task.canPlan
+                    ? 'Đủ thông tin để chia việc'
+                    : 'Thông tin công việc',
+                titleIsHeader: true,
+                message: task.canPlan
+                    ? 'Mình đã gom đủ ý chính rồi, bạn lướt qua rồi bấm tạo phương án nhé.'
+                    : 'Bạn xem nhanh các mục dưới đây, thiếu gì mình chỉnh lại ngay.',
+                tone: task.canPlan
+                    ? MelbelCardTone.sage
+                    : MelbelCardTone.amber,
+                mascotWidth: 52,
+                mascotHeight: 48,
+              ),
+            ),
+            const SizedBox(height: 14),
+            MelbelEntrance(
+              child: MelbelCard(
+                borderRadius: 26,
+                padding: const EdgeInsets.all(18),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    Theme(
+                      data: Theme.of(context)
+                          .copyWith(dividerColor: Colors.transparent),
+                      child: ExpansionTile(
+                        tilePadding: EdgeInsets.zero,
+                        leading: fieldBadge(
+                          Icons.title_rounded,
+                          ready: displayTitle.isNotEmpty,
                         ),
-                        onChanged: task.setSummaryTitle,
+                        title: const Text('Tên công việc'),
+                        subtitle: Text(
+                          displayTitle.isEmpty ? 'Chưa có tên' : displayTitle,
+                          style: textTheme.titleSmall?.copyWith(
+                            color: palette.onSurface,
+                          ),
+                        ),
+                        children: [
+                          TextFormField(
+                            initialValue: title,
+                            decoration: const InputDecoration(
+                              labelText: 'Sửa tên công việc',
+                            ),
+                            onChanged: task.setSummaryTitle,
+                          ),
+                        ],
                       ),
-                    ],
-                  ),
-                  const SizedBox(height: 12),
-                  TextField(
-                    controller: _scopeController,
-                    focusNode: _scopeFocusNode,
-                    minLines: 1,
-                    maxLines: null,
-                    keyboardType: TextInputType.multiline,
-                    decoration: const InputDecoration(
-                      labelText: 'Phạm vi',
-                      hintText: 'VD: 5 trang Word, kèm biểu đồ',
-                      border: OutlineInputBorder(),
                     ),
-                    onChanged: task.setScope,
-                  ),
-                  const SizedBox(height: 8),
-                  ListTile(
-                    contentPadding: EdgeInsets.zero,
-                    leading: const Icon(Icons.event_available_outlined),
-                    title: const Text('Giờ rảnh'),
-                    subtitle: Text(task.availabilitySummary),
-                    trailing: Text(task.hasAvailability
-                        ? 'Đổi khung giờ'
-                        : 'Chọn khung giờ'),
-                    onTap: _isSubmitting || task.isApiBusy
-                        ? null
-                        : () => _pickAvailability(task),
-                  ),
-                  ListTile(
-                    contentPadding: EdgeInsets.zero,
-                    leading: const Icon(Icons.schedule_outlined),
-                    title: const Text('Hạn chót'),
-                    subtitle: Text(task.formatDeadline(task.deadline)),
-                    trailing: const Icon(Icons.edit_outlined),
-                    onTap: _isSubmitting || task.isApiBusy
-                        ? null
-                        : () => _pickSummaryDeadline(task),
-                  ),
-                ],
+                    const SizedBox(height: 12),
+                    Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Padding(
+                          padding: const EdgeInsets.only(top: 6),
+                          child: fieldBadge(
+                            Icons.track_changes_rounded,
+                            ready: _scopeController.text.trim().isNotEmpty,
+                          ),
+                        ),
+                        const SizedBox(width: 14),
+                        Expanded(
+                          child: TextField(
+                            controller: _scopeController,
+                            focusNode: _scopeFocusNode,
+                            minLines: 1,
+                            maxLines: null,
+                            keyboardType: TextInputType.multiline,
+                            decoration: const InputDecoration(
+                              labelText: 'Phạm vi',
+                              hintText: 'VD: 5 trang Word, kèm biểu đồ',
+                            ),
+                            onChanged: (value) {
+                              task.setScope(value);
+                              setState(() {});
+                            },
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 10),
+                    ListTile(
+                      contentPadding: EdgeInsets.zero,
+                      leading: fieldBadge(
+                        Icons.event_available_outlined,
+                        ready: task.hasAvailability,
+                      ),
+                      title: const Text('Giờ rảnh'),
+                      subtitle: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(task.availabilitySummary),
+                          Text(
+                            task.hasAvailability
+                                ? 'Đổi khung giờ'
+                                : 'Chọn khung giờ',
+                            style: textTheme.labelLarge?.copyWith(
+                              color: task.hasAvailability
+                                  ? palette.sage
+                                  : palette.amber,
+                            ),
+                          ),
+                        ],
+                      ),
+                      trailing: Icon(Icons.edit_outlined,
+                          color: palette.onSurfaceVariant),
+                      onTap: _isSubmitting || task.isApiBusy
+                          ? null
+                          : () => _pickAvailability(task),
+                    ),
+                    ListTile(
+                      contentPadding: EdgeInsets.zero,
+                      leading: fieldBadge(
+                        Icons.schedule_outlined,
+                        ready: task.deadline != null,
+                      ),
+                      title: const Text('Hạn chót'),
+                      subtitle: Text(
+                        task.formatDeadline(task.deadline),
+                        style: task.deadline == null
+                            ? textTheme.bodySmall?.copyWith(
+                                color: palette.amber,
+                                fontWeight: FontWeight.w600,
+                              )
+                            : null,
+                      ),
+                      trailing: Icon(
+                        Icons.edit_outlined,
+                        color: palette.onSurfaceVariant,
+                      ),
+                      onTap: _isSubmitting || task.isApiBusy
+                          ? null
+                          : () => _pickSummaryDeadline(task),
+                    ),
+                  ],
+                ),
               ),
             ),
             const SizedBox(height: 16),
@@ -408,6 +545,7 @@ class _TaskSummaryScreenState extends State<TaskSummaryScreen> {
                     false)) ...[
               SecondaryCta(
                 label: 'Điều chỉnh thời gian',
+                icon: Icons.schedule_rounded,
                 onPressed: _isSubmitting || task.isApiBusy
                     ? null
                     : () async {
@@ -424,23 +562,35 @@ class _TaskSummaryScreenState extends State<TaskSummaryScreen> {
               ),
               const SizedBox(height: 12),
             ],
-
             if (task.draft != null && !task.canPlan && hasQuestions) ...[
-              const SizedBox(height: 16),
+              const SizedBox(height: 12),
               MelbelCard(
+                tone: MelbelCardTone.amber,
+                borderRadius: 26,
+                padding: const EdgeInsets.all(18),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text(
-                      missingRequiredQuestions.isEmpty
-                          ? 'Cần xác nhận'
-                          : 'Cần bổ sung',
-                      style: TextStyle(
-                        fontFamily: 'Be Vietnam Pro',
-                        fontSize: 16,
-                        fontWeight: FontWeight.w600,
-                        color: MelbelColors.kOnSurface,
-                      ),
+                    Row(
+                      children: [
+                        Icon(
+                          Icons.help_outline_rounded,
+                          size: 18,
+                          color: palette.amber,
+                        ),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Text(
+                            missingRequiredQuestions.isEmpty
+                                ? 'Cần xác nhận'
+                                : 'Cần bổ sung',
+                            style: textTheme.titleMedium?.copyWith(
+                              color: palette.onAmberSoft,
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
+                        ),
+                      ],
                     ),
                     const SizedBox(height: 8),
                     for (final question in missingRequiredQuestions)
@@ -448,28 +598,63 @@ class _TaskSummaryScreenState extends State<TaskSummaryScreen> {
                         padding: const EdgeInsets.only(bottom: 8),
                         child: Text(
                           question,
-                          style: TextStyle(
-                            fontFamily: 'Be Vietnam Pro',
-                            fontSize: 14,
-                            color: MelbelColors.kOnSurfaceVariant,
+                          style: textTheme.bodyMedium?.copyWith(
+                            color: palette.onAmberSoft,
                           ),
                         ),
                       ),
                     if (missingRequiredQuestions.isNotEmpty &&
                         reviewQuestions.isNotEmpty)
-                      const Text('Thông tin cần xác nhận'),
+                      Padding(
+                        padding: const EdgeInsets.only(bottom: 6),
+                        child: Text(
+                          'Thông tin cần xác nhận',
+                          style: textTheme.titleSmall?.copyWith(
+                            color: palette.onAmberSoft,
+                          ),
+                        ),
+                      ),
                     for (final question in reviewQuestions)
                       Padding(
                         padding: const EdgeInsets.only(bottom: 8),
-                        child: Text(question),
+                        child: Text(
+                          question,
+                          style: textTheme.bodyMedium?.copyWith(
+                            color: palette.onAmberSoft,
+                          ),
+                        ),
                       ),
+                    if (quickOptions.isNotEmpty) ...[
+                      Wrap(
+                        spacing: 8,
+                        runSpacing: 6,
+                        children: [
+                          for (final option in quickOptions)
+                            ActionChip(
+                              label: Text(option),
+                              onPressed: _isSubmitting || task.isApiBusy
+                                  ? null
+                                  : () {
+                                      _clarificationController.value =
+                                          TextEditingValue(
+                                        text: option,
+                                        selection: TextSelection.collapsed(
+                                          offset: option.length,
+                                        ),
+                                      );
+                                      setState(() {});
+                                    },
+                            ),
+                        ],
+                      ),
+                      const SizedBox(height: 10),
+                    ],
                     TextField(
                       controller: _clarificationController,
                       minLines: 1,
                       maxLines: 3,
                       decoration: const InputDecoration(
-                        hintText: 'Nhập thông tin còn thiếu',
-                        border: OutlineInputBorder(),
+                        labelText: 'Nhập thông tin còn thiếu',
                       ),
                     ),
                   ],
@@ -480,31 +665,32 @@ class _TaskSummaryScreenState extends State<TaskSummaryScreen> {
               const SizedBox(height: 8),
               Text(
                 'Chưa đủ điều kiện lập kế hoạch.',
-                style: TextStyle(
-                  fontFamily: 'Be Vietnam Pro',
-                  fontSize: 14,
-                  color: MelbelColors.kOnSurfaceVariant,
+                style: textTheme.bodyMedium?.copyWith(
+                  color: palette.onSurfaceVariant,
                 ),
               ),
             ],
             const SizedBox(height: 24),
-
             if (task.canPlan) ...[
-              TextField(
-                controller: _clarificationController,
-                minLines: 1,
-                maxLines: 3,
-                decoration: const InputDecoration(
-                  labelText: 'Yêu cầu thêm (không bắt buộc)',
-                  border: OutlineInputBorder(),
-                ),
+              ExpansionTile(
+                tilePadding: EdgeInsets.zero,
+                title: const Text('Yêu cầu thêm (không bắt buộc)'),
+                children: [
+                  TextField(
+                    controller: _clarificationController,
+                    minLines: 1,
+                    maxLines: 3,
+                    decoration:
+                        const InputDecoration(labelText: 'Yêu cầu của bạn'),
+                  ),
+                ],
               ),
               const SizedBox(height: 16),
             ],
 
             // Actions
             if (!task.canPlan) ...[
-              SecondaryCta(
+              PrimaryCta(
                 label: missingRequiredQuestions.isNotEmpty
                     ? 'Bổ sung thông tin'
                     : reviewQuestions.isNotEmpty
@@ -521,13 +707,14 @@ class _TaskSummaryScreenState extends State<TaskSummaryScreen> {
                 padding: EdgeInsets.only(bottom: 8),
                 child: LinearProgressIndicator(semanticsLabel: 'Đang xử lý'),
               ),
-            PrimaryCta(
-              label: _isSubmitting ? 'Đang xử lý…' : 'Tạo phương án',
-              icon: Icons.arrow_forward,
-              onPressed: _isSubmitting || task.isApiBusy || !task.canPlan
-                  ? null
-                  : _continue,
-            ),
+            if (task.canPlan)
+              PrimaryCta(
+                label: _isSubmitting ? 'Đang xử lý…' : 'Tạo phương án',
+                icon: Icons.arrow_forward,
+                onPressed: _isSubmitting || task.isApiBusy || !task.canPlan
+                    ? null
+                    : _continue,
+              ),
             const SizedBox(height: 10),
             SecondaryCta(
               label: 'Lưu nháp',
@@ -538,6 +725,7 @@ class _TaskSummaryScreenState extends State<TaskSummaryScreen> {
           ],
         ),
       ),
+    ),
     );
   }
 }
@@ -651,98 +839,89 @@ class _TimeConflictScreenState extends State<TimeConflictScreen> {
             .join('\n') ??
         '';
 
-    return Scaffold(
-      appBar: const MelbelAppBar(
-        title: 'Điều chỉnh thời gian',
-        showBack: true,
-      ),
-      body: SafeArea(
-        top: false,
-        child: ListView(
-          padding: const EdgeInsets.fromLTRB(20, 12, 20, 32),
+    final palette = context.melbel;
+    final textTheme = Theme.of(context).textTheme;
+
+    return MelbelPageBackdrop(
+      showTopCloud: false,
+      showBottomClouds: true,
+      child: Scaffold(
+        backgroundColor: Colors.transparent,
+        appBar: const MelbelAppBar(
+          title: 'Điều chỉnh thời gian',
+          showBack: true,
+          showTitleRays: true,
+        ),
+        body: SafeArea(
+          top: false,
+          child: ListView(
+          padding: MelbelLayout.pageInsets(context, top: 12, bottom: 32),
           children: [
-            // 1. Previous Requirements Card
-            Container(
-              padding: const EdgeInsets.all(16),
-              decoration: BoxDecoration(
-                color: MelbelColors.kSurfaceContainer,
-                borderRadius: BorderRadius.circular(12),
-                border: Border.all(color: MelbelColors.kOutlineVariant),
-              ),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    children: [
-                      Eyebrow('Thông tin đã lưu'),
-                      Icon(
-                        Icons.lock_outline,
-                        size: 16,
-                        color: MelbelColors.kOnSurfaceVariant,
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 6),
-                  Text(
-                    task.title.isEmpty
-                        ? 'Chưa có nội dung công việc'
-                        : task.title,
-                    style: TextStyle(
-                      fontFamily: 'Be Vietnam Pro',
-                      fontSize: 18,
-                      fontWeight: FontWeight.w600,
-                      color: MelbelColors.kOnSurface,
-                    ),
-                  ),
-                  const SizedBox(height: 6),
-                  Row(
-                    children: [
-                      Icon(
-                        Icons.schedule,
-                        size: 15,
-                        color: MelbelColors.kOnSurfaceVariant,
-                      ),
-                      const SizedBox(width: 6),
-                      Text(
-                        'Hạn: ${task.formatDeadline(task.deadline)}',
-                        style: TextStyle(
-                          fontFamily: 'Be Vietnam Pro',
-                          fontSize: 13,
-                          color: MelbelColors.kOnSurfaceVariant,
+            MelbelEntrance(
+              child: MelbelCard(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        const Eyebrow('Thông tin đã lưu'),
+                        Icon(
+                          Icons.lock_outline_rounded,
+                          size: 16,
+                          color: palette.onSurfaceVariant,
                         ),
+                      ],
+                    ),
+                    const SizedBox(height: 6),
+                    Text(
+                      task.title.isEmpty
+                          ? 'Chưa có nội dung công việc'
+                          : task.title,
+                      style: textTheme.titleLarge?.copyWith(
+                        color: palette.onSurface,
                       ),
-                    ],
-                  ),
-                ],
+                    ),
+                    const SizedBox(height: 6),
+                    Row(
+                      children: [
+                        Icon(
+                          Icons.schedule_rounded,
+                          size: 15,
+                          color: palette.onSurfaceVariant,
+                        ),
+                        const SizedBox(width: 6),
+                        Expanded(
+                          child: Text(
+                            'Hạn: ${task.formatDeadline(task.deadline)}',
+                            style: textTheme.bodySmall?.copyWith(
+                              color: palette.onSurfaceVariant,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
               ),
             ),
             const SizedBox(height: 16),
-
-            // 2. Conflict Callout Card (Soft Amber, Calm & Non-Judgmental)
-            Container(
-              padding: const EdgeInsets.all(16),
-              decoration: BoxDecoration(
-                color: MelbelColors.kSurfaceContainerHigh,
-                borderRadius: BorderRadius.circular(12),
-                border: Border.all(
-                  color: MelbelColors.kTertiaryFixedDim.withValues(alpha: 0.4),
-                ),
-              ),
+            MelbelCard(
+              tone: MelbelCardTone.amber,
               child: Row(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Container(
-                    width: 32,
-                    height: 32,
+                    width: 34,
+                    height: 34,
                     decoration: BoxDecoration(
-                      color: MelbelColors.kTertiaryContainer,
+                      color: palette.amber.withValues(alpha: 0.14),
                       shape: BoxShape.circle,
                     ),
                     child: Icon(
-                      Icons.info,
+                      Icons.info_outline_rounded,
                       size: 20,
-                      color: MelbelColors.kOnTertiaryContainer,
+                      color: palette.amber,
                     ),
                   ),
                   const SizedBox(width: 12),
@@ -752,21 +931,15 @@ class _TimeConflictScreenState extends State<TimeConflictScreen> {
                       children: [
                         Text(
                           'Cần điều chỉnh',
-                          style: TextStyle(
-                            fontFamily: 'Be Vietnam Pro',
-                            fontSize: 15,
-                            fontWeight: FontWeight.w600,
-                            color: MelbelColors.kTertiaryFixedDim,
+                          style: textTheme.titleSmall?.copyWith(
+                            color: palette.onAmberSoft,
                           ),
                         ),
-                        SizedBox(height: 4),
+                        const SizedBox(height: 4),
                         Text(
                           issueText.isEmpty ? task.conflictMessage : issueText,
-                          style: TextStyle(
-                            fontFamily: 'Be Vietnam Pro',
-                            fontSize: 14,
-                            color: MelbelColors.kOnSurface,
-                            height: 1.4,
+                          style: textTheme.bodyMedium?.copyWith(
+                            color: palette.onAmberSoft,
                           ),
                         ),
                       ],
@@ -775,62 +948,53 @@ class _TimeConflictScreenState extends State<TimeConflictScreen> {
                 ],
               ),
             ),
-            const SizedBox(height: 20),
-
+            const SizedBox(height: 16),
             MelbelCard(
               child: ListTile(
                 contentPadding: EdgeInsets.zero,
-                leading: const Icon(Icons.event_available_outlined),
+                leading: Icon(
+                  Icons.event_available_outlined,
+                  color: palette.sage,
+                ),
                 title: const Text('Giờ rảnh đã khai báo'),
                 subtitle: Text(task.availabilitySummary),
               ),
             ),
-            const SizedBox(height: 16),
-
-            // 3. ONE Clear Question & Quick Direct Resolution
+            const SizedBox(height: 18),
             Text(
               'Chọn cách điều chỉnh',
-              style: TextStyle(
-                fontFamily: 'Be Vietnam Pro',
-                fontSize: 16,
-                fontWeight: FontWeight.w600,
-                color: MelbelColors.kOnSurface,
+              style: textTheme.titleMedium?.copyWith(
+                color: palette.onSurface,
               ),
             ),
-            const SizedBox(height: 14),
-
+            const SizedBox(height: 12),
             _ConflictResolutionOption(
               label: 'Đổi hạn chót',
               isSelected: _selectedOption == 0,
               onTap: () => setState(() => _selectedOption = 0),
             ),
             const SizedBox(height: 10),
-
             _ConflictResolutionOption(
               label: 'Sửa giờ rảnh',
               isSelected: _selectedOption == 1,
               onTap: () => setState(() => _selectedOption = 1),
             ),
             const SizedBox(height: 10),
-
             _ConflictResolutionOption(
               label: 'Lưu nháp',
               isSelected: _selectedOption == 2,
               onTap: () => setState(() => _selectedOption = 2),
             ),
-            const SizedBox(height: 10),
-
-            const SizedBox(height: 16),
-
-            // Confirm Resolution Button
+            const SizedBox(height: 22),
             PrimaryCta(
-              label: 'Xác nhận',
-              icon: Icons.check,
+              label: 'Áp dụng lựa chọn',
+              icon: Icons.check_rounded,
               onPressed: _selectedOption < 0 ? null : () => _resolve(task),
             ),
           ],
         ),
       ),
+    ),
     );
   }
 }
@@ -848,63 +1012,43 @@ class _ConflictResolutionOption extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return InkWell(
-      onTap: onTap,
-      borderRadius: BorderRadius.circular(12),
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-        decoration: BoxDecoration(
-          color: isSelected
-              ? MelbelColors.kSurfaceContainerHighest
-              : MelbelColors.kSurfaceContainer,
-          borderRadius: BorderRadius.circular(12),
-          border: Border.all(
-            color: isSelected
-                ? MelbelColors.kPrimaryContainer
-                : MelbelColors.kOutlineVariant.withValues(alpha: 0.5),
-          ),
-        ),
+    final palette = context.melbel;
+    return Semantics(
+      selected: isSelected,
+      button: true,
+      label: label,
+      child: MelbelCard(
+        tone: isSelected ? MelbelCardTone.sage : MelbelCardTone.neutral,
+        borderColor: isSelected ? palette.sage : palette.hairline,
+        borderWidth: isSelected ? 1.5 : 1.0,
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+        onTap: onTap,
         child: Row(
-          mainAxisAlignment: MainAxisAlignment.spaceBetween,
           children: [
-            Row(
-              children: [
-                Container(
-                  width: 20,
-                  height: 20,
-                  decoration: BoxDecoration(
-                    color: MelbelColors.kSurfaceContainerHighest,
-                    shape: BoxShape.circle,
-                    border: Border.all(
-                      color: isSelected
-                          ? MelbelColors.kPrimaryContainer
-                          : MelbelColors.kOutline,
-                    ),
-                  ),
-                  child: Center(
-                    child: Container(
-                      width: 8,
-                      height: 8,
-                      decoration: BoxDecoration(
-                        color: isSelected
-                            ? MelbelColors.kPrimaryContainer
-                            : Colors.transparent,
-                        shape: BoxShape.circle,
-                      ),
-                    ),
-                  ),
+            Container(
+              width: 22,
+              height: 22,
+              decoration: BoxDecoration(
+                color: isSelected ? palette.sage : palette.surface,
+                shape: BoxShape.circle,
+                border: Border.all(
+                  color: isSelected ? palette.sage : palette.controlOutline,
+                  width: 1.5,
                 ),
-                const SizedBox(width: 12),
-                Text(
-                  label,
-                  style: TextStyle(
-                    fontFamily: 'Be Vietnam Pro',
-                    fontSize: 14,
-                    fontWeight: FontWeight.w500,
-                    color: MelbelColors.kOnSurface,
-                  ),
-                ),
-              ],
+              ),
+              child: isSelected
+                  ? Icon(Icons.check_rounded, size: 14, color: palette.onSage)
+                  : null,
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Text(
+                label,
+                style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                      color:
+                          isSelected ? palette.onSageSoft : palette.onSurface,
+                    ),
+              ),
             ),
           ],
         ),

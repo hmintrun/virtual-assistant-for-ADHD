@@ -230,7 +230,7 @@ class _WeeklyAvailabilityEditorState extends State<WeeklyAvailabilityEditor> {
               const SizedBox(height: 12),
               if (_rules.isEmpty)
                 Padding(
-                  padding: EdgeInsets.symmetric(vertical: 10),
+                  padding: const EdgeInsets.symmetric(vertical: 10),
                   child: Text(
                     'Chưa có khung giờ rảnh nào.',
                     style: TextStyle(color: MelbelColors.kOnSurfaceVariant),

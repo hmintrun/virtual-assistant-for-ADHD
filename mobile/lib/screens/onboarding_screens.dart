@@ -11,49 +11,83 @@ import '../widgets/google_login_button.dart';
 import '../services/dnd_service.dart';
 import '../widgets/melbel_ui.dart';
 
-class LoginScreen extends StatelessWidget {
+class LoginScreen extends StatefulWidget {
   const LoginScreen({super.key});
+
+  @override
+  State<LoginScreen> createState() => _LoginScreenState();
+}
+
+class _LoginScreenState extends State<LoginScreen> {
+  String _whisper = 'Chia nhỏ công việc và bắt đầu từng bước.';
 
   @override
   Widget build(BuildContext context) {
     final auth = context.watch<AuthService>();
-    return Scaffold(
-      body: SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.fromLTRB(28, 24, 28, 28),
-          child: Column(
-            children: [
-              const Spacer(),
-              const MelbelEntrance(child: MelbelMascot()),
-              const SizedBox(height: 32),
-              Text(
-                'ProPlan VA',
-                style: Theme.of(context).textTheme.headlineMedium?.copyWith(
-                      fontWeight: FontWeight.w700,
-                    ),
+    final palette = context.melbel;
+    final textTheme = Theme.of(context).textTheme;
+
+    return MelbelPageBackdrop(
+      showTopCloud: true,
+      showBottomClouds: true,
+      child: Scaffold(
+        backgroundColor: Colors.transparent,
+        body: SafeArea(
+          child: CustomScrollView(
+            slivers: [
+              SliverPadding(
+                padding: const EdgeInsets.fromLTRB(28, 24, 28, 28),
+                sliver: SliverFillRemaining(
+                  hasScrollBody: false,
+                  child: Column(
+                    children: [
+                      const Spacer(),
+                      MelbelEntrance(
+                        child: MelbelCushionAvatar(
+                          width: 108,
+                          height: 96,
+                          onPetted: (whisper) =>
+                              setState(() => _whisper = whisper),
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+                      ConstrainedBox(
+                        constraints: const BoxConstraints(maxWidth: 320),
+                        child: MelbelChatBubble(
+                          tail: MelbelBubbleTail.top,
+                          centered: true,
+                          senderLabel: 'Melbel',
+                          badge: 'Trợ lý VA',
+                          message: _whisper,
+                          footnote: 'Chạm hoặc vuốt nhẹ Melbel',
+                          tone: MelbelCardTone.amber,
+                        ),
+                      ),
+                      const SizedBox(height: 22),
+                      Text(
+                        'ProPlan VA',
+                        style: textTheme.headlineMedium?.copyWith(
+                          fontWeight: FontWeight.w800,
+                          letterSpacing: -0.5,
+                          color: palette.onSurface,
+                        ),
+                      ),
+                      const Spacer(flex: 2),
+                      const GoogleLoginButton(),
+                      if (auth.error != null) ...[
+                        const SizedBox(height: 12),
+                        Text(
+                          auth.error!,
+                          textAlign: TextAlign.center,
+                          style: textTheme.bodySmall?.copyWith(
+                            color: palette.amber,
+                          ),
+                        ),
+                      ],
+                    ],
+                  ),
+                ),
               ),
-              const SizedBox(height: 10),
-              Text(
-                'Lên kế hoạch cùng Melbel',
-                textAlign: TextAlign.center,
-                style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                      color: MelbelColors.kSecondary,
-                    ),
-              ),
-              const SizedBox(height: 8),
-              Text(
-                'Chia nhỏ công việc và bắt đầu từng bước.',
-                textAlign: TextAlign.center,
-                style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                      color: MelbelColors.kTextSecondary,
-                    ),
-              ),
-              const Spacer(flex: 2),
-              const GoogleLoginButton(),
-              if (auth.error != null) ...[
-                const SizedBox(height: 12),
-                Text(auth.error!, textAlign: TextAlign.center),
-              ],
             ],
           ),
         ),
@@ -241,101 +275,143 @@ class _SetupFlowScreenState extends State<SetupFlowScreen>
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: MelbelAppBar(
+    final palette = context.melbel;
+    final theme = Theme.of(context);
+    final isDark = theme.brightness == Brightness.dark;
+    final totalBars = _step < 4 ? 4 : 3;
+    final activeBars = _step < 4 ? _step + 1 : _step - 3;
+
+    return MelbelPageBackdrop(
+      showTopCloud: false,
+      showBottomClouds: true,
+      child: Scaffold(
+        backgroundColor: Colors.transparent,
+        appBar: MelbelAppBar(
           title: _title,
           showBack: true,
-          onBack: _requestingPermission ? () {} : _back),
-      body: Column(
-        children: [
-          if (_step >= 4)
+          showTitleRays: true,
+          onBack: _requestingPermission ? () {} : _back,
+        ),
+        body: Column(
+          children: [
             Padding(
-              padding: const EdgeInsets.fromLTRB(24, 8, 24, 0),
-              child: Row(
-                children: List.generate(
-                  3,
-                  (index) => Expanded(
-                    child: Container(
-                      height: 5,
-                      margin: const EdgeInsets.only(right: 8),
-                      decoration: BoxDecoration(
-                        color: index <= _step - 4
-                            ? MelbelColors.kPrimaryContainer
-                            : MelbelColors.kSurfaceContainerHighest,
-                        borderRadius: BorderRadius.circular(99),
+              padding: const EdgeInsets.fromLTRB(24, 12, 24, 0),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 12,
+                      vertical: 5,
+                    ),
+                    decoration: BoxDecoration(
+                      color: palette.sageSoft,
+                      borderRadius: BorderRadius.circular(999),
+                    ),
+                    child: Text(
+                      _step < 4
+                          ? 'Thiết lập · Bước ${_step + 1}/4'
+                          : 'Quyền Android · Bước ${_step - 3}/3',
+                      style: theme.textTheme.labelLarge?.copyWith(
+                        fontWeight: FontWeight.w700,
+                        color: palette.onSageSoft,
                       ),
                     ),
                   ),
-                ),
+                  const SizedBox(height: 10),
+                  Row(
+                    spacing: 6,
+                    children: [
+                      for (var i = 1; i <= totalBars; i++)
+                        Expanded(
+                          child: AnimatedContainer(
+                            duration: MediaQuery.disableAnimationsOf(context)
+                                ? Duration.zero
+                                : const Duration(milliseconds: 220),
+                            height: 6,
+                            decoration: BoxDecoration(
+                              color: i <= activeBars
+                                  ? palette.sage
+                                  : (isDark
+                                      ? const Color(0xFF3E3454)
+                                      : const Color(0xFFE6DCF7)),
+                              borderRadius: BorderRadius.circular(999),
+                            ),
+                          ),
+                        ),
+                    ],
+                  ),
+                ],
               ),
             ),
-          Expanded(
-            child: SingleChildScrollView(
-              padding: const EdgeInsets.fromLTRB(24, 22, 24, 20),
-              child: switch (_step) {
-                0 => _appearanceStep(context),
-                1 => _durationStep(context),
-                2 => _reminderStep(context),
-                3 => _guideStep(context),
-                _ => _permissionStep(context, _step - 4),
-              },
+            Expanded(
+              child: SingleChildScrollView(
+                key: ValueKey(_step),
+                padding: const EdgeInsets.fromLTRB(24, 20, 24, 20),
+                child: switch (_step) {
+                  0 => _appearanceStep(context),
+                  1 => _durationStep(context),
+                  2 => _reminderStep(context),
+                  3 => _guideStep(context),
+                  _ => _permissionStep(context, _step - 4),
+                },
+              ),
             ),
-          ),
-          SafeArea(
-            top: false,
-            minimum: const EdgeInsets.fromLTRB(24, 0, 24, 16),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                SizedBox(
-                  width: double.infinity,
-                  height: 56,
-                  child: FilledButton(
+            SafeArea(
+              top: false,
+              minimum: const EdgeInsets.fromLTRB(24, 0, 24, 16),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  PrimaryCta(
+                    label: switch (_step) {
+                      0 => 'Chọn nhịp làm việc',
+                      1 => 'Chọn cách nhắc',
+                      2 => 'Xem hướng dẫn',
+                      3 => _isAndroid ? 'Thiết lập quyền' : 'Vào trang chủ',
+                      4 => 'Cho phép Không làm phiền',
+                      5 => 'Cho phép báo thức',
+                      _ => 'Cho phép thông báo',
+                    },
                     onPressed: _requestingPermission || _savingPreferences
                         ? null
                         : () => _handlePermission(),
-                    child: Text(_step == 3
-                        ? (_isAndroid ? 'Thiết lập quyền' : 'Vào trang chủ')
-                        : _step >= 4 && _isAndroid
-                            ? 'Cho phép'
-                            : 'Tiếp theo'),
                   ),
-                ),
-                if ((_step == 3 && _isAndroid) || _step >= 4)
-                  TextButton(
-                    onPressed: _requestingPermission || _savingPreferences
-                        ? null
-                        : _step == 3
-                            ? _openHome
-                            : _next,
-                    child: Text(_step == 3 ? 'Vào trang chủ' : 'Để sau'),
-                  ),
-              ],
+                  if ((_step == 3 && _isAndroid) || _step >= 4)
+                    TextButton(
+                      onPressed: _requestingPermission || _savingPreferences
+                          ? null
+                          : _step == 3
+                              ? _openHome
+                              : _next,
+                      child: Text(_step == 3 ? 'Vào trang chủ' : 'Để sau'),
+                    ),
+                ],
+              ),
             ),
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }
 
   Widget _appearanceStep(BuildContext context) => Column(
         children: [
-          const MelbelMascot(),
-          const SizedBox(height: 20),
+          const MelbelCushionAvatar(width: 96, height: 84),
+          const SizedBox(height: 18),
           Text('Chọn giao diện',
               style: Theme.of(context).textTheme.headlineSmall),
           const SizedBox(height: 6),
-          const Text('Chọn màu màn hình bạn thích.'),
           const SizedBox(height: 28),
           _ChoiceCard(
             icon: Icons.light_mode_outlined,
-            title: 'Sáng (Trăng ngày)',
+            title: 'Sáng',
             selected: _appearance == 'light',
             onTap: () => _selectAppearance('light'),
           ),
           _ChoiceCard(
             icon: Icons.dark_mode_outlined,
-            title: 'Tối (Trăng đêm)',
+            title: 'Tối',
             selected: _appearance == 'dark',
             onTap: () => _selectAppearance('dark'),
           ),
@@ -347,9 +423,11 @@ class _SetupFlowScreenState extends State<SetupFlowScreen>
           ),
           const SizedBox(height: 10),
           Text(
-            'Bạn có thể đổi lựa chọn trước khi tiếp tục.',
+            'Tự động bật chế độ tối từ 18:00 đến 06:00.',
             textAlign: TextAlign.center,
-            style: TextStyle(color: MelbelColors.kTextSecondary),
+            style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                  color: context.melbel.onSurfaceVariant,
+                ),
           ),
         ],
       );
@@ -357,18 +435,15 @@ class _SetupFlowScreenState extends State<SetupFlowScreen>
   Widget _durationStep(BuildContext context) => Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const Text('Tạo khoảng đệm êm dịu, không áp lực thúc ép.'),
-          const SizedBox(height: 20),
           MelbelCard(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
-                    'MÔ PHỎNG 1 NHỊP $_focusMinutes phút tập trung + $_breakMinutes phút nghỉ'),
+                    '$_focusMinutes phút tập trung · $_breakMinutes phút nghỉ'),
                 const SizedBox(height: 12),
-                const LinearProgressIndicator(value: .66),
-                const SizedBox(height: 8),
-                const Text('Dòng chảy êm đềm     •     Thở sâu & nạp lại'),
+                LinearProgressIndicator(
+                    value: _focusMinutes / (_focusMinutes + _breakMinutes)),
               ],
             ),
           ),
@@ -410,15 +485,18 @@ class _SetupFlowScreenState extends State<SetupFlowScreen>
   Widget _reminderStep(BuildContext context) => Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const Text('Chọn cách nhắc nhở đồng hành cùng bạn hôm nay.'),
-          const SizedBox(height: 22),
-          Text('Tần suất nhắc', style: Theme.of(context).textTheme.titleMedium),
+          Text('Nhắc trước phiên',
+              style: Theme.of(context).textTheme.titleMedium),
           const SizedBox(height: 8),
           Wrap(
             spacing: 8,
             children: ['Ít', 'Vừa', 'Nhiều']
                 .map((label) => ChoiceChip(
-                      label: Text(label),
+                      label: Text(switch (label) {
+                        'Ít' => '5 phút',
+                        'Vừa' => '10 và 5 phút',
+                        _ => '15, 10 và 5 phút',
+                      }),
                       selected: _reminderFrequency == label,
                       onSelected: (_) =>
                           setState(() => _reminderFrequency = label),
@@ -426,38 +504,43 @@ class _SetupFlowScreenState extends State<SetupFlowScreen>
                 .toList(),
           ),
           const SizedBox(height: 22),
-          Text('Kiểu nhắc', style: Theme.of(context).textTheme.titleMedium),
-          Wrap(
-            spacing: 8,
-            children: ['Hỏi tiến độ', 'Nhắc khích lệ']
-                .map((style) => ChoiceChip(
-                      label: Text(style),
-                      selected: _reminderStyle == style,
-                      onSelected: (_) => setState(() => _reminderStyle = style),
-                    ))
-                .toList(),
-          ),
-          const SizedBox(height: 12),
-          Text('Bộ đệm tâm lý', style: Theme.of(context).textTheme.titleMedium),
-          SwitchListTile(
-            value: _microTask,
-            onChanged: (value) => setState(() => _microTask = value),
-            title: const Text('Khởi động 2 phút'),
-          ),
-          SwitchListTile(
-            value: _voiceReadout,
-            onChanged: (value) => setState(() => _voiceReadout = value),
-            title: const Text('Đọc bằng giọng nói'),
-          ),
-          SwitchListTile(
-            value: _breakReminder,
-            onChanged: (value) => setState(() => _breakReminder = value),
-            title: const Text('Nhắc nghỉ giải lao'),
-          ),
-          const _NoticeCard(
-            icon: Icons.spa_outlined,
-            title: 'Mỗi bước nhỏ đều là tiến bộ.',
-            message: 'Các lựa chọn được giữ trong phiên demo trên thiết bị.',
+          ExpansionTile(
+            tilePadding: EdgeInsets.zero,
+            title: const Text('Tùy chọn bổ sung'),
+            subtitle: const Text('Áp dụng trong màn thiết lập này'),
+            children: [
+              Align(
+                  alignment: Alignment.centerLeft,
+                  child: Text('Kiểu nhắc',
+                      style: Theme.of(context).textTheme.titleMedium)),
+              Wrap(
+                spacing: 8,
+                children: ['Hỏi tiến độ', 'Nhắc khích lệ']
+                    .map((style) => ChoiceChip(
+                          label: Text(style),
+                          selected: _reminderStyle == style,
+                          onSelected: (_) =>
+                              setState(() => _reminderStyle = style),
+                        ))
+                    .toList(),
+              ),
+              const SizedBox(height: 12),
+              SwitchListTile(
+                value: _microTask,
+                onChanged: (value) => setState(() => _microTask = value),
+                title: const Text('Khởi động 2 phút'),
+              ),
+              SwitchListTile(
+                value: _voiceReadout,
+                onChanged: (value) => setState(() => _voiceReadout = value),
+                title: const Text('Đọc bằng giọng nói'),
+              ),
+              SwitchListTile(
+                value: _breakReminder,
+                onChanged: (value) => setState(() => _breakReminder = value),
+                title: const Text('Nhắc nghỉ giải lao'),
+              ),
+            ],
           ),
         ],
       );
@@ -484,50 +567,49 @@ class _SetupFlowScreenState extends State<SetupFlowScreen>
         ],
       );
 
-  Widget _permissionStep(BuildContext context, int index) => Column(
-        children: [
-          Align(
-            alignment: Alignment.centerLeft,
-            child: Text('BƯỚC ${index + 1} / 3',
-                style: TextStyle(color: MelbelColors.kPrimaryContainer)),
+  Widget _permissionStep(BuildContext context, int index) {
+    final palette = context.melbel;
+    return Column(
+      children: [
+        const SizedBox(height: 16),
+        Container(
+          width: 136,
+          height: 136,
+          decoration: BoxDecoration(
+            color: palette.sageSoft,
+            shape: BoxShape.circle,
           ),
-          const SizedBox(height: 72),
-          Container(
-            width: 144,
-            height: 144,
-            decoration: BoxDecoration(
-              color: MelbelColors.kSurfaceContainer,
-              shape: BoxShape.circle,
-            ),
-            child: Icon(_permissionIcons[index],
-                size: 64, color: MelbelColors.kPrimaryContainer),
-          ),
-          const SizedBox(height: 28),
-          Text(_permissionTitles[index],
-              textAlign: TextAlign.center,
-              style: Theme.of(context).textTheme.headlineSmall),
-          const SizedBox(height: 8),
-          Text(_permissionSubtitles[index],
-              textAlign: TextAlign.center,
-              style: Theme.of(context).textTheme.bodyLarge),
-          const SizedBox(height: 36),
-          _NoticeCard(
-            icon: _permissionIcons[index],
-            title: index == 0
-                ? 'Chế độ tĩnh khi tập trung'
-                : index == 1
-                    ? 'Đúng nhịp phiên làm việc'
-                    : 'Tôn trọng không gian riêng',
-            message: !_isAndroid
-                ? 'Quyền này dùng trên ứng dụng Android.'
-                : switch (index) {
-                    0 => 'Bật quyền cho ProPlan VA trong màn hình hệ thống.',
-                    1 => 'Android có thể yêu cầu cho phép đặt báo thức.',
-                    _ => 'Cho phép ProPlan VA gửi lời nhắc.',
-                  },
-          ),
-        ],
-      );
+          child: Icon(_permissionIcons[index], size: 60, color: palette.sage),
+        ),
+        const SizedBox(height: 28),
+        Text(
+          _permissionTitles[index],
+          textAlign: TextAlign.center,
+          style: Theme.of(context).textTheme.headlineSmall,
+        ),
+        const SizedBox(height: 8),
+        Text(
+          _permissionSubtitles[index],
+          textAlign: TextAlign.center,
+          style: Theme.of(context).textTheme.bodyLarge?.copyWith(
+                color: palette.onSurfaceVariant,
+              ),
+        ),
+        const SizedBox(height: 32),
+        _NoticeCard(
+          icon: _permissionIcons[index],
+          title: 'Quyền trên thiết bị',
+          message: !_isAndroid
+              ? 'Quyền này dùng trên ứng dụng Android.'
+              : switch (index) {
+                  0 => 'Bật quyền cho ProPlan VA trong màn hình hệ thống.',
+                  1 => 'Android có thể yêu cầu cho phép đặt báo thức.',
+                  _ => 'Cho phép ProPlan VA gửi lời nhắc.',
+                },
+        ),
+      ],
+    );
+  }
 }
 
 class _ChoiceCard extends StatelessWidget {
@@ -544,72 +626,133 @@ class _ChoiceCard extends StatelessWidget {
   final VoidCallback onTap;
 
   @override
-  Widget build(BuildContext context) => Padding(
-        padding: const EdgeInsets.only(bottom: 10),
-        child: InkWell(
+  Widget build(BuildContext context) {
+    final palette = context.melbel;
+    final theme = Theme.of(context);
+    final isDark = theme.brightness == Brightness.dark;
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 10),
+      child: Semantics(
+        checked: selected,
+        inMutuallyExclusiveGroup: true,
+        child: MelbelCard(
+          borderRadius: 24,
+          tone: selected ? MelbelCardTone.sage : MelbelCardTone.neutral,
+          borderColor: selected
+              ? palette.sage.withValues(alpha: 0.72)
+              : (isDark ? palette.hairline : Colors.transparent),
+          borderWidth: selected ? 1.5 : (isDark ? 1.0 : 0.0),
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
           onTap: onTap,
-          borderRadius: BorderRadius.circular(18),
-          child: Container(
-            padding: const EdgeInsets.all(18),
-            decoration: BoxDecoration(
-              color: MelbelColors.kSurfaceContainer,
-              borderRadius: BorderRadius.circular(18),
-              border: Border.all(
-                color: selected
-                    ? MelbelColors.kPrimaryContainer
-                    : MelbelColors.kOutlineVariant,
+          child: Row(
+            children: [
+              Container(
+                width: 40,
+                height: 40,
+                decoration: BoxDecoration(
+                  color: selected
+                      ? palette.sage.withValues(alpha: 0.18)
+                      : palette.sageSoft,
+                  borderRadius: BorderRadius.circular(14),
+                ),
+                child: Icon(
+                  icon,
+                  size: 20,
+                  color: selected ? palette.sage : palette.onSurfaceVariant,
+                ),
               ),
-            ),
-            child: Row(
-              children: [
-                Icon(icon, color: MelbelColors.kPrimaryContainer),
-                const SizedBox(width: 14),
-                Expanded(child: Text(title)),
-                Icon(selected
-                    ? Icons.radio_button_checked
-                    : Icons.radio_button_off),
-              ],
-            ),
+              const SizedBox(width: 14),
+              Expanded(
+                child: Text(
+                  title,
+                  style: theme.textTheme.titleSmall?.copyWith(
+                    fontSize: 16,
+                    fontWeight: FontWeight.w700,
+                    color: selected ? palette.onSageSoft : palette.onSurface,
+                  ),
+                ),
+              ),
+              Icon(
+                selected
+                    ? Icons.radio_button_checked_rounded
+                    : Icons.radio_button_off_rounded,
+                color: selected ? palette.sage : palette.controlOutline,
+              ),
+            ],
           ),
         ),
-      );
+      ),
+    );
+  }
 }
 
 class _GuideTile extends StatelessWidget {
-  const _GuideTile(
-      {required this.number, required this.title, required this.detail});
+  const _GuideTile({
+    required this.number,
+    required this.title,
+    required this.detail,
+  });
 
   final String number;
   final String title;
   final String detail;
 
   @override
-  Widget build(BuildContext context) => Padding(
-        padding: const EdgeInsets.only(bottom: 12),
-        child: MelbelCard(
-          child: Row(
-            children: [
-              CircleAvatar(
-                backgroundColor: MelbelColors.kSecondaryContainer,
-                child: Text(number),
+  Widget build(BuildContext context) {
+    final palette = context.melbel;
+    final theme = Theme.of(context);
+    final useHoney = number == '2';
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 12),
+      child: MelbelCard(
+        borderRadius: 24,
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+        child: Row(
+          children: [
+            Container(
+              width: 40,
+              height: 40,
+              decoration: BoxDecoration(
+                color: useHoney ? palette.amberSoft : palette.sageSoft,
+                borderRadius: BorderRadius.circular(14),
               ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(title,
-                        style: const TextStyle(fontWeight: FontWeight.w600)),
-                    const SizedBox(height: 4),
-                    Text(detail,
-                        style: TextStyle(color: MelbelColors.kTextSecondary)),
-                  ],
+              alignment: Alignment.center,
+              child: Text(
+                number,
+                style: theme.textTheme.titleSmall?.copyWith(
+                  fontWeight: FontWeight.w800,
+                  color: useHoney ? palette.amber : palette.onSageSoft,
                 ),
               ),
-            ],
-          ),
+            ),
+            const SizedBox(width: 14),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    title,
+                    style: theme.textTheme.titleSmall?.copyWith(
+                      fontSize: 16,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                  const SizedBox(height: 3),
+                  Text(
+                    detail,
+                    style: theme.textTheme.bodySmall?.copyWith(
+                      color: palette.onSurfaceVariant,
+                      height: 1.35,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
         ),
-      );
+      ),
+    );
+  }
 }
 
 class _NoticeCard extends StatelessWidget {
@@ -624,25 +767,37 @@ class _NoticeCard extends StatelessWidget {
   final String message;
 
   @override
-  Widget build(BuildContext context) => MelbelCard(
-        child: Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Icon(icon, color: MelbelColors.kAmber),
-            const SizedBox(width: 12),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(title,
-                      style: const TextStyle(fontWeight: FontWeight.w600)),
-                  const SizedBox(height: 4),
-                  Text(message,
-                      style: TextStyle(color: MelbelColors.kOnSurfaceVariant)),
-                ],
-              ),
+  Widget build(BuildContext context) {
+    final palette = context.melbel;
+    return MelbelCard(
+      tone: MelbelCardTone.amber,
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(icon, color: palette.amber),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  title,
+                  style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                        color: palette.onAmberSoft,
+                      ),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  message,
+                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                        color: palette.onAmberSoft,
+                      ),
+                ),
+              ],
             ),
-          ],
-        ),
-      );
+          ),
+        ],
+      ),
+    );
+  }
 }

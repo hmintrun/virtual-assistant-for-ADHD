@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
+import '../core/responsive_layout.dart';
 import '../core/theme.dart';
 import '../providers/task_provider.dart';
 import '../widgets/melbel_ui.dart';
@@ -29,10 +30,11 @@ class _TaskReadyScreenState extends State<TaskReadyScreen> {
         ),
       );
     } catch (error) {
-      if (mounted)
+      if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text('Chưa xác nhận được thông tin: $error')),
         );
+      }
     } finally {
       if (mounted) setState(() => _isConfirming = false);
     }
@@ -41,239 +43,85 @@ class _TaskReadyScreenState extends State<TaskReadyScreen> {
   @override
   Widget build(BuildContext context) {
     final task = context.watch<TaskProvider>();
+    final palette = context.melbel;
+    final textTheme = Theme.of(context).textTheme;
     final displayTitle = task.title;
     final displayDeadline = task.formatDeadline(task.deadline);
     final availabilityStr = task.availabilitySummary;
 
-    return Scaffold(
-      appBar: const MelbelAppBar(title: 'Sẵn sàng', showBack: true),
-      body: SafeArea(
-        top: false,
-        child: ListView(
-          padding: const EdgeInsets.fromLTRB(20, 12, 20, 32),
-          children: [
-            // Top Status
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                Row(
+    return MelbelPageBackdrop(
+      showTopCloud: false,
+      showBottomClouds: true,
+      child: Scaffold(
+        backgroundColor: Colors.transparent,
+        appBar: const MelbelAppBar(
+          title: 'Sẵn sàng',
+          showBack: true,
+          showTitleRays: true,
+        ),
+        body: SafeArea(
+          top: false,
+          child: ListView(
+            padding: MelbelLayout.pageInsets(context, top: 12, bottom: 32),
+            children: [
+              const PlanningStageHeader(step: 2, label: 'Xác nhận thông tin'),
+              const SizedBox(height: 16),
+              MelbelCard(
+                borderRadius: 26,
+                padding: const EdgeInsets.all(18),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Container(
-                      width: 10,
-                      height: 10,
-                      decoration: BoxDecoration(
-                        color: MelbelColors.kSecondary,
-                        shape: BoxShape.circle,
-                      ),
-                    ),
-                    const SizedBox(width: 8),
+                    const Eyebrow('Tên việc'),
+                    const SizedBox(height: 6),
                     Text(
-                      'Mọi thứ đã rõ ràng',
-                      style: TextStyle(
-                        fontFamily: 'Be Vietnam Pro',
-                        fontSize: 14,
-                        fontWeight: FontWeight.w500,
-                        color: MelbelColors.kSecondary,
+                      displayTitle,
+                      style: textTheme.titleLarge?.copyWith(
+                        fontWeight: FontWeight.w800,
+                        color: palette.sage,
                       ),
                     ),
+                    const SizedBox(height: 16),
+                    _DetailLine(
+                      icon: Icons.description_outlined,
+                      title: 'Phạm vi',
+                      content:
+                          task.scope.isEmpty ? 'Chưa có phạm vi' : task.scope,
+                    ),
+                    const SizedBox(height: 14),
+                    _DetailLine(
+                        icon: Icons.schedule_outlined,
+                        title: 'Giờ rảnh',
+                        content: availabilityStr),
+                    const SizedBox(height: 14),
+                    _DetailLine(
+                        icon: Icons.flag_outlined,
+                        title: 'Hạn chót',
+                        content: displayDeadline),
                   ],
                 ),
-                const Eyebrow('Bước cuối'),
-              ],
-            ),
-            const SizedBox(height: 16),
-
-            // Heading
-            Text(
-              'Bạn đã sẵn sàng chứ?',
-              style: TextStyle(
-                fontFamily: 'Be Vietnam Pro',
-                fontSize: 24,
-                fontWeight: FontWeight.w600,
-                color: MelbelColors.kOnSurface,
-                letterSpacing: -0.4,
               ),
-            ),
-            const SizedBox(height: 4),
-            Text(
-              'Cứ thong thả, hệ thống đã chuẩn bị nhịp làm việc êm dịu nhất cho bạn.',
-              style: TextStyle(
-                fontFamily: 'Be Vietnam Pro',
-                fontSize: 14,
-                color: MelbelColors.kOnSurfaceVariant,
+              const SizedBox(height: 16),
+              const MelbelChatBlock(
+                expression: CatExpression.happy,
+                tone: MelbelCardTone.sage,
+                senderLabel: 'Melbel',
+                badge: 'Sẵn sàng',
+                message:
+                    'Bạn sẽ được xem và chỉnh phương án trước khi chốt lịch.',
+                mascotWidth: 58,
+                mascotHeight: 52,
               ),
-            ),
-            const SizedBox(height: 20),
-
-            // Main Details Card (D-20)
-            Container(
-              padding: const EdgeInsets.all(16),
-              decoration: BoxDecoration(
-                color: MelbelColors.kSurfaceContainer,
-                borderRadius: BorderRadius.circular(12),
-                border: Border.all(color: MelbelColors.kOutlineVariant),
+              const SizedBox(height: 24),
+              PrimaryCta(
+                label: _isConfirming ? 'Đang chuẩn bị...' : 'Xác nhận công việc',
+                icon: _isConfirming
+                    ? Icons.hourglass_top_rounded
+                    : Icons.check_rounded,
+                onPressed: _isConfirming ? null : _onConfirm,
               ),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    'Tên việc',
-                    style: TextStyle(
-                      fontFamily: 'Be Vietnam Pro',
-                      fontSize: 12,
-                      color: MelbelColors.kOnSurfaceVariant,
-                    ),
-                  ),
-                  const SizedBox(height: 4),
-                  Text(
-                    displayTitle,
-                    style: TextStyle(
-                      fontFamily: 'Be Vietnam Pro',
-                      fontSize: 20,
-                      fontWeight: FontWeight.w600,
-                      color: MelbelColors.kPrimary,
-                    ),
-                  ),
-                  const SizedBox(height: 16),
-
-                  // Deadline box inside card
-                  Container(
-                    padding: const EdgeInsets.all(14),
-                    decoration: BoxDecoration(
-                      color: MelbelColors.kSurfaceContainerHigh,
-                      borderRadius: BorderRadius.circular(10),
-                    ),
-                    child: Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                      children: [
-                        Row(
-                          children: [
-                            Container(
-                              width: 40,
-                              height: 40,
-                              decoration: BoxDecoration(
-                                color: MelbelColors.kSurfaceContainerHighest,
-                                shape: BoxShape.circle,
-                              ),
-                              child: Icon(
-                                Icons.flag,
-                                size: 20,
-                                color: MelbelColors.kPrimaryContainer,
-                              ),
-                            ),
-                            const SizedBox(width: 12),
-                            Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                Text(
-                                  'Hạn chót',
-                                  style: TextStyle(
-                                    fontFamily: 'Be Vietnam Pro',
-                                    fontSize: 12,
-                                    color: MelbelColors.kOnSurfaceVariant,
-                                  ),
-                                ),
-                                const SizedBox(height: 2),
-                                Text(
-                                  displayDeadline,
-                                  style: TextStyle(
-                                    fontFamily: 'Be Vietnam Pro',
-                                    fontSize: 15,
-                                    fontWeight: FontWeight.w600,
-                                    color: MelbelColors.kOnSurface,
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ],
-                        ),
-                        Container(
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 10,
-                            vertical: 4,
-                          ),
-                          decoration: BoxDecoration(
-                            color: MelbelColors.kSecondaryContainer.withValues(
-                              alpha: 0.4,
-                            ),
-                            borderRadius: BorderRadius.circular(999),
-                          ),
-                          child: Text(
-                            'Hạn đã chọn',
-                            style: TextStyle(
-                              fontFamily: 'Be Vietnam Pro',
-                              fontSize: 12,
-                              fontWeight: FontWeight.w500,
-                              color: MelbelColors.kSecondary,
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                  const SizedBox(height: 16),
-
-                  // Three Info Lines
-                  _DetailLine(
-                    icon: Icons.schedule,
-                    title: 'Giờ rảnh theo hồ sơ',
-                    content: availabilityStr,
-                  ),
-                  const SizedBox(height: 14),
-                  const _DetailLine(
-                    icon: Icons.timer,
-                    title: 'Kế hoạch phiên',
-                    content:
-                        'Backend sẽ đề xuất phiên sau khi xác nhận thông tin.',
-                  ),
-                  const SizedBox(height: 14),
-                  const _DetailLine(
-                    icon: Icons.bedtime,
-                    title: 'Nhịp hỗ trợ',
-                    content: 'Báo thức nhẹ nhàng, không tiếng giật mình',
-                  ),
-                ],
-              ),
-            ),
-            const SizedBox(height: 16),
-
-            // Helper box
-            Container(
-              padding: const EdgeInsets.all(16),
-              decoration: BoxDecoration(
-                color: MelbelColors.kSurfaceContainerLow,
-                borderRadius: BorderRadius.circular(12),
-                border: Border.all(
-                  color: MelbelColors.kOutlineVariant.withValues(alpha: 0.3),
-                ),
-              ),
-              child: Row(
-                children: [
-                  Icon(Icons.eco, size: 22, color: MelbelColors.kSecondary),
-                  SizedBox(width: 12),
-                  Expanded(
-                    child: Text(
-                      'Không áp lực, không phán xét. Bạn có thể tạm dừng hoặc điều chỉnh bất kỳ lúc nào.',
-                      style: TextStyle(
-                        fontFamily: 'Be Vietnam Pro',
-                        fontSize: 13,
-                        color: MelbelColors.kOnSurfaceVariant,
-                        height: 1.4,
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-            const SizedBox(height: 24),
-
-            // Confirm Action
-            PrimaryCta(
-              label: _isConfirming ? 'Đang chuẩn bị...' : 'Xác nhận công việc',
-              icon: _isConfirming ? Icons.hourglass_top : Icons.check,
-              onPressed: _isConfirming ? null : _onConfirm,
-            ),
-          ],
+            ],
+          ),
         ),
       ),
     );
@@ -293,10 +141,20 @@ class _DetailLine extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final palette = context.melbel;
+    final textTheme = Theme.of(context).textTheme;
     return Row(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Icon(icon, size: 20, color: MelbelColors.kOnSurfaceVariant),
+        Container(
+          width: 36,
+          height: 36,
+          decoration: BoxDecoration(
+            color: palette.sageSoft,
+            borderRadius: BorderRadius.circular(12),
+          ),
+          child: Icon(icon, size: 19, color: palette.sage),
+        ),
         const SizedBox(width: 12),
         Expanded(
           child: Column(
@@ -304,20 +162,16 @@ class _DetailLine extends StatelessWidget {
             children: [
               Text(
                 title,
-                style: TextStyle(
-                  fontFamily: 'Be Vietnam Pro',
-                  fontSize: 12,
-                  color: MelbelColors.kOnSurfaceVariant,
+                style: textTheme.labelSmall?.copyWith(
+                  color: palette.onSurfaceVariant,
                 ),
               ),
               const SizedBox(height: 2),
               Text(
                 content,
-                style: TextStyle(
-                  fontFamily: 'Be Vietnam Pro',
-                  fontSize: 14,
+                style: textTheme.bodyMedium?.copyWith(
                   fontWeight: FontWeight.w500,
-                  color: MelbelColors.kOnSurface,
+                  color: palette.onSurface,
                 ),
               ),
             ],

@@ -40,7 +40,6 @@ dependencies:
   circular_countdown_timer: ^0.2.3
   shimmer: ^3.0.0
   intl: ^0.20.2
-  google_fonts: ^8.2.1
   timezone: ^0.9.4
   shared_preferences: ^2.5.6
   android_alarm_manager_plus: ^5.1.2
@@ -60,6 +59,19 @@ flutter:
   uses-material-design: true
   assets:
     - assets/melbel_svg/
+    - assets/audio/
+    - assets/fonts/OFL.txt
+  fonts:
+    - family: Be Vietnam Pro
+      fonts:
+        - asset: assets/fonts/BeVietnamPro-Regular.ttf
+          weight: 400
+        - asset: assets/fonts/BeVietnamPro-Medium.ttf
+          weight: 500
+        - asset: assets/fonts/BeVietnamPro-SemiBold.ttf
+          weight: 600
+        - asset: assets/fonts/BeVietnamPro-Bold.ttf
+          weight: 700
 
 dependency_overrides:
   # record 5.x chon record_linux cu, khong tuong thich platform interface 1.5+.
