@@ -8,18 +8,12 @@ from __future__ import annotations
 
 import zoneinfo
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
-
-from app.schemas.calendar import BusyInterval
-from app.schemas.common import TimeInterval
-
-if TYPE_CHECKING:
-    from app.models.execution import SessionRun
-    from app.models.session import Session
 from datetime import UTC, date, datetime, timedelta
+from typing import Any
 
 from app.schemas.availability import Availability, DraftAvailability
-from app.schemas.common import ClarificationIssue, TimeConstraint
+from app.schemas.calendar import BusyInterval
+from app.schemas.common import ClarificationIssue, TimeConstraint, TimeInterval
 from app.schemas.draft import TaskSummary
 
 
@@ -433,7 +427,7 @@ def validate_session_start_feasibility(
         run_session_id = str(getattr(live_run, "session_id", ""))
         current_session_id = str(getattr(session, "id", getattr(session, "session_id", "")))
 
-        if run_state in ("running", "paused", "awaiting_checkin") and run_session_id != current_session_id:
+        if run_state in ("running", "paused") and run_session_id != current_session_id:
             return SessionStartFeasibilityResult(
                 is_feasible=False,
                 error_code="ANOTHER_SESSION_ACTIVE",
@@ -443,8 +437,9 @@ def validate_session_start_feasibility(
 
     # Guardrail 4: Xung đột với sự kiện bận từ Calendar
     work_seconds = getattr(session, "work_seconds", 1500)
+    rest_seconds = getattr(session, "rest_seconds", 300)
     run_start = req_utc
-    run_end = req_utc + timedelta(seconds=work_seconds)
+    run_end = req_utc + timedelta(seconds=work_seconds + rest_seconds)
 
     if busy_intervals:
         for busy in busy_intervals:
@@ -469,6 +464,15 @@ def validate_session_start_feasibility(
 
             adj_start = adj.scheduled_start.astimezone(UTC)
             adj_end = adj.scheduled_end.astimezone(UTC)
+
+            # Chồng lấn trực tiếp với phiên lân cận
+            if max(run_start, adj_start) < min(run_end, adj_end):
+                return SessionStartFeasibilityResult(
+                    is_feasible=False,
+                    error_code="INSUFFICIENT_INTER_SESSION_GAP",
+                    message="Thời gian phiên này bị chồng lấn vào một phiên khác trong kế hoạch.",
+                    suggested_action="reschedule_uf6",
+                )
 
             # Phiên kế tiếp ngay sau phiên hiện tại
             if adj_start >= run_end:

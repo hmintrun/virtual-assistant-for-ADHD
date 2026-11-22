@@ -1,10 +1,10 @@
 # Router cho nhóm API bản nháp công việc UF1 (/api/v1/drafts)
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Header, Path, Query
 
 from app.api.deps import CurrentUserDep, DbSessionDep
-from app.schemas.common import SuccessEnvelope, build_response_meta
+from app.schemas.common import ErrorEnvelope, SuccessEnvelope, build_response_meta
 from app.schemas.draft import (
     ConfirmSummaryRequest,
     ConfirmSummaryResult,
@@ -195,5 +195,35 @@ async def analyze_draft(
     )
     return SuccessEnvelope(
         data=draft,
+        meta=build_response_meta(),
+    )
+
+
+@router.delete(
+    "/{draft_id}",
+    status_code=200,
+    response_model=SuccessEnvelope[dict[str, Any]],
+    responses={
+        401: {"model": ErrorEnvelope},
+        404: {"model": ErrorEnvelope},
+        409: {"model": ErrorEnvelope},
+        422: {"model": ErrorEnvelope},
+    },
+)
+async def delete_draft(
+    draft_id: Annotated[
+        str, Path(min_length=1, description="Mã bản nháp cần xóa (ví dụ: draft_1)")
+    ],
+    current_user: CurrentUserDep,
+    db: DbSessionDep,
+) -> SuccessEnvelope[dict[str, Any]]:
+    """Xóa vĩnh viễn một bản nháp công việc chưa chốt thành công việc chính thức."""
+    result = await draft_service.delete_draft(
+        user_id=current_user.user_id,
+        draft_id=draft_id,
+        db=db,
+    )
+    return SuccessEnvelope(
+        data=result,
         meta=build_response_meta(),
     )

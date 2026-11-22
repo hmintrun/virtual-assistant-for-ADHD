@@ -12,17 +12,18 @@ Bao phủ toàn diện 7 ca kiểm thử cốt lõi:
 
 from __future__ import annotations
 
-from datetime import UTC, date, datetime, timedelta, timezone
+import zoneinfo
+from datetime import UTC, datetime, timedelta
 from urllib.parse import parse_qs, urlparse
 from uuid import UUID, uuid4
-import zoneinfo
+
 import pytest
-from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.api.v1.calendar import confirm_event_change_preview, create_event_change_preview
 from app.core.config import settings
+from app.core.errors import AppError
 from app.models.base import Base
 from app.models.calendar import (
     CalendarAuthorization,
@@ -116,7 +117,7 @@ def test_parse_all_day_event_local_timezone():
     assert parsed_utc is not None
 
     # 00:00:00 ngày 09/11 tại Việt Nam (UTC+7) tương ứng với 17:00:00 ngày 08/11 tại UTC
-    expected_utc = datetime(2026, 11, 8, 17, 0, 0, tzinfo=timezone.utc)
+    expected_utc = datetime(2026, 11, 8, 17, 0, 0, tzinfo=UTC)
     assert parsed_utc == expected_utc
 
     # Khi đổi ngược về timezone Asia/Ho_Chi_Minh thì đúng là 00:00:00 ngày 09/11
@@ -369,12 +370,12 @@ async def test_event_change_preview_expiry_and_idempotent_confirm(test_session: 
         },
         status="pending",
         source_revisions={},
-        expires_at=datetime.now(timezone.utc) - timedelta(minutes=5),  # Đã quá hạn 5 phút
+        expires_at=datetime.now(UTC) - timedelta(minutes=5),  # Đã quá hạn 5 phút
     )
     test_session.add(expired_preview)
     await test_session.commit()
 
-    with pytest.raises(HTTPException) as exc_info:
+    with pytest.raises(AppError) as exc_info:
         await confirm_event_change_preview(
             preview_id=expired_preview.id,
             payload=EventChangeConfirmRequest(expected_preview_revision=1),
@@ -382,7 +383,7 @@ async def test_event_change_preview_expiry_and_idempotent_confirm(test_session: 
             db=test_session,
         )
     assert exc_info.value.status_code == 409
-    detail_lower = exc_info.value.detail.lower()
+    detail_lower = exc_info.value.message.lower()
     assert (
         "hết hạn" in detail_lower
         or "15" in detail_lower

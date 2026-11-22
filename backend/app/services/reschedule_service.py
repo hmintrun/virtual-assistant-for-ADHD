@@ -12,17 +12,20 @@ Triển khai đầy đủ 7 endpoints theo API Sheet (Dòng 64 và Dòng 33–38
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+import zoneinfo
+from datetime import UTC, date, datetime, time, timedelta
 from typing import Any, Literal, cast
 from uuid import UUID, uuid4
 
-from sqlalchemy import select
+from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import AppError
 from app.models.calendar import (
     CalendarConnection,
     CalendarEventLink,
+    CalendarPreview,
     CalendarSyncJob,
     PlanningContext,
 )
@@ -36,6 +39,7 @@ from app.models.step import Step as StepRow
 from app.models.system import Reminder
 from app.models.task import Task as TaskRow
 from app.models.user import UserPreference as UserPreferenceRow
+from app.schemas.availability import DateOverride, DraftAvailability, LocalInterval, WeeklyRule
 from app.schemas.common import (
     BlockingReason,
     FieldError,
@@ -63,7 +67,9 @@ from app.schemas.reschedule import (
     ProposedChanges,
     ProposedSessionAddAfter,
     ProposedSessionAddItem,
+    ProposedSessionCancelItem,
     ProposedSessionMoveItem,
+    ProposedStepItem,
     RebuildProposalRequest,
     RejectProposalData,
     RejectProposalRequest,
@@ -75,18 +81,75 @@ from app.schemas.reschedule import (
     UpcomingScheduleContextData,
 )
 from app.services import command_service, draft_service, run_service
+from app.services.ai_service import ai_service
+from app.services.planning.availability import compute_effective_free_intervals
+from app.services.planning.durations import (
+    calculate_buffered_work,
+    fit_session_to_slot,
+)
+from app.services.planning.scheduling import (
+    ExtraSchedulingConstraints,
+    _intersect_preferred_windows,
+    _split_intervals_by_local_day,
+    parse_extra_requirements,
+)
 
 STANDARD_INTER_SESSION_GAP_SECONDS = 900
 SourceRevisions = ProposalSourceRevisions
 FeasibilityData = ProposalFeasibilityData
 GenerationTier = ProposalGenerationTier
+
+_UF6_REASON_MAP: dict[str, str] = {
+    "checkin_busy": "busy",
+    "busy": "busy",
+    "checkin_incomplete": "incomplete",
+    "incomplete": "incomplete",
+    "partial": "incomplete",
+    "checkin_skipped": "skipped",
+    "skipped": "skipped",
+    "settings_change": "setting_changed",
+    "setting_changed": "setting_changed",
+    "early_completion_pull_forward": "setting_changed",
+    "missed_start": "deadline_risk",
+    "user_reschedule": "deadline_risk",
+    "expand_next_horizon": "expand_horizon",
+    "deadline_risk": "deadline_risk",
+}
+
+
+async def _generate_uf6_explanation_and_tier(
+    trigger_reason: str,
+    feasibility: FeasibilityData,
+) -> tuple[str, GenerationTier]:
+    """Sinh lời giải thích Guilt-free UF6 qua AI Service (fallback Python an toàn)."""
+    mapped_reason = _UF6_REASON_MAP.get(
+        (trigger_reason or "").strip().lower(),
+        "deadline_risk",
+    )
+    deficit_secs = feasibility.deficit_seconds or 0
+    deficit_minutes = (deficit_secs + 59) // 60 if deficit_secs > 0 else None
+    proposal_available = feasibility.status in ("feasible", "valid") and feasibility.confirmable
+
+    empathy = await ai_service.generate_reschedule_empathy(
+        trigger_reason=mapped_reason,
+        task_title=None,
+        proposal_available=proposal_available,
+        deficit_minutes=deficit_minutes,
+    )
+    parts = [empathy.empathetic_note.strip()]
+    if feasibility.status == "insufficient_data":
+        parts.append("Mình giữ nguyên lịch cũ và cần bạn xác nhận lại giờ rảnh trước khi xếp lịch mới.")
+    if empathy.encouragement_tip and empathy.encouragement_tip.strip():
+        parts.append(empathy.encouragement_tip.strip())
+    explanation = " ".join(part for part in parts if part)
+    return explanation, empathy.generation_tier
 ScheduleVersionData = ProposalScheduleVersionData
 SessionData = ProposalSessionData
 
 IMMEDIATE_CONTINUATION_GAP_SECONDS = 120
 MAX_BORROW_BREAK_SECONDS = 120
 MIN_BORROWED_GAP_SECONDS = STANDARD_INTER_SESSION_GAP_SECONDS - MAX_BORROW_BREAK_SECONDS  # 780s
-START_GRACE_SECONDS = 300
+START_GRACE_SECONDS = 900
 
 
 def _current_utc_now(now: datetime | None = None) -> datetime:
@@ -380,10 +443,439 @@ async def _load_google_busy_items(
     return busy_items, cal_status, ctx.fetched_at
 
 
+def _parse_local_time_hhmm(raw: Any) -> time | None:
+    if isinstance(raw, time):
+        return raw.replace(tzinfo=None)
+    if isinstance(raw, str) and raw.strip():
+        s = raw.strip()
+        if s.startswith("24:00"):
+            return time(23, 59, 59)
+        parts = s.split(":")
+        try:
+            hh = int(parts[0])
+            mm = int(parts[1])
+            ss = int(parts[2]) if len(parts) > 2 else 0
+            if hh == 24 and mm == 0:
+                return time(23, 59, 59)
+            return time(hh, mm, ss)
+        except (ValueError, IndexError):
+            return None
+    return None
+
+
+def _normalize_availability_schema(
+    raw_avail: Any,
+    *,
+    default_tz: str = "Asia/Ho_Chi_Minh",
+    allow_empty: bool = False,
+) -> DraftAvailability | None:
+    """Chuẩn hóa AvailabilityRow hoặc dict (hỗ trợ cả schema chuẩn & legacy day_of_week/start_local_time)."""
+    if raw_avail is None:
+        return None
+    if isinstance(raw_avail, DraftAvailability):
+        return raw_avail
+
+    if isinstance(raw_avail, AvailabilityRow):
+        tz_raw = raw_avail.timezone or default_tz
+        rules_raw = raw_avail.weekly_rules or []
+        overrides_raw = raw_avail.date_overrides or []
+    elif isinstance(raw_avail, dict):
+        tz_raw = raw_avail.get("timezone") or default_tz
+        rules_raw = raw_avail.get("weekly_rules") or []
+        overrides_raw = raw_avail.get("date_overrides") or []
+        if not rules_raw and not overrides_raw and not allow_empty:
+            return None
+    else:
+        return None
+
+    try:
+        zoneinfo.ZoneInfo(str(tz_raw))
+        tz_name = str(tz_raw)
+    except Exception:
+        tz_name = default_tz
+
+    weekly_rules: list[WeeklyRule] = []
+    for item in rules_raw:
+        if not isinstance(item, dict):
+            continue
+        if "weekday" in item and item["weekday"] is not None:
+            wday = int(item["weekday"])
+        elif "day_of_week" in item and item["day_of_week"] is not None:
+            dow = int(item["day_of_week"])
+            wday = 7 if dow == 0 else dow
+        else:
+            continue
+        if not (1 <= wday <= 7):
+            continue
+        st = _parse_local_time_hhmm(item.get("start_local") or item.get("start_local_time"))
+        en = _parse_local_time_hhmm(item.get("end_local") or item.get("end_local_time"))
+        if st is None or en is None or st >= en:
+            continue
+        weekly_rules.append(WeeklyRule(weekday=wday, start_local=st, end_local=en))
+
+    date_overrides: list[DateOverride] = []
+    seen_dates: set[date] = set()
+    for ov in overrides_raw:
+        if not isinstance(ov, dict) or not ov.get("date"):
+            continue
+        try:
+            ov_date = date.fromisoformat(str(ov["date"])[:10])
+        except ValueError:
+            continue
+        if ov_date in seen_dates:
+            continue
+        seen_dates.add(ov_date)
+        ov_ints: list[LocalInterval] = []
+        for iv in ov.get("intervals") or []:
+            if not isinstance(iv, dict):
+                continue
+            st = _parse_local_time_hhmm(iv.get("start_local") or iv.get("start_local_time"))
+            en = _parse_local_time_hhmm(iv.get("end_local") or iv.get("end_local_time"))
+            if st is None or en is None or st >= en:
+                continue
+            ov_ints.append(LocalInterval(start_local=st, end_local=en))
+        date_overrides.append(DateOverride(date=ov_date, intervals=ov_ints))
+
+    if not weekly_rules and not date_overrides and not allow_empty:
+        return None
+    return DraftAvailability(
+        timezone=tz_name,
+        weekly_rules=weekly_rules,
+        date_overrides=date_overrides,
+    )
+
+
+def _resolve_task_availability(
+    task_row: TaskRow | None,
+    avail_row: AvailabilityRow | None,
+    *,
+    override_availability: dict[str, Any] | None = None,
+    override_target_task_id: str | None = None,
+) -> DraftAvailability | None:
+    if override_availability is not None and (
+        override_target_task_id is None
+        or (task_row is not None and str(task_row.id) == str(override_target_task_id))
+    ):
+        norm_override = _normalize_availability_schema(override_availability, allow_empty=True)
+        if norm_override is not None:
+            return norm_override
+    if task_row is not None and isinstance(task_row.availability, dict):
+        norm_task = _normalize_availability_schema(task_row.availability, allow_empty=False)
+        if norm_task is not None:
+            return norm_task
+    if avail_row is not None:
+        return _normalize_availability_schema(avail_row, allow_empty=True)
+    return None
+
+
+def _extract_task_time_bounds(
+    task_row: TaskRow | None,
+) -> tuple[datetime | None, datetime | None]:
+    if task_row is None or not isinstance(task_row.time_constraint, dict):
+        return None, None
+    tc = task_row.time_constraint
+    start_at = _parse_iso_dt(tc.get("start_at"))
+    deadline_at = _parse_iso_dt(tc.get("deadline_at") or tc.get("finish_by_at") or tc.get("at"))
+    return (
+        start_at.astimezone(UTC) if start_at is not None else None,
+        deadline_at.astimezone(UTC) if deadline_at is not None else None,
+    )
+
+
+def _get_local_timezone(
+    avail_row: AvailabilityRow | None,
+    target_row: TaskRow | None = None,
+    override_availability: dict[str, Any] | None = None,
+) -> zoneinfo.ZoneInfo:
+    candidates: list[Any] = [
+        (override_availability or {}).get("timezone") if isinstance(override_availability, dict) else None,
+        (target_row.availability or {}).get("timezone")
+        if target_row is not None and isinstance(target_row.availability, dict)
+        else None,
+        (target_row.time_constraint or {}).get("input_timezone") or (target_row.time_constraint or {}).get("timezone")
+        if target_row is not None and isinstance(target_row.time_constraint, dict)
+        else None,
+        avail_row.timezone if avail_row is not None else None,
+        "Asia/Ho_Chi_Minh",
+    ]
+    for raw in candidates:
+        if isinstance(raw, str) and raw.strip():
+            try:
+                return zoneinfo.ZoneInfo(raw.strip())
+            except Exception:
+                continue
+    return zoneinfo.ZoneInfo("Asia/Ho_Chi_Minh")
+
+
+def _subtract_blocked_from_free(
+    free_intervals: list[tuple[datetime, datetime]],
+    fixed_intervals: list[tuple[datetime, datetime, str]],
+    *,
+    gap_seconds: int = STANDARD_INTER_SESSION_GAP_SECONDS,
+) -> list[tuple[datetime, datetime]]:
+    """Trừ các khoảng bận/phiên cố định (mở rộng thêm gap hai đầu) khỏi tập khoảng rảnh."""
+    if not free_intervals:
+        return []
+    gap = timedelta(seconds=gap_seconds)
+    blocked = sorted(
+        [(s - gap, e + gap) for s, e, _ in fixed_intervals if e > s],
+        key=lambda x: (x[0], x[1]),
+    )
+    if not blocked:
+        return list(free_intervals)
+    merged_blocked: list[tuple[datetime, datetime]] = [blocked[0]]
+    for b_s, b_e in blocked[1:]:
+        p_s, p_e = merged_blocked[-1]
+        if b_s <= p_e:
+            merged_blocked[-1] = (p_s, max(p_e, b_e))
+        else:
+            merged_blocked.append((b_s, b_e))
+
+    result: list[tuple[datetime, datetime]] = []
+    b_idx = 0
+    num_b = len(merged_blocked)
+    for f_s, f_e in free_intervals:
+        curr = f_s
+        while b_idx < num_b and merged_blocked[b_idx][1] <= curr:
+            b_idx += 1
+        ptr = b_idx
+        while ptr < num_b and merged_blocked[ptr][0] < f_e:
+            b_s, b_e = merged_blocked[ptr]
+            if b_s > curr:
+                result.append((curr, min(b_s, f_e)))
+            curr = max(curr, b_e)
+            if curr >= f_e:
+                break
+            ptr += 1
+        if curr < f_e:
+            result.append((curr, f_e))
+    return [(s, e) for s, e in result if e > s]
+
+
+def _find_free_slot(
+    free_intervals: list[tuple[datetime, datetime]],
+    fixed_intervals: list[tuple[datetime, datetime, str]],
+    earliest_start: datetime,
+    duration_seconds: int,
+) -> tuple[datetime, datetime] | None:
+    """Tìm khoảng trống đầu tiên >= earliest_start vừa duration_seconds và giữ gap 900s."""
+    available_slots = _subtract_blocked_from_free(free_intervals, fixed_intervals)
+    for slot_s, slot_e in available_slots:
+        cand_s = max(earliest_start, slot_s)
+        cand_e = cand_s + timedelta(seconds=duration_seconds)
+        if cand_e <= slot_e:
+            return cand_s, cand_e
+    return None
+
+
+def _extract_task_extra_constraints(task_row: TaskRow | None) -> ExtraSchedulingConstraints:
+    """Đọc & phân tích offline `extra_requirements` từ TaskRow (UF6-BUG-05 / A4)."""
+    if task_row is None:
+        return ExtraSchedulingConstraints()
+    raw_extra = (
+        task_row.extra_requirements
+        if task_row.extra_requirements is not None
+        else ((task_row.source_summary or {}).get("extra_requirements") or [])
+    )
+    return parse_extra_requirements(raw_extra)
+
+
+def _has_extra_constraints(constraints: ExtraSchedulingConstraints) -> bool:
+    return bool(
+        constraints.max_daily_work_seconds is not None
+        or constraints.min_contiguous_slot_seconds is not None
+        or constraints.preferred_time_windows
+    )
+
+
+def _filter_min_contiguous_slots(
+    slots: list[tuple[datetime, datetime]],
+    min_slot_seconds: int | None,
+) -> list[tuple[datetime, datetime]]:
+    if min_slot_seconds is None or min_slot_seconds <= 0:
+        return list(slots)
+    return [
+        (s, e)
+        for s, e in slots
+        if int((e - s).total_seconds()) >= min_slot_seconds
+    ]
+
+
+def _find_free_slot_with_constraints(
+    free_intervals: list[tuple[datetime, datetime]],
+    fixed_intervals: list[tuple[datetime, datetime, str]],
+    earliest_start: datetime,
+    duration_seconds: int,
+    *,
+    work_seconds: int,
+    constraints: ExtraSchedulingConstraints,
+    daily_work_used: dict[date, int],
+    local_tz: zoneinfo.ZoneInfo,
+) -> tuple[datetime, datetime] | None:
+    """Tìm khe rảnh cho phiên có tôn trọng extra_requirements (daily cap, min slot, preferred windows)."""
+    if not _has_extra_constraints(constraints):
+        return _find_free_slot(free_intervals, fixed_intervals, earliest_start, duration_seconds)
+
+    raw_avail = _subtract_blocked_from_free(free_intervals, fixed_intervals)
+    avail_slots = _filter_min_contiguous_slots(raw_avail, constraints.min_contiguous_slot_seconds)
+    if not avail_slots:
+        return None
+
+    passes: list[list[tuple[datetime, datetime]]] = []
+    if constraints.preferred_time_windows:
+        pref_slots = _intersect_preferred_windows(
+            avail_slots, constraints.preferred_time_windows, local_tz
+        )
+        pref_slots = _filter_min_contiguous_slots(
+            pref_slots, constraints.min_contiguous_slot_seconds
+        )
+        if pref_slots:
+            passes.append(pref_slots)
+    passes.append(avail_slots)
+
+    daily_cap = constraints.max_daily_work_seconds
+    min_slot_secs = constraints.min_contiguous_slot_seconds
+    for candidate_slots in passes:
+        scan_slots = (
+            _split_intervals_by_local_day(candidate_slots, local_tz)
+            if daily_cap is not None
+            else candidate_slots
+        )
+        for slot_s, slot_e in scan_slots:
+            if (
+                min_slot_secs is not None
+                and (slot_e - slot_s).total_seconds() < min_slot_secs
+            ):
+                continue
+            cand_s = max(earliest_start, slot_s)
+            if (
+                min_slot_secs is not None
+                and (slot_e - cand_s).total_seconds() < min_slot_secs
+            ):
+                continue
+            cand_e = cand_s + timedelta(seconds=duration_seconds)
+            if cand_e > slot_e:
+                continue
+            if daily_cap is not None:
+                local_day = cand_s.astimezone(local_tz).date()
+                if daily_work_used.get(local_day, 0) + work_seconds > daily_cap:
+                    continue
+            return cand_s, cand_e
+    return None
+
+
+def _plan_step_sessions_with_constraints(
+    *,
+    target_work: int,
+    task_free: list[tuple[datetime, datetime]],
+    fixed_intervals: list[tuple[datetime, datetime, str]],
+    start_cursor: datetime,
+    work_interval: int,
+    rest_interval: int,
+    constraints: ExtraSchedulingConstraints,
+    daily_work_used: dict[date, int],
+    local_tz: zoneinfo.ZoneInfo,
+) -> tuple[list[tuple[datetime, datetime, int, int, int, list[SessionSegment]]], int, datetime]:
+    """Phân đoạn & xếp phiên cho 1 Step có tôn trọng extra_requirements (UF6-BUG-05 / A4)."""
+    raw_avail = _subtract_blocked_from_free(task_free, fixed_intervals)
+    avail_slots = _filter_min_contiguous_slots(raw_avail, constraints.min_contiguous_slot_seconds)
+    daily_cap = constraints.max_daily_work_seconds
+    min_slot_secs = constraints.min_contiguous_slot_seconds
+    min_chunk = min(300, work_interval)
+
+    def _run_pass(
+        slots: list[tuple[datetime, datetime]],
+        rem_init: int,
+        cursor_init: datetime,
+        used_by_day: dict[date, int],
+    ) -> tuple[list[tuple[datetime, datetime, int, int, int, list[SessionSegment]]], int, datetime]:
+        planned_out: list[tuple[datetime, datetime, int, int, int, list[SessionSegment]]] = []
+        rem = rem_init
+        cur = cursor_init
+        scan = (
+            _split_intervals_by_local_day(slots, local_tz)
+            if daily_cap is not None
+            else slots
+        )
+        for slot_s, slot_e in scan:
+            if rem <= 0:
+                break
+            if (
+                min_slot_secs is not None
+                and (slot_e - slot_s).total_seconds() < min_slot_secs
+            ):
+                continue
+            left = max(slot_s, cur)
+            cap = int((slot_e - left).total_seconds())
+            if cap <= 0:
+                continue
+            if min_slot_secs is not None and cap < min_slot_secs:
+                continue
+            req_work = rem
+            local_day = left.astimezone(local_tz).date()
+            if daily_cap is not None:
+                rem_daily = daily_cap - used_by_day.get(local_day, 0)
+                if rem_daily <= 0:
+                    continue
+                req_work = min(rem, rem_daily)
+            segs, work, rest, dur = fit_session_to_slot(
+                req_work, cap, work_interval, rest_interval
+            )
+            if work <= 0:
+                continue
+            if work < rem and work < min_chunk:
+                continue
+            right = left + timedelta(seconds=dur)
+            planned_out.append((left, right, work, rest, dur, segs))
+            rem -= work
+            used_by_day[local_day] = used_by_day.get(local_day, 0) + work
+            cur = right + timedelta(seconds=STANDARD_INTER_SESSION_GAP_SECONDS)
+        return planned_out, rem, cur
+
+    if constraints.preferred_time_windows:
+        pref_slots = _intersect_preferred_windows(
+            avail_slots, constraints.preferred_time_windows, local_tz
+        )
+        pref_slots = _filter_min_contiguous_slots(
+            pref_slots, constraints.min_contiguous_slot_seconds
+        )
+        if pref_slots:
+            temp_used = dict(daily_work_used)
+            p1_planned, p1_rem, p1_cursor = _run_pass(
+                pref_slots, target_work, start_cursor, temp_used
+            )
+            if p1_rem <= 0:
+                return p1_planned, 0, p1_cursor
+            # Nếu khung ưu tiên chưa đủ, xếp tiếp phần còn lại trên toàn bộ avail_slots (trừ phần vừa đặt)
+            extra_fixed = list(fixed_intervals) + [
+                (p_s, p_e, f"pref_tmp:{i}") for i, (p_s, p_e, _, _, _, _) in enumerate(p1_planned)
+            ]
+            fallback_avail = _filter_min_contiguous_slots(
+                _subtract_blocked_from_free(task_free, extra_fixed),
+                constraints.min_contiguous_slot_seconds,
+            )
+            p2_planned, p2_rem, p2_cursor = _run_pass(
+                fallback_avail, p1_rem, start_cursor, temp_used
+            )
+            combined = sorted([*p1_planned, *p2_planned], key=lambda item: item[0])
+            final_cursor = (
+                combined[-1][1] + timedelta(seconds=STANDARD_INTER_SESSION_GAP_SECONDS)
+                if combined
+                else max(p1_cursor, p2_cursor)
+            )
+            return combined, p2_rem, final_cursor
+
+    temp_used = dict(daily_work_used)
+    return _run_pass(avail_slots, target_work, start_cursor, temp_used)
+
+
 def _compute_max_extension_without_borrow(
     continuation_start: datetime,
     upcoming_sessions: list[TimelineSessionItem],
     busy_items: list[TimelineGoogleBusyItem],
+    *,
+    deadline_at: datetime | None = None,
+    availability_end: datetime | None = None,
 ) -> tuple[int, list[int]]:
     """Tính số giây tối đa có thể làm thêm mà không cần mượn giờ nghỉ (gap = 900s)."""
     locked_points: list[datetime] = [b.start for b in busy_items if b.end > continuation_start]
@@ -404,20 +896,45 @@ def _compute_max_extension_without_borrow(
     else:
         # Tính latest_start của phiên movable đầu tiên trước rào chắn cố định gần nhất
         first_sess = movable_sessions[0]
-        if earliest_locked is not None and earliest_locked > first_sess.scheduled_start:
+        if earliest_locked is not None and earliest_locked <= first_sess.scheduled_start:
+            avail_secs = int((earliest_locked - continuation_start).total_seconds())
+            max_ext = max(0, min(3600, avail_secs - STANDARD_INTER_SESSION_GAP_SECONDS))
+        elif earliest_locked is not None and earliest_locked > first_sess.scheduled_start:
             # Các phiên movable nằm trước earliest_locked
             squeezed = [
                 s for s in movable_sessions if s.scheduled_start < earliest_locked
             ]
             total_squeezed_dur = sum(s.duration_seconds for s in squeezed)
-            inter_gaps = max(0, len(squeezed) - 1) * STANDARD_INTER_SESSION_GAP_SECONDS
-            first_latest_start = earliest_locked - timedelta(seconds=total_squeezed_dur + inter_gaps)
+            required_gaps = max(0, len(squeezed) - 1) * STANDARD_INTER_SESSION_GAP_SECONDS
+            first_latest_start = min(
+                first_sess.scheduled_start + timedelta(seconds=3600),
+                earliest_locked - timedelta(seconds=total_squeezed_dur + required_gaps),
+            )
+            avail_before_first = int((first_latest_start - continuation_start).total_seconds())
+            max_ext = max(0, min(3600, avail_before_first - STANDARD_INTER_SESSION_GAP_SECONDS))
         else:
             # Nếu không bị chặn bởi sự kiện cố định gần đó, cho phép dịch tối đa 60 phút
             first_latest_start = first_sess.scheduled_start + timedelta(seconds=3600)
+            avail_before_first = int((first_latest_start - continuation_start).total_seconds())
+            max_ext = max(0, min(3600, avail_before_first - STANDARD_INTER_SESSION_GAP_SECONDS))
 
-        avail_before_first = int((first_latest_start - continuation_start).total_seconds())
-        max_ext = max(0, min(3600, avail_before_first - STANDARD_INTER_SESSION_GAP_SECONDS))
+    hard_caps: list[int] = []
+    if earliest_locked is not None:
+        hard_caps.append(
+            max(0, int((earliest_locked - continuation_start).total_seconds()) - STANDARD_INTER_SESSION_GAP_SECONDS)
+        )
+    if deadline_at is not None:
+        dl_aware = _ensure_aware(deadline_at)
+        total_movable_dur = sum(s.duration_seconds for s in movable_sessions)
+        total_movable_gaps = len(movable_sessions) * STANDARD_INTER_SESSION_GAP_SECONDS
+        avail_for_cont = int((dl_aware - continuation_start).total_seconds()) - total_movable_dur - total_movable_gaps
+        hard_caps.append(max(0, avail_for_cont))
+    if availability_end is not None:
+        hard_caps.append(
+            max(0, int((_ensure_aware(availability_end) - continuation_start).total_seconds()))
+        )
+    if hard_caps:
+        max_ext = min(max_ext, min(hard_caps))
 
     candidates = [x for x in (300, 600, 900, 1200, 1500) if x <= max_ext]
     if max_ext >= 60 and max_ext not in candidates:
@@ -570,7 +1087,7 @@ async def get_upcoming_schedule_context(
                 scheduled_end=_ensure_aware(r.scheduled_end),
                 duration_seconds=r.duration_seconds,
                 status=r.status,
-                is_movable=(r.status == "scheduled"),
+                is_movable=(r.status == "scheduled" and tk is not None and tk.id == task_row.id),
             )
         )
 
@@ -590,8 +1107,98 @@ async def get_upcoming_schedule_context(
 
     cont_base = _ensure_aware(run.ended_at or calc_now)
     continuation_start = cont_base + timedelta(seconds=IMMEDIATE_CONTINUATION_GAP_SECONDS)
+    _, task_deadline = _extract_task_time_bounds(task_row)
+    avail_schema = _resolve_task_availability(task_row, avail_row)
+    availability_end: datetime | None = None
+    if avail_schema is not None:
+        free_ivs = compute_effective_free_intervals(
+            avail_schema,
+            window_start=continuation_start,
+            window_end=continuation_start + timedelta(hours=24),
+            task_id=str(task_row.id),
+        )
+        matching_iv = next(
+            (
+                iv
+                for iv in free_ivs
+                if iv.start_at.astimezone(UTC) <= continuation_start < iv.end_at.astimezone(UTC)
+            ),
+            None,
+        )
+        availability_end = (
+            matching_iv.end_at.astimezone(UTC) if matching_iv is not None else continuation_start
+        )
+    # Độc lập hoàn toàn với cửa sổ phân trang UI: truy vấn toàn khung [continuation_start, continuation_start + 24h)
+    calc_window_from = continuation_start
+    calc_window_to = continuation_start + timedelta(hours=24)
+    if window_from <= calc_window_from and window_to >= calc_window_to:
+        calc_session_items = session_items
+        calc_busy_items = busy_items
+    else:
+        calc_rows = (
+            await db.scalars(
+                select(SessionRow)
+                .where(
+                    SessionRow.user_id == owner,
+                    SessionRow.id != run.session_id,
+                    SessionRow.status.in_(("scheduled", "in_progress")),
+                    SessionRow.scheduled_end > calc_window_from,
+                    SessionRow.scheduled_start < calc_window_to,
+                )
+                .order_by(SessionRow.scheduled_start.asc())
+            )
+        ).all()
+        calc_step_ids = list({r.step_id for r in calc_rows})
+        calc_steps_map: dict[UUID, StepRow] = dict(steps_map)
+        missing_step_ids = [sid for sid in calc_step_ids if sid not in calc_steps_map]
+        if missing_step_ids:
+            s_rows = (
+                await db.scalars(
+                    select(StepRow).where(StepRow.user_id == owner, StepRow.id.in_(missing_step_ids))
+                )
+            ).all()
+            for s in s_rows:
+                calc_steps_map[s.id] = s
+        calc_t_ids = list({s.task_id for s in calc_steps_map.values() if s.task_id not in tasks_map})
+        calc_tasks_map: dict[UUID, TaskRow] = dict(tasks_map)
+        if calc_t_ids:
+            t_rows = (
+                await db.scalars(
+                    select(TaskRow).where(TaskRow.user_id == owner, TaskRow.id.in_(calc_t_ids))
+                )
+            ).all()
+            for t in t_rows:
+                calc_tasks_map[t.id] = t
+
+        calc_session_items = []
+        for r in calc_rows:
+            st = calc_steps_map.get(r.step_id)
+            tk = calc_tasks_map.get(st.task_id) if st is not None else None
+            calc_session_items.append(
+                TimelineSessionItem(
+                    kind="session",
+                    session_id=str(r.id),
+                    task_id=str(tk.id) if tk is not None else str(task_row.id),
+                    task_title=tk.title if tk is not None else task_row.title,
+                    step_id=str(r.step_id),
+                    step_title=st.title if st is not None else step_row.title,
+                    scheduled_start=_ensure_aware(r.scheduled_start),
+                    scheduled_end=_ensure_aware(r.scheduled_end),
+                    duration_seconds=r.duration_seconds,
+                    status=r.status,
+                    is_movable=(r.status == "scheduled" and tk is not None and tk.id == task_row.id),
+                )
+            )
+        calc_busy_items, _, _ = await _load_google_busy_items(
+            db, owner, calc_window_from, calc_window_to
+        )
+
     max_ext, rec_ext = _compute_max_extension_without_borrow(
-        continuation_start, session_items, busy_items
+        continuation_start,
+        calc_session_items,
+        calc_busy_items,
+        deadline_at=task_deadline,
+        availability_end=availability_end,
     )
 
     rem_secs = (
@@ -646,6 +1253,8 @@ def _pack_proposed_changes(
     start_window: StartWindow | None = None,
     approval_envelope: ApprovalEnvelope | None = None,
     request_text: str | None = None,
+    override_preferences: dict[str, Any] | None = None,
+    override_availability: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     raw = changes.model_dump(mode="json")
     raw["_meta"] = {
@@ -659,8 +1268,22 @@ def _pack_proposed_changes(
         if approval_envelope
         else None,
         "request_text": request_text,
+        "override_preferences": dict(override_preferences) if override_preferences else None,
+        "override_availability": dict(override_availability) if override_availability else None,
     }
     return raw
+
+
+def _unpack_settings_overrides(
+    raw_changes: dict[str, Any],
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    meta = (raw_changes or {}).get("_meta") or {}
+    prefs = meta.get("override_preferences")
+    avail = meta.get("override_availability")
+    return (
+        dict(prefs) if isinstance(prefs, dict) else None,
+        dict(avail) if isinstance(avail, dict) else None,
+    )
 
 
 def _unpack_proposal_meta(
@@ -697,6 +1320,228 @@ def _unpack_proposal_meta(
     return changes, calc_at, cont_req, gap_ex, start_win, app_env, req_text
 
 
+async def _validate_continuation_chain_at_time(
+    db: AsyncSession,
+    owner: UUID,
+    *,
+    proposal: RescheduleProposal,
+    changes: ProposedChanges,
+    gap_exceptions: list[GapException],
+    start_win: StartWindow | None,
+    app_env: ApprovalEnvelope | None,
+    ref_now: datetime,
+    start_continuation: bool = True,
+) -> bool:
+    """Re-validate toàn chuỗi Continuation trên dữ liệu DB live tại `ref_now` (UF6-BUG-01 / RG02)."""
+    cont_add = next(
+        (a for a in changes.sessions_to_add if a.action == "create_continuation_session"),
+        None,
+    )
+    if cont_add is None:
+        return True
+
+    base_start = _ensure_aware(cont_add.after.start)
+    if start_win is not None:
+        base_start = max(base_start, _ensure_aware(start_win.earliest_start))
+    actual_cont_start = max(ref_now, base_start) if start_continuation else base_start
+    actual_cont_end = actual_cont_start + timedelta(seconds=cont_add.after.duration_seconds)
+
+    min_break_after_cont = (
+        app_env.continuation_min_break_after_seconds
+        if app_env is not None
+        else STANDARD_INTER_SESSION_GAP_SECONDS
+    )
+
+    # Chuỗi (ref_str, task_id_str, start_utc, end_utc)
+    planned_chain: list[tuple[str, str, datetime, datetime]] = [
+        (cont_add.temp_session_id, str(cont_add.task_id), actual_cont_start, actual_cont_end)
+    ]
+    prev_end = actual_cont_end
+    moved_ids: set[UUID] = set()
+    for idx, mv in enumerate(changes.sessions_to_move):
+        try:
+            moved_ids.add(UUID(str(mv.session_id)))
+        except ValueError:
+            pass
+        t_start_raw = mv.to_start or (mv.after.start if mv.after else None)
+        t_end_raw = mv.to_end or (mv.after.end if mv.after else None)
+        if t_start_raw is None or t_end_raw is None:
+            continue
+        t_start = _ensure_aware(t_start_raw)
+        dur_secs = max(1, int((_ensure_aware(t_end_raw) - t_start).total_seconds()))
+        req_gap = min_break_after_cont if idx == 0 else STANDARD_INTER_SESSION_GAP_SECONDS
+        min_allowed = prev_end + timedelta(seconds=req_gap)
+        eff_start = max(t_start, min_allowed)
+        eff_end = eff_start + timedelta(seconds=dur_secs)
+        planned_chain.append((str(mv.session_id), str(mv.task_id or ""), eff_start, eff_end))
+        prev_end = eff_end
+
+    cancelled_ids: set[UUID] = set()
+    for c_item in changes.sessions_to_cancel:
+        try:
+            cancelled_ids.add(UUID(str(c_item.session_id)))
+        except ValueError:
+            pass
+
+    source_session_id: UUID | None = None
+    if cont_add.source_run_id:
+        try:
+            src_run_uuid = UUID(str(cont_add.source_run_id))
+            src_run = await db.scalar(
+                select(SessionRun).where(
+                    SessionRun.id == src_run_uuid,
+                    SessionRun.user_id == owner,
+                )
+            )
+            if src_run is not None:
+                source_session_id = src_run.session_id
+        except ValueError:
+            pass
+
+    min_chain_start = min(item[2] for item in planned_chain)
+    max_chain_end = max(item[3] for item in planned_chain)
+    query_start = min_chain_start - timedelta(hours=24)
+    query_end = max_chain_end + timedelta(hours=24)
+
+    excluded_ids = moved_ids | cancelled_ids
+    live_stmt = select(SessionRow).where(
+        SessionRow.user_id == owner,
+        SessionRow.status.notin_(("cancelled", "skipped")),
+        SessionRow.scheduled_end > query_start,
+        SessionRow.scheduled_start < query_end,
+    )
+    if excluded_ids:
+        live_stmt = live_stmt.where(SessionRow.id.notin_(excluded_ids))
+    live_sessions = list((await db.scalars(live_stmt)).all())
+
+    # Map step_id -> task_id cho toàn bộ live_sessions và lấy ended_run cho phiên đã kết thúc
+    live_step_ids = list({s.step_id for s in live_sessions})
+    live_step_to_task: dict[UUID, UUID] = {}
+    if live_step_ids:
+        st_rows = (
+            await db.scalars(
+                select(StepRow).where(StepRow.user_id == owner, StepRow.id.in_(live_step_ids))
+            )
+        ).all()
+        for st in st_rows:
+            live_step_to_task[st.id] = st.task_id
+
+    finished_ids = [
+        s.id for s in live_sessions if s.status in ("completed", "incomplete")
+    ]
+    ended_run_bounds: dict[UUID, tuple[datetime, datetime]] = {}
+    if finished_ids:
+        runs = (
+            await db.scalars(
+                select(SessionRun)
+                .where(
+                    SessionRun.user_id == owner,
+                    SessionRun.session_id.in_(finished_ids),
+                    SessionRun.ended_at.is_not(None),
+                )
+                .order_by(SessionRun.ended_at.desc())
+            )
+        ).all()
+        for r in runs:
+            if r.session_id not in ended_run_bounds and r.ended_at is not None:
+                ended_run_bounds[r.session_id] = (
+                    _ensure_aware(r.started_at),
+                    _ensure_aware(r.ended_at),
+                )
+
+    allowed_set = {str(x) for x in (proposal.allowed_task_ids or [])}
+    gap_ex_map: dict[tuple[str, str], int] = {}
+    for gx in gap_exceptions:
+        if gx.applied_gap_seconds is not None:
+            gap_ex_map[(str(gx.from_session_ref), str(gx.to_session_ref))] = max(
+                0, int(gx.applied_gap_seconds)
+            )
+
+    for item_ref, _item_tid, item_start, item_end in planned_chain:
+        for other in live_sessions:
+            if other.id in ended_run_bounds:
+                other_start, other_end = ended_run_bounds[other.id]
+            else:
+                other_start = _ensure_aware(other.scheduled_start)
+                other_end = _ensure_aware(other.scheduled_end)
+
+            if source_session_id is not None and other.id == source_session_id:
+                req_after_src = gap_ex_map.get(
+                    (str(other.id), item_ref), STANDARD_INTER_SESSION_GAP_SECONDS
+                )
+                if item_start < other_end + timedelta(seconds=req_after_src):
+                    return False
+                continue
+
+            other_tid = str(live_step_to_task.get(other.step_id, ""))
+            # Chỉ cho phép nới gap theo gap_exceptions với phiên thuộc allowed_task_ids;
+            # TUYỆT ĐỐI KHÔNG nới gap với Task cố định ngoài allowed_task_ids.
+            req_gap = STANDARD_INTER_SESSION_GAP_SECONDS
+            if other_tid in allowed_set:
+                override_gap = gap_ex_map.get((item_ref, str(other.id)))
+                if override_gap is not None:
+                    req_gap = override_gap
+
+            gap_td = timedelta(seconds=req_gap)
+            if item_start < other_end + gap_td and other_start < item_end + gap_td:
+                return False
+
+    # Kiểm tra va chạm trực tiếp với Google Calendar busy intervals hiện hành
+    busy_items, _, _ = await _load_google_busy_items(db, owner, min_chain_start, max_chain_end)
+    for _item_ref, _item_tid, item_start, item_end in planned_chain:
+        for busy in busy_items:
+            if item_start < busy.end and item_end > busy.start:
+                return False
+
+    # Kiểm tra lại deadline và khung giờ rảnh (availability) của từng Task bị chạm
+    chain_task_uuids: list[UUID] = []
+    for _item_ref, item_tid, _s, _e in planned_chain:
+        if item_tid:
+            try:
+                tu = UUID(item_tid)
+                if tu not in chain_task_uuids:
+                    chain_task_uuids.append(tu)
+            except ValueError:
+                pass
+
+    if chain_task_uuids:
+        t_rows = (
+            await db.scalars(
+                select(TaskRow).where(TaskRow.user_id == owner, TaskRow.id.in_(chain_task_uuids))
+            )
+        ).all()
+        tasks_by_id = {str(t.id): t for t in t_rows}
+        avail_row = await db.scalar(
+            select(AvailabilityRow)
+            .where(AvailabilityRow.user_id == owner)
+            .order_by(AvailabilityRow.revision.desc())
+            .limit(1)
+        )
+        for _item_ref, item_tid, item_start, item_end in planned_chain:
+            t_row = tasks_by_id.get(item_tid)
+            if t_row is None:
+                continue
+            _, t_deadline = _extract_task_time_bounds(t_row)
+            if t_deadline is not None and item_end > t_deadline:
+                return False
+            t_avail = _resolve_task_availability(t_row, avail_row)
+            if t_avail is not None:
+                eff_free = compute_effective_free_intervals(
+                    t_avail,
+                    window_start=item_start,
+                    window_end=item_end,
+                    task_id=str(t_row.id),
+                )
+                if not any(
+                    iv.start_at.astimezone(UTC) <= item_start
+                    and item_end <= iv.end_at.astimezone(UTC)
+                    for iv in eff_free
+                ):
+                    return False
+
+    return True
+
+
 async def _evaluate_proposal_staleness(
     db: AsyncSession,
     owner: UUID,
@@ -729,8 +1574,8 @@ async def _evaluate_proposal_staleness(
     if present["calendar"] and db_revs.calendar != prop_revs.calendar:
         return True, db_revs, current_sched_rev
 
-    # 2. Kiểm tra start_window và approval_envelope (cho Continuation SY02 / R05)
-    changes, _, _, _, start_win, app_env, _ = _unpack_proposal_meta(proposal.proposed_changes)
+    # 2. Kiểm tra start_window, approval_envelope và re-validate live DB (Continuation SY02 / R05 / RG02)
+    changes, _, _, gap_ex, start_win, app_env, _ = _unpack_proposal_meta(proposal.proposed_changes)
     if start_win is not None:
         if now > _ensure_aware(start_win.not_after) or now > _ensure_aware(start_win.latest_start):
             return True, db_revs, current_sched_rev
@@ -746,14 +1591,56 @@ async def _evaluate_proposal_staleness(
             if required_end_plus_break > _ensure_aware(bound.latest_start):
                 return True, db_revs, current_sched_rev
 
-    # 3. Kiểm tra các ô lịch đề xuất đã trôi qua thời điểm `now` (đóng/mở lại app ở UF6)
+    if start_win is not None or app_env is not None:
+        chain_ok = await _validate_continuation_chain_at_time(
+            db,
+            owner,
+            proposal=proposal,
+            changes=changes,
+            gap_exceptions=gap_ex,
+            start_win=start_win,
+            app_env=app_env,
+            ref_now=now,
+            start_continuation=True,
+        )
+        if not chain_ok:
+            return True, db_revs, current_sched_rev
+
+    # 3. Kiểm tra các ô lịch đề xuất đã trôi qua thời điểm `now` hoặc vượt quá deadline (đóng/mở lại app ở UF6)
     if start_win is None:
+        task_deadlines: dict[str, datetime] = {}
+        task_ids_needed = {
+            t for t in ([mv.task_id for mv in changes.sessions_to_move] + [ad.task_id for ad in changes.sessions_to_add]) if t
+        }
+        if task_ids_needed:
+            valid_tuuids = []
+            for tid in task_ids_needed:
+                try:
+                    valid_tuuids.append(UUID(str(tid)))
+                except ValueError:
+                    continue
+            if valid_tuuids:
+                t_rows = (
+                    await db.scalars(
+                        select(TaskRow).where(TaskRow.user_id == owner, TaskRow.id.in_(valid_tuuids))
+                    )
+                ).all()
+                for t_row in t_rows:
+                    _, d_at = _extract_task_time_bounds(t_row)
+                    if d_at is not None:
+                        task_deadlines[str(t_row.id)] = d_at
         for mv in changes.sessions_to_move:
             target_start = mv.to_start or (mv.after.start if mv.after else None)
+            target_end = mv.to_end or (mv.after.end if mv.after else None)
             if target_start is not None and _ensure_aware(target_start) < now:
                 return True, db_revs, current_sched_rev
+            if mv.task_id and mv.task_id in task_deadlines and target_end is not None:
+                if _ensure_aware(target_end) > task_deadlines[mv.task_id]:
+                    return True, db_revs, current_sched_rev
         for ad in changes.sessions_to_add:
             if _ensure_aware(ad.after.start) < now:
+                return True, db_revs, current_sched_rev
+            if ad.task_id in task_deadlines and _ensure_aware(ad.after.end) > task_deadlines[ad.task_id]:
                 return True, db_revs, current_sched_rev
 
     return False, db_revs, current_sched_rev
@@ -769,6 +1656,17 @@ async def _proposal_row_to_schema(
         proposal.proposed_changes
     )
     stale, _, _ = await _evaluate_proposal_staleness(db, owner, proposal, now)
+    notif_state = (
+        proposal.pending_notification_state
+        if proposal.pending_notification_state
+        in ("not_needed", "not_sent", "pending", "sent")
+        else "not_sent"
+    )
+    notif_sent_at = (
+        _ensure_aware(proposal.pending_notification_sent_at)
+        if proposal.pending_notification_sent_at is not None
+        else None
+    )
     return ProposalData(
         proposal_id=str(proposal.id),
         status=cast(ProposalStatus, proposal.status),
@@ -792,6 +1690,8 @@ async def _proposal_row_to_schema(
         explanation=proposal.explanation,
         generation_tier=cast(GenerationTier, proposal.generation_tier),
         stale=stale,
+        pending_notification_state=notif_state,
+        pending_notification_sent_at=notif_sent_at,
         created_at=_ensure_aware(proposal.created_at),
         updated_at=_ensure_aware(proposal.updated_at),
     )
@@ -954,7 +1854,48 @@ async def _build_continuation_plan(
                 next_action="reduce_extension",
             )
 
-    # Map step_id -> task_id cho các phiên sắp tới
+    _, cont_deadline = _extract_task_time_bounds(source_task)
+    if cont_deadline is not None and cont_end > cont_deadline:
+        raise AppError(
+            status_code=409,
+            code="LOCKED_CALENDAR_COLLISION",
+            message="Phiên làm tiếp vượt quá hạn chót của công việc.",
+            next_action="reduce_extension",
+        )
+    cont_avail_row = await db.scalar(
+        select(AvailabilityRow)
+        .where(AvailabilityRow.user_id == owner)
+        .order_by(AvailabilityRow.revision.desc())
+        .limit(1)
+    )
+    cont_avail = _resolve_task_availability(source_task, cont_avail_row)
+    cont_avail_end: datetime | None = None
+    if cont_avail is not None:
+        cont_free = compute_effective_free_intervals(
+            cont_avail,
+            window_start=cont_start,
+            window_end=horizon_end,
+            task_id=str(source_task.id),
+        )
+        matching_cont_iv = next(
+            (
+                iv
+                for iv in cont_free
+                if iv.start_at.astimezone(UTC) <= cont_start
+                and cont_end <= iv.end_at.astimezone(UTC)
+            ),
+            None,
+        )
+        if matching_cont_iv is None:
+            raise AppError(
+                status_code=409,
+                code="LOCKED_CALENDAR_COLLISION",
+                message="Phiên làm tiếp vượt ra ngoài khung giờ rảnh khả dụng.",
+                next_action="reduce_extension",
+            )
+        cont_avail_end = matching_cont_iv.end_at.astimezone(UTC)
+
+    # Map step_id -> task_id và tải TaskRow cho các phiên sắp tới
     up_step_ids = list({s.step_id for s in upcoming_sessions})
     step_to_task: dict[UUID, UUID] = {source_step.id: source_task.id}
     if up_step_ids:
@@ -966,20 +1907,97 @@ async def _build_continuation_plan(
         for s in s_rows:
             step_to_task[s.id] = s.task_id
 
+    other_task_ids = [tid for tid in set(step_to_task.values()) if tid != source_task.id]
+    cont_tasks_map: dict[UUID, TaskRow] = {source_task.id: source_task}
+    if other_task_ids:
+        t_rows = (
+            await db.scalars(
+                select(TaskRow).where(TaskRow.user_id == owner, TaskRow.id.in_(other_task_ids))
+            )
+        ).all()
+        for t in t_rows:
+            cont_tasks_map[t.id] = t
+
+    cont_busy_fixed: list[tuple[datetime, datetime, str]] = [
+        (b.start, b.end, f"gcal:{b.event_id}") for b in busy_items if b.end > b.start
+    ]
+    cont_task_windows_cache: dict[
+        UUID, tuple[list[tuple[datetime, datetime]], datetime | None, bool]
+    ] = {}
+
+    def _get_cont_task_windows(
+        task_uuid: UUID,
+    ) -> tuple[list[tuple[datetime, datetime]], datetime | None, bool]:
+        if task_uuid in cont_task_windows_cache:
+            return cont_task_windows_cache[task_uuid]
+        t_row = cont_tasks_map.get(task_uuid)
+        t_start_bound, t_deadline = _extract_task_time_bounds(t_row)
+        t_avail = _resolve_task_availability(t_row, cont_avail_row)
+        if t_avail is None:
+            res = ([], t_deadline, False)
+            cont_task_windows_cache[task_uuid] = res
+            return res
+        eff_end = horizon_end
+        if t_deadline is not None and t_deadline < eff_end:
+            eff_end = t_deadline
+        if eff_end <= cont_start:
+            res = ([], t_deadline, True)
+            cont_task_windows_cache[task_uuid] = res
+            return res
+        eff_ivs = compute_effective_free_intervals(
+            t_avail,
+            window_start=cont_start,
+            window_end=eff_end,
+            task_id=str(task_uuid),
+        )
+        windows: list[tuple[datetime, datetime]] = []
+        for iv in eff_ivs:
+            s_utc = max(cont_start, iv.start_at.astimezone(UTC))
+            e_utc = min(eff_end, iv.end_at.astimezone(UTC))
+            if t_start_bound is not None:
+                s_utc = max(s_utc, t_start_bound)
+            if e_utc > s_utc:
+                windows.append((s_utc, e_utc))
+        res = (windows, t_deadline, True)
+        cont_task_windows_cache[task_uuid] = res
+        return res
+
     temp_session_id = "temp_cont_session_1"
     moves: list[ProposedSessionMoveItem] = []
     bounds: list[ShiftedSessionBound] = []
     affected_tasks: list[str] = [str(source_task.id)]
+    cont_blocking_reasons: list[BlockingReason] = []
+    cont_seen_codes: set[str] = set()
+    cont_deficit_seconds = 0
+
+    def _add_cont_blocking(code: str, msg: str, shortfall: int) -> None:
+        nonlocal cont_deficit_seconds
+        cont_deficit_seconds += max(1, shortfall)
+        if code not in cont_seen_codes:
+            cont_seen_codes.add(code)
+            cont_blocking_reasons.append(BlockingReason(code=code, message=msg))
+
+    fixed_blockers: list[SessionRow] = [
+        s
+        for s in upcoming_sessions
+        if str(step_to_task.get(s.step_id, source_task.id)) not in effective_allowed
+    ]
 
     prev_end = cont_end
     for idx, sess in enumerate(upcoming_sessions):
-        req_gap = required_after_gap if idx == 0 else STANDARD_INTER_SESSION_GAP_SECONDS
+        sess_task_uuid = step_to_task.get(sess.step_id, source_task.id)
+        sess_task_id = str(sess_task_uuid)
+        # Không bao giờ nới gap dưới 900s với phiên thuộc Task cố định ngoài effective_allowed
+        req_gap = (
+            required_after_gap
+            if (idx == 0 and sess_task_id in effective_allowed)
+            else STANDARD_INTER_SESSION_GAP_SECONDS
+        )
         s_start = _ensure_aware(sess.scheduled_start)
         s_end = _ensure_aware(sess.scheduled_end)
         min_allowed_start = prev_end + timedelta(seconds=req_gap)
 
         if s_start < min_allowed_start:
-            sess_task_id = str(step_to_task.get(sess.step_id, source_task.id))
             if sess_task_id not in effective_allowed:
                 raise AppError(
                     status_code=409,
@@ -990,7 +2008,6 @@ async def _build_continuation_plan(
 
             new_start = min_allowed_start
             new_end = new_start + timedelta(seconds=sess.duration_seconds)
-            shift_secs = int((new_start - s_start).total_seconds())
 
             # Kiểm tra va chạm của phiên bị đẩy với sự kiện lịch cố định
             for busy in busy_items:
@@ -1002,15 +2019,88 @@ async def _build_continuation_plan(
                         next_action="reduce_extension",
                     )
 
-            # Tìm sự kiện cố định gần nhất phía sau phiên này để tính latest_start
+            t_free, t_deadline, has_t_avail = _get_cont_task_windows(sess_task_uuid)
+            if t_deadline is not None and new_end > t_deadline:
+                _add_cont_blocking(
+                    "DEADLINE_EXCEEDED",
+                    f"Dời phiên kế tiếp làm công việc vượt quá hạn chót ({t_deadline.isoformat()}).",
+                    int((new_end - t_deadline).total_seconds()),
+                )
+            elif has_t_avail and not any(
+                fs <= new_start and new_end <= fe for fs, fe in t_free
+            ):
+                # Thử tìm khe rảnh hợp lệ tiếp theo trong khung giờ rảnh của task (tránh giờ bận Google)
+                avail_slots = _subtract_blocked_from_free(
+                    t_free, cont_busy_fixed, gap_seconds=0
+                )
+                found_slot: tuple[datetime, datetime] | None = None
+                for fs, fe in avail_slots:
+                    cand_s = max(new_start, fs)
+                    cand_e = cand_s + timedelta(seconds=sess.duration_seconds)
+                    if cand_e <= fe:
+                        found_slot = (cand_s, cand_e)
+                        break
+                if found_slot is not None:
+                    new_start, new_end = found_slot
+                else:
+                    usable = sum(
+                        max(0, int((fe - max(fs, new_start)).total_seconds()))
+                        for fs, fe in avail_slots
+                        if fe > max(fs, new_start)
+                    )
+                    shortfall = max(1, sess.duration_seconds - usable)
+                    if t_deadline is not None and (
+                        t_deadline <= new_start + timedelta(seconds=sess.duration_seconds)
+                    ):
+                        _add_cont_blocking(
+                            "DEADLINE_EXCEEDED",
+                            f"Không còn đủ khung giờ rảnh trước hạn chót ({t_deadline.isoformat()}) cho phiên kế tiếp.",
+                            shortfall,
+                        )
+                    else:
+                        _add_cont_blocking(
+                            "INSUFFICIENT_AVAILABILITY",
+                            "Dời phiên kế tiếp vượt ra ngoài khung giờ rảnh khả dụng của công việc.",
+                            shortfall,
+                        )
+
+            shift_secs = int((new_start - s_start).total_seconds())
+
+            # Tính latest_sess_start đầy đủ với Google busy, fixed sessions, deadline và availability (UF6-BUG-01)
+            sess_caps: list[datetime] = [new_start + timedelta(seconds=300)]
+            locked_event_id: str | None = None
             later_busies = [b for b in busy_items if b.start >= new_end]
             if later_busies:
                 nearest_busy = min(later_busies, key=lambda b: b.start)
-                latest_sess_start = nearest_busy.start - timedelta(seconds=sess.duration_seconds)
-                locked_event_id: str | None = nearest_busy.event_id
-            else:
-                latest_sess_start = new_start + timedelta(seconds=300)
-                locked_event_id = None
+                busy_cap = nearest_busy.start - timedelta(seconds=sess.duration_seconds)
+                sess_caps.append(busy_cap)
+                if busy_cap <= min(sess_caps):
+                    locked_event_id = nearest_busy.event_id
+
+            later_fixed = [
+                f for f in fixed_blockers if _ensure_aware(f.scheduled_start) >= new_end
+            ]
+            if later_fixed:
+                nearest_fixed = min(later_fixed, key=lambda f: _ensure_aware(f.scheduled_start))
+                sess_caps.append(
+                    _ensure_aware(nearest_fixed.scheduled_start)
+                    - timedelta(seconds=STANDARD_INTER_SESSION_GAP_SECONDS + sess.duration_seconds)
+                )
+
+            if not cont_blocking_reasons and t_deadline is not None:
+                sess_caps.append(t_deadline - timedelta(seconds=sess.duration_seconds))
+
+            if not cont_blocking_reasons and has_t_avail:
+                matching_t_iv = next(
+                    ((fs, fe) for fs, fe in t_free if fs <= new_start and new_end <= fe),
+                    None,
+                )
+                if matching_t_iv is not None:
+                    sess_caps.append(
+                        matching_t_iv[1] - timedelta(seconds=sess.duration_seconds)
+                    )
+
+            latest_sess_start = min(sess_caps)
 
             moves.append(
                 ProposedSessionMoveItem(
@@ -1040,44 +2130,77 @@ async def _build_continuation_plan(
                 affected_tasks.append(sess_task_id)
             prev_end = new_end
         else:
-            # Phiên kế tiếp không cần dịch chuyển nhưng vẫn đóng vai trò biên giới hạn
-            sess_task_id = str(step_to_task.get(sess.step_id, source_task.id))
+            # Phiên kế tiếp không nằm trong sessions_to_move (approve giữ nguyên tại s_start),
+            # do đó luôn là cận trên cứng <= s_start cho toàn chuỗi phía trước (UF6-BUG-01 / RG02).
+            static_caps: list[datetime] = [s_start]
+            locked_event_id = None
             later_busies = [b for b in busy_items if b.start >= s_end]
-            if later_busies and idx == 0:
+            if later_busies:
                 nearest_busy = min(later_busies, key=lambda b: b.start)
-                latest_sess_start = nearest_busy.start - timedelta(seconds=sess.duration_seconds)
-                bounds.append(
-                    ShiftedSessionBound(
-                        session_id=str(sess.id),
-                        earliest_start=s_start,
-                        latest_start=latest_sess_start,
-                        fixed_duration_seconds=sess.duration_seconds,
-                        locked_after_event_id=nearest_busy.event_id,
-                    )
+                busy_cap = nearest_busy.start - timedelta(seconds=sess.duration_seconds)
+                if busy_cap < s_start:
+                    static_caps.append(busy_cap)
+                locked_event_id = nearest_busy.event_id
+            bounds.append(
+                ShiftedSessionBound(
+                    session_id=str(sess.id),
+                    earliest_start=s_start,
+                    latest_start=min(static_caps),
+                    fixed_duration_seconds=sess.duration_seconds,
+                    locked_after_event_id=locked_event_id,
                 )
+            )
             break
 
-    # Tính latest_start cho chính phiên continuation B theo R05
+    # Lan truyền ngược cận latest_start theo dây chuyền (multi-hop chain)
+    for b_idx in range(len(bounds) - 2, -1, -1):
+        chained_cap = bounds[b_idx + 1].latest_start - timedelta(
+            seconds=bounds[b_idx].fixed_duration_seconds + STANDARD_INTER_SESSION_GAP_SECONDS
+        )
+        if chained_cap < bounds[b_idx].latest_start:
+            bounds[b_idx] = bounds[b_idx].model_copy(update={"latest_start": chained_cap})
+
+    # Tính latest_start cho chính phiên continuation B theo R05 & RG02 (lấy min mọi cận thực tế)
+    cont_caps: list[datetime] = [cont_start + timedelta(seconds=300)]
     if bounds:
         first_bound = bounds[0]
-        cont_latest_start = first_bound.latest_start - timedelta(
-            seconds=work_secs + required_after_gap
+        first_bound_is_fixed = any(
+            str(f.id) == first_bound.session_id for f in fixed_blockers
         )
-    elif busy_items:
-        nearest_busy = min(busy_items, key=lambda b: b.start)
-        cont_latest_start = nearest_busy.start - timedelta(
-            seconds=work_secs + required_after_gap
+        first_gap = (
+            STANDARD_INTER_SESSION_GAP_SECONDS
+            if first_bound_is_fixed
+            else required_after_gap
         )
-    else:
-        cont_latest_start = cont_start + timedelta(seconds=300)
+        cont_caps.append(
+            first_bound.latest_start - timedelta(seconds=work_secs + first_gap)
+        )
+    later_cont_busies = [b for b in busy_items if b.start >= cont_end]
+    if later_cont_busies:
+        nearest_busy = min(later_cont_busies, key=lambda b: b.start)
+        busy_gap = 0 if bounds else required_after_gap
+        cont_caps.append(nearest_busy.start - timedelta(seconds=work_secs + busy_gap))
+    for fb in fixed_blockers:
+        fb_start = _ensure_aware(fb.scheduled_start)
+        if fb_start > cont_start:
+            cont_caps.append(
+                fb_start - timedelta(seconds=work_secs + STANDARD_INTER_SESSION_GAP_SECONDS)
+            )
+    if cont_deadline is not None:
+        cont_caps.append(cont_deadline - timedelta(seconds=work_secs))
+    if cont_avail_end is not None:
+        cont_caps.append(cont_avail_end - timedelta(seconds=work_secs))
+    cont_latest_start = min(cont_caps)
 
-    if cont_start > cont_latest_start:
+    if not cont_blocking_reasons and cont_start > cont_latest_start:
         raise AppError(
             status_code=409,
             code="LOCKED_CALENDAR_COLLISION",
             message="Thời lượng làm thêm vượt quá khoảng trống cho phép trước sự kiện cố định.",
             next_action="reduce_extension",
         )
+    if cont_blocking_reasons and cont_latest_start < cont_start:
+        cont_latest_start = cont_start
 
     add_item = ProposedSessionAddItem(
         temp_session_id=temp_session_id,
@@ -1118,16 +2241,18 @@ async def _build_continuation_plan(
             )
         )
     if borrow_secs > 0 and upcoming_sessions:
-        gap_exceptions.append(
-            GapException(
-                from_session_ref=temp_session_id,
-                to_session_ref=str(upcoming_sessions[0].id),
-                standard_gap_seconds=STANDARD_INTER_SESSION_GAP_SECONDS,
-                applied_gap_seconds=required_after_gap,
-                borrowed_seconds=borrow_secs,
-                reason="user_borrowed_break",
+        first_up_tid = str(step_to_task.get(upcoming_sessions[0].step_id, source_task.id))
+        if first_up_tid in effective_allowed:
+            gap_exceptions.append(
+                GapException(
+                    from_session_ref=temp_session_id,
+                    to_session_ref=str(upcoming_sessions[0].id),
+                    standard_gap_seconds=STANDARD_INTER_SESSION_GAP_SECONDS,
+                    applied_gap_seconds=required_after_gap,
+                    borrowed_seconds=borrow_secs,
+                    reason="user_borrowed_break",
+                )
             )
-        )
 
     start_window = StartWindow(
         earliest_start=cont_start,
@@ -1149,22 +2274,32 @@ async def _build_continuation_plan(
         next_horizon_from=None,
         next_horizon_to=None,
     )
-    feasibility = FeasibilityData(
-        status="feasible",
-        confirmable=True,
-        deficit_seconds=0,
-        blocking_reasons=[],
-        next_horizon_preview=None,
-    )
-    work_mins = max(1, work_secs // 60)
-    explanation = (
-        f"Bạn có thể làm tiếp {work_mins} phút để hoàn tất bước đang dở"
-        + (
-            f", phiên kế tiếp sẽ dời nhẹ về sau và vẫn giữ tối thiểu {required_after_gap // 60} phút nghỉ."
-            if moves
-            else " mà không ảnh hưởng các phiên khác."
+    if cont_blocking_reasons:
+        feasibility = FeasibilityData(
+            status="infeasible",
+            confirmable=False,
+            deficit_seconds=max(1, cont_deficit_seconds),
+            blocking_reasons=cont_blocking_reasons,
+            next_horizon_preview=None,
         )
-    )
+        explanation = cont_blocking_reasons[0].message
+    else:
+        feasibility = FeasibilityData(
+            status="feasible",
+            confirmable=True,
+            deficit_seconds=0,
+            blocking_reasons=[],
+            next_horizon_preview=None,
+        )
+        work_mins = max(1, work_secs // 60)
+        explanation = (
+            f"Bạn có thể làm tiếp {work_mins} phút để hoàn tất bước đang dở"
+            + (
+                f", phiên kế tiếp sẽ dời nhẹ về sau và vẫn giữ tối thiểu {required_after_gap // 60} phút nghỉ."
+                if moves
+                else " mà không ảnh hưởng các phiên khác."
+            )
+        )
     return (
         source_task.id,
         affected_tasks,
@@ -1177,17 +2312,52 @@ async def _build_continuation_plan(
     )
 
 
+async def _get_unscheduled_pending_steps(
+    db: AsyncSession, owner: UUID, task_id: UUID
+) -> list[StepRow]:
+    """Lấy các Step của task vẫn đang pending, còn khối lượng và chưa có phiên hoạt động."""
+    steps = (
+        await db.scalars(
+            select(StepRow)
+            .where(
+                StepRow.user_id == owner,
+                StepRow.task_id == task_id,
+                StepRow.status == "pending",
+                StepRow.remaining_base_seconds > 0,
+            )
+            .order_by(StepRow.order_index.asc())
+        )
+    ).all()
+    if not steps:
+        return []
+    step_ids = [st.id for st in steps]
+    active_step_ids = set(
+        (
+            await db.scalars(
+                select(SessionRow.step_id).where(
+                    SessionRow.user_id == owner,
+                    SessionRow.step_id.in_(step_ids),
+                    SessionRow.status.notin_(("cancelled", "skipped")),
+                )
+            )
+        ).all()
+    )
+    return [st for st in steps if st.id not in active_step_ids]
+
+
 async def _build_normal_proposal_plan(
     db: AsyncSession,
     owner: UUID,
     *,
     trigger_reason: str,
     target_task_id: str | None,
-    allowed_task_ids: list[str],
+    allowed_task_ids: list[str] | None,
     request_text: str | None,
     calc_now: datetime,
+    override_preferences: dict[str, Any] | None = None,
+    override_availability: dict[str, Any] | None = None,
 ) -> tuple[UUID | None, list[str], ProposedChanges, FeasibilityData, str]:
-    """Tính toán phương án tái lập lịch thường (giữ cứng min_inter_session_gap_seconds = 900)."""
+    """Tính toán phương án tái lập lịch thường & tái phân đoạn UF7 (giữ cứng gap = 900s)."""
     target_uuid: UUID | None = None
     target_row: TaskRow | None = None
     if target_task_id:
@@ -1203,6 +2373,46 @@ async def _build_normal_proposal_plan(
                 next_action="reload",
             )
 
+    pending_unscheduled_steps: list[StepRow] = []
+    if trigger_reason == "expand_next_horizon":
+        if target_row is None:
+            candidate_tasks = (
+                await db.scalars(
+                    select(TaskRow)
+                    .where(
+                        TaskRow.user_id == owner,
+                        TaskRow.status.not_in(("completed", "cancelled")),
+                    )
+                    .order_by(TaskRow.created_at.asc())
+                )
+            ).all()
+            for cand_t in candidate_tasks:
+                if allowed_task_ids and str(cand_t.id) not in allowed_task_ids:
+                    continue
+                cand_unexpanded = bool(cand_t.unexpanded_scope and cand_t.unexpanded_scope.strip())
+                cand_pending = await _get_unscheduled_pending_steps(db, owner, cand_t.id)
+                if cand_unexpanded or cand_pending:
+                    target_row = cand_t
+                    target_uuid = cand_t.id
+                    pending_unscheduled_steps = cand_pending
+                    break
+        else:
+            pending_unscheduled_steps = await _get_unscheduled_pending_steps(
+                db, owner, target_row.id
+            )
+        has_unexpanded = bool(
+            target_row is not None
+            and target_row.unexpanded_scope
+            and target_row.unexpanded_scope.strip()
+        )
+        if target_row is None or (not pending_unscheduled_steps and not has_unexpanded):
+            raise AppError(
+                status_code=409,
+                code="INVALID_STATE_TRANSITION",
+                message="Công việc này không còn phần phạm vi nào chưa mở rộng.",
+                next_action="reload_and_review",
+            )
+
     avail_row = await db.scalar(
         select(AvailabilityRow)
         .where(AvailabilityRow.user_id == owner)
@@ -1211,8 +2421,45 @@ async def _build_normal_proposal_plan(
     )
     has_task_avail = (
         (target_row is not None and bool(target_row.availability))
+        or override_availability is not None
         or trigger_reason == "settings_change"
     )
+
+    # UF6-BUG-09: Khi target_row is None nhưng toàn bộ Task mục tiêu đã có Task.availability riêng
+    # (do UF1/UF2 bỏ availability_ref), không trả oan AVAILABILITY_NOT_CONFIRMED.
+    if (avail_row is None or avail_row.confirmed_at is None) and not has_task_avail:
+        scope_tasks: list[TaskRow] = []
+        if allowed_task_ids:
+            valid_allowed_uuids: list[UUID] = []
+            for tid in allowed_task_ids:
+                try:
+                    valid_allowed_uuids.append(UUID(str(tid)))
+                except ValueError:
+                    continue
+            if valid_allowed_uuids:
+                scope_tasks = list(
+                    (
+                        await db.scalars(
+                            select(TaskRow).where(
+                                TaskRow.user_id == owner,
+                                TaskRow.id.in_(valid_allowed_uuids),
+                            )
+                        )
+                    ).all()
+                )
+        else:
+            scope_tasks = list(
+                (
+                    await db.scalars(
+                        select(TaskRow).where(
+                            TaskRow.user_id == owner,
+                            TaskRow.status.not_in(("completed", "cancelled")),
+                        )
+                    )
+                ).all()
+            )
+        if scope_tasks and all(bool(t.availability) for t in scope_tasks):
+            has_task_avail = True
 
     # Nếu chưa có Availability đã xác nhận -> trả về trạng thái insufficient_data (Sheet Dòng 33 Variant 1)
     if (avail_row is None or avail_row.confirmed_at is None) and not has_task_avail:
@@ -1239,9 +2486,51 @@ async def _build_normal_proposal_plan(
         explanation = "Mình giữ nguyên lịch cũ và cần bạn xác nhận lại giờ rảnh trước khi xếp lịch mới."
         return target_uuid, [], changes, feasibility, explanation
 
-    effective_allowed = list(dict.fromkeys(allowed_task_ids))
+    effective_allowed = (
+        list(dict.fromkeys(allowed_task_ids)) if allowed_task_ids is not None else []
+    )
     if target_uuid is not None and str(target_uuid) not in effective_allowed:
         effective_allowed.append(str(target_uuid))
+    allow_all_tasks = (
+        allowed_task_ids is None
+        and target_uuid is None
+        and trigger_reason
+        in ("settings_change", "expand_next_horizon", "early_completion_pull_forward")
+    )
+
+    pref_row = await db.scalar(
+        select(UserPreferenceRow).where(UserPreferenceRow.user_id == owner)
+    )
+    old_work_int = pref_row.work_interval_seconds if pref_row else 1500
+    old_rest_int = pref_row.rest_interval_seconds if pref_row else 300
+    old_micro_sec = (
+        pref_row.micro_task_seconds
+        if (pref_row is not None and pref_row.micro_task_seconds is not None)
+        else 120
+    )
+    old_buffer = float(pref_row.buffer_multiplier) if pref_row else 1.2
+
+    eff_override_prefs: dict[str, Any] = {}
+    if override_preferences:
+        eff_override_prefs = dict(override_preferences)
+    elif (
+        trigger_reason == "settings_change"
+        and pref_row is not None
+        and isinstance(pref_row.requested_changes, dict)
+    ):
+        eff_override_prefs = dict(pref_row.requested_changes)
+
+    new_work_int = int(eff_override_prefs.get("work_interval_seconds", old_work_int))
+    new_rest_int = int(eff_override_prefs.get("rest_interval_seconds", old_rest_int))
+    new_micro_sec = int(eff_override_prefs.get("micro_task_seconds", old_micro_sec))
+    new_buffer = float(eff_override_prefs.get("buffer_multiplier", old_buffer))
+
+    seg_config_changed = trigger_reason == "settings_change" and (
+        new_work_int != old_work_int
+        or new_rest_int != old_rest_int
+        or abs(new_buffer - old_buffer) > 1e-9
+        or new_micro_sec != old_micro_sec
+    )
 
     # Tải tất cả các phiên scheduled của user
     all_scheduled = (
@@ -1254,6 +2543,11 @@ async def _build_normal_proposal_plan(
 
     step_ids = list({s.step_id for s in all_scheduled})
     step_to_task: dict[UUID, UUID] = {}
+    steps_map: dict[UUID, StepRow] = {}
+    tasks_map: dict[UUID, TaskRow] = {}
+    if target_row is not None:
+        tasks_map[target_row.id] = target_row
+
     if step_ids:
         s_rows = (
             await db.scalars(
@@ -1262,12 +2556,26 @@ async def _build_normal_proposal_plan(
         ).all()
         for s in s_rows:
             step_to_task[s.id] = s.task_id
+            steps_map[s.id] = s
+        needed_task_ids = list({s.task_id for s in s_rows if s.task_id not in tasks_map})
+        if needed_task_ids:
+            t_rows = (
+                await db.scalars(
+                    select(TaskRow).where(TaskRow.user_id == owner, TaskRow.id.in_(needed_task_ids))
+                )
+            ).all()
+            for t in t_rows:
+                tasks_map[t.id] = t
 
-    busy_items, _, _ = await _load_google_busy_items(
-        db, owner, calc_now, calc_now + timedelta(days=14)
-    )
+    horizon_days = 21 if trigger_reason != "expand_next_horizon" else 14
+    horizon_end = calc_now + timedelta(days=horizon_days)
+    if trigger_reason == "expand_next_horizon":
+        for sess in all_scheduled:
+            s_task_id = str(step_to_task.get(sess.step_id, target_uuid or ""))
+            if allow_all_tasks or s_task_id in effective_allowed:
+                horizon_end = max(horizon_end, _ensure_aware(sess.scheduled_end))
+    busy_items, _, _ = await _load_google_busy_items(db, owner, calc_now, horizon_end)
 
-    # Các phiên thuộc allowed_task_ids cần dịch chuyển (hoặc đã trôi qua mốc calc_now, hoặc dời theo yêu cầu)
     movable_sessions: list[SessionRow] = []
     fixed_intervals: list[tuple[datetime, datetime, str]] = [
         (b.start, b.end, f"busy:{b.event_id}") for b in busy_items
@@ -1277,92 +2585,645 @@ async def _build_normal_proposal_plan(
         s_task_id = str(step_to_task.get(sess.step_id, target_uuid or ""))
         s_start = _ensure_aware(sess.scheduled_start)
         s_end = _ensure_aware(sess.scheduled_end)
-        if not effective_allowed or s_task_id in effective_allowed:
+        if allow_all_tasks or s_task_id in effective_allowed:
             movable_sessions.append(sess)
         else:
             fixed_intervals.append((s_start, s_end, f"task:{s_task_id}"))
 
-    # Nếu không có phiên scheduled nào có sẵn nhưng target_task có step chưa xong, kiểm tra để dịch
-    moves: list[ProposedSessionMoveItem] = []
-    affected_tasks: list[str] = []
+    local_tz = _get_local_timezone(avail_row, target_row, override_availability)
 
-    # Mốc bắt đầu xếp lịch mới sau calc_now (làm tròn lên phút kế tiếp + 15p hoặc +1h nếu user yêu cầu dời)
-    base_cursor = (calc_now + timedelta(minutes=15)).replace(second=0, microsecond=0)
+    # UF6-BUG-06 (A4 / Bug 2.1): Nạp các phiên đang chạy / vừa kết thúc (completed/incomplete)
+    # vào fixed_intervals để giữ khoảng nghỉ đệm 900s, đồng thời cộng ngân sách làm việc đã dùng trong ngày (UF6-BUG-05).
+    gap_cutoff = calc_now - timedelta(seconds=STANDARD_INTER_SESSION_GAP_SECONDS)
+    local_day_start_utc = (
+        calc_now.astimezone(local_tz).replace(hour=0, minute=0, second=0, microsecond=0).astimezone(UTC)
+    )
+    recent_non_scheduled = list(
+        (
+            await db.scalars(
+                select(SessionRow).where(
+                    SessionRow.user_id == owner,
+                    SessionRow.status.in_(("in_progress", "completed", "incomplete")),
+                    SessionRow.scheduled_end >= min(gap_cutoff, local_day_start_utc),
+                )
+            )
+        ).all()
+    )
+    recent_runs = list(
+        (
+            await db.scalars(
+                select(SessionRun)
+                .where(
+                    SessionRun.user_id == owner,
+                    (SessionRun.ended_at >= gap_cutoff)
+                    | SessionRun.run_state.in_(("running", "paused")),
+                )
+                .order_by(SessionRun.started_at.desc())
+            )
+        ).all()
+    )
+    run_by_session: dict[UUID, SessionRun] = {}
+    extra_run_sess_ids: set[UUID] = set()
+    recent_sess_ids = {s.id for s in recent_non_scheduled}
+    for r in recent_runs:
+        if r.session_id not in run_by_session:
+            run_by_session[r.session_id] = r
+        if r.session_id not in recent_sess_ids:
+            extra_run_sess_ids.add(r.session_id)
+    if extra_run_sess_ids:
+        extra_s_rows = (
+            await db.scalars(
+                select(SessionRow).where(
+                    SessionRow.user_id == owner,
+                    SessionRow.id.in_(extra_run_sess_ids),
+                    SessionRow.status.notin_(("cancelled", "skipped")),
+                )
+            )
+        ).all()
+        recent_non_scheduled.extend(extra_s_rows)
+
+    # Nạp step_to_task cho các phiên non-scheduled để tính daily_work_used chính xác theo Task
+    missing_st_ids = list({s.step_id for s in recent_non_scheduled if s.step_id not in step_to_task})
+    if missing_st_ids:
+        miss_st_rows = (
+            await db.scalars(
+                select(StepRow).where(StepRow.user_id == owner, StepRow.id.in_(missing_st_ids))
+            )
+        ).all()
+        for st in miss_st_rows:
+            step_to_task[st.id] = st.task_id
+            steps_map[st.id] = st
+
+    daily_work_by_task: dict[UUID | None, dict[date, int]] = {}
+    for ns in recent_non_scheduled:
+        r_row = run_by_session.get(ns.id)
+        if r_row is not None and r_row.ended_at is not None:
+            ns_start = _ensure_aware(r_row.started_at)
+            ns_end = _ensure_aware(r_row.ended_at)
+        elif r_row is not None:
+            ns_start = _ensure_aware(r_row.started_at)
+            ns_end = max(_ensure_aware(ns.scheduled_end), calc_now)
+        else:
+            ns_start = _ensure_aware(ns.scheduled_start)
+            ns_end = _ensure_aware(ns.scheduled_end)
+
+        if ns.status == "in_progress" or ns_end > gap_cutoff:
+            fixed_intervals.append((ns_start, ns_end, f"recent:{ns.id}"))
+
+        ns_task_uuid = step_to_task.get(ns.step_id)
+        if ns_task_uuid is not None:
+            ns_day = ns_start.astimezone(local_tz).date()
+            ns_work = (
+                int(r_row.actual_work_seconds)
+                if (r_row is not None and r_row.actual_work_seconds is not None and r_row.actual_work_seconds > 0)
+                else int(ns.work_seconds)
+            )
+            t_used = daily_work_by_task.setdefault(ns_task_uuid, {})
+            t_used[ns_day] = t_used.get(ns_day, 0) + ns_work
+
+    task_constraints_cache: dict[UUID | None, ExtraSchedulingConstraints] = {}
+
+    def _get_constraints(t_uuid: UUID | None, task_obj: TaskRow | None) -> ExtraSchedulingConstraints:
+        if t_uuid in task_constraints_cache:
+            return task_constraints_cache[t_uuid]
+        res = _extract_task_extra_constraints(task_obj)
+        task_constraints_cache[t_uuid] = res
+        return res
+
+    def _record_daily_work(t_uuid: UUID | None, start_utc: datetime, work_secs_val: int) -> None:
+        if t_uuid is None or work_secs_val <= 0:
+            return
+        d_local = start_utc.astimezone(local_tz).date()
+        t_used = daily_work_by_task.setdefault(t_uuid, {})
+        t_used[d_local] = t_used.get(d_local, 0) + work_secs_val
+
+    initial_cursor = (calc_now + timedelta(minutes=15)).replace(second=0, microsecond=0)
     if request_text and "mai" in request_text.lower():
-        base_cursor = (calc_now + timedelta(days=1)).replace(
-            hour=2, minute=0, second=0, microsecond=0
+        local_tomorrow_9am = (calc_now.astimezone(local_tz) + timedelta(days=1)).replace(
+            hour=9, minute=0, second=0, microsecond=0
         )
+        initial_cursor = max(initial_cursor, local_tomorrow_9am.astimezone(UTC))
+    task_cursors: dict[UUID | None, datetime] = {}
 
-    for sess in movable_sessions:
-        s_start = _ensure_aware(sess.scheduled_start)
-        s_end = _ensure_aware(sess.scheduled_end)
-        s_task_id = str(step_to_task.get(sess.step_id, target_uuid or ""))
-        dur = sess.duration_seconds
+    def _task_free_windows(
+        task_obj: TaskRow | None,
+        *,
+        window_start_override: datetime | None = None,
+        window_end_override: datetime | None = None,
+    ) -> tuple[list[tuple[datetime, datetime]], datetime | None]:
+        t_start_bound, t_deadline = _extract_task_time_bounds(task_obj)
+        base_start = window_start_override if window_start_override is not None else calc_now
+        base_end = window_end_override if window_end_override is not None else horizon_end
+        w_start = max(base_start, t_start_bound) if t_start_bound is not None else base_start
+        w_end = min(base_end, t_deadline) if t_deadline is not None else base_end
+        if w_start >= w_end:
+            return [], t_deadline
+        t_avail = _resolve_task_availability(
+            task_obj,
+            avail_row,
+            override_availability=override_availability,
+            override_target_task_id=target_task_id,
+        )
+        if t_avail is not None:
+            ivs = compute_effective_free_intervals(
+                t_avail,
+                window_start=w_start,
+                window_end=w_end,
+                task_id=str(task_obj.id) if task_obj is not None else None,
+            )
+            return [(iv.start_at.astimezone(UTC), iv.end_at.astimezone(UTC)) for iv in ivs], t_deadline
+        return [(w_start, w_end)], t_deadline
 
-        # Nếu phiên đã ở trong quá khứ hoặc trùng vùng cần dời, hoặc là phiên đầu tiên của task mục tiêu
-        needs_move = (
-            s_start <= base_cursor
-            or trigger_reason
-            in (
+    moves: list[ProposedSessionMoveItem] = []
+    adds: list[ProposedSessionAddItem] = []
+    cancels: list[ProposedSessionCancelItem] = []
+    steps_to_add: list[ProposedStepItem] = []
+    affected_tasks: list[str] = []
+    blocking_reasons: list[BlockingReason] = []
+    seen_blocking_codes: set[str] = set()
+    deficit_seconds = 0
+
+    def _record_blocking(
+        t_deadline: datetime | None,
+        earliest_req: datetime,
+        needed_secs: int,
+        task_free: list[tuple[datetime, datetime]],
+    ) -> None:
+        nonlocal deficit_seconds
+        avail_slots = _subtract_blocked_from_free(task_free, fixed_intervals)
+        usable_avail = sum(
+            max(0, int((e - max(s, earliest_req)).total_seconds()))
+            for s, e in avail_slots
+            if e > max(s, earliest_req)
+        )
+        shortfall = max(needed_secs - usable_avail, 1)
+        deficit_seconds += shortfall
+        if t_deadline is not None and (t_deadline <= earliest_req + timedelta(seconds=needed_secs)):
+            code = "DEADLINE_EXCEEDED"
+            msg = (
+                f"Không đủ khung giờ rảnh trước hạn chót "
+                f"({t_deadline.astimezone(local_tz).isoformat()})."
+            )
+        else:
+            code = "INSUFFICIENT_AVAILABILITY"
+            msg = "Không còn khung giờ rảnh khả dụng phù hợp để xếp toàn bộ phiên tập trung."
+        if code not in seen_blocking_codes:
+            seen_blocking_codes.add(code)
+            blocking_reasons.append(BlockingReason(code=code, message=msg))
+
+    if seg_config_changed and movable_sessions:
+        grouped_steps: dict[UUID, list[SessionRow]] = {}
+        for sess in movable_sessions:
+            grouped_steps.setdefault(sess.step_id, []).append(sess)
+
+        # Kiểm tra xem mỗi step có các phiên đã hoàn thành / đang chạy / cố định khác hay không (UF6-BUG-06: bỏ skipped)
+        step_ids_list = list(grouped_steps.keys())
+        all_step_sessions = (
+            await db.scalars(
+                select(SessionRow).where(
+                    SessionRow.user_id == owner,
+                    SessionRow.step_id.in_(step_ids_list),
+                    SessionRow.status.notin_(("cancelled", "skipped")),
+                )
+            )
+        ).all()
+        movable_ids = {s.id for s in movable_sessions}
+        other_sessions_by_step: dict[UUID, list[SessionRow]] = {}
+        for st_s in all_step_sessions:
+            if st_s.id not in movable_ids:
+                other_sessions_by_step.setdefault(st_s.step_id, []).append(st_s)
+
+        reseg_counter = 0
+        for step_id, step_sessions in grouped_steps.items():
+            step_row = steps_map.get(step_id)
+            t_uuid = step_to_task.get(step_id, target_uuid)
+            task_row = tasks_map.get(t_uuid) if t_uuid is not None else target_row
+            s_task_id = str(t_uuid or target_uuid or "")
+            task_free, t_deadline = _task_free_windows(task_row)
+            constraints = _get_constraints(t_uuid, task_row)
+            t_daily_used = daily_work_by_task.setdefault(t_uuid, {})
+
+            scheduled_work = sum(s.work_seconds for s in step_sessions)
+            has_other_step_sessions = bool(other_sessions_by_step.get(step_id))
+            if abs(new_buffer - old_buffer) > 1e-9 and scheduled_work > 0:
+                eff_old_buffer = (
+                    old_buffer
+                    if old_buffer > 0
+                    else (
+                        step_row.buffer_multiplier
+                        if step_row is not None and step_row.buffer_multiplier > 0
+                        else 1.2
+                    )
+                )
+                if (
+                    not has_other_step_sessions
+                    and step_row is not None
+                    and step_row.remaining_base_seconds > 0
+                ):
+                    rem_base = step_row.remaining_base_seconds
+                else:
+                    rem_base = max(1, round(scheduled_work / eff_old_buffer))
+                target_work = calculate_buffered_work(rem_base, new_buffer)
+            else:
+                target_work = scheduled_work
+
+            micro_text = step_sessions[0].micro_task_text
+            micro_secs = new_micro_sec if micro_text else 0
+
+            # Thử phân đoạn và xếp vào các khe rảnh khả dụng (áp dụng extra_requirements UF6-BUG-05)
+            avail_slots = _subtract_blocked_from_free(task_free, fixed_intervals)
+            task_cursor = task_cursors.get(t_uuid, initial_cursor)
+            planned, rem_work, _ = _plan_step_sessions_with_constraints(
+                target_work=target_work,
+                task_free=task_free,
+                fixed_intervals=fixed_intervals,
+                start_cursor=task_cursor,
+                work_interval=new_work_int,
+                rest_interval=new_rest_int,
+                constraints=constraints,
+                daily_work_used=t_daily_used,
+                local_tz=local_tz,
+            )
+
+            if rem_work > 0:
+                _record_blocking(t_deadline, task_cursor, rem_work, task_free)
+                if s_task_id and s_task_id not in affected_tasks:
+                    affected_tasks.append(s_task_id)
+                continue
+
+            # Kiểm tra cấu hình phân đoạn có thực sự thay đổi so với phiên cũ hay không
+            seg_same = len(planned) == len(step_sessions) and all(
+                p_dur == old_s.duration_seconds
+                and p_work == old_s.work_seconds
+                and p_rest == old_s.rest_seconds
+                and (old_s.micro_task_seconds or 0) == micro_secs
+                and [sg.model_dump() for sg in p_segs] == (old_s.segments or [])
+                for (_, _, p_work, p_rest, p_dur, p_segs), old_s in zip(
+                    planned, step_sessions, strict=True
+                )
+            )
+            if seg_same:
+                for (_p_s, _p_e, _, _, _, _), old_s in zip(
+                    planned, step_sessions, strict=True
+                ):
+                    o_s = _ensure_aware(old_s.scheduled_start)
+                    o_e = _ensure_aware(old_s.scheduled_end)
+                    cur_cursor = task_cursors.get(t_uuid, initial_cursor)
+                    # Kiểm tra phiên cũ có còn nằm gọn trong task_free và không đụng fixed_intervals không
+                    old_valid = any(fs <= o_s and o_e <= fe for fs, fe in avail_slots)
+                    if old_valid and o_s >= cur_cursor:
+                        fixed_intervals.append((o_s, o_e, f"session:{old_s.id}"))
+                        _record_daily_work(t_uuid, o_s, old_s.work_seconds)
+                        task_cursors[t_uuid] = max(
+                            cur_cursor,
+                            o_e + timedelta(seconds=STANDARD_INTER_SESSION_GAP_SECONDS),
+                        )
+                        continue
+                    slot = _find_free_slot_with_constraints(
+                        task_free,
+                        fixed_intervals,
+                        cur_cursor,
+                        old_s.duration_seconds,
+                        work_seconds=old_s.work_seconds,
+                        constraints=constraints,
+                        daily_work_used=t_daily_used,
+                        local_tz=local_tz,
+                    )
+                    if slot is None:
+                        _record_blocking(t_deadline, cur_cursor, old_s.duration_seconds, task_free)
+                        continue
+                    cand_s, cand_e = slot
+                    moves.append(
+                        ProposedSessionMoveItem(
+                            session_id=str(old_s.id),
+                            task_id=s_task_id or None,
+                            step_id=str(old_s.step_id),
+                            from_start=o_s,
+                            from_end=o_e,
+                            to_start=cand_s,
+                            to_end=cand_e,
+                            before=ProposalTimeRange(start=o_s, end=o_e),
+                            after=ProposalTimeRange(start=cand_s, end=cand_e),
+                            shift_seconds=int((cand_s - o_s).total_seconds()),
+                            reason=trigger_reason,
+                        )
+                    )
+                    fixed_intervals.append((cand_s, cand_e, f"session:{old_s.id}"))
+                    _record_daily_work(t_uuid, cand_s, old_s.work_seconds)
+                    task_cursors[t_uuid] = max(
+                        cur_cursor,
+                        cand_e + timedelta(seconds=STANDARD_INTER_SESSION_GAP_SECONDS),
+                    )
+                    if s_task_id and s_task_id not in affected_tasks:
+                        affected_tasks.append(s_task_id)
+            else:
+                for old_s in step_sessions:
+                    cancels.append(
+                        ProposedSessionCancelItem(
+                            session_id=str(old_s.id),
+                            task_id=s_task_id or None,
+                            step_id=str(old_s.step_id),
+                            reason="resegmented_by_settings_change",
+                        )
+                    )
+                for p_idx, (p_s, p_e, p_work, p_rest, p_dur, p_segs) in enumerate(planned):
+                    reseg_counter += 1
+                    adds.append(
+                        ProposedSessionAddItem(
+                            temp_session_id=f"temp_reseg_{reseg_counter}",
+                            action="create_session",
+                            task_id=s_task_id,
+                            step_id=str(step_id),
+                            source_run_id=None,
+                            before=None,
+                            after=ProposedSessionAddAfter(
+                                step_id=str(step_id),
+                                start=p_s,
+                                end=p_e,
+                                work_seconds=p_work,
+                                rest_seconds=p_rest,
+                                duration_seconds=p_dur,
+                                micro_task_text=micro_text if p_idx == 0 else None,
+                                micro_task_seconds=micro_secs if p_idx == 0 else 0,
+                                segments=p_segs,
+                            ),
+                            reason="resegmented_by_settings_change",
+                        )
+                    )
+                    fixed_intervals.append((p_s, p_e, f"reseg:{reseg_counter}"))
+                    _record_daily_work(t_uuid, p_s, p_work)
+                    cur_cursor = task_cursors.get(t_uuid, initial_cursor)
+                    task_cursors[t_uuid] = max(
+                        cur_cursor,
+                        p_e + timedelta(seconds=STANDARD_INTER_SESSION_GAP_SECONDS),
+                    )
+                if s_task_id and s_task_id not in affected_tasks:
+                    affected_tasks.append(s_task_id)
+    else:
+        for sess in movable_sessions:
+            s_start = _ensure_aware(sess.scheduled_start)
+            s_end = _ensure_aware(sess.scheduled_end)
+            t_uuid = step_to_task.get(sess.step_id, target_uuid)
+            task_row = tasks_map.get(t_uuid) if t_uuid is not None else target_row
+            s_task_id = str(t_uuid or "")
+            dur = sess.duration_seconds
+            task_cursor = task_cursors.get(t_uuid, initial_cursor)
+            constraints = _get_constraints(t_uuid, task_row)
+            t_daily_used = daily_work_by_task.setdefault(t_uuid, {})
+
+            task_free, t_deadline = _task_free_windows(task_row)
+            avail_for_existing = _subtract_blocked_from_free(task_free, fixed_intervals)
+            existing_valid = any(fs <= s_start and s_end <= fe for fs, fe in avail_for_existing)
+
+            is_targeted_reschedule = trigger_reason in (
                 "checkin_incomplete",
                 "checkin_busy",
                 "checkin_skipped",
                 "missed_start",
                 "user_reschedule",
-                "settings_change",
-                "early_completion_pull_forward",
-                "expand_next_horizon",
+            ) and (target_uuid is None or t_uuid == target_uuid)
+            needs_move = (not existing_valid) or (s_start < task_cursor) or is_targeted_reschedule
+            if not needs_move:
+                fixed_intervals.append((s_start, s_end, f"session:{sess.id}"))
+                _record_daily_work(t_uuid, s_start, sess.work_seconds)
+                task_cursors[t_uuid] = max(
+                    task_cursor,
+                    s_end + timedelta(seconds=STANDARD_INTER_SESSION_GAP_SECONDS),
+                )
+                continue
+
+            if (
+                s_start <= calc_now
+                or not existing_valid
+                or s_start < task_cursor
+                or not is_targeted_reschedule
+            ):
+                candidate_earliest = task_cursor
+            else:
+                candidate_earliest = max(task_cursor, s_start + timedelta(minutes=30))
+
+            slot = _find_free_slot_with_constraints(
+                task_free,
+                fixed_intervals,
+                candidate_earliest,
+                dur,
+                work_seconds=sess.work_seconds,
+                constraints=constraints,
+                daily_work_used=t_daily_used,
+                local_tz=local_tz,
             )
-        )
-        if not needs_move:
-            fixed_intervals.append((s_start, s_end, f"session:{sess.id}"))
-            continue
+            if slot is None:
+                _record_blocking(t_deadline, candidate_earliest, dur, task_free)
+                if s_task_id and s_task_id not in affected_tasks:
+                    affected_tasks.append(s_task_id)
+                continue
 
-        candidate_start = max(base_cursor, s_start + timedelta(minutes=30))
-        if s_start <= calc_now:
-            candidate_start = base_cursor
+            candidate_start, candidate_end = slot
+            shift_secs = int((candidate_start - s_start).total_seconds())
+            moves.append(
+                ProposedSessionMoveItem(
+                    session_id=str(sess.id),
+                    task_id=s_task_id or None,
+                    step_id=str(sess.step_id),
+                    from_start=s_start,
+                    from_end=s_end,
+                    to_start=candidate_start,
+                    to_end=candidate_end,
+                    before=ProposalTimeRange(start=s_start, end=s_end),
+                    after=ProposalTimeRange(start=candidate_start, end=candidate_end),
+                    shift_seconds=shift_secs,
+                    reason=trigger_reason,
+                )
+            )
+            if s_task_id and s_task_id not in affected_tasks:
+                affected_tasks.append(s_task_id)
+            fixed_intervals.append((candidate_start, candidate_end, f"session:{sess.id}"))
+            _record_daily_work(t_uuid, candidate_start, sess.work_seconds)
+            task_cursors[t_uuid] = max(
+                task_cursor,
+                candidate_end + timedelta(seconds=STANDARD_INTER_SESSION_GAP_SECONDS),
+            )
 
-        # Dịch candidate_start để giữ khoảng cách >= 900s với mọi fixed_intervals
-        while True:
-            candidate_end = candidate_start + timedelta(seconds=dur)
-            conflict_end: datetime | None = None
-            for f_start, f_end, _ in fixed_intervals:
-                # Phải thỏa mãn: candidate_end + 900s <= f_start HOẶC f_end + 900s <= candidate_start
-                if not (
-                    candidate_end + timedelta(seconds=STANDARD_INTER_SESSION_GAP_SECONDS) <= f_start
-                    or f_end + timedelta(seconds=STANDARD_INTER_SESSION_GAP_SECONDS)
-                    <= candidate_start
-                ):
-                    conflict_end = f_end + timedelta(seconds=STANDARD_INTER_SESSION_GAP_SECONDS)
+    horizon_from_dt: datetime | None = calc_now if trigger_reason == "expand_next_horizon" else None
+    horizon_to_dt: datetime | None = (
+        (calc_now + timedelta(days=14)) if trigger_reason == "expand_next_horizon" else None
+    )
+    expanded_steps_count = 0
+
+    if trigger_reason == "expand_next_horizon" and target_row is not None:
+        target_row_id = target_row.id
+        horizon_sess_counter = 0
+
+        def _append_horizon_sessions(
+            step_id_str: str,
+            micro_text: str,
+            micro_secs: int,
+            planned_sessions: list[
+                tuple[datetime, datetime, int, int, int, list[SessionSegment]]
+            ],
+        ) -> None:
+            nonlocal horizon_sess_counter
+            for p_idx, (p_s, p_e, p_work, p_rest, p_dur, p_segs) in enumerate(planned_sessions):
+                horizon_sess_counter += 1
+                adds.append(
+                    ProposedSessionAddItem(
+                        temp_session_id=f"temp_horizon_{horizon_sess_counter}",
+                        action="create_session",
+                        task_id=str(target_row_id),
+                        step_id=step_id_str,
+                        source_run_id=None,
+                        before=None,
+                        after=ProposedSessionAddAfter(
+                            step_id=step_id_str,
+                            start=p_s,
+                            end=p_e,
+                            work_seconds=p_work,
+                            rest_seconds=p_rest,
+                            duration_seconds=p_dur,
+                            micro_task_text=micro_text,
+                            micro_task_seconds=micro_secs if p_idx == 0 else 0,
+                            segments=p_segs,
+                        ),
+                        reason="expand_next_horizon",
+                    )
+                )
+                fixed_intervals.append((p_s, p_e, f"horizon:{horizon_sess_counter}"))
+                _record_daily_work(target_row_id, p_s, p_work)
+                cur_cursor = task_cursors.get(target_row_id, initial_cursor)
+                task_cursors[target_row_id] = max(
+                    cur_cursor,
+                    p_e + timedelta(seconds=STANDARD_INTER_SESSION_GAP_SECONDS),
+                )
+
+        horizon_constraints = _get_constraints(target_row_id, target_row)
+        horizon_daily_used = daily_work_by_task.setdefault(target_row_id, {})
+
+        if pending_unscheduled_steps:
+            next_start = max(initial_cursor, task_cursors.get(target_row.id, initial_cursor))
+            latest_task_sess_end = await db.scalar(
+                select(func.max(SessionRow.scheduled_end))
+                .join(StepRow, StepRow.id == SessionRow.step_id)
+                .where(
+                    StepRow.user_id == owner,
+                    StepRow.task_id == target_row.id,
+                    SessionRow.status.notin_(("cancelled", "skipped")),
+                )
+            )
+            if latest_task_sess_end is not None:
+                next_start = max(
+                    next_start,
+                    _ensure_aware(latest_task_sess_end)
+                    + timedelta(seconds=STANDARD_INTER_SESSION_GAP_SECONDS),
+                )
+            _, t_deadline = _extract_task_time_bounds(target_row)
+            window_limit = next_start + timedelta(days=14)
+            next_end = min(t_deadline, window_limit) if t_deadline is not None else window_limit
+            horizon_from_dt = next_start
+            horizon_to_dt = next_end
+            if next_end > horizon_end:
+                extra_busy, _, _ = await _load_google_busy_items(db, owner, horizon_end, next_end)
+                for b in extra_busy:
+                    fixed_intervals.append((b.start, b.end, f"busy:{b.event_id}"))
+            task_free, t_deadline = _task_free_windows(
+                target_row,
+                window_start_override=next_start,
+                window_end_override=next_end,
+            )
+            step_cursor = next_start
+            for st_row in pending_unscheduled_steps:
+                eff_st_buf = (
+                    float(st_row.buffer_multiplier)
+                    if st_row.buffer_multiplier and st_row.buffer_multiplier > 0
+                    else new_buffer
+                )
+                target_work = calculate_buffered_work(
+                    st_row.remaining_base_seconds, eff_st_buf
+                )
+                micro_text = f"Mở tài liệu và bắt đầu 2 phút cho: {st_row.title[:80]}"
+                micro_secs = new_micro_sec if new_micro_sec > 0 else 120
+                planned_horizon, rem_work, step_end_cursor = _plan_step_sessions_with_constraints(
+                    target_work=target_work,
+                    task_free=task_free,
+                    fixed_intervals=fixed_intervals,
+                    start_cursor=step_cursor,
+                    work_interval=new_work_int,
+                    rest_interval=new_rest_int,
+                    constraints=horizon_constraints,
+                    daily_work_used=horizon_daily_used,
+                    local_tz=local_tz,
+                )
+                if rem_work > 0:
+                    if (t_deadline is None or window_limit < t_deadline) and expanded_steps_count > 0:
+                        break
+                    _record_blocking(t_deadline, step_end_cursor, rem_work, task_free)
                     break
-            if conflict_end is None:
-                break
-            candidate_start = conflict_end
-
-        candidate_end = candidate_start + timedelta(seconds=dur)
-        shift_secs = int((candidate_start - s_start).total_seconds())
-        moves.append(
-            ProposedSessionMoveItem(
-                session_id=str(sess.id),
-                task_id=s_task_id or None,
-                step_id=str(sess.step_id),
-                from_start=s_start,
-                from_end=s_end,
-                to_start=candidate_start,
-                to_end=candidate_end,
-                before=ProposalTimeRange(start=s_start, end=s_end),
-                after=ProposalTimeRange(start=candidate_start, end=candidate_end),
-                shift_seconds=shift_secs,
-                reason=trigger_reason,
+                expanded_steps_count += 1
+                step_cursor = step_end_cursor
+                _append_horizon_sessions(str(st_row.id), micro_text, micro_secs, planned_horizon)
+        else:
+            existing_task_steps = (
+                await db.scalars(
+                    select(StepRow)
+                    .where(StepRow.user_id == owner, StepRow.task_id == target_row.id)
+                    .order_by(StepRow.order_index.asc())
+                )
+            ).all()
+            next_order_idx = (
+                max((st.order_index for st in existing_task_steps), default=-1) + 1
             )
-        )
-        if s_task_id and s_task_id not in affected_tasks:
-            affected_tasks.append(s_task_id)
-        fixed_intervals.append((candidate_start, candidate_end, f"session:{sess.id}"))
-        base_cursor = candidate_end + timedelta(seconds=STANDARD_INTER_SESSION_GAP_SECONDS)
+            raw_unexpanded = (target_row.unexpanded_scope or "").strip()
+            raw_parts = [
+                seg.strip(" -•\t")
+                for line in raw_unexpanded.splitlines()
+                for seg in line.split(";")
+                if seg.strip(" -•\t")
+            ]
+            if not raw_parts:
+                raw_parts = [raw_unexpanded]
+            raw_parts = raw_parts[:6]
+
+            base_est_per_step = max(300, round(new_work_int / max(new_buffer, 1.0)))
+            for idx, part_title in enumerate(raw_parts):
+                steps_to_add.append(
+                    ProposedStepItem(
+                        step_id=str(uuid4()),
+                        task_id=str(target_row.id),
+                        title=part_title[:200],
+                        order_index=next_order_idx + idx,
+                        estimated_base_seconds=base_est_per_step,
+                    )
+                )
+
+            task_free, t_deadline = _task_free_windows(target_row)
+            for st_item in steps_to_add:
+                target_work = calculate_buffered_work(
+                    st_item.estimated_base_seconds, new_buffer
+                )
+                micro_text = f"Mở tài liệu và bắt đầu 2 phút cho: {st_item.title[:80]}"
+                micro_secs = new_micro_sec if new_micro_sec > 0 else 120
+                step_cursor = task_cursors.get(target_row.id, initial_cursor)
+                planned_horizon, rem_work, step_end_cursor = _plan_step_sessions_with_constraints(
+                    target_work=target_work,
+                    task_free=task_free,
+                    fixed_intervals=fixed_intervals,
+                    start_cursor=step_cursor,
+                    work_interval=new_work_int,
+                    rest_interval=new_rest_int,
+                    constraints=horizon_constraints,
+                    daily_work_used=horizon_daily_used,
+                    local_tz=local_tz,
+                )
+                if rem_work > 0:
+                    _record_blocking(t_deadline, step_end_cursor, rem_work, task_free)
+                _append_horizon_sessions(
+                    st_item.step_id, micro_text, micro_secs, planned_horizon
+                )
+            expanded_steps_count = len(steps_to_add)
+        if str(target_row.id) not in affected_tasks:
+            affected_tasks.append(str(target_row.id))
 
     if target_uuid is not None and str(target_uuid) not in affected_tasks and (
-        moves or trigger_reason == "settings_change"
+        moves or adds or cancels or steps_to_add or trigger_reason == "settings_change"
     ):
         affected_tasks.insert(0, str(target_uuid))
     if not affected_tasks and trigger_reason == "settings_change" and effective_allowed:
@@ -1370,50 +3231,55 @@ async def _build_normal_proposal_plan(
 
     changes = ProposedChanges(
         sessions_to_move=moves,
-        sessions_to_add=[],
-        sessions_to_cancel=[],
-        steps_to_add=[],
-        next_horizon_from=calc_now if trigger_reason == "expand_next_horizon" else None,
-        next_horizon_to=(calc_now + timedelta(days=14))
+        sessions_to_add=adds,
+        sessions_to_cancel=cancels,
+        steps_to_add=steps_to_add,
+        next_horizon_from=horizon_from_dt,
+        next_horizon_to=horizon_to_dt,
+    )
+    horizon_preview = (
+        {
+            "expanded_steps_count": expanded_steps_count,
+            "added_sessions_count": len(adds),
+            "unexpanded_scope": None,
+        }
         if trigger_reason == "expand_next_horizon"
-        else None,
+        else None
     )
-    feasibility = FeasibilityData(
-        status="feasible",
-        confirmable=True,
-        deficit_seconds=0,
-        blocking_reasons=[],
-        next_horizon_preview=None,
-    )
-    explanation = (
-        "Mình đã sắp xếp lại các phiên vào khung giờ rảnh tiếp theo, đảm bảo khoảng nghỉ 15 phút giữa các phiên và giữ nguyên các công việc khác."
-    )
+    if deficit_seconds > 0:
+        feasibility = FeasibilityData(
+            status="infeasible",
+            confirmable=False,
+            deficit_seconds=deficit_seconds,
+            blocking_reasons=blocking_reasons,
+            next_horizon_preview=horizon_preview,
+        )
+        explanation = (
+            "Không đủ khung giờ rảnh khả dụng trước hạn chót để xếp lại toàn bộ các phiên. "
+            "Mình giữ nguyên lịch cũ để bạn nới hạn chót hoặc mở thêm giờ rảnh."
+        )
+    else:
+        feasibility = FeasibilityData(
+            status="feasible",
+            confirmable=True,
+            deficit_seconds=0,
+            blocking_reasons=[],
+            next_horizon_preview=horizon_preview,
+        )
+        explanation = (
+            "Mình đã sắp xếp lại các phiên vào khung giờ rảnh tiếp theo, đảm bảo khoảng nghỉ 15 phút giữa các phiên và giữ nguyên các công việc khác."
+        )
     return target_uuid, affected_tasks, changes, feasibility, explanation
 
 
-@command_service.durable_command("create_proposal", ProposalData, resource_arg="")
-async def create_proposal(
-    db: AsyncSession,
-    *,
-    user_id: str,
-    idempotency_key: str,
+def _validate_create_source_revisions(
     payload: CreateProposalRequest,
-    now: datetime | None = None,
-) -> ProposalData:
-    """Dòng 33 trên API Sheet: POST /api/v1/proposals."""
-    calc_now = _current_utc_now(now)
-    owner = draft_service.resolve_user_uuid(user_id)
-
-    current_sched_rev = await _get_current_schedule_revision(db, owner)
-    db_revs, present = await _compute_db_source_revisions(
-        db,
-        owner,
-        target_task_id=payload.target_task_id,
-        allowed_task_ids=payload.allowed_task_ids,
-        fallback_revisions=payload.expected_source_revisions,
-    )
-
-    # Kiểm tra expected_base_schedule_revision và expected_source_revisions với DB thực tế
+    *,
+    current_sched_rev: int,
+    db_revs: SourceRevisions,
+    present: dict[str, bool],
+) -> None:
+    """Kiểm tra expected_base_schedule_revision và expected_source_revisions với DB thực tế."""
     if present["schedule"] and (
         payload.expected_base_schedule_revision != current_sched_rev
         or payload.expected_source_revisions.schedule != current_sched_rev
@@ -1464,9 +3330,52 @@ async def create_proposal(
             next_action="reload_and_review",
         )
 
+
+async def create_proposal(
+    db: AsyncSession,
+    *,
+    user_id: str,
+    idempotency_key: str,
+    payload: CreateProposalRequest,
+    now: datetime | None = None,
+) -> ProposalData:
+    """Dòng 33 trên API Sheet: POST /api/v1/proposals (Risk 3: tách pha AI không giữ khóa DB)."""
+    calc_now = _current_utc_now(now)
+    owner = draft_service.resolve_user_uuid(user_id)
+    deferred = bool(db.info.get("defer_command_commit"))
+    digest = ""
+
+    # Phase A (Lock-free replay & read/plan computation)
+    if not deferred:
+        digest = command_service.command_hash(
+            "create_proposal",
+            "",
+            payload.model_dump(mode="json", exclude_unset=True),
+        )
+        saved = await command_service.replay(db, user_id, idempotency_key, digest)
+        if saved is not None:
+            await db.rollback()
+            return ProposalData.model_validate(saved)
+
+    current_sched_rev = await _get_current_schedule_revision(db, owner)
+    db_revs, present = await _compute_db_source_revisions(
+        db,
+        owner,
+        target_task_id=payload.target_task_id,
+        allowed_task_ids=payload.allowed_task_ids,
+        fallback_revisions=payload.expected_source_revisions,
+    )
+    _validate_create_source_revisions(
+        payload,
+        current_sched_rev=current_sched_rev,
+        db_revs=db_revs,
+        present=present,
+    )
+
     base_sched_rev = (
         current_sched_rev if present["schedule"] else payload.expected_base_schedule_revision
     )
+    trigger_reason = payload.trigger_reason
 
     if payload.continuation_request is not None:
         (
@@ -1501,6 +3410,9 @@ async def create_proposal(
             approval_envelope=approval_envelope,
             request_text=payload.request_text,
         )
+        gen_tier: GenerationTier = "python_fallback"
+        if not deferred:
+            await db.rollback()
     else:
         (
             target_uuid,
@@ -1511,13 +3423,15 @@ async def create_proposal(
         ) = await _build_normal_proposal_plan(
             db,
             owner,
-            trigger_reason=payload.trigger_reason,
+            trigger_reason=trigger_reason,
             target_task_id=payload.target_task_id,
             allowed_task_ids=payload.allowed_task_ids,
             request_text=payload.request_text,
             calc_now=calc_now,
         )
         effective_allowed = list(dict.fromkeys(payload.allowed_task_ids))
+        if target_uuid is not None and str(target_uuid) not in effective_allowed:
+            effective_allowed.append(str(target_uuid))
         packed_changes = _pack_proposed_changes(
             changes,
             calculated_at=calc_now,
@@ -1527,35 +3441,148 @@ async def create_proposal(
             approval_envelope=None,
             request_text=payload.request_text,
         )
+        if not deferred:
+            # Giải phóng toàn bộ transaction/lock DB trước khi gọi AI empathy
+            await db.rollback()
+        explanation, gen_tier = await _generate_uf6_explanation_and_tier(
+            trigger_reason,
+            feasibility,
+        )
 
-    # Duy trì tối đa 1 proposal pending / user: supersede bản cũ trước khi insert bản mới
-    supersedes_id = await _supersede_existing_pending_proposal(db, owner, calc_now)
+    if deferred:
+        supersedes_id = await _supersede_existing_pending_proposal(db, owner, calc_now)
+        new_proposal = RescheduleProposal(
+            id=uuid4(),
+            user_id=owner,
+            created_at=calc_now,
+            updated_at=calc_now,
+            trigger_reason=trigger_reason,
+            target_task_id=target_uuid,
+            allowed_task_ids=effective_allowed,
+            affected_task_ids=affected_tasks,
+            base_schedule_revision=base_sched_rev,
+            source_revisions=db_revs.model_dump(mode="json"),
+            proposal_revision=1,
+            status="pending",
+            supersedes_proposal_id=supersedes_id,
+            proposed_changes=packed_changes,
+            feasibility=feasibility.model_dump(mode="json", by_alias=True),
+            explanation=explanation,
+            generation_tier=gen_tier,
+            pending_notification_state="pending",
+            pending_notification_sent_at=None,
+        )
+        db.add(new_proposal)
+        await db.flush()
+        return await _proposal_row_to_schema(db, owner, new_proposal, calc_now)
 
-    new_proposal = RescheduleProposal(
-        id=uuid4(),
-        user_id=owner,
-        created_at=calc_now,
-        updated_at=calc_now,
-        trigger_reason=payload.trigger_reason,
-        target_task_id=target_uuid,
-        allowed_task_ids=effective_allowed,
-        affected_task_ids=affected_tasks,
-        base_schedule_revision=base_sched_rev,
-        source_revisions=db_revs.model_dump(mode="json"),
-        proposal_revision=1,
-        status="pending",
-        supersedes_proposal_id=supersedes_id,
-        proposed_changes=packed_changes,
-        feasibility=feasibility.model_dump(mode="json", by_alias=True),
-        explanation=explanation,
-        generation_tier="python_fallback",
-        pending_notification_state="not_needed",
-        pending_notification_sent_at=None,
-    )
-    db.add(new_proposal)
-    await db.flush()
+    # Phase B (Short locked atomic write)
+    db.info["defer_command_commit"] = True
+    try:
+        await command_service.lock_owner(db, user_id)
+        saved = await command_service.replay(db, user_id, idempotency_key, digest)
+        if saved is not None:
+            await db.rollback()
+            return ProposalData.model_validate(saved)
 
-    return await _proposal_row_to_schema(db, owner, new_proposal, calc_now)
+        current_sched_rev_2 = await _get_current_schedule_revision(db, owner)
+        db_revs_2, present_2 = await _compute_db_source_revisions(
+            db,
+            owner,
+            target_task_id=payload.target_task_id,
+            allowed_task_ids=payload.allowed_task_ids,
+            fallback_revisions=payload.expected_source_revisions,
+        )
+        _validate_create_source_revisions(
+            payload,
+            current_sched_rev=current_sched_rev_2,
+            db_revs=db_revs_2,
+            present=present_2,
+        )
+        if db_revs_2 != db_revs or present_2 != present:
+            raise AppError(
+                status_code=409,
+                code="REVISION_CONFLICT",
+                message="Dữ liệu nguồn đã thay đổi trong lúc tính toán đề xuất.",
+                current_revisions=db_revs_2.model_dump(),
+                next_action="reload_and_review",
+            )
+        base_sched_rev_2 = (
+            current_sched_rev_2
+            if present_2["schedule"]
+            else payload.expected_base_schedule_revision
+        )
+
+        # Duy trì tối đa 1 proposal pending / user: supersede bản cũ trước khi insert bản mới
+        supersedes_id = await _supersede_existing_pending_proposal(db, owner, calc_now)
+
+        new_proposal = RescheduleProposal(
+            id=uuid4(),
+            user_id=owner,
+            created_at=calc_now,
+            updated_at=calc_now,
+            trigger_reason=trigger_reason,
+            target_task_id=target_uuid,
+            allowed_task_ids=effective_allowed,
+            affected_task_ids=affected_tasks,
+            base_schedule_revision=base_sched_rev_2,
+            source_revisions=db_revs_2.model_dump(mode="json"),
+            proposal_revision=1,
+            status="pending",
+            supersedes_proposal_id=supersedes_id,
+            proposed_changes=packed_changes,
+            feasibility=feasibility.model_dump(mode="json", by_alias=True),
+            explanation=explanation,
+            generation_tier=gen_tier,
+            pending_notification_state="pending",
+            pending_notification_sent_at=None,
+        )
+        db.add(new_proposal)
+        await db.flush()
+
+        result = await _proposal_row_to_schema(db, owner, new_proposal, calc_now)
+        command_service.record(
+            db, user_id, idempotency_key, digest, "create_proposal", result
+        )
+        await db.commit()
+        return result
+    except (IntegrityError, AppError):
+        await db.rollback()
+        saved = await command_service.replay(db, user_id, idempotency_key, digest)
+        if saved is not None:
+            return ProposalData.model_validate(saved)
+        raise
+    except Exception:
+        await db.rollback()
+        raise
+    finally:
+        db.info.pop("defer_command_commit", None)
+        db.info.pop("command_result_meta", None)
+
+
+async def _cancel_linked_setting_requests(
+    db: AsyncSession,
+    owner: UUID,
+    proposal_id: UUID,
+    now_utc: datetime,
+) -> None:
+    """Hủy toàn bộ SettingChangeRequest liên kết với proposal và dọn sạch cả 2 trường requested_* (UF6-BUG-02)."""
+    pending_setting_reqs = (
+        await db.scalars(
+            select(SettingChangeRequest).where(
+                SettingChangeRequest.user_id == owner,
+                SettingChangeRequest.pending_proposal_id == proposal_id,
+                SettingChangeRequest.application_state.in_(
+                    ("pending_review", "pending_proposal")
+                ),
+            )
+        )
+    ).all()
+    for s_req in pending_setting_reqs:
+        s_req.application_state = "cancelled"
+        s_req.requested_revision = None
+        s_req.requested_availability_revision = None
+        s_req.updated_at = now_utc
 
 
 async def _supersede_existing_pending_proposal(
@@ -1585,21 +3612,7 @@ async def _supersede_existing_pending_proposal(
         pref_row.pending_proposal_id = None
         pref_row.updated_at = calc_now
 
-    pending_setting_reqs = (
-        await db.scalars(
-            select(SettingChangeRequest).where(
-                SettingChangeRequest.user_id == owner,
-                SettingChangeRequest.pending_proposal_id == existing_pending.id,
-                SettingChangeRequest.application_state.in_(
-                    ("pending_review", "pending_proposal")
-                ),
-            )
-        )
-    ).all()
-    for s_req in pending_setting_reqs:
-        s_req.application_state = "cancelled"
-        s_req.requested_revision = None
-        s_req.updated_at = calc_now
+    await _cancel_linked_setting_requests(db, owner, existing_pending.id, calc_now)
 
     await db.flush()
     return existing_pending.id
@@ -1612,7 +3625,10 @@ async def create_settings_change_proposal(
     target_task_id: str | None = None,
     allowed_task_ids: list[str] | None = None,
     request_text: str | None = None,
+    override_preferences: dict[str, Any] | None = None,
+    override_availability: dict[str, Any] | None = None,
     now: datetime | None = None,
+    precomputed_empathy: tuple[str, GenerationTier] | None = None,
 ) -> ProposalData:
     """Helper nội bộ (không bọc @durable_command) tạo RescheduleProposal cho UF7 settings_change."""
     calc_now = _current_utc_now(now)
@@ -1657,6 +3673,8 @@ async def create_settings_change_proposal(
         allowed_task_ids=effective_allowed,
         request_text=request_text,
         calc_now=calc_now,
+        override_preferences=override_preferences,
+        override_availability=override_availability,
     )
     packed_changes = _pack_proposed_changes(
         changes,
@@ -1666,7 +3684,16 @@ async def create_settings_change_proposal(
         start_window=None,
         approval_envelope=None,
         request_text=request_text,
+        override_preferences=override_preferences,
+        override_availability=override_availability,
     )
+    if precomputed_empathy is not None:
+        explanation, gen_tier = precomputed_empathy
+    else:
+        explanation, gen_tier = await _generate_uf6_explanation_and_tier(
+            "settings_change",
+            feasibility,
+        )
 
     supersedes_id = await _supersede_existing_pending_proposal(db, owner, calc_now)
 
@@ -1687,8 +3714,8 @@ async def create_settings_change_proposal(
         proposed_changes=packed_changes,
         feasibility=feasibility.model_dump(mode="json", by_alias=True),
         explanation=explanation,
-        generation_tier="python_fallback",
-        pending_notification_state="not_needed",
+        generation_tier=gen_tier,
+        pending_notification_state="pending",
         pending_notification_sent_at=None,
     )
     db.add(new_proposal)
@@ -1714,6 +3741,11 @@ async def get_current_proposal(
     )
     if row is None:
         return None
+    if row.pending_notification_state in ("pending", "not_sent"):
+        row.pending_notification_state = "sent"
+        row.pending_notification_sent_at = calc_now
+        await db.flush()
+        await db.commit()
     return await _proposal_row_to_schema(db, owner, row, calc_now)
 
 
@@ -1741,10 +3773,14 @@ async def get_proposal_detail(
             message="Không tìm thấy đề xuất điều chỉnh lịch.",
             next_action="reload",
         )
+    if row.status == "pending" and row.pending_notification_state in ("pending", "not_sent"):
+        row.pending_notification_state = "sent"
+        row.pending_notification_sent_at = calc_now
+        await db.flush()
+        await db.commit()
     return await _proposal_row_to_schema(db, owner, row, calc_now)
 
 
-@command_service.durable_command("rebuild_proposal", ProposalData, resource_arg="proposal_id")
 async def rebuild_proposal(
     db: AsyncSession,
     *,
@@ -1754,9 +3790,24 @@ async def rebuild_proposal(
     payload: RebuildProposalRequest,
     now: datetime | None = None,
 ) -> ProposalData:
-    """Dòng 36 trên API Sheet: POST /api/v1/proposals/{proposal_id}/rebuild."""
+    """Dòng 36 trên API Sheet: POST /api/v1/proposals/{proposal_id}/rebuild (Risk 3: tách pha AI không giữ khóa DB)."""
     calc_now = _current_utc_now(now)
     owner = draft_service.resolve_user_uuid(user_id)
+    deferred = bool(db.info.get("defer_command_commit"))
+    digest = ""
+
+    # Phase A (Lock-free replay & read/plan computation)
+    if not deferred:
+        digest = command_service.command_hash(
+            "rebuild_proposal",
+            str(proposal_id),
+            payload.model_dump(mode="json", exclude_unset=True),
+        )
+        saved = await command_service.replay(db, user_id, idempotency_key, digest)
+        if saved is not None:
+            await db.rollback()
+            return ProposalData.model_validate(saved)
+
     prop_uuid = _uuid_or_404(proposal_id, "Không tìm thấy đề xuất điều chỉnh lịch.")
 
     row = await db.scalar(
@@ -1789,24 +3840,33 @@ async def rebuild_proposal(
             next_action="reload_and_review",
         )
 
-    _, _, cont_req, _, _, _, old_req_text = _unpack_proposal_meta(row.proposed_changes)
+    # Tách toàn bộ dữ liệu thuần Python/Pydantic trước khi gọi rollback (không giữ ORM object qua rollback)
+    row_trigger_reason = row.trigger_reason
+    row_target_task_id = str(row.target_task_id) if row.target_task_id else None
+    row_allowed_task_ids = list(row.allowed_task_ids or [])
+    row_base_schedule_revision = row.base_schedule_revision
+    row_source_revisions_dict = dict(row.source_revisions or {})
+    row_proposed_changes_dict = dict(row.proposed_changes or {})
+
+    _, _, cont_req, _, _, _, old_req_text = _unpack_proposal_meta(row_proposed_changes_dict)
     effective_req_text = (
         payload.request_text if payload.request_text is not None else old_req_text
     )
 
     current_sched_rev = await _get_current_schedule_revision(db, owner)
-    old_revs = SourceRevisions.model_validate(row.source_revisions)
+    old_revs = SourceRevisions.model_validate(row_source_revisions_dict)
     db_revs, present = await _compute_db_source_revisions(
         db,
         owner,
-        target_task_id=str(row.target_task_id) if row.target_task_id else None,
-        allowed_task_ids=row.allowed_task_ids,
+        target_task_id=row_target_task_id,
+        allowed_task_ids=row_allowed_task_ids,
         fallback_revisions=old_revs,
     )
     base_sched_rev = (
-        current_sched_rev if present["schedule"] else row.base_schedule_revision
+        current_sched_rev if present["schedule"] else row_base_schedule_revision
     )
 
+    new_target_uuid: UUID | None = None
     if cont_req is not None:
         # Cập nhật expected_run_revision theo revision hiện tại của source_run khi rebuild
         s_run = await db.scalar(
@@ -1833,7 +3893,7 @@ async def rebuild_proposal(
             db,
             owner,
             cont_req=updated_cont_req,
-            allowed_task_ids=row.allowed_task_ids,
+            allowed_task_ids=row_allowed_task_ids,
             calc_now=calc_now,
         )
         packed_changes = _pack_proposed_changes(
@@ -1845,10 +3905,14 @@ async def rebuild_proposal(
             approval_envelope=approval_envelope,
             request_text=effective_req_text,
         )
-        row.target_task_id = target_uuid
+        new_target_uuid = target_uuid
+        gen_tier: GenerationTier = "python_fallback"
+        if not deferred:
+            await db.rollback()
     else:
+        override_prefs, override_avail = _unpack_settings_overrides(row_proposed_changes_dict)
         (
-            target_uuid,
+            _target_uuid,
             affected_tasks,
             changes,
             feasibility,
@@ -1856,11 +3920,13 @@ async def rebuild_proposal(
         ) = await _build_normal_proposal_plan(
             db,
             owner,
-            trigger_reason=row.trigger_reason,
-            target_task_id=str(row.target_task_id) if row.target_task_id else None,
-            allowed_task_ids=row.allowed_task_ids,
+            trigger_reason=row_trigger_reason,
+            target_task_id=row_target_task_id,
+            allowed_task_ids=row_allowed_task_ids,
             request_text=effective_req_text,
             calc_now=calc_now,
+            override_preferences=override_prefs,
+            override_availability=override_avail,
         )
         packed_changes = _pack_proposed_changes(
             changes,
@@ -1870,19 +3936,155 @@ async def rebuild_proposal(
             start_window=None,
             approval_envelope=None,
             request_text=effective_req_text,
+            override_preferences=override_prefs,
+            override_availability=override_avail,
+        )
+        if not deferred:
+            # Giải phóng toàn bộ transaction/lock DB trước khi gọi AI empathy
+            await db.rollback()
+        explanation, gen_tier = await _generate_uf6_explanation_and_tier(
+            row_trigger_reason,
+            feasibility,
         )
 
-    row.affected_task_ids = affected_tasks
-    row.base_schedule_revision = base_sched_rev
-    row.source_revisions = db_revs.model_dump(mode="json")
-    row.proposal_revision += 1
-    row.updated_at = calc_now
-    row.proposed_changes = packed_changes
-    row.feasibility = feasibility.model_dump(mode="json", by_alias=True)
-    row.explanation = explanation
-    await db.flush()
+    if deferred:
+        if cont_req is not None and new_target_uuid is not None:
+            row.target_task_id = new_target_uuid
+        row.affected_task_ids = affected_tasks
+        row.base_schedule_revision = base_sched_rev
+        row.source_revisions = db_revs.model_dump(mode="json")
+        row.proposal_revision += 1
+        row.updated_at = calc_now
+        row.proposed_changes = packed_changes
+        row.feasibility = feasibility.model_dump(mode="json", by_alias=True)
+        row.explanation = explanation
+        row.generation_tier = gen_tier
+        await db.flush()
+        return await _proposal_row_to_schema(db, owner, row, calc_now)
 
-    return await _proposal_row_to_schema(db, owner, row, calc_now)
+    # Phase B (Short locked atomic write)
+    db.info["defer_command_commit"] = True
+    try:
+        await command_service.lock_owner(db, user_id)
+        saved = await command_service.replay(db, user_id, idempotency_key, digest)
+        if saved is not None:
+            await db.rollback()
+            return ProposalData.model_validate(saved)
+
+        fresh_row = await db.scalar(
+            select(RescheduleProposal)
+            .where(
+                RescheduleProposal.id == prop_uuid,
+                RescheduleProposal.user_id == owner,
+            )
+            .execution_options(populate_existing=True)
+        )
+        if fresh_row is None:
+            raise AppError(
+                status_code=404,
+                code="RESOURCE_NOT_FOUND",
+                message="Không tìm thấy đề xuất điều chỉnh lịch.",
+                next_action="reload",
+            )
+        if fresh_row.status != "pending":
+            raise AppError(
+                status_code=409,
+                code="PROPOSAL_CHANGED",
+                message="Chỉ có thể tính toán lại đề xuất đang ở trạng thái chờ duyệt.",
+                current_revisions={"proposal_revision": fresh_row.proposal_revision},
+                next_action="reload_and_review",
+            )
+        if fresh_row.proposal_revision != payload.expected_proposal_revision:
+            raise AppError(
+                status_code=409,
+                code="REVISION_CONFLICT",
+                message="Phiên bản đề xuất đã thay đổi.",
+                current_revisions={"proposal_revision": fresh_row.proposal_revision},
+                next_action="reload_and_review",
+            )
+
+        current_sched_rev_2 = await _get_current_schedule_revision(db, owner)
+        db_revs_2, present_2 = await _compute_db_source_revisions(
+            db,
+            owner,
+            target_task_id=str(fresh_row.target_task_id) if fresh_row.target_task_id else None,
+            allowed_task_ids=list(fresh_row.allowed_task_ids or []),
+            fallback_revisions=old_revs,
+        )
+        if (
+            db_revs_2 != db_revs
+            or present_2 != present
+            or current_sched_rev_2 != current_sched_rev
+        ):
+            raise AppError(
+                status_code=409,
+                code="REVISION_CONFLICT",
+                message="Dữ liệu nguồn đã thay đổi trong lúc tính toán lại đề xuất.",
+                current_revisions=db_revs_2.model_dump(),
+                next_action="reload_and_review",
+            )
+
+        if cont_req is not None and new_target_uuid is not None:
+            fresh_row.target_task_id = new_target_uuid
+        fresh_row.affected_task_ids = affected_tasks
+        fresh_row.base_schedule_revision = base_sched_rev
+        fresh_row.source_revisions = db_revs_2.model_dump(mode="json")
+        fresh_row.proposal_revision += 1
+        fresh_row.updated_at = calc_now
+        fresh_row.proposed_changes = packed_changes
+        fresh_row.feasibility = feasibility.model_dump(mode="json", by_alias=True)
+        fresh_row.explanation = explanation
+        fresh_row.generation_tier = gen_tier
+        await db.flush()
+
+        result = await _proposal_row_to_schema(db, owner, fresh_row, calc_now)
+        command_service.record(
+            db, user_id, idempotency_key, digest, "rebuild_proposal", result
+        )
+        await db.commit()
+        return result
+    except (IntegrityError, AppError):
+        await db.rollback()
+        saved = await command_service.replay(db, user_id, idempotency_key, digest)
+        if saved is not None:
+            return ProposalData.model_validate(saved)
+        raise
+    except Exception:
+        await db.rollback()
+        raise
+    finally:
+        db.info.pop("defer_command_commit", None)
+        db.info.pop("command_result_meta", None)
+
+
+async def _next_session_google_event_id(
+    db: AsyncSession,
+    *,
+    connection_id: UUID,
+    calendar_id: str,
+    session_id: UUID,
+) -> str:
+    """Sinh google_event_id hợp chuẩn base32hex ([a-v0-9]) không trùng link lịch sử (UF6-BUG-03 / RG06)."""
+    base_id = f"session{session_id.hex}"
+    used_ids = set(
+        (
+            await db.scalars(
+                select(CalendarEventLink.google_event_id).where(
+                    CalendarEventLink.connection_id == connection_id,
+                    CalendarEventLink.google_calendar_id == calendar_id,
+                    CalendarEventLink.google_event_id.like(f"{base_id}%"),
+                )
+            )
+        ).all()
+    )
+    if base_id not in used_ids:
+        return base_id
+    gen = 2
+    while True:
+        candidate = f"{base_id}v{gen}"
+        if candidate not in used_ids:
+            return candidate
+        gen += 1
 
 
 async def _sync_calendar_on_approve(
@@ -1908,10 +4110,32 @@ async def _sync_calendar_on_approve(
     if conn is None or not conn.write_calendar_id:
         return "not_integrated", False
 
+    latest_cfg = await db.scalar(
+        select(CalendarPreview)
+        .where(
+            CalendarPreview.user_id == owner,
+            CalendarPreview.connection_id == conn.id,
+            CalendarPreview.kind == "configuration",
+            CalendarPreview.status == "confirmed",
+        )
+        .order_by(CalendarPreview.updated_at.desc(), CalendarPreview.created_at.desc())
+        .limit(1)
+    )
+    existing_event_action = (
+        (latest_cfg.payload or {}).get("existing_event_action")
+        if latest_cfg is not None
+        else None
+    )
+
     job_enqueued = False
 
     for sess in added_sessions:
-        event_id = f"session{sess.id.hex}"
+        event_id = await _next_session_google_event_id(
+            db,
+            connection_id=conn.id,
+            calendar_id=conn.write_calendar_id,
+            session_id=sess.id,
+        )
         link = CalendarEventLink(
             id=uuid4(),
             user_id=owner,
@@ -1968,19 +4192,63 @@ async def _sync_calendar_on_approve(
         job_enqueued = True
 
     for sess in moved_sessions:
-        existing_link = await db.scalar(
-            select(CalendarEventLink).where(
-                CalendarEventLink.user_id == owner,
-                CalendarEventLink.session_id == sess.id,
-                CalendarEventLink.is_current.is_(True),
-            )
+        all_current_links = list(
+            (
+                await db.scalars(
+                    select(CalendarEventLink).where(
+                        CalendarEventLink.user_id == owner,
+                        CalendarEventLink.session_id == sess.id,
+                        CalendarEventLink.is_current.is_(True),
+                    )
+                )
+            ).all()
         )
-        event_id = (
-            existing_link.google_event_id
-            if existing_link and existing_link.google_event_id
-            else f"session{sess.id.hex}"
-        )
+        existing_link: CalendarEventLink | None = None
+        for lk in all_current_links:
+            if (
+                lk.connection_id == conn.id
+                and lk.google_calendar_id == conn.write_calendar_id
+            ):
+                existing_link = lk
+            else:
+                # Đóng link cũ trên connection/calendar cũ trước khi tạo link mới trên write_calendar_id hiện hành
+                lk.is_current = False
+                lk.desired_schedule_revision = version
+                if existing_event_action == "keep" and lk.connection_id == conn.id:
+                    # Tôn trọng cấu hình existing_event_action="keep": giữ nguyên sự kiện cũ trên Google Calendar
+                    if lk.sync_state == "synced":
+                        lk.sync_state = "synced"
+                else:
+                    lk.sync_state = "pending"
+                    db.add(
+                        CalendarSyncJob(
+                            id=uuid4(),
+                            user_id=owner,
+                            connection_id=lk.connection_id,
+                            event_link_id=lk.id,
+                            target_kind="session_event",
+                            target_ref=str(sess.id),
+                            operation="delete",
+                            target_schedule_revision=version,
+                            expected_google_etag=lk.google_etag,
+                            payload_snapshot={
+                                "id": lk.google_event_id,
+                                "google_calendar_id": lk.google_calendar_id,
+                            },
+                            idempotency_key=f"sync_session:{sess.id}:v{version}:delete:{lk.id.hex[:8]}",
+                            job_state="queued",
+                            attempt_count=0,
+                        )
+                    )
+                    job_enqueued = True
+
         if existing_link is None:
+            event_id = await _next_session_google_event_id(
+                db,
+                connection_id=conn.id,
+                calendar_id=conn.write_calendar_id,
+                session_id=sess.id,
+            )
             existing_link = CalendarEventLink(
                 id=uuid4(),
                 user_id=owner,
@@ -1998,6 +4266,16 @@ async def _sync_calendar_on_approve(
             await db.flush()
             op = "create"
         else:
+            event_id = (
+                existing_link.google_event_id
+                if existing_link.google_event_id
+                else await _next_session_google_event_id(
+                    db,
+                    connection_id=conn.id,
+                    calendar_id=conn.write_calendar_id,
+                    session_id=sess.id,
+                )
+            )
             existing_link.desired_schedule_revision = version
             existing_link.sync_state = "pending"
             op = "update"
@@ -2032,7 +4310,7 @@ async def _sync_calendar_on_approve(
                 target_ref=str(sess.id),
                 operation=op,
                 target_schedule_revision=version,
-                expected_google_etag=existing_link.google_etag,
+                expected_google_etag=existing_link.google_etag if op == "update" else None,
                 payload_snapshot=payload_snapshot,
                 idempotency_key=f"sync_session:{sess.id}:v{version}:{op}",
                 job_state="queued",
@@ -2042,29 +4320,44 @@ async def _sync_calendar_on_approve(
         job_enqueued = True
 
     for sess in cancelled_sessions:
-        existing_link = await db.scalar(
-            select(CalendarEventLink).where(
-                CalendarEventLink.user_id == owner,
-                CalendarEventLink.session_id == sess.id,
-                CalendarEventLink.is_current.is_(True),
-            )
+        current_links = list(
+            (
+                await db.scalars(
+                    select(CalendarEventLink).where(
+                        CalendarEventLink.user_id == owner,
+                        CalendarEventLink.session_id == sess.id,
+                        CalendarEventLink.is_current.is_(True),
+                    )
+                )
+            ).all()
         )
-        if existing_link is not None:
+        for existing_link in current_links:
             existing_link.desired_schedule_revision = version
             existing_link.sync_state = "pending"
+            idem_suffix = (
+                ""
+                if (
+                    existing_link.connection_id == conn.id
+                    and existing_link.google_calendar_id == conn.write_calendar_id
+                )
+                else f":{existing_link.id.hex[:8]}"
+            )
             db.add(
                 CalendarSyncJob(
                     id=uuid4(),
                     user_id=owner,
-                    connection_id=conn.id,
+                    connection_id=existing_link.connection_id,
                     event_link_id=existing_link.id,
                     target_kind="session_event",
                     target_ref=str(sess.id),
                     operation="delete",
                     target_schedule_revision=version,
                     expected_google_etag=existing_link.google_etag,
-                    payload_snapshot={"id": existing_link.google_event_id},
-                    idempotency_key=f"sync_session:{sess.id}:v{version}:delete",
+                    payload_snapshot={
+                        "id": existing_link.google_event_id,
+                        "google_calendar_id": existing_link.google_calendar_id,
+                    },
+                    idempotency_key=f"sync_session:{sess.id}:v{version}:delete{idem_suffix}",
                     job_state="queued",
                     attempt_count=0,
                 )
@@ -2096,7 +4389,14 @@ def _session_row_to_schema(sess: SessionRow, link_id: str | None = None) -> Sess
         ),
         calendar_event_link_id=link_id,
         start_state=cast(
-            Literal["pending", "started", "missed_pending_replan", "superseded"],
+            Literal[
+                "waiting",
+                "not_started",
+                "started",
+                "pending",
+                "missed_pending_replan",
+                "superseded",
+            ],
             sess.start_state,
         ),
         start_decision_due_at=_ensure_aware(due_at),
@@ -2214,7 +4514,7 @@ async def approve_proposal(
             next_action="finish_active_run",
         )
 
-    changes, _, cont_req, _, start_win, app_env, _ = _unpack_proposal_meta(
+    changes, _, cont_req, gap_ex, start_win, app_env, _ = _unpack_proposal_meta(
         row.proposed_changes
     )
 
@@ -2255,6 +4555,29 @@ async def approve_proposal(
                     },
                     next_action="rebuild_and_review",
                 )
+        # Re-validate toàn chuỗi Continuation trên dữ liệu DB live tại `approve_now` (UF6-BUG-01 / RG02)
+        chain_ok = await _validate_continuation_chain_at_time(
+            db,
+            owner,
+            proposal=row,
+            changes=changes,
+            gap_exceptions=gap_ex,
+            start_win=start_win,
+            app_env=app_env,
+            ref_now=approve_now,
+            start_continuation=bool(payload.start_continuation),
+        )
+        if not chain_ok:
+            raise AppError(
+                status_code=409,
+                code="PREVIEW_STALE",
+                message="Lịch thực tế hiện tại không còn đủ khoảng nghỉ tối thiểu 15 phút hoặc bị vướng lịch cố định. Vui lòng tính toán lại đề xuất.",
+                current_revisions={
+                    "schedule": row.base_schedule_revision,
+                    "proposal_revision": row.proposal_revision,
+                },
+                next_action="rebuild_and_review",
+            )
     else:
         # Với đề xuất thường: kiểm tra không có phiên nào trong proposed_changes đã trôi qua approve_now
         for mv in changes.sessions_to_move:
@@ -2335,6 +4658,11 @@ async def approve_proposal(
     )
 
     # 1. Áp dụng steps_to_add (nếu có)
+    eff_buf = (
+        float(pref_row.buffer_multiplier)
+        if pref_row is not None and pref_row.buffer_multiplier
+        else 1.2
+    )
     for st_item in changes.steps_to_add:
         st_uuid = UUID(st_item.step_id)
         existing_st = await db.scalar(
@@ -2351,11 +4679,27 @@ async def approve_proposal(
                     expected_output=st_item.title,
                     estimated_base_seconds=st_item.estimated_base_seconds,
                     remaining_base_seconds=st_item.estimated_base_seconds,
-                    buffer_multiplier=1.2,
+                    buffer_multiplier=eff_buf,
                     estimate_source="reschedule",
                     status="pending",
                 )
             )
+    expanded_task_uuids: set[UUID] = set()
+    if row.trigger_reason == "expand_next_horizon":
+        if row.target_task_id is not None:
+            expanded_task_uuids.add(row.target_task_id)
+        for st_item in changes.steps_to_add:
+            try:
+                expanded_task_uuids.add(UUID(st_item.task_id))
+            except ValueError:
+                pass
+        if changes.steps_to_add:
+            for exp_tid in expanded_task_uuids:
+                exp_task = await db.scalar(
+                    select(TaskRow).where(TaskRow.id == exp_tid, TaskRow.user_id == owner)
+                )
+                if exp_task is not None:
+                    exp_task.unexpanded_scope = None
     await db.flush()
 
     # 2. Áp dụng sessions_to_cancel
@@ -2376,7 +4720,7 @@ async def approve_proposal(
                     select(Reminder).where(
                         Reminder.user_id == owner,
                         Reminder.session_id == s_row.id,
-                        Reminder.delivery_state == "scheduled",
+                        Reminder.delivery_state.in_(("scheduled", "snoozed")),
                     )
                 )
             ).all()
@@ -2395,19 +4739,21 @@ async def approve_proposal(
         if payload.start_continuation and approve_now > add_start:
             add_start = approve_now
         add_end = add_start + timedelta(seconds=after.duration_seconds)
-        actual_cont_end = add_end
 
         is_cont_start = bool(
             payload.start_continuation
             and a_item.action == "create_continuation_session"
         )
+        if a_item.action == "create_continuation_session":
+            actual_cont_end = add_end
         new_sess = SessionRow(
             id=uuid4(),
             user_id=owner,
             step_id=UUID(after.step_id),
             scheduled_start=add_start,
             scheduled_end=add_end,
-            micro_task_text=after.micro_task_text,
+            micro_task_text=after.micro_task_text
+            or "Mở tài liệu và bắt đầu 2 phút đầu tiên.",
             micro_task_seconds=after.micro_task_seconds,
             work_seconds=after.work_seconds,
             rest_seconds=after.rest_seconds,
@@ -2417,7 +4763,7 @@ async def approve_proposal(
             duration_seconds=after.duration_seconds,
             schedule_revision=next_version,
             status="in_progress" if is_cont_start else "scheduled",
-            start_state="started" if is_cont_start else "pending",
+            start_state="started" if is_cont_start else "waiting",
             start_decision_due_at=add_start + timedelta(seconds=START_GRACE_SECONDS),
         )
         db.add(new_sess)
@@ -2426,18 +4772,39 @@ async def approve_proposal(
             continuation_session_row = new_sess
         else:
             for offset in reminder_offsets:
+                fire_at = add_start - timedelta(seconds=offset)
+                if fire_at < approve_now:
+                    continue
                 db.add(
                     Reminder(
                         user_id=owner,
                         session_id=new_sess.id,
                         schedule_revision=next_version,
                         kind="pre_session",
-                        fire_at=add_start - timedelta(seconds=offset),
+                        fire_at=fire_at,
                         dedupe_key=f"session:{new_sess.id}:version:{next_version}:reminder:{offset}",
                         delivery_state="scheduled",
                     )
                 )
     await db.flush()
+
+    applied_ids: dict[str, str] = {}
+    for a_item, new_sess in zip(changes.sessions_to_add, added_rows, strict=False):
+        ref = (
+            getattr(a_item, "temp_session_id", None)
+            or getattr(a_item, "session_ref", None)
+            or getattr(a_item, "id", None)
+        )
+        if ref:
+            applied_ids[str(ref)] = str(new_sess.id)
+    if applied_ids:
+        changes_dict = (
+            dict(row.proposed_changes)
+            if isinstance(row.proposed_changes, dict)
+            else {}
+        )
+        changes_dict["applied_session_ids"] = applied_ids
+        row.proposed_changes = changes_dict
 
     # 4. Áp dụng sessions_to_move
     moved_rows: list[SessionRow] = []
@@ -2446,7 +4813,8 @@ async def approve_proposal(
         if app_env is not None
         else STANDARD_INTER_SESSION_GAP_SECONDS
     )
-    prev_shifted_end = actual_cont_end
+    is_continuation_shift = app_env is not None and actual_cont_end is not None
+    prev_shifted_end = actual_cont_end if is_continuation_shift else None
 
     for idx, m_item in enumerate(changes.sessions_to_move):
         m_uuid = _uuid_or_404(m_item.session_id)
@@ -2463,7 +4831,7 @@ async def approve_proposal(
         new_end = _ensure_aware(target_end)
 
         # Nếu bấm duyệt trễ hợp lệ trong start_window làm actual_cont_end nhích lên, đẩy nhẹ phiên kế tiếp
-        if prev_shifted_end is not None:
+        if is_continuation_shift and prev_shifted_end is not None:
             req_gap = (
                 min_break_after_cont if idx == 0 else STANDARD_INTER_SESSION_GAP_SECONDS
             )
@@ -2479,7 +4847,8 @@ async def approve_proposal(
             s_row.start_decision_due_at = new_start + timedelta(seconds=START_GRACE_SECONDS)
         s_row.updated_at = approve_now
         moved_rows.append(s_row)
-        prev_shifted_end = new_end
+        if is_continuation_shift:
+            prev_shifted_end = new_end
 
         # Hủy reminder cũ và tạo reminder mới cho phiên bản lịch mới
         old_rems = (
@@ -2487,7 +4856,7 @@ async def approve_proposal(
                 select(Reminder).where(
                     Reminder.user_id == owner,
                     Reminder.session_id == s_row.id,
-                    Reminder.delivery_state == "scheduled",
+                    Reminder.delivery_state.in_(("scheduled", "snoozed")),
                 )
             )
         ).all()
@@ -2496,18 +4865,40 @@ async def approve_proposal(
             rem.updated_at = approve_now
 
         for offset in reminder_offsets:
+            fire_at = new_start - timedelta(seconds=offset)
+            if fire_at < approve_now:
+                continue
             db.add(
                 Reminder(
                     user_id=owner,
                     session_id=s_row.id,
                     schedule_revision=next_version,
                     kind="pre_session",
-                    fire_at=new_start - timedelta(seconds=offset),
+                    fire_at=fire_at,
                     dedupe_key=f"session:{s_row.id}:version:{next_version}:reminder:{offset}",
                     delivery_state="scheduled",
                 )
             )
     await db.flush()
+
+    # 4b. Cập nhật decomposition_state cho expand_next_horizon SAU khi đã flush toàn bộ sessions mới (UF6-BUG-08)
+    if row.trigger_reason == "expand_next_horizon" and expanded_task_uuids:
+        for exp_tid in expanded_task_uuids:
+            exp_task = await db.scalar(
+                select(TaskRow).where(TaskRow.id == exp_tid, TaskRow.user_id == owner)
+            )
+            if exp_task is not None:
+                remaining_pending = await _get_unscheduled_pending_steps(db, owner, exp_tid)
+                has_unexpanded = bool(
+                    exp_task.unexpanded_scope and exp_task.unexpanded_scope.strip()
+                )
+                if not remaining_pending and not has_unexpanded:
+                    exp_task.decomposition_state = "complete"
+                else:
+                    exp_task.decomposition_state = "partial"
+                exp_task.revision += 1
+                exp_task.updated_at = approve_now
+        await db.flush()
 
     # 5. Đồng bộ Google Calendar Outbox trong cùng transaction
     cal_summary, job_enqueued = await _sync_calendar_on_approve(
@@ -2799,22 +5190,7 @@ async def reject_proposal(
         pref_row.pending_proposal_id = None
         pref_row.updated_at = reject_now
 
-    setting_reqs = (
-        await db.scalars(
-            select(SettingChangeRequest).where(
-                SettingChangeRequest.user_id == owner,
-                SettingChangeRequest.pending_proposal_id == row.id,
-                SettingChangeRequest.application_state.in_(
-                    ("pending_review", "pending_proposal")
-                ),
-            )
-        )
-    ).all()
-    for s_req in setting_reqs:
-        s_req.application_state = "cancelled"
-        s_req.requested_revision = None
-        s_req.requested_availability_revision = None
-        s_req.updated_at = reject_now
+    await _cancel_linked_setting_requests(db, owner, row.id, reject_now)
 
     await db.flush()
 

@@ -1,7 +1,8 @@
 # Schema/DTO cho cài đặt trợ lý (UserPreference - Dòng 39), tái xuất Availability (Dòng 40), ChangeRequests (Dòng 41-42) và Suggestions (Dòng 43-44)
+import math
 from typing import Annotated, Any, Literal
 
-from pydantic import Field, model_validator
+from pydantic import Field, field_validator, model_validator
 
 from app.schemas.availability import (
     Availability,
@@ -25,22 +26,54 @@ SuggestionApplicationState = Literal[
 AnnoyanceFeedback = Literal["too_frequent", "not_helpful", "interrupted_me"]
 
 
+def validate_strict_descending_offsets(offsets: list[int] | None) -> list[int] | None:
+    if offsets is None:
+        return None
+    if not (1 <= len(offsets) <= 3):
+        raise ValueError("Mốc nhắc phải từ 1 đến 3 giá trị")
+    for x in offsets:
+        if not isinstance(x, int) or isinstance(x, bool) or x < 0:
+            raise ValueError("Mốc nhắc phải là số nguyên >= 0")
+    for i in range(len(offsets) - 1):
+        if offsets[i] <= offsets[i + 1]:
+            raise ValueError("Các mốc nhắc phải giảm dần nghiêm ngặt (ví dụ: [900, 600, 300])")
+    return offsets
+
+
 class PreferenceChanges(ApiModel):
     """Các thay đổi cài đặt đang chờ duyệt (nếu ảnh hưởng lịch tương lai)."""
 
-    work_interval_seconds: int | None = Field(default=None, ge=0)
+    work_interval_seconds: int | None = Field(default=None, gt=0)
     rest_interval_seconds: int | None = Field(default=None, ge=0)
     reminder_offsets: ReminderOffsets | None = None
-    buffer_multiplier: float | None = Field(default=None, gt=0)
+    buffer_multiplier: float | None = Field(default=None, ge=1.0, le=2.0)
     reminder_style: str | None = None
 
-    @model_validator(mode="after")
-    def distinct_offsets(self):
-        if self.reminder_offsets is not None and len(set(self.reminder_offsets)) != len(
-            self.reminder_offsets
-        ):
-            raise ValueError("Các mốc nhắc không được trùng nhau")
-        return self
+    @field_validator("buffer_multiplier", mode="before")
+    @classmethod
+    def validate_buffer_not_bool(cls, v: Any) -> Any:
+        if isinstance(v, bool):
+            raise ValueError("buffer_multiplier không được là boolean")
+        return v
+
+    @field_validator("work_interval_seconds", "rest_interval_seconds", mode="before")
+    @classmethod
+    def validate_intervals_not_bool(cls, v: Any) -> Any:
+        if isinstance(v, bool):
+            raise ValueError("interval seconds không được là boolean")
+        return v
+
+    @field_validator("buffer_multiplier")
+    @classmethod
+    def validate_buffer_finite(cls, v: float | None) -> float | None:
+        if v is not None and not math.isfinite(v):
+            raise ValueError("buffer_multiplier phải là số hữu hạn trong khoảng [1.0, 2.0]")
+        return v
+
+    @field_validator("reminder_offsets")
+    @classmethod
+    def validate_offsets(cls, v: ReminderOffsets | None) -> ReminderOffsets | None:
+        return validate_strict_descending_offsets(v)
 
 
 class UserPreference(ApiModel):
@@ -55,7 +88,7 @@ class UserPreference(ApiModel):
     reminder_offsets: ReminderOffsets
     buffer_multiplier: float = Field(gt=0)
     reminder_style: str = Field(min_length=1)
-    requested_changes: PreferenceChanges | None = None
+    requested_changes: dict[str, Any] | None = None
     pending_proposal_id: str | None = None
 
 
@@ -151,6 +184,17 @@ class SettingsChangeRequest(ApiModel):
             raise ValueError("Target chỉ áp dụng khi chỉnh giờ đã khai báo")
         if self.changes.preferences is not None and self.expected_preferences_revision is None:
             raise ValueError("Đổi cài đặt cần expected_preferences_revision; lần đầu dùng 0")
+        if (
+            self.target_draft_id is not None or self.target_task_id is not None
+        ) and self.changes.preferences is not None:
+            touches_global_sched = any(
+                getattr(self.changes.preferences, k) is not None
+                for k in ("work_interval_seconds", "rest_interval_seconds", "buffer_multiplier")
+            )
+            if touches_global_sched:
+                raise ValueError(
+                    "Không thể đổi cấu hình làm/nghỉ/buffer toàn cục kèm target_task_id; hãy tách thành yêu cầu toàn cục và yêu cầu sửa giờ riêng của công việc."
+                )
         return self
 
 
@@ -162,7 +206,7 @@ class SettingsChangeResult(ApiModel):
     effective_revision: int
     requested_availability_revision: int | None
     effective_availability_revision: int | None
-    requested_changes: SettingsChanges
+    requested_changes: SettingsChanges | dict[str, Any]
     pending_proposal_id: str | None
     target_draft_id: str | None = None
     target_task_id: str | None = None

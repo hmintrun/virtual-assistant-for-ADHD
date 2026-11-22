@@ -989,7 +989,8 @@ async def test_qa_bug3_batch_job1_conflict_and_job2_auth_error_then_job3_ok(monk
             l1 = await db.get(CalendarEventLink, link1_id)
             assert r1 is not None and r1.job_state == "conflict" and r1.lease_expires_at is None
             assert l1 is not None and l1.sync_state == "conflict"
-            assert r2 is not None and r2.job_state == "queued" and r2.attempt_count == 1
+            assert r2 is not None and r2.job_state == "failed" and r2.attempt_count == 5
+            assert r2.last_error_code == "AUTH_EXPIRED" and r2.lease_expires_at is None
             assert c2 is not None and c2.connection_state == "needs_reconnect"
             assert r3 is not None and r3.job_state == "completed"
     finally:
@@ -1230,3 +1231,168 @@ async def test_qa_bug5_url_encoding_special_chars_and_spaces(monkeypatch):
     assert seen[2][1].endswith(f"/calendars/{encoded_cal}/events")
     assert seen[3][1].endswith(f"/calendars/{encoded_cal}/events/{encoded_evt}")
     assert seen[4][1].endswith(f"/calendars/{encoded_cal}/events/{encoded_evt}")
+
+
+# ---------------------------------------------------------------------------
+# Phase 3: External Google Calendar Link Reconciliation (A22.3 / K19 / K20)
+# ---------------------------------------------------------------------------
+async def test_qa_phase3_external_deletion_reconciliation_k19(api):
+    """K19: Sự kiện bị xóa trên Google Calendar (404/None hoặc status='cancelled') -> link.sync_state='deleted_externally', is_current=False, giữ nguyên Session."""
+    from app.services.google_calendar_client import get_calendar_client
+
+    client, factory, _ = api
+    fake_client = get_calendar_client()
+    assert isinstance(fake_client, FakeCalendarClient)
+
+    async with factory() as db:
+        await ensure_dev_seed_in_db(db)
+        uid = resolve_user_uuid("user_a")
+        conn = _make_connection(
+            user_id=uid,
+            connection_state="connected",
+            write_calendar_id="primary",
+        )
+        db.add(conn)
+        _, _, sess1 = await _seed_task_step_session(db, uid)
+        _, _, sess2 = await _seed_task_step_session(db, uid)
+
+        # Link 1: event completely missing from Google Calendar (returns None)
+        link1 = CalendarEventLink(
+            id=uuid4(),
+            user_id=uid,
+            session_id=sess1.id,
+            connection_id=conn.id,
+            google_calendar_id="primary",
+            google_event_id="evt_missing_1",
+            google_etag='"etag_1"',
+            desired_schedule_revision=1,
+            synced_schedule_revision=1,
+            sync_state="synced",
+            is_current=True,
+        )
+        # Link 2: event exists on Google Calendar with status="cancelled"
+        link2 = CalendarEventLink(
+            id=uuid4(),
+            user_id=uid,
+            session_id=sess2.id,
+            connection_id=conn.id,
+            google_calendar_id="primary",
+            google_event_id="evt_cancelled_2",
+            google_etag='"etag_2"',
+            desired_schedule_revision=1,
+            synced_schedule_revision=1,
+            sync_state="synced",
+            is_current=True,
+        )
+        fake_client.mock_events["primary"] = [
+            {
+                "id": "evt_cancelled_2",
+                "summary": "ProPlan VA Focus Session",
+                "status": "cancelled",
+                "etag": '"etag_2"',
+            }
+        ]
+        db.add_all([link1, link2])
+        await db.commit()
+        conn_id = str(conn.id)
+        link1_id = link1.id
+        link2_id = link2.id
+        sess1_id = sess1.id
+        sess2_id = sess2.id
+
+    resp = await client.post(
+        f"/api/v1/calendar/connections/{conn_id}/refresh",
+        json={},
+    )
+    assert resp.status_code == 200, resp.text
+    data = resp.json()["data"]
+    assert data["status"] == "refreshed"
+    assert data["links_checked"] == "2"
+    assert data["links_deleted_externally"] == "2"
+    assert data["links_diverged"] == "0"
+
+    async with factory() as db:
+        db_link1 = await db.get(CalendarEventLink, link1_id)
+        db_link2 = await db.get(CalendarEventLink, link2_id)
+        assert db_link1 is not None and db_link2 is not None
+        assert db_link1.sync_state == "deleted_externally"
+        assert db_link1.is_current is False
+        assert db_link2.sync_state == "deleted_externally"
+        assert db_link2.is_current is False
+
+        # Internal sessions must remain scheduled and intact
+        db_sess1 = await db.get(SessionModel, sess1_id)
+        db_sess2 = await db.get(SessionModel, sess2_id)
+        assert db_sess1 is not None and db_sess1.status == "scheduled"
+        assert db_sess2 is not None and db_sess2.status == "scheduled"
+
+
+async def test_qa_phase3_external_modification_reconciliation_k20(api):
+    """K20: Sự kiện bị sửa giờ bắt đầu/kết thúc hoặc etag trên Google Calendar -> link.sync_state='diverged', is_current=True."""
+    from app.services.google_calendar_client import get_calendar_client
+
+    client, factory, _ = api
+    fake_client = get_calendar_client()
+    assert isinstance(fake_client, FakeCalendarClient)
+
+    async with factory() as db:
+        await ensure_dev_seed_in_db(db)
+        uid = resolve_user_uuid("user_a")
+        conn = _make_connection(
+            user_id=uid,
+            connection_state="connected",
+            write_calendar_id="primary",
+        )
+        db.add(conn)
+        _, _, sess = await _seed_task_step_session(db, uid)
+        link = CalendarEventLink(
+            id=uuid4(),
+            user_id=uid,
+            session_id=sess.id,
+            connection_id=conn.id,
+            google_calendar_id="primary",
+            google_event_id="evt_drifted_1",
+            google_etag='"etag_orig"',
+            desired_schedule_revision=1,
+            synced_schedule_revision=1,
+            sync_state="synced",
+            is_current=True,
+        )
+        # External user shifted event 30 minutes later on Google Calendar
+        fake_client.mock_events["primary"] = [
+            {
+                "id": "evt_drifted_1",
+                "summary": "ProPlan VA Focus Session",
+                "start": {
+                    "dateTime": (sess.scheduled_start + timedelta(minutes=30)).isoformat()
+                },
+                "end": {
+                    "dateTime": (sess.scheduled_end + timedelta(minutes=30)).isoformat()
+                },
+                "transparency": "opaque",
+                "status": "confirmed",
+                "etag": '"etag_modified_externally"',
+            }
+        ]
+        db.add(link)
+        await db.commit()
+        conn_id = str(conn.id)
+        link_id = link.id
+
+    resp = await client.post(
+        f"/api/v1/calendar/connections/{conn_id}/refresh",
+        json={},
+    )
+    assert resp.status_code == 200, resp.text
+    data = resp.json()["data"]
+    assert data["status"] == "refreshed"
+    assert data["links_checked"] == "1"
+    assert data["links_deleted_externally"] == "0"
+    assert data["links_diverged"] == "1"
+
+    async with factory() as db:
+        db_link = await db.get(CalendarEventLink, link_id)
+        assert db_link is not None
+        assert db_link.sync_state == "diverged"
+        assert db_link.is_current is True
+

@@ -3,8 +3,13 @@
 from typing import Annotated
 
 from fastapi import APIRouter, Header, Path, Request
+from fastapi.responses import PlainTextResponse
+from sqlalchemy import text
 
 from app.api.deps import CurrentUserDep, DbSessionDep
+from app.core.config import settings
+from app.core.errors import AppError
+from app.core.metrics import PROMETHEUS_CONTENT_TYPE, collect_prometheus_metrics
 from app.schemas.calendar import CalendarContext, PlanningContextCreateRequest
 from app.schemas.common import (
     CapabilitiesData,
@@ -22,19 +27,57 @@ _DEFAULT_CAPABILITIES = CapabilitiesData(
     policy_revision="demo-policy",
     offline_start_supported=False,
     configured_parameters=ConfiguredParameters(
-        buffer_multiplier_range=None,
-        minimum_sample_count=None,
-        audio_max_seconds=None,
-        audio_max_bytes=None,
-        preview_ttl_seconds=None,
+        buffer_multiplier_range=[1.0, 2.0],
+        minimum_sample_count=7,
+        audio_max_seconds=120,
+        audio_max_bytes=int(settings.VOICE_MAX_AUDIO_BYTES),
+        preview_ttl_seconds=900,
         default_reminder_offset_seconds=900,
         default_reminder_offsets=[900, 600, 300],
         start_grace_seconds=900,
         min_inter_session_gap_seconds=900,
         checkin_timeout_seconds=300,
     ),
-    policy_state="requires_configuration_before_release",
+    policy_state="ready",
 )
+
+
+def _build_capabilities() -> CapabilitiesData:
+    """Tạo bản sao CapabilitiesData phản ánh cấu hình VOICE_MAX_AUDIO_BYTES hiện hành."""
+    return _DEFAULT_CAPABILITIES.model_copy(
+        update={
+            "configured_parameters": _DEFAULT_CAPABILITIES.configured_parameters.model_copy(
+                update={"audio_max_bytes": int(settings.VOICE_MAX_AUDIO_BYTES)}
+            )
+        }
+    )
+
+
+@router.get("/health", summary="Kiểm tra trạng thái hoạt động Backend & Database")
+async def health_check(db: DbSessionDep) -> dict[str, str]:
+    try:
+        await db.execute(text("SELECT 1"))
+    except Exception:
+        raise AppError(
+            status_code=503,
+            code="DATABASE_UNAVAILABLE",
+            message="Cơ sở dữ liệu hiện không sẵn sàng.",
+            retryable=True,
+            next_action="retry_later",
+        ) from None
+    return {"status": "ok", "database": "ok"}
+
+
+@router.get(
+    "/metrics",
+    summary="Xuất số liệu giám sát chuẩn Prometheus",
+    response_class=PlainTextResponse,
+)
+async def metrics_endpoint(db: DbSessionDep) -> PlainTextResponse:
+    return PlainTextResponse(
+        content=await collect_prometheus_metrics(db),
+        media_type=PROMETHEUS_CONTENT_TYPE,
+    )
 
 
 @router.get("/capabilities", response_model=SuccessEnvelope[CapabilitiesData])
@@ -42,7 +85,7 @@ async def get_capabilities(
     request: Request, current_user: CurrentUserDep
 ) -> SuccessEnvelope[CapabilitiesData]:
     return SuccessEnvelope(
-        data=_DEFAULT_CAPABILITIES,
+        data=_build_capabilities(),
         meta=build_response_meta(getattr(request.state, "request_id", None)),
     )
 
