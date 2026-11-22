@@ -8,11 +8,13 @@ import '../core/responsive_layout.dart';
 import '../core/theme.dart';
 import '../providers/task_provider.dart';
 import '../providers/focus_provider.dart';
+import '../providers/streak_provider.dart';
 import '../models/focus_session_model.dart';
 import '../services/melbel_sound_service.dart';
 import '../services/schedule_service.dart';
 import 'focus_screen.dart';
 import '../widgets/melbel_ui.dart';
+import '../widgets/streak_widgets.dart';
 import 'support_screens.dart';
 import 'task_entry_screen.dart';
 
@@ -58,11 +60,16 @@ class _CalendarScreenState extends State<CalendarScreen> {
         month,
         DateTime(month.year, month.month + 1),
       );
-      if (mounted && request == _request)
+      if (mounted && request == _request) {
         setState(() {
           _sessions = sessions;
           _cached = service.usedCache;
         });
+        final streak = StreakProvider.maybeOf(context, listen: false);
+        if (streak != null) {
+          unawaited(streak.ingestCompletedSessions(sessions));
+        }
+      }
     } catch (error) {
       if (mounted && request == _request)
         setState(() => _error = error.toString());
@@ -95,6 +102,9 @@ class _CalendarScreenState extends State<CalendarScreen> {
   Future<void> _openDay(DateTime day) async {
     if (_loading) return;
     _petMelbel();
+    final streak = StreakProvider.maybeOf(context, listen: false);
+    final streakStatus = streak?.dayStatus(day);
+    final streakMinutes = streak?.dayMinutes(day) ?? 0;
     final sessions = _onDate(day);
     final dayLabel = MaterialLocalizations.of(context).formatFullDate(day);
     final selected = await showModalBottomSheet<Object>(
@@ -114,6 +124,30 @@ class _CalendarScreenState extends State<CalendarScreen> {
                             child: Text(dayLabel,
                                 style: Theme.of(context).textTheme.titleLarge)),
                         const SizedBox(height: 12),
+                        if (streakStatus != null) ...[
+                          MelbelCard(
+                            tone: streakStatus == StreakDayKind.repair
+                                ? MelbelCardTone.amber
+                                : MelbelCardTone.sage,
+                            borderRadius: 18,
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 14,
+                              vertical: 10,
+                            ),
+                            child: Text(
+                              switch (streakStatus) {
+                                StreakDayKind.done =>
+                                  'Đã giữ nhịp tập trung $streakMinutes phút cùng Melbel.',
+                                StreakDayKind.freeze =>
+                                  'Ngày Melbel ngủ nướng: Khiên tự động bật giúp chuỗi không bị đứt.',
+                                StreakDayKind.repair =>
+                                  'Ngày đang chờ nối lại nhịp (24h). Hoàn thành ≥ 2 phút để nối lại chuỗi!',
+                              },
+                              style: Theme.of(context).textTheme.bodySmall,
+                            ),
+                          ),
+                          const SizedBox(height: 12),
+                        ],
                         if (_error != null)
                           const Text('Chưa tải được các phiên của ngày này.')
                         else if (sessions.isEmpty)
@@ -225,6 +259,7 @@ class _CalendarScreenState extends State<CalendarScreen> {
     final colors = theme.colorScheme;
     final palette = context.melbel;
     final isDark = theme.brightness == Brightness.dark;
+    final streak = StreakProvider.maybeOf(context);
     final today = DateTime.now();
     final offset = _month.weekday - 1;
     final days = DateTime(_month.year, _month.month + 1, 0).day;
@@ -378,19 +413,40 @@ class _CalendarScreenState extends State<CalendarScreen> {
                                   ),
                                   label: const Text('Xem hôm nay'),
                                 ),
-                                Row(
-                                  mainAxisSize: MainAxisSize.min,
+                                Wrap(
+                                  crossAxisAlignment: WrapCrossAlignment.center,
+                                  spacing: 4,
+                                  runSpacing: 4,
                                   children: [
+                                    if (streak != null)
+                                      InkWell(
+                                        borderRadius:
+                                            BorderRadius.circular(999),
+                                        onTap: () => showMelbelStreakSheet(
+                                            context, streak),
+                                        child: MelbelStatusPill(
+                                          label: streak.repairPending
+                                              ? 'Chờ nối ${streak.effectiveDisplayStreak} ngày'
+                                              : !streak.isUnlocked
+                                                  ? 'Khởi động ${streak.effectiveDisplayStreak}/${StreakProvider.unlockDays}'
+                                                  : '${streak.effectiveDisplayStreak} ngày nối tiếp',
+                                          icon: streak.isUnlocked
+                                              ? Icons
+                                                  .local_fire_department_outlined
+                                              : Icons.eco_outlined,
+                                          tone: streak.repairPending ||
+                                                  !streak.isUnlocked
+                                              ? MelbelCardTone.amber
+                                              : MelbelCardTone.sage,
+                                        ),
+                                      ),
                                     if (!_loading &&
                                         _error == null &&
                                         _sessions.isNotEmpty)
-                                      Padding(
-                                        padding: const EdgeInsets.only(right: 4),
-                                        child: MelbelStatusPill(
-                                          label: '${_sessions.length} phiên',
-                                          icon: Icons.event_note_outlined,
-                                          tone: MelbelCardTone.sage,
-                                        ),
+                                      MelbelStatusPill(
+                                        label: '${_sessions.length} phiên',
+                                        icon: Icons.event_note_outlined,
+                                        tone: MelbelCardTone.sage,
                                       ),
                                     TextButton.icon(
                                       style: TextButton.styleFrom(
@@ -473,18 +529,62 @@ class _CalendarScreenState extends State<CalendarScreen> {
                               final isToday = DateUtils.isSameDay(date, today);
                               final count = _onDate(date).length;
                               final hasSessions = count > 0;
+                              final streakKind = streak?.dayStatus(date);
+                              final isDoneDay =
+                                  streakKind == StreakDayKind.done;
+                              final isFreezeDay =
+                                  streakKind == StreakDayKind.freeze;
+                              final isRepairDay =
+                                  streakKind == StreakDayKind.repair;
+                              final inRibbon =
+                                  streak?.isInUnlockedRibbon(date) ?? false;
+                              final col = index % 7;
+                              final ribbonPrev = inRibbon &&
+                                  col > 0 &&
+                                  (streak?.hasRibbonPrev(date) ?? false);
+                              final ribbonNext = inRibbon &&
+                                  col < 6 &&
+                                  (streak?.hasRibbonNext(date) ?? false);
                               final openDay =
                                   _loading ? null : () => _openDay(date);
                               final isInteractiveHighlight = openDay != null &&
                                   (date == _hoveredDay || date == _focusedDay);
                               final showPaw = isToday ||
+                                  isDoneDay ||
+                                  isFreezeDay ||
+                                  isRepairDay ||
                                   hasSessions ||
                                   isInteractiveHighlight;
-                              final pawColor = isToday
-                                  ? colors.primary
-                                  : isDark
-                                      ? palette.selectedSurface
-                                      : const Color(0xFFE7DDF9);
+                              final Color pawFill;
+                              Color? pawStroke;
+                              if (isDoneDay) {
+                                pawFill = colors.primary;
+                              } else if (isFreezeDay) {
+                                pawFill = palette.surface;
+                                pawStroke = colors.primary;
+                              } else if (isRepairDay) {
+                                pawFill = palette.amberSoft;
+                                pawStroke = palette.amber;
+                              } else if (isToday) {
+                                if (streak != null) {
+                                  pawFill = palette.amberSoft;
+                                  pawStroke = palette.amber;
+                                } else {
+                                  pawFill = colors.primary;
+                                }
+                              } else {
+                                pawFill = isDark
+                                    ? palette.selectedSurface
+                                    : const Color(0xFFE7DDF9);
+                              }
+                              final Color textColor = isDoneDay ||
+                                      (isToday && streak == null)
+                                  ? colors.onPrimary
+                                  : isRepairDay || (isToday && streak != null)
+                                      ? palette.amberInk
+                                      : isFreezeDay
+                                          ? activeTint
+                                          : colors.onSurface;
 
                               return Semantics(
                                 button: true,
@@ -492,60 +592,98 @@ class _CalendarScreenState extends State<CalendarScreen> {
                                 onTap: openDay,
                                 label: '${date.day}/${date.month}/${date.year}'
                                     '${isToday ? ', hôm nay' : ''}'
+                                    '${isDoneDay ? ', giữ chuỗi' : ''}'
+                                    '${isFreezeDay ? ', khiên ngủ nướng' : ''}'
                                     '${hasSessions ? ', $count phiên' : ''}',
                                 excludeSemantics: true,
-                                child: Padding(
-                                  padding: const EdgeInsets.all(1),
-                                  child: Material(
-                                    color: Colors.transparent,
-                                    borderRadius: BorderRadius.circular(12),
-                                    child: InkWell(
-                                      borderRadius: BorderRadius.circular(12),
-                                      onTap: openDay,
-                                      hoverColor: Colors.transparent,
-                                      focusColor: Colors.transparent,
-                                      onHover: (hovering) {
-                                        if (!hovering && _hoveredDay != date) {
-                                          return;
-                                        }
-                                        setState(() =>
-                                            _hoveredDay = hovering ? date : null);
-                                      },
-                                      onFocusChange: (focused) {
-                                        if (!focused && _focusedDay != date) {
-                                          return;
-                                        }
-                                        setState(() =>
-                                            _focusedDay = focused ? date : null);
-                                      },
-                                      child: Stack(
-                                        alignment: Alignment.center,
-                                        children: [
-                                          if (showPaw)
-                                            CustomPaint(
-                                              size: const Size(36, 36),
-                                              painter: _TodayPawPainter(
-                                                pawColor,
-                                              ),
-                                            ),
-                                          Text(
-                                            '${date.day}',
-                                            style: theme.textTheme.titleMedium
-                                                ?.copyWith(
-                                              fontSize: 15.5,
-                                              color: isToday
-                                                  ? colors.onPrimary
-                                                  : colors.onSurface,
-                                              fontWeight:
-                                                  isToday || hasSessions
-                                                      ? FontWeight.w700
-                                                      : FontWeight.w500,
+                                child: Stack(
+                                  alignment: Alignment.center,
+                                  children: [
+                                    if (inRibbon && (ribbonPrev || ribbonNext))
+                                      Positioned(
+                                        top: 11,
+                                        bottom: 4,
+                                        left: ribbonPrev ? 0 : 4,
+                                        right: ribbonNext ? 0 : 4,
+                                        child: DecoratedBox(
+                                          decoration: BoxDecoration(
+                                            color: palette.sageSoft,
+                                            borderRadius:
+                                                BorderRadius.horizontal(
+                                              left: ribbonPrev
+                                                  ? Radius.zero
+                                                  : const Radius.circular(999),
+                                              right: ribbonNext
+                                                  ? Radius.zero
+                                                  : const Radius.circular(999),
                                             ),
                                           ),
-                                        ],
+                                        ),
+                                      ),
+                                    Padding(
+                                      padding: const EdgeInsets.all(1),
+                                      child: Material(
+                                        color: Colors.transparent,
+                                        borderRadius: BorderRadius.circular(12),
+                                        child: InkWell(
+                                          borderRadius:
+                                              BorderRadius.circular(12),
+                                          onTap: openDay,
+                                          hoverColor: Colors.transparent,
+                                          focusColor: Colors.transparent,
+                                          onHover: (hovering) {
+                                            if (!hovering &&
+                                                _hoveredDay != date) {
+                                              return;
+                                            }
+                                            setState(() => _hoveredDay =
+                                                hovering ? date : null);
+                                          },
+                                          onFocusChange: (focused) {
+                                            if (!focused &&
+                                                _focusedDay != date) {
+                                              return;
+                                            }
+                                            setState(() => _focusedDay =
+                                                focused ? date : null);
+                                          },
+                                          child: Stack(
+                                            alignment: Alignment.center,
+                                            children: [
+                                              if (showPaw)
+                                                CustomPaint(
+                                                  size: const Size(36, 36),
+                                                  painter: MelbelPawPainter(
+                                                    fillColor: pawFill,
+                                                    strokeColor: pawStroke,
+                                                    strokeWidth:
+                                                        pawStroke != null
+                                                            ? 2.0
+                                                            : 0,
+                                                    dashed: isRepairDay,
+                                                  ),
+                                                ),
+                                              Text(
+                                                '${date.day}',
+                                                style: theme
+                                                    .textTheme.titleMedium
+                                                    ?.copyWith(
+                                                  fontSize: 15.5,
+                                                  color: textColor,
+                                                  fontWeight: isToday ||
+                                                          isDoneDay ||
+                                                          isFreezeDay ||
+                                                          hasSessions
+                                                      ? FontWeight.w700
+                                                      : FontWeight.w500,
+                                                ),
+                                              ),
+                                            ],
+                                          ),
+                                        ),
                                       ),
                                     ),
-                                  ),
+                                  ],
                                 ),
                               );
                             },
@@ -558,10 +696,19 @@ class _CalendarScreenState extends State<CalendarScreen> {
                               Row(
                                 mainAxisSize: MainAxisSize.min,
                                 children: [
-                                  Icon(
-                                    Icons.pets_rounded,
-                                    size: 13,
-                                    color: activeTint,
+                                  SizedBox(
+                                    width: 14,
+                                    height: 16,
+                                    child: CustomPaint(
+                                      painter: MelbelPawPainter(
+                                        fillColor: streak != null
+                                            ? palette.amberSoft
+                                            : colors.primary,
+                                        strokeColor:
+                                            streak != null ? palette.amber : null,
+                                        strokeWidth: streak != null ? 2.4 : 0,
+                                      ),
+                                    ),
                                   ),
                                   const SizedBox(width: 6),
                                   Text(
@@ -576,14 +723,20 @@ class _CalendarScreenState extends State<CalendarScreen> {
                               Row(
                                 mainAxisSize: MainAxisSize.min,
                                 children: [
-                                  Icon(
-                                    Icons.circle,
-                                    size: 8,
-                                    color: activeTint,
+                                  SizedBox(
+                                    width: 14,
+                                    height: 16,
+                                    child: CustomPaint(
+                                      painter: MelbelPawPainter(
+                                        fillColor: colors.primary,
+                                      ),
+                                    ),
                                   ),
                                   const SizedBox(width: 6),
                                   Text(
-                                    'Ngày có phiên',
+                                    streak != null
+                                        ? 'Đã giữ nhịp'
+                                        : 'Ngày có phiên',
                                     style:
                                         theme.textTheme.labelSmall?.copyWith(
                                       color: colors.onSurfaceVariant,
@@ -591,6 +744,31 @@ class _CalendarScreenState extends State<CalendarScreen> {
                                   ),
                                 ],
                               ),
+                              if (streak != null)
+                                Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    SizedBox(
+                                      width: 14,
+                                      height: 16,
+                                      child: CustomPaint(
+                                        painter: MelbelPawPainter(
+                                          fillColor: palette.surface,
+                                          strokeColor: colors.primary,
+                                          strokeWidth: 2.4,
+                                        ),
+                                      ),
+                                    ),
+                                    const SizedBox(width: 6),
+                                    Text(
+                                      'Khiên ngủ nướng',
+                                      style:
+                                          theme.textTheme.labelSmall?.copyWith(
+                                        color: colors.onSurfaceVariant,
+                                      ),
+                                    ),
+                                  ],
+                                ),
                             ],
                           ),
                         ],
@@ -905,46 +1083,4 @@ class _CalendarPeekingPawsPainter extends CustomPainter {
   @override
   bool shouldRepaint(_CalendarPeekingPawsPainter oldDelegate) =>
       oldDelegate.isDark != isDark;
-}
-
-class _TodayPawPainter extends CustomPainter {
-  const _TodayPawPainter(this.color);
-
-  final Color color;
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    canvas.save();
-    final center = size.center(Offset.zero);
-    canvas.translate(center.dx, center.dy - size.height * 0.13);
-    canvas.scale(1.1);
-    canvas.translate(-center.dx, -center.dy);
-    // Fit the large pad behind the fixed, centered date label.
-    canvas.scale(size.width / 38, size.height / 43);
-    final fill = Paint()..color = color;
-    final pad = Path()
-      ..moveTo(19, 15)
-      ..cubicTo(12, 15, 5, 23, 5, 29)
-      ..cubicTo(5, 35, 11, 38, 19, 38)
-      ..cubicTo(27, 38, 33, 35, 33, 29)
-      ..cubicTo(33, 23, 26, 15, 19, 15)
-      ..close();
-    canvas.drawPath(pad, fill);
-    for (final center in const [
-      Offset(5, 13),
-      Offset(14, 7),
-      Offset(24, 7),
-      Offset(33, 13),
-    ]) {
-      canvas.drawOval(
-        Rect.fromCenter(center: center, width: 7, height: 9),
-        fill,
-      );
-    }
-    canvas.restore();
-  }
-
-  @override
-  bool shouldRepaint(_TodayPawPainter oldDelegate) =>
-      color != oldDelegate.color;
 }

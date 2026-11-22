@@ -9,11 +9,13 @@ import '../core/responsive_layout.dart';
 import '../core/theme.dart';
 import '../models/focus_session_model.dart';
 import '../providers/focus_provider.dart';
+import '../providers/streak_provider.dart';
 import '../providers/task_provider.dart';
 import '../services/adaptation_api.dart';
 import '../services/schedule_service.dart';
 import '../widgets/melbel_ui.dart';
 import '../widgets/shimmer_loading.dart';
+import '../widgets/streak_widgets.dart';
 import 'focus_screen.dart';
 import 'candidate_review_screen.dart';
 import 'task_entry_screen.dart';
@@ -41,6 +43,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   FocusProvider? _observedFocus;
   bool _openingRecoveredCheckIn = false;
   String? _expiredNoticeRunId;
+  bool _showingStreakCelebration = false;
 
   @override
   void initState() {
@@ -157,13 +160,35 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     }
   }
 
-  Future<List<Map<String, dynamic>>> _loadSessions() {
+  Future<List<Map<String, dynamic>>> _loadSessions() async {
     final now = DateTime.now();
-    return _schedule.loadSessions(
+    final streak = StreakProvider.maybeOf(context, listen: false);
+    final items = await _schedule.loadSessions(
       DateUtils.dateOnly(now),
       DateTime(now.year, now.month, now.day + 30),
       includeTitles: true,
     );
+    if (streak != null) {
+      unawaited(streak.ingestCompletedSessions(items));
+    }
+    return items;
+  }
+
+  void _maybeShowStreakCelebration(StreakProvider? streak) {
+    if (_showingStreakCelebration || streak == null) return;
+    if (streak.pendingCelebration == null) return;
+    if (!(ModalRoute.of(context)?.isCurrent ?? true)) return;
+    _showingStreakCelebration = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      try {
+        if (!mounted) return;
+        final event = streak.consumePendingCelebration();
+        if (event == null) return;
+        await showMelbelStreakCelebration(context, event);
+      } finally {
+        _showingStreakCelebration = false;
+      }
+    });
   }
 
   Future<void> _refreshAll() async {
@@ -275,6 +300,8 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     _loadWhenTaskChanges();
     final theme = Theme.of(context);
     final palette = context.melbel;
+    final streak = StreakProvider.maybeOf(context);
+    _maybeShowStreakCelebration(streak);
 
     final hasDraft =
         context.select<TaskProvider, bool>((task) => task.hasUnconfirmedDraft);
@@ -291,10 +318,16 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
 
     return Scaffold(
       backgroundColor: theme.scaffoldBackgroundColor,
-      appBar: const MelbelAppBar(
+      appBar: MelbelAppBar(
         title: 'Hôm nay',
         showThemeToggle: true,
         showAccountAction: false,
+        trailingAction: streak == null
+            ? null
+            : MelbelStreakPill(
+                streak: streak,
+                onTap: () => showMelbelStreakSheet(context, streak),
+              ),
       ),
       bottomNavigationBar: MelbelFloatingNavBar(
         selectedIndex: 0,

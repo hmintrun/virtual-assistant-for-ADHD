@@ -6,10 +6,12 @@ import '../core/responsive_layout.dart';
 import '../core/theme.dart';
 import '../models/focus_session_model.dart';
 import '../providers/focus_provider.dart';
+import '../providers/streak_provider.dart';
 import '../services/adaptation_api.dart';
 import '../services/schedule_service.dart';
 import '../services/voice_service.dart';
 import '../widgets/melbel_ui.dart';
+import '../widgets/streak_widgets.dart';
 
 class ReviewHeader extends StatelessWidget {
   const ReviewHeader(
@@ -295,6 +297,14 @@ class _NextFocusActionScreenState extends State<NextFocusActionScreen> {
   void initState() {
     super.initState();
     _nextSession = _loadNextSession();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      final event = StreakProvider.maybeOf(context, listen: false)
+          ?.consumePendingCelebration();
+      if (event != null) {
+        showMelbelStreakCelebration(context, event);
+      }
+    });
   }
 
   Future<FocusSessionInfo?> _loadNextSession() async {

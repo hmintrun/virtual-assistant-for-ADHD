@@ -21,6 +21,7 @@ class MelbelAppBar extends StatelessWidget implements PreferredSizeWidget {
     this.leadingIcon,
     this.showThemeToggle = false,
     this.showTitleRays = false,
+    this.trailingAction,
     this.onBack,
     super.key,
   });
@@ -32,6 +33,7 @@ class MelbelAppBar extends StatelessWidget implements PreferredSizeWidget {
   final IconData? leadingIcon;
   final bool showThemeToggle;
   final bool showTitleRays;
+  final Widget? trailingAction;
   final VoidCallback? onBack;
 
   @override
@@ -151,6 +153,10 @@ class MelbelAppBar extends StatelessWidget implements PreferredSizeWidget {
             ),
           ),
           if (showGlobalActions) ...[
+            if (trailingAction != null) ...[
+              trailingAction!,
+              const SizedBox(width: 2),
+            ],
             IconButton(
               tooltip: 'Trợ giúp & Hướng dẫn',
               constraints: const BoxConstraints(minWidth: 48, minHeight: 48),

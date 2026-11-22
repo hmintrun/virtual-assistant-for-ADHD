@@ -13,6 +13,7 @@ import 'core/theme.dart';
 import 'repositories/local_run_repository.dart';
 import 'services/auth_service.dart';
 import 'providers/focus_provider.dart';
+import 'providers/streak_provider.dart';
 import 'providers/task_provider.dart';
 import 'providers/theme_provider.dart';
 import 'screens/onboarding_screens.dart';
@@ -119,6 +120,8 @@ class _OwnerApp extends StatefulWidget {
 }
 
 class _OwnerAppState extends State<_OwnerApp> {
+  late final StreakProvider _streakProvider =
+      StreakProvider(ownerId: widget.session.ownerId);
   late Future<FocusProvider> _focusProvider;
   bool _restoreStarted = false;
   FocusProvider? _initializedFocus;
@@ -126,10 +129,15 @@ class _OwnerAppState extends State<_OwnerApp> {
   @override
   void initState() {
     super.initState();
+    unawaited(_streakProvider.restore());
     _focusProvider = _createFocusProvider();
   }
 
   Future<FocusProvider> _createFocusProvider() async {
+    void onFocusRecorded(int seconds) {
+      unawaited(_streakProvider.recordFocusActivity(seconds: seconds));
+    }
+
     if (kIsWeb) {
       return FocusProvider(
         ownerId: widget.session.ownerId,
@@ -138,16 +146,19 @@ class _OwnerAppState extends State<_OwnerApp> {
           runKey: 'proplan.uf3.active_run.v1.${widget.session.ownerId}',
           thoughtsKey: 'proplan.uf4.local_thoughts.v1.${widget.session.ownerId}',
         ),
+        onFocusRecorded: onFocusRecorded,
       );
     }
     return FocusProvider.createOfflineAware(
       ownerId: widget.session.ownerId,
       apiClient: ApiClient(),
+      onFocusRecorded: onFocusRecorded,
     );
   }
 
   @override
   void dispose() {
+    _streakProvider.dispose();
     _initializedFocus?.dispose();
     super.dispose();
   }
@@ -243,6 +254,8 @@ class _OwnerAppState extends State<_OwnerApp> {
                     return task;
                   }),
               ChangeNotifierProvider<FocusProvider>.value(value: focus),
+              ChangeNotifierProvider<StreakProvider>.value(
+                  value: _streakProvider),
             ],
             child: ProPlanApp(
               signedIn: true,

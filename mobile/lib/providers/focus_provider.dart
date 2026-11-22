@@ -184,6 +184,7 @@ class FocusProvider extends ChangeNotifier {
     NativeRecoveryChecker? nativeRecoveryChecker,
     ReminderApi? reminderApi,
     String? ownerId,
+    ValueChanged<int>? onFocusRecorded,
   })  : _clock = clock ?? const SystemClock(),
         timer = timer ?? FocusTimerService(clock: clock),
         microTaskTimer = microTaskTimer ?? FocusTimerService(clock: clock),
@@ -200,6 +201,7 @@ class FocusProvider extends ChangeNotifier {
         _outboxWorker = outboxWorker,
         _clockSync = clockSync,
         _nativeRecoveryChecker = nativeRecoveryChecker,
+        _onFocusRecorded = onFocusRecorded,
         _ownerId = ownerId ?? ApiSession.current?.ownerId ?? 'default' {
     _reminderApi = reminderApi ?? ReminderApi(_api);
     this.timer.onElapsed = _onSegmentElapsed;
@@ -227,6 +229,7 @@ class FocusProvider extends ChangeNotifier {
     required String ownerId,
     required ApiClient apiClient,
     NativeRecoveryChecker? nativeRecoveryChecker,
+    ValueChanged<int>? onFocusRecorded,
   }) async {
     final dbManager = LocalDatabaseManager.instance;
     final db = await dbManager.openUserDatabase(ownerId);
@@ -249,12 +252,14 @@ class FocusProvider extends ChangeNotifier {
       outboxWorker: worker,
       clockSync: clockSync,
       nativeRecoveryChecker: nativeRecoveryChecker,
+      onFocusRecorded: onFocusRecorded,
     );
   }
 
   late final void Function(ThoughtRecording) _recordingStopped;
   late final void Function(RecorderException) _recordingFailedCallback;
   final String _ownerId;
+  final ValueChanged<int>? _onFocusRecorded;
   final Clock _clock;
   final FocusTimerService timer;
   final FocusTimerService microTaskTimer;
@@ -798,6 +803,7 @@ class FocusProvider extends ChangeNotifier {
   void _onMicroTaskElapsed() {
     if (_stage != FocusStage.microTask) return;
     _stage = FocusStage.ready;
+    _onFocusRecorded?.call(120);
     _notify();
   }
 
@@ -999,6 +1005,9 @@ class FocusProvider extends ChangeNotifier {
     }
     _stage = FocusStage.ended;
     await _restoreFocusMode(preserveCheckIn: awaitCheckIn);
+    if (_actualWorkSeconds >= 120) {
+      _onFocusRecorded?.call(_actualWorkSeconds);
+    }
     final endedAt = awaitCheckIn ? _runEndsAt ?? _clock.now() : _clock.now();
     _runEndsAt = null;
     // Káº¿t thÃºc Ä‘áº¿m giá» cá»¥c bá»™ KHÃ”NG tá»± Ä‘á»™ng Ä‘Ã¡nh dáº¥u hoÃ n thÃ nh Session/Step/Task (UF5).
@@ -1192,6 +1201,9 @@ class FocusProvider extends ChangeNotifier {
     } finally {
       _runCommandBusy = false;
       _notify();
+    }
+    if (_runError == null && outcome == 'completed') {
+      _onFocusRecorded?.call(_actualWorkSeconds >= 120 ? _actualWorkSeconds : 120);
     }
     if (_runError != null) await refreshRunCheckIn();
   }
