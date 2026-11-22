@@ -130,6 +130,10 @@ class Settings(BaseSettings):
     VOICE_TTS_TIMEOUT_SECONDS: float = Field(default=10.0, gt=0.0, le=60.0)
     VOICE_TTS_MAX_CHARS: int = Field(default=600, gt=0, le=2000)
     VOICE_TTS_CACHE_SIZE: int = Field(default=64, ge=0, le=512)
+    # Edge-TTS ~0,6s/câu nhưng có đợt chậm 4–10s → sau mốc này gửi thêm 1 request song song (0 = tắt).
+    VOICE_TTS_HEDGE_DELAY_SECONDS: float = Field(default=1.2, ge=0.0, le=10.0)
+    # Tổng hợp sẵn các câu hỏi Check-in UF5 (mẫu cố định, không gọi LLM) khi server khởi động.
+    VOICE_TTS_PREWARM: bool = True
 
     # UF1: trần cơ sở, ưu tiên Gemini và mốc hedge là ba giới hạn riêng.
     AI_UF1_TIMEOUT_SECONDS: float = Field(default=6.0, gt=0.0, le=15.0)

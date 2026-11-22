@@ -82,6 +82,8 @@ Tốc độ như nhau. Chọn **verbatim** làm mặc định vì:
 | `backend/.env.example` | Cập nhật ghi chú cấu hình. |
 | `backend/tests/test_stt_gemini_transcribe_inline.py` | 6 test mới (mock SDK, offline). |
 | `backend/tests/test_stt_gemini_flash_lite_inline.py`, `test_voice_service.py` | Cập nhật giá trị mặc định; test legacy giờ chọn `transport="transcribe_api"` tường minh. |
+| `backend/app/services/tts_prewarm.py` (mới), `TtsService` | Tối ưu độ trễ TTS: prewarm, hedge, gộp request — xem §8. |
+| `backend/tests/test_tts_latency_optimizations.py` | 11 test cho §8. |
 
 **Không đổi:** router `/api/v1/voice/transcriptions`, schema response, mobile, luồng fallback/purpose routing, prompt Groq và bộ lọc ảo giác Groq của vqh.
 
@@ -135,3 +137,49 @@ cd speech-lab
 
 Kết quả JSON: `speech-lab/results/` (`gemini_inline_vs_upload_smart.json`, `long_compare.json`, `flash_audio.json`,
 `live_verbatim.json`, `gc_mode.json`, `groq_prompt_v2.json`).
+
+## 8. TTS — đo & tối ưu độ trễ (23/11/2026)
+
+### 8.1. Chọn engine
+
+| Engine | Có audio đầu tiên | Đủ audio | Ghi chú |
+|---|---|---|---|
+| **Edge-TTS** `vi-VN-HoaiMyNeural` (đang dùng) | ~0,35 s | **~0,55–0,6 s** (trung vị) | Không giới hạn lượt; MP3 nhỏ (~32 KB/câu) |
+| Gemini 3.8 Flash-Lite TTS (`generate_content_stream`) | 1,02 s | 1,71 s | Free tier **10 lượt/ngày**; PCM 24 kHz nặng ~6× MP3 |
+| Gemini 3.8 Flash TTS | 1,15 s | 2,26 s | 10 lượt/ngày |
+| Gemini 3.1 Flash TTS preview | 1,32 s | 2,97 s | |
+| Gemini 2.5 Flash preview TTS | 5,16 s | 5,16 s | Không stream |
+
+→ Giữ **Edge-TTS**. (Gemini TTS ngày 01/11 bị treo 90 s là do gọi qua `interactions`; qua `generate_content_stream`
+chỉ ~1,7 s nhưng quota 10/ngày không đủ cho Check-in thật.)
+
+### 8.2. Vấn đề: Edge-TTS có lúc chậm 4–10 s
+
+Đo 40 câu khác nhau × 2 cấu hình xen kẽ (`run_tts_hedge_bench.py`): câu 0–19 cả hai đều ~0,6 s; **từ câu 20 cả hai cùng
+chậm 4–10 s** → độ chậm đi theo **đợt**, nhiều khả năng do phía Microsoft giới hạn khi gọi dồn dập (bài đo gửi >80
+request/phút), không phải ngẫu nhiên từng request.
+
+### 8.3. Đã triển khai trong `TtsService`
+
+| Kỹ thuật | Cấu hình | Kết quả đo thật |
+|---|---|---|
+| **Prewarm** 7 câu hỏi Check-in UF5 lúc khởi động (`tts_prewarm.py`, chạy nền) | `VOICE_TTS_PREWARM=true` | 7/7 sẵn sàng; `/voice/uf5-checkin-prompt` sau đó lấy audio **0,06 ms** (cache) |
+| **Hedged request**: quá mốc chưa xong thì gửi thêm 1 request, lấy cái về trước, hủy cái còn lại | `VOICE_TTS_HEDGE_DELAY_SECONDS=1.2` (0 = tắt) | Xem bảng dưới |
+| Gộp request trùng (cùng giọng + câu) | — | 5 lời gọi đồng thời → 1 lần tổng hợp (test) |
+| Kết quả về sau timeout vẫn lưu cache | — | Lần gọi sau trả `cached=true` (test) |
+
+Hedge, đo thật với Edge-TTS (40 câu/cấu hình):
+
+| Giai đoạn | Không hedge | Hedge 1,2 s |
+|---|---|---|
+| Edge bình thường (câu 0–19) | TB 0,61 s · max 0,85 s | TB 0,59 s · max 0,75 s — **như nhau, hedge không kích hoạt** |
+| Edge bị chậm (câu 21–39) | TB 6,24 s · trung vị 5,96 s · max 9,88 s · **2 lỗi timeout** | TB **5,43 s** (−13%) · trung vị **4,93 s** (−17%) · max 8,43 s · **0 lỗi** |
+
+**Kết luận:** hedge giúp vừa phải (bớt ~1 s và không còn lỗi timeout khi Edge chậm), không tốn gì khi Edge bình thường.
+Vì Edge chậm theo đợt nên hedge không cắt hết được đuôi; cách hiệu quả nhất là **không phải gọi Edge lúc người dùng
+đang chờ**: prewarm phía Backend + cache/prefetch phía Mobile (`VoicePlaybackService`, hedge 2,5 s → giọng máy).
+Lưu ý: hedge gửi thêm request khi Edge đang chậm; nếu sau này thấy Edge giới hạn nặng hơn khi nhiều người dùng, đặt
+`VOICE_TTS_HEDGE_DELAY_SECONDS=0` để tắt.
+
+Chạy lại: `BACKEND=backend backend/.venv/bin/python -I speech-lab/run_tts_hedge_bench.py 40`
+(kết quả `speech-lab/results/tts_hedge_bench.json`).

@@ -22,6 +22,8 @@ from app.core.middleware import (
 )
 from app.core.security import validate_auth_configuration
 from app.services.calendar_sync_worker import process_calendar_sync_jobs
+from app.services.tts_prewarm import prewarm_uf5_checkin_audio
+from app.services.voice_service import get_tts_service
 
 logger = logging.getLogger(__name__)
 
@@ -46,17 +48,23 @@ async def _calendar_sync_background_loop():
 async def lifespan(app: FastAPI):
     validate_auth_configuration()
     worker_task = None
-    if settings.ENABLE_CALENDAR_SYNC_WORKER and not getattr(settings, "TESTING", False):
+    testing = getattr(settings, "TESTING", False)
+    if settings.ENABLE_CALENDAR_SYNC_WORKER and not testing:
         worker_task = asyncio.create_task(_calendar_sync_background_loop())
+    # Chạy nền, không chặn server mở cổng: render sẵn audio câu hỏi Check-in UF5.
+    prewarm_task = None
+    if settings.VOICE_TTS_PREWARM and settings.VOICE_TTS_PROVIDER == "edge_tts" and not testing:
+        prewarm_task = asyncio.create_task(prewarm_uf5_checkin_audio(get_tts_service()))
     try:
         yield
     finally:
-        if worker_task:
-            worker_task.cancel()
-            try:
-                await worker_task
-            except asyncio.CancelledError:
-                pass
+        for task in (worker_task, prewarm_task):
+            if task and not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
 
 
 install_access_log_redaction_filter()

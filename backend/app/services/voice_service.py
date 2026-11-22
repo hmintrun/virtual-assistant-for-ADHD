@@ -1396,7 +1396,15 @@ class FakeTtsProvider:
 
 
 class TtsService:
-    """Điều phối tổng hợp giọng nói: chuẩn hóa văn bản, cache LRU theo hash, áp timeout."""
+    """Điều phối tổng hợp giọng nói: chuẩn hóa văn bản, cache LRU, áp timeout và giảm độ trễ đuôi.
+
+    Tối ưu thời gian (đo 23/11: Edge-TTS ~0,6s/câu nhưng có đợt chậm 4–10s; hedge: TB 6,24s → 5,43s, hết timeout):
+    - Hedged request: sau ``hedge_delay_seconds`` chưa có kết quả thì gửi thêm 1 request song song,
+      lấy cái về trước, hủy cái còn lại → giảm ~1s và tránh lỗi timeout khi Edge vào đợt chậm.
+    - Gộp request trùng (cùng giọng + câu) đang chạy → chỉ tổng hợp 1 lần.
+    - Kết quả về sau khi người gọi đã hết timeout vẫn được lưu cache cho lần sau.
+    - ``prewarm``: tổng hợp sẵn các câu cố định (câu hỏi Check-in UF5) lúc khởi động.
+    """
 
     def __init__(
         self,
@@ -1406,6 +1414,7 @@ class TtsService:
         timeout_seconds: float = 10.0,
         max_chars: int = 600,
         cache_size: int = 64,
+        hedge_delay_seconds: float = 0.0,
     ) -> None:
         self._provider = provider
         self._default_voice = default_voice
@@ -1413,10 +1422,24 @@ class TtsService:
         self._max_chars = max_chars
         self._cache_size = max(0, cache_size)
         self._cache: OrderedDict[str, tuple[bytes, str, str]] = OrderedDict()
+        self._hedge_delay_seconds = max(0.0, hedge_delay_seconds)
+        self._inflight: dict[str, asyncio.Future[tuple[bytes, str]]] = {}
+        self.hedges_started = 0
 
     @property
     def provider_name(self) -> str:
         return self._provider.name
+
+    def _cache_key(self, normalized: str, voice: str) -> str:
+        return hashlib.sha256(f"{self._provider.name}|{voice}|{normalized}".encode()).hexdigest()
+
+    def _cache_put(self, cache_key: str, audio_bytes: bytes, mime_type: str, voice: str) -> None:
+        if self._cache_size <= 0:
+            return
+        self._cache.pop(cache_key, None)
+        self._cache[cache_key] = (audio_bytes, mime_type, voice)
+        while len(self._cache) > self._cache_size:
+            self._cache.popitem(last=False)
 
     async def synthesize(
         self,
@@ -1431,9 +1454,7 @@ class TtsService:
             raise TtsError(TtsErrorCode.TEXT_TOO_LONG, f"chars={len(normalized)}")
 
         target_voice = (voice or self._default_voice).strip() or self._default_voice
-        cache_key = hashlib.sha256(
-            f"{self._provider.name}|{target_voice}|{normalized}".encode()
-        ).hexdigest()
+        cache_key = self._cache_key(normalized, target_voice)
 
         if self._cache_size > 0 and cache_key in self._cache:
             cached_bytes, cached_mime, cached_voice = self._cache.pop(cache_key)
@@ -1448,10 +1469,15 @@ class TtsService:
             )
 
         started = time.perf_counter()
+        task = self._inflight.get(cache_key)
+        if task is None:
+            task = asyncio.ensure_future(self._produce(cache_key, normalized, target_voice))
+            self._inflight[cache_key] = task
+            task.add_done_callback(lambda t, key=cache_key: self._on_produce_done(key, t))
         try:
+            # shield: người gọi hết timeout không hủy task dùng chung; task chạy tiếp để lưu cache.
             audio_bytes, mime_type = await asyncio.wait_for(
-                self._provider.synthesize(normalized, target_voice),
-                timeout=self._timeout_seconds,
+                asyncio.shield(task), timeout=self._timeout_seconds
             )
         except TtsError as exc:
             self._log_tts_failure(exc, started, target_voice)
@@ -1465,17 +1491,7 @@ class TtsService:
             self._log_tts_failure(mapped, started, target_voice)
             raise mapped from exc
 
-        if not audio_bytes:
-            empty_err = TtsError(TtsErrorCode.EMPTY_AUDIO, "empty_audio")
-            self._log_tts_failure(empty_err, started, target_voice)
-            raise empty_err
-
         latency_ms = int((time.perf_counter() - started) * 1000)
-        if self._cache_size > 0:
-            self._cache[cache_key] = (audio_bytes, mime_type, target_voice)
-            if len(self._cache) > self._cache_size:
-                self._cache.popitem(last=False)
-
         logger.info(
             "TTS thành công: provider=%s voice=%s latency_ms=%d bytes=%d",
             self._provider.name,
@@ -1491,6 +1507,59 @@ class TtsService:
             cached=False,
             latency_ms=latency_ms,
         )
+
+    def _on_produce_done(self, cache_key: str, task: asyncio.Future[tuple[bytes, str]]) -> None:
+        self._inflight.pop(cache_key, None)
+        if not task.cancelled():
+            task.exception()  # đánh dấu đã đọc lỗi, tránh cảnh báo "never retrieved"
+
+    async def _produce(self, cache_key: str, normalized: str, voice: str) -> tuple[bytes, str]:
+        audio_bytes, mime_type = await self._hedged_synthesize(normalized, voice)
+        if not audio_bytes:
+            raise TtsError(TtsErrorCode.EMPTY_AUDIO, "empty_audio")
+        self._cache_put(cache_key, audio_bytes, mime_type, voice)
+        return audio_bytes, mime_type
+
+    async def _hedged_synthesize(self, normalized: str, voice: str) -> tuple[bytes, str]:
+        """Gọi provider; nếu quá ``hedge_delay`` chưa xong thì gửi thêm 1 request, lấy cái về trước."""
+        if self._hedge_delay_seconds <= 0:
+            return await self._provider.synthesize(normalized, voice)
+
+        tasks: set[asyncio.Future[tuple[bytes, str]]] = {
+            asyncio.ensure_future(self._provider.synthesize(normalized, voice))
+        }
+        try:
+            done, _ = await asyncio.wait(tasks, timeout=self._hedge_delay_seconds)
+            if done:
+                return done.pop().result()  # xong (hoặc lỗi nhanh) trước mốc hedge
+            self.hedges_started += 1
+            logger.info("TTS chậm hơn %.2fs → gửi request dự phòng (hedge).", self._hedge_delay_seconds)
+            tasks.add(asyncio.ensure_future(self._provider.synthesize(normalized, voice)))
+            last_error: BaseException | None = None
+            while tasks:
+                done, tasks = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+                for finished in done:
+                    error = finished.exception()
+                    if error is None:
+                        return finished.result()
+                    last_error = error
+            assert last_error is not None
+            raise last_error
+        finally:
+            for pending in tasks:
+                if not pending.done():
+                    pending.cancel()
+
+    async def prewarm(self, texts: list[str], *, voice: str | None = None) -> int:
+        """Tổng hợp sẵn các câu cố định vào cache (tuần tự, lỗi bỏ qua). Trả về số câu sẵn sàng."""
+        ready = 0
+        for text in texts:
+            try:
+                await self.synthesize(text, voice=voice)
+                ready += 1
+            except TtsError as exc:
+                logger.warning("Prewarm TTS bỏ qua 1 câu: code=%s", exc.code)
+        return ready
 
     def _log_tts_failure(self, exc: TtsError, started: float, voice: str) -> None:
         elapsed_ms = int((time.perf_counter() - started) * 1000)
@@ -1519,6 +1588,7 @@ def build_tts_service(app_settings: Settings | None = None) -> TtsService:
         timeout_seconds=cfg.VOICE_TTS_TIMEOUT_SECONDS,
         max_chars=cfg.VOICE_TTS_MAX_CHARS,
         cache_size=cfg.VOICE_TTS_CACHE_SIZE,
+        hedge_delay_seconds=cfg.VOICE_TTS_HEDGE_DELAY_SECONDS,
     )
 
 
