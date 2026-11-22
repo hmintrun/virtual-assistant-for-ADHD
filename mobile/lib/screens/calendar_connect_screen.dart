@@ -268,7 +268,8 @@ class _CalendarConnectScreenState extends State<CalendarConnectScreen>
                       tone: MelbelCardTone.amber,
                       child: Row(
                         children: [
-                          Icon(Icons.cloud_off_outlined, color: palette.amber),
+                          Icon(Icons.cloud_off_outlined,
+                              color: palette.amberInk),
                           const SizedBox(width: 10),
                           Expanded(
                             child: Text(
@@ -390,7 +391,8 @@ class _CalendarConnectScreenState extends State<CalendarConnectScreen>
         tone: MelbelCardTone.sage,
         child: Row(
           children: [
-            Icon(Icons.check_circle_outline_rounded, color: palette.sage),
+            Icon(Icons.check_circle_outline_rounded,
+                color: palette.accentInk),
             const SizedBox(width: 10),
             Expanded(
               child: Text(

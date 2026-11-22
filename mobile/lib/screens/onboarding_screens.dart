@@ -82,7 +82,7 @@ class _LoginScreenState extends State<LoginScreen> {
                           auth.error!,
                           textAlign: TextAlign.center,
                           style: textTheme.bodySmall?.copyWith(
-                            color: palette.amber,
+                            color: palette.amberInk,
                           ),
                         ),
                       ],
@@ -444,7 +444,7 @@ class _SetupFlowScreenState extends State<SetupFlowScreen>
                     contentPadding: EdgeInsets.zero,
                     leading: Icon(
                       Icons.cloud_off_outlined,
-                      color: palette.amber,
+                      color: palette.amberInk,
                     ),
                     title: const Text('Chưa tải được cài đặt đã lưu'),
                     subtitle: Text(
@@ -963,7 +963,7 @@ class _NoticeCard extends StatelessWidget {
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Icon(icon, color: palette.amber),
+          Icon(icon, color: palette.amberInk),
           const SizedBox(width: 12),
           Expanded(
             child: Column(

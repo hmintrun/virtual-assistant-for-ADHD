@@ -23,6 +23,7 @@ import 'screens/calendar_screen.dart';
 import 'screens/google_calendar_screen.dart';
 import 'screens/calendar_connect_screen.dart';
 import 'screens/focus_screen.dart';
+import 'widgets/melbel_ui.dart';
 import 'screens/settings_screen.dart';
 import 'screens/focus_review_screens.dart';
 import 'services/alarm_service.dart';
@@ -178,9 +179,49 @@ class _OwnerAppState extends State<_OwnerApp> {
             );
           }
           if (!snapshot.hasData) {
-            return const MaterialApp(
+            return MaterialApp(
+              debugShowCheckedModeBanner: false,
+              theme: MelbelTheme.themeFor(isDark: MelbelColors.isDark),
+              highContrastTheme: MelbelTheme.themeFor(
+                isDark: MelbelColors.isDark,
+                highContrast: true,
+              ),
               home: Scaffold(
-                body: Center(child: CircularProgressIndicator()),
+                backgroundColor: MelbelColors.kBackground,
+                body: Center(
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 32),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        const MelbelMascot(
+                          width: 72,
+                          height: 60,
+                          interactive: false,
+                        ),
+                        const SizedBox(height: 14),
+                        Text(
+                          'Đang chuẩn bị không gian của bạn...',
+                          textAlign: TextAlign.center,
+                          style: TextStyle(
+                            fontFamily: 'Be Vietnam Pro',
+                            fontSize: 15,
+                            fontWeight: FontWeight.w600,
+                            color: MelbelColors.kOnSurface,
+                          ),
+                        ),
+                        const SizedBox(height: 14),
+                        const SizedBox(
+                          width: 140,
+                          child: ClipRRect(
+                            borderRadius: BorderRadius.all(Radius.circular(99)),
+                            child: LinearProgressIndicator(minHeight: 4),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
               ),
             );
           }
@@ -254,7 +295,11 @@ class _ProPlanAppState extends State<ProPlanApp> {
       supportedLocales: const [Locale('vi')],
       localizationsDelegates: GlobalMaterialLocalizations.delegates,
       debugShowCheckedModeBanner: false,
-      theme: MelbelTheme.currentTheme,
+      theme: MelbelTheme.themeFor(isDark: MelbelColors.isDark),
+      highContrastTheme: MelbelTheme.themeFor(
+        isDark: MelbelColors.isDark,
+        highContrast: true,
+      ),
       themeAnimationDuration: Duration.zero,
       routes: signedIn
           ? {

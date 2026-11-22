@@ -169,7 +169,7 @@ class _AccountScreenState extends State<AccountScreen> {
           showTitleRays: true,
         ),
         body: ListView(
-          padding: MelbelLayout.pageInsets(context, top: 16, bottom: 28),
+          padding: MelbelLayout.pageInsets(context, top: 12, bottom: 24),
           children: [
             Container(
               clipBehavior: Clip.antiAlias,
@@ -215,36 +215,20 @@ class _AccountScreenState extends State<AccountScreen> {
                     ),
                   ),
                   Padding(
-                    padding: const EdgeInsets.fromLTRB(18, 18, 22, 18),
+                    padding: const EdgeInsets.fromLTRB(18, 12, 22, 12),
                     child: Row(
                       children: [
                         Stack(
                           clipBehavior: Clip.none,
                           children: [
-                            Container(
-                              width: 78,
-                              height: 78,
-                              decoration: BoxDecoration(
-                                shape: BoxShape.circle,
-                                color: const Color(0xFFFFF8E2),
-                                border: isDark
-                                    ? null
-                                    : Border.all(
-                                        color: Colors.white
-                                            .withValues(alpha: 0.85),
-                                        width: 2.0,
-                                      ),
-                              ),
-                              alignment: Alignment.center,
-                              child: const MelbelMascot(
-                                width: 64,
-                                height: 58,
-                                forceLightSvg: true,
-                              ),
+                            MelbelCatEarAvatar(
+                              photoUrl: auth.photoUrl,
+                              displayName: auth.user?['display_name'] as String?,
+                              size: 68,
                             ),
                             Positioned(
-                              top: -2,
-                              right: -4,
+                              top: 2,
+                              right: -8,
                               child: IgnorePointer(
                                 child: Transform.rotate(
                                   angle: 0.32,
@@ -619,7 +603,7 @@ class _CalendarVoiceQuestionScreenState
           showTitleRays: true,
         ),
         body: ListView(
-          padding: MelbelLayout.pageInsets(context, top: 16, bottom: 28),
+          padding: MelbelLayout.pageInsets(context, top: 12, bottom: 24),
           children: [
             MelbelCard(
               borderRadius: 28,

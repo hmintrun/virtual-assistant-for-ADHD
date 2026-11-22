@@ -352,7 +352,7 @@ class _TaskSummaryScreenState extends State<TaskSummaryScreen> {
           child: Icon(
             icon,
             size: 20,
-            color: ready ? palette.sage : palette.amber,
+            color: ready ? palette.accentInk : palette.amberInk,
           ),
         );
 
@@ -381,7 +381,7 @@ class _TaskSummaryScreenState extends State<TaskSummaryScreen> {
                 child: Row(
                   children: [
                     Icon(Icons.info_outline_rounded,
-                        size: 18, color: palette.amber),
+                        size: 18, color: palette.amberInk),
                     const SizedBox(width: 8),
                     Expanded(
                       child: Text(
@@ -505,8 +505,8 @@ class _TaskSummaryScreenState extends State<TaskSummaryScreen> {
                                 : 'Chọn khung giờ',
                             style: textTheme.labelLarge?.copyWith(
                               color: task.hasAvailability
-                                  ? palette.sage
-                                  : palette.amber,
+                                  ? palette.accentInk
+                                  : palette.amberInk,
                             ),
                           ),
                         ],
@@ -557,7 +557,7 @@ class _TaskSummaryScreenState extends State<TaskSummaryScreen> {
                         task.formatDeadline(task.deadline),
                         style: task.deadline == null
                             ? textTheme.bodySmall?.copyWith(
-                                color: palette.amber,
+                                color: palette.amberInk,
                                 fontWeight: FontWeight.w600,
                               )
                             : null,
@@ -619,7 +619,7 @@ class _TaskSummaryScreenState extends State<TaskSummaryScreen> {
                         Icon(
                           Icons.help_outline_rounded,
                           size: 18,
-                          color: palette.amber,
+                          color: palette.amberInk,
                         ),
                         const SizedBox(width: 8),
                         Expanded(
@@ -964,7 +964,7 @@ class _TimeConflictScreenState extends State<TimeConflictScreen> {
                     child: Icon(
                       Icons.info_outline_rounded,
                       size: 20,
-                      color: palette.amber,
+                      color: palette.amberInk,
                     ),
                   ),
                   const SizedBox(width: 12),
@@ -997,7 +997,7 @@ class _TimeConflictScreenState extends State<TimeConflictScreen> {
                 contentPadding: EdgeInsets.zero,
                 leading: Icon(
                   Icons.event_available_outlined,
-                  color: palette.sage,
+                  color: palette.accentInk,
                 ),
                 title: const Text('Giờ rảnh đã khai báo'),
                 subtitle: Text(task.availabilitySummary),

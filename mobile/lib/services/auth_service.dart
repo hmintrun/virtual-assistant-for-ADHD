@@ -35,6 +35,20 @@ class AuthService extends ChangeNotifier {
   bool onboardingRequired = false;
   String? error;
 
+  String? get photoUrl {
+    final raw =
+        user?['photo_url'] ?? user?['avatar_url'] ?? user?['picture'];
+    if (raw is! String) return null;
+    final trimmed = raw.trim();
+    return trimmed.isEmpty ? null : trimmed;
+  }
+
+  String get displayName {
+    final raw = user?['display_name'];
+    if (raw is String && raw.trim().isNotEmpty) return raw.trim();
+    return 'Tài khoản của bạn';
+  }
+
   bool get configured => kIsWeb
       ? _webClientId.isNotEmpty
       : defaultTargetPlatform == TargetPlatform.android &&
@@ -81,7 +95,14 @@ class AuthService extends ChangeNotifier {
           await signOut();
           return;
         }
-        user = verified;
+        final cachedPhoto = profile['photo_url'] as String?;
+        user = {
+          ...verified,
+          if ((verified['photo_url'] as String?)?.isNotEmpty != true &&
+              cachedPhoto != null &&
+              cachedPhoto.isNotEmpty)
+            'photo_url': cachedPhoto,
+        };
       } on ApiException {
         // Keep the cache bound to its last authenticated account.
         needsSignIn = true;
@@ -124,7 +145,17 @@ class AuthService extends ChangeNotifier {
           idempotent: false,
         );
         if (session != bound || !bound.active || user == null) return false;
-        final profile = data['user'] as Map<String, dynamic>? ?? user!;
+        final rawProfile = data['user'] is Map<String, dynamic>
+            ? data['user'] as Map<String, dynamic>
+            : user!;
+        final existingPhoto = user?['photo_url'] as String?;
+        final profile = <String, dynamic>{
+          ...rawProfile,
+          if ((rawProfile['photo_url'] as String?)?.isNotEmpty != true &&
+              existingPhoto != null &&
+              existingPhoto.isNotEmpty)
+            'photo_url': existingPhoto,
+        };
         if (profile['user_id'] != bound.ownerId) return false;
         await _saveTokens(data, profile, keepRefreshToken: true);
         bound.token = data['access_token'] as String;
@@ -188,7 +219,13 @@ class AuthService extends ChangeNotifier {
       data: {'id_token': idToken},
       idempotent: false,
     );
-    final profile = data['user'] as Map<String, dynamic>;
+    final rawProfile = Map<String, dynamic>.from(data['user'] as Map);
+    final googlePhoto = account.photoUrl?.trim();
+    final profile = <String, dynamic>{
+      ...rawProfile,
+      if (googlePhoto != null && googlePhoto.isNotEmpty)
+        'photo_url': googlePhoto,
+    };
     final owner = profile['user_id'] as String;
     final token = data['access_token'] as String;
     if (session != previous) return;

@@ -86,7 +86,7 @@ class FocusSessionSummaryCard extends StatelessWidget {
               child: Row(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Icon(Icons.spa_outlined, size: 17, color: palette.sage),
+                  Icon(Icons.spa_outlined, size: 17, color: palette.accentInk),
                   const SizedBox(width: 8),
                   Expanded(
                     child: Text(
@@ -302,7 +302,9 @@ class _FocusHoldToRecordState extends State<FocusHoldToRecord> {
                             ? Icons.graphic_eq_rounded
                             : Icons.mic_none_rounded,
                         size: 34,
-                        color: isRecording ? palette.surface : palette.sage,
+                        color: isRecording
+                            ? MelbelColors.kOnBrandHoney
+                            : palette.accentInk,
                       ),
                     ),
                   ),

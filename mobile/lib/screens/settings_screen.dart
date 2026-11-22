@@ -186,7 +186,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   shape: RoundedRectangleBorder(
                     borderRadius: BorderRadius.circular(18),
                   ),
-                  leading: Icon(option.icon, color: palette.sage),
+                  leading: Icon(option.icon, color: palette.accentInk),
                   title: Text(option.label),
                   subtitle: Text(
                     option.subtitle,
@@ -228,32 +228,113 @@ class _SettingsScreenState extends State<SettingsScreen> {
       : '×$value';
 
   Future<String?> _showPreferenceEditor(Object value) async {
+    final isList = value is List;
     final controller = TextEditingController(
-      text: value is List
+      text: isList
           ? value.whereType<int>().map((s) => s ~/ 60).join(', ')
           : '$value',
     );
+    const reminderPresets = [
+      ('15 & 5 phút', '15, 5'),
+      ('10 & 5 phút', '10, 5'),
+      ('5 phút', '5'),
+    ];
+    const bufferPresets = [
+      ('×1.0', '1.0'),
+      ('×1.2', '1.2'),
+      ('×1.4', '1.4'),
+      ('×1.6', '1.6'),
+    ];
+
+    bool isValidValue(String raw) {
+      final text = raw.trim();
+      if (text.isEmpty) return false;
+      if (isList) {
+        final parts = text.split(',').map((v) => int.tryParse(v.trim()));
+        return parts.isNotEmpty && parts.every((v) => v != null && v >= 0);
+      }
+      return _parseBuffer(text) != null;
+    }
+
     final result = await showModalBottomSheet<String>(
       context: context,
+      showDragHandle: true,
       isScrollControlled: true,
-      builder: (sheet) => SafeArea(
-          child: Padding(
-        padding: EdgeInsets.fromLTRB(
-            20, 20, 20, 20 + MediaQuery.viewInsetsOf(sheet).bottom),
-        child: Column(mainAxisSize: MainAxisSize.min, children: [
-          TextField(
-            controller: controller,
-            decoration: InputDecoration(
-                labelText: value is List
-                    ? 'Phút, cách nhau bằng dấu phẩy'
-                    : 'Hệ số đệm'),
-          ),
-          const SizedBox(height: 12),
-          PrimaryCta(
-              label: 'Áp dụng',
-              onPressed: () => Navigator.pop(sheet, controller.text.trim())),
-        ]),
-      )),
+      builder: (sheet) => StatefulBuilder(
+        builder: (sheet, setSheetState) {
+          final palette = sheet.melbel;
+          final textTheme = Theme.of(sheet).textTheme;
+          final currentText = controller.text.trim();
+          final valid = isValidValue(currentText);
+          final presets = isList ? reminderPresets : bufferPresets;
+
+          return SafeArea(
+            child: SingleChildScrollView(
+              padding: EdgeInsets.fromLTRB(
+                20,
+                4,
+                20,
+                20 + MediaQuery.viewInsetsOf(sheet).bottom,
+              ),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Text(
+                    isList ? 'Nhắc trước phiên' : 'Hệ số đệm thời gian',
+                    style: textTheme.titleLarge?.copyWith(
+                      color: palette.onSurface,
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 8,
+                    children: [
+                      for (final (label, presetVal) in presets)
+                        ChoiceChip(
+                          label: Text(label),
+                          selected: currentText == presetVal,
+                          onSelected: (_) {
+                            controller.text = presetVal;
+                            setSheetState(() {});
+                          },
+                        ),
+                    ],
+                  ),
+                  const SizedBox(height: 12),
+                  TextField(
+                    controller: controller,
+                    keyboardType: TextInputType.text,
+                    onChanged: (_) => setSheetState(() {}),
+                    decoration: InputDecoration(
+                      labelText: isList
+                          ? 'Phút, cách nhau bằng dấu phẩy'
+                          : 'Hệ số đệm',
+                      errorText: !valid
+                          ? (isList
+                              ? 'Nhập số phút >= 0, cách nhau bằng dấu phẩy.'
+                              : 'Nhập hệ số đệm từ 1,0 đến 2,0.')
+                          : null,
+                    ),
+                  ),
+                  const SizedBox(height: 14),
+                  PrimaryCta(
+                    label: 'Áp dụng',
+                    onPressed:
+                        valid ? () => Navigator.pop(sheet, currentText) : null,
+                  ),
+                  const SizedBox(height: 4),
+                  TextButton(
+                    onPressed: () => Navigator.pop(sheet),
+                    child: const Text('Hủy'),
+                  ),
+                ],
+              ),
+            ),
+          );
+        },
+      ),
     );
     WidgetsBinding.instance.addPostFrameCallback((_) => controller.dispose());
     return result;
@@ -468,7 +549,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
             child: Row(
               children: [
                 Icon(Icons.info_outline_rounded,
-                    size: 18, color: palette.amber),
+                    size: 18, color: palette.amberInk),
                 const SizedBox(width: 10),
                 Expanded(
                   child: Text(
@@ -494,7 +575,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Eyebrow('Chờ duyệt lịch', color: palette.amber),
+                  Eyebrow('Chờ duyệt lịch', color: palette.amberInk),
                   const SizedBox(height: 6),
                   Text(
                     'Thay đổi nhịp làm việc ảnh hưởng tới lịch tương lai.',
@@ -673,7 +754,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 ),
                 ListTile(
                   contentPadding: EdgeInsets.zero,
-                  leading: Icon(Icons.shield_outlined, color: palette.sage),
+                  leading: Icon(Icons.shield_outlined, color: palette.accentInk),
                   title: Text('Hệ số đệm: ×$buffer'),
                   subtitle: const Text('Dự phòng thời gian khi xếp phiên'),
                   trailing: const MelbelStatusPill(

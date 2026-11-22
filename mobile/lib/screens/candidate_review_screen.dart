@@ -61,7 +61,6 @@ class CandidateReviewScreen extends StatelessWidget {
     final dates = MaterialLocalizations.of(context);
 
     final palette = context.melbel;
-    final isDark = Theme.of(context).brightness == Brightness.dark;
     final textTheme = Theme.of(context).textTheme;
     final firstMicroTask = candidate.sessions
         .map((session) => session['micro_task_text'])
@@ -209,7 +208,7 @@ class CandidateReviewScreen extends StatelessWidget {
             const SizedBox(height: 14),
             if (firstMicroTask != null) ...[
               MelbelCard(
-                tone: isDark ? MelbelCardTone.sage : MelbelCardTone.amber,
+                tone: MelbelCardTone.amber,
                 borderRadius: 26,
                 padding: const EdgeInsets.all(18),
                 child: Row(
@@ -219,15 +218,14 @@ class CandidateReviewScreen extends StatelessWidget {
                       width: 44,
                       height: 44,
                       decoration: BoxDecoration(
-                        color: (isDark ? palette.sage : palette.amber)
-                            .withValues(alpha: 0.16),
+                        color: palette.amber.withValues(alpha: 0.16),
                         borderRadius: BorderRadius.circular(14),
                       ),
                       alignment: Alignment.center,
                       child: Icon(
                         Icons.rocket_launch_outlined,
                         size: 22,
-                        color: isDark ? palette.sage : palette.amber,
+                        color: palette.amberInk,
                       ),
                     ),
                     const SizedBox(width: 14),
@@ -237,28 +235,21 @@ class CandidateReviewScreen extends StatelessWidget {
                         children: [
                           Eyebrow(
                             'KHỞI ĐỘNG 2 PHÚT ĐẦU TIÊN',
-                            color: isDark
-                                ? palette.onSageSoft
-                                : palette.onAmberSoft,
+                            color: palette.onAmberSoft,
                           ),
                           const SizedBox(height: 6),
                           Text(
                             firstMicroTask,
                             style: textTheme.titleSmall?.copyWith(
                               fontWeight: FontWeight.w700,
-                              color: isDark
-                                  ? palette.onSageSoft
-                                  : palette.onAmberSoft,
+                              color: palette.onAmberSoft,
                             ),
                           ),
                           const SizedBox(height: 4),
                           Text(
                             'Chỉ 2 phút để vào nhịp · không tính vào thời lượng phiên chính',
                             style: textTheme.bodySmall?.copyWith(
-                              color: (isDark
-                                      ? palette.onSageSoft
-                                      : palette.onAmberSoft)
-                                  .withValues(alpha: 0.78),
+                              color: palette.onAmberSoft.withValues(alpha: 0.78),
                             ),
                           ),
                         ],
@@ -307,7 +298,7 @@ class CandidateReviewScreen extends StatelessWidget {
               children: [
                 ActionChip(
                   avatar: Icon(Icons.tune_rounded,
-                      size: 18, color: palette.sage),
+                      size: 18, color: palette.accentInk),
                   label: const Text('Tùy chỉnh theo ý tôi'),
                   backgroundColor: palette.surface,
                   onPressed: task.isApiBusy
@@ -324,7 +315,7 @@ class CandidateReviewScreen extends StatelessWidget {
                 if (candidate.steps.isNotEmpty)
                   ActionChip(
                     avatar: Icon(Icons.mic_none_rounded,
-                        size: 18, color: palette.sage),
+                        size: 18, color: palette.accentInk),
                     label: const Text('Tùy chỉnh bằng giọng nói'),
                     backgroundColor: palette.surface,
                     onPressed:
@@ -523,7 +514,7 @@ class CandidateReviewScreen extends StatelessWidget {
               child: Row(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Icon(Icons.spa_outlined, size: 17, color: palette.sage),
+                  Icon(Icons.spa_outlined, size: 17, color: palette.accentInk),
                   const SizedBox(width: 8),
                   Expanded(
                     child: Text(

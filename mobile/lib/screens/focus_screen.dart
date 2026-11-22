@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 
 import '../core/responsive_layout.dart';
@@ -144,7 +145,32 @@ class _FocusScreenState extends State<FocusScreen> with WidgetsBindingObserver {
                       Navigator.of(context).pushReplacementNamed('/calendar'),
                 ),
               ),
-            _buildStage(context, focus, session),
+            AnimatedSwitcher(
+              duration: MediaQuery.disableAnimationsOf(context)
+                  ? Duration.zero
+                  : const Duration(milliseconds: 240),
+              switchInCurve: Curves.easeOutCubic,
+              switchOutCurve: Curves.easeInCubic,
+              transitionBuilder: (child, animation) {
+                if (MediaQuery.disableAnimationsOf(context)) return child;
+                return RepaintBoundary(
+                  child: FadeTransition(
+                    opacity: animation,
+                    child: SlideTransition(
+                      position: Tween<Offset>(
+                        begin: const Offset(0, 0.025),
+                        end: Offset.zero,
+                      ).animate(animation),
+                      child: child,
+                    ),
+                  ),
+                );
+              },
+              child: KeyedSubtree(
+                key: ValueKey(focus.stage),
+                child: _buildStage(context, focus, session),
+              ),
+            ),
           ],
         ),
       ),
@@ -312,7 +338,8 @@ class _FocusScreenState extends State<FocusScreen> with WidgetsBindingObserver {
               formatFocusClock(DateTime.now()),
               style: text.displayMedium?.copyWith(
                 color: palette.onSurface,
-                fontWeight: FontWeight.w300,
+                fontWeight: FontWeight.w500,
+                fontFeatures: const [FontFeature.tabularFigures()],
               ),
             ),
           ),
@@ -379,8 +406,9 @@ class _FocusScreenState extends State<FocusScreen> with WidgetsBindingObserver {
                       Text(
                         formatFocusTimer(focus.microTaskRemainingSeconds),
                         style: text.titleMedium?.copyWith(
-                          color: palette.sage,
+                          color: palette.accentInk,
                           fontWeight: FontWeight.w700,
+                          fontFeatures: const [FontFeature.tabularFigures()],
                         ),
                       ),
                     ],
@@ -915,7 +943,7 @@ class _FocusScreenState extends State<FocusScreen> with WidgetsBindingObserver {
               child: TextButton.icon(
                 onPressed: focus.runCommandBusy
                     ? null
-                    : () => _openActualCorrectionDialog(focus),
+                    : () => _openActualCorrectionSheet(focus),
                 icon: const Icon(Icons.edit_outlined, size: 18),
                 label: const Text('Sửa thời gian thực tế'),
               ),
@@ -993,7 +1021,7 @@ class _FocusScreenState extends State<FocusScreen> with WidgetsBindingObserver {
                       child: Icon(
                         icon,
                         size: 21,
-                        color: toneAmber ? palette.amber : palette.sage,
+                        color: toneAmber ? palette.amberInk : palette.accentInk,
                       ),
                     ),
                     title: Text(
@@ -1178,66 +1206,170 @@ class _FocusScreenState extends State<FocusScreen> with WidgetsBindingObserver {
         MaterialPageRoute(builder: (_) => const ThoughtInboxScreen()),
       );
 
-  Future<void> _openActualCorrectionDialog(FocusProvider focus) async {
+  Future<void> _openActualCorrectionSheet(FocusProvider focus) async {
     final initialMinutes = (focus.actualWorkSeconds / 60).round();
     final minutesController = TextEditingController(
       text: initialMinutes.toString(),
     );
     final reasonController = TextEditingController();
-    final confirmed = await showDialog<bool>(
+    const quickReasons = [
+      'Quên bấm kết thúc',
+      'Xong sớm hơn dự kiến',
+      'Nghỉ giữa chừng',
+      'Làm thêm giờ',
+    ];
+
+    final result =
+        await showModalBottomSheet<({int minutes, String reason})>(
       context: context,
-      builder: (dialogContext) => AlertDialog(
-        title: const Text('Sửa thời gian thực tế'),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            TextField(
-              controller: minutesController,
-              keyboardType: TextInputType.number,
-              decoration: const InputDecoration(
-                labelText: 'Số phút làm thực tế',
+      showDragHandle: true,
+      isScrollControlled: true,
+      builder: (sheetContext) => StatefulBuilder(
+        builder: (sheetContext, setSheetState) {
+          final palette = sheetContext.melbel;
+          final textTheme = Theme.of(sheetContext).textTheme;
+          final parsedMinutes = int.tryParse(minutesController.text.trim());
+          final reasonText = reasonController.text.trim();
+          final hasValidMinutes = parsedMinutes != null && parsedMinutes >= 0;
+          final isValid = hasValidMinutes && reasonText.isNotEmpty;
+
+          void nudgeMinutes(int delta) {
+            final current = int.tryParse(minutesController.text.trim()) ??
+                initialMinutes;
+            final next = (current + delta).clamp(0, 1440);
+            minutesController.text = next.toString();
+            setSheetState(() {});
+          }
+
+          return SafeArea(
+            child: SingleChildScrollView(
+              padding: EdgeInsets.fromLTRB(
+                20,
+                4,
+                20,
+                20 + MediaQuery.viewInsetsOf(sheetContext).bottom,
+              ),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Text(
+                    'Sửa thời gian thực tế',
+                    style: textTheme.titleLarge?.copyWith(
+                      color: palette.onSurface,
+                    ),
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    'Chọn nhanh hoặc nhập số phút bạn đã làm thực tế.',
+                    style: textTheme.bodySmall?.copyWith(
+                      color: palette.onSurfaceVariant,
+                    ),
+                  ),
+                  const SizedBox(height: 14),
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 8,
+                    children: [
+                      for (final delta in const [-10, -5, 5, 10])
+                        ActionChip(
+                          label: Text(
+                            '${delta > 0 ? '+' : ''}${delta}p',
+                          ),
+                          onPressed: () => nudgeMinutes(delta),
+                        ),
+                    ],
+                  ),
+                  const SizedBox(height: 12),
+                  TextField(
+                    controller: minutesController,
+                    keyboardType: TextInputType.number,
+                    inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+                    onChanged: (_) => setSheetState(() {}),
+                    decoration: InputDecoration(
+                      labelText: 'Số phút làm thực tế',
+                      suffixText: 'phút',
+                      errorText:
+                          minutesController.text.isNotEmpty && !hasValidMinutes
+                              ? 'Nhập số phút hợp lệ (>= 0).'
+                              : null,
+                    ),
+                  ),
+                  const SizedBox(height: 14),
+                  Text(
+                    'Lý do nhanh',
+                    style: textTheme.labelMedium?.copyWith(
+                      color: palette.onSurfaceVariant,
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 8,
+                    children: [
+                      for (final preset in quickReasons)
+                        ChoiceChip(
+                          label: Text(preset),
+                          selected: reasonText == preset,
+                          onSelected: (_) {
+                            reasonController.text = preset;
+                            setSheetState(() {});
+                          },
+                        ),
+                    ],
+                  ),
+                  const SizedBox(height: 12),
+                  TextField(
+                    controller: reasonController,
+                    maxLines: 2,
+                    textCapitalization: TextCapitalization.sentences,
+                    onChanged: (_) => setSheetState(() {}),
+                    decoration: const InputDecoration(
+                      labelText: 'Lý do điều chỉnh',
+                      hintText: 'Chọn gợi ý ở trên hoặc tự nhập ngắn gọn',
+                    ),
+                  ),
+                  if (!isValid) ...[
+                    const SizedBox(height: 8),
+                    Text(
+                      !hasValidMinutes
+                          ? 'Nhập số phút hợp lệ (>= 0).'
+                          : 'Chọn hoặc nhập lý do để lưu điều chỉnh.',
+                      style: textTheme.bodySmall?.copyWith(
+                        color: palette.amberInk,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ],
+                  const SizedBox(height: 16),
+                  PrimaryCta(
+                    label: 'Lưu điều chỉnh',
+                    onPressed: isValid
+                        ? () => Navigator.of(sheetContext).pop(
+                              (minutes: parsedMinutes, reason: reasonText),
+                            )
+                        : null,
+                  ),
+                  const SizedBox(height: 4),
+                  TextButton(
+                    onPressed: () => Navigator.of(sheetContext).pop(),
+                    child: const Text('Hủy'),
+                  ),
+                ],
               ),
             ),
-            const SizedBox(height: 12),
-            TextField(
-              controller: reasonController,
-              maxLines: 2,
-              decoration: const InputDecoration(
-                labelText: 'Lý do điều chỉnh',
-                hintText: 'VD: Quên bấm kết thúc khi đã xong sớm',
-              ),
-            ),
-          ],
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(dialogContext).pop(false),
-            child: const Text('Hủy'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.of(dialogContext).pop(true),
-            child: const Text('Lưu'),
-          ),
-        ],
+          );
+        },
       ),
     );
-    final minutesText = minutesController.text.trim();
-    final reasonText = reasonController.text.trim();
-    minutesController.dispose();
-    reasonController.dispose();
-    if (confirmed != true || !mounted) return;
-    final parsedMinutes = int.tryParse(minutesText);
-    if (parsedMinutes == null || parsedMinutes < 0 || reasonText.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Nhập số phút >= 0 và lý do điều chỉnh.'),
-        ),
-      );
-      return;
-    }
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      minutesController.dispose();
+      reasonController.dispose();
+    });
+    if (result == null || !mounted) return;
     final ok = await focus.submitActualCorrection(
-      correctedWorkMinutes: parsedMinutes,
-      reason: reasonText,
+      correctedWorkMinutes: result.minutes,
+      reason: result.reason,
     );
     if (!mounted) return;
     if (ok) {

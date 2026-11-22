@@ -10,11 +10,11 @@ class MelbelColors {
   static bool isDark = false;
   static Color _pick(int day, int night) => Color(isDark ? night : day);
 
-  static const Color kBrandLavender = Color(0xFF8368C4);
+  static const Color kBrandLavender = Color(0xFF7A5EBD);
   static const Color kOnBrandLavender = Color(0xFFFFFDFB);
   static const Color kBrandHoney = Color(0xFFD9AE48);
   static const Color kOnBrandHoney = Color(0xFF2B2212);
-  static const Color kBrandRose = Color(0xFFB5626C);
+  static const Color kBrandRose = Color(0xFFAA545E);
 
   static Color get kBackground => _pick(0xFFFBF5EC, 0xFF1A1523);
   static Color get kSurface => _pick(0xFFFFFDFB, 0xFF282235);
@@ -80,6 +80,9 @@ class MelbelPalette extends ThemeExtension<MelbelPalette> {
     required this.softError,
     required this.softErrorSoft,
     required this.onSoftErrorSoft,
+    required this.accentInk,
+    required this.amberInk,
+    required this.errorInk,
     required this.hairline,
     required this.controlOutline,
   });
@@ -100,6 +103,9 @@ class MelbelPalette extends ThemeExtension<MelbelPalette> {
   final Color softError;
   final Color softErrorSoft;
   final Color onSoftErrorSoft;
+  final Color accentInk;
+  final Color amberInk;
+  final Color errorInk;
   final Color hairline;
   final Color controlOutline;
 
@@ -120,6 +126,9 @@ class MelbelPalette extends ThemeExtension<MelbelPalette> {
     softError: MelbelColors.kBrandRose,
     softErrorSoft: Color(0xFFFAEEF0),
     onSoftErrorSoft: Color(0xFF612830),
+    accentInk: Color(0xFF6449A6),
+    amberInk: Color(0xFF876010),
+    errorInk: Color(0xFF943F4A),
     hairline: Color(0xFFECE2D4),
     controlOutline: Color(0xFF9387A6),
   );
@@ -141,14 +150,76 @@ class MelbelPalette extends ThemeExtension<MelbelPalette> {
     softError: MelbelColors.kBrandRose,
     softErrorSoft: Color(0xFF382429),
     onSoftErrorSoft: Color(0xFFF6D8DC),
+    accentInk: Color(0xFFC7B6F2),
+    amberInk: Color(0xFFE8C468),
+    errorInk: Color(0xFFEDA1AA),
     hairline: Color(0xFF3C334F),
     controlOutline: Color(0xFF8C80A3),
   );
 
+  static const lightHighContrast = MelbelPalette(
+    background: Color(0xFFFBF5EC),
+    surface: Color(0xFFFFFDFB),
+    mutedSurface: Color(0xFFF1EAE0),
+    selectedSurface: Color(0xFFE9DFFA),
+    onSurface: Color(0xFF2B2338),
+    onSurfaceVariant: Color(0xFF4A4158),
+    sage: MelbelColors.kBrandLavender,
+    onSage: MelbelColors.kOnBrandLavender,
+    sageSoft: Color(0xFFECE3FA),
+    onSageSoft: Color(0xFF2B2338),
+    amber: MelbelColors.kBrandHoney,
+    amberSoft: Color(0xFFFCF6EA),
+    onAmberSoft: Color(0xFF3E3018),
+    softError: MelbelColors.kBrandRose,
+    softErrorSoft: Color(0xFFFAEEF0),
+    onSoftErrorSoft: Color(0xFF612830),
+    accentInk: Color(0xFF4E348F),
+    amberInk: Color(0xFF6E4C08),
+    errorInk: Color(0xFF7B2B36),
+    hairline: Color(0xFF8F82A6),
+    controlOutline: Color(0xFF5D5270),
+  );
+
+  static const darkHighContrast = MelbelPalette(
+    background: Color(0xFF1A1523),
+    surface: Color(0xFF282235),
+    mutedSurface: Color(0xFF302940),
+    selectedSurface: Color(0xFF534273),
+    onSurface: Color(0xFFF5F1FA),
+    onSurfaceVariant: Color(0xFFDFD8EB),
+    sage: MelbelColors.kBrandLavender,
+    onSage: MelbelColors.kOnBrandLavender,
+    sageSoft: Color(0xFF3D3252),
+    onSageSoft: Color(0xFFF5F1FA),
+    amber: MelbelColors.kBrandHoney,
+    amberSoft: Color(0xFF3D352E),
+    onAmberSoft: Color(0xFFF6E7C3),
+    softError: MelbelColors.kBrandRose,
+    softErrorSoft: Color(0xFF382429),
+    onSoftErrorSoft: Color(0xFFF6D8DC),
+    accentInk: Color(0xFFDDD0FA),
+    amberInk: Color(0xFFF4D88A),
+    errorInk: Color(0xFFF6BCC3),
+    hairline: Color(0xFF80749B),
+    controlOutline: Color(0xFFB8AECB),
+  );
+
   static MelbelPalette of(BuildContext context) {
     final theme = Theme.of(context);
-    return theme.extension<MelbelPalette>() ??
-        (theme.brightness == Brightness.dark ? dark : light);
+    final isDark = theme.brightness == Brightness.dark;
+    final highContrast = MediaQuery.maybeHighContrastOf(context) ?? false;
+    final ext = theme.extension<MelbelPalette>();
+    if (ext != null) {
+      if (highContrast && (identical(ext, light) || identical(ext, dark))) {
+        return isDark ? darkHighContrast : lightHighContrast;
+      }
+      return ext;
+    }
+    if (highContrast) {
+      return isDark ? darkHighContrast : lightHighContrast;
+    }
+    return isDark ? dark : light;
   }
 
   @override
@@ -169,6 +240,9 @@ class MelbelPalette extends ThemeExtension<MelbelPalette> {
     Color? softError,
     Color? softErrorSoft,
     Color? onSoftErrorSoft,
+    Color? accentInk,
+    Color? amberInk,
+    Color? errorInk,
     Color? hairline,
     Color? controlOutline,
   }) =>
@@ -189,6 +263,9 @@ class MelbelPalette extends ThemeExtension<MelbelPalette> {
         softError: softError ?? this.softError,
         softErrorSoft: softErrorSoft ?? this.softErrorSoft,
         onSoftErrorSoft: onSoftErrorSoft ?? this.onSoftErrorSoft,
+        accentInk: accentInk ?? this.accentInk,
+        amberInk: amberInk ?? this.amberInk,
+        errorInk: errorInk ?? this.errorInk,
         hairline: hairline ?? this.hairline,
         controlOutline: controlOutline ?? this.controlOutline,
       );
@@ -214,6 +291,9 @@ class MelbelPalette extends ThemeExtension<MelbelPalette> {
       softError: Color.lerp(softError, other.softError, t)!,
       softErrorSoft: Color.lerp(softErrorSoft, other.softErrorSoft, t)!,
       onSoftErrorSoft: Color.lerp(onSoftErrorSoft, other.onSoftErrorSoft, t)!,
+      accentInk: Color.lerp(accentInk, other.accentInk, t)!,
+      amberInk: Color.lerp(amberInk, other.amberInk, t)!,
+      errorInk: Color.lerp(errorInk, other.errorInk, t)!,
       hairline: Color.lerp(hairline, other.hairline, t)!,
       controlOutline: Color.lerp(controlOutline, other.controlOutline, t)!,
     );
@@ -225,9 +305,19 @@ extension MelbelContextTheme on BuildContext {
 }
 
 class MelbelTheme {
-  static ThemeData get currentTheme {
-    final dark = MelbelColors.isDark;
-    final palette = dark ? MelbelPalette.dark : MelbelPalette.light;
+  static ThemeData get currentTheme =>
+      themeFor(isDark: MelbelColors.isDark, highContrast: false);
+
+  static ThemeData themeFor({
+    required bool isDark,
+    bool highContrast = false,
+  }) {
+    final dark = isDark;
+    final palette = highContrast
+        ? (dark
+            ? MelbelPalette.darkHighContrast
+            : MelbelPalette.lightHighContrast)
+        : (dark ? MelbelPalette.dark : MelbelPalette.light);
     final brightness = dark ? Brightness.dark : Brightness.light;
     final baseTextTheme =
         (dark ? ThemeData.dark() : ThemeData.light()).textTheme.apply(
@@ -362,11 +452,15 @@ class MelbelTheme {
         ),
         border: OutlineInputBorder(
           borderRadius: BorderRadius.circular(20),
-          borderSide: BorderSide.none,
+          borderSide: highContrast
+              ? BorderSide(color: palette.controlOutline, width: 1.2)
+              : BorderSide.none,
         ),
         enabledBorder: OutlineInputBorder(
           borderRadius: BorderRadius.circular(20),
-          borderSide: BorderSide.none,
+          borderSide: highContrast
+              ? BorderSide(color: palette.controlOutline, width: 1.2)
+              : BorderSide.none,
         ),
         focusedBorder: OutlineInputBorder(
           borderRadius: BorderRadius.circular(20),
@@ -442,9 +536,11 @@ class MelbelTheme {
           backgroundColor: dark ? const Color(0xFF231D2E) : palette.surface,
           foregroundColor: palette.onSurface,
           minimumSize: const Size(48, 48),
-          side: dark
-              ? BorderSide(color: palette.hairline, width: 1.0)
-              : BorderSide.none,
+          side: highContrast
+              ? BorderSide(color: palette.controlOutline, width: 1.5)
+              : dark
+                  ? BorderSide(color: palette.hairline, width: 1.0)
+                  : BorderSide.none,
           shape: const StadiumBorder(),
           textStyle: textTheme.labelLarge?.copyWith(
             fontWeight: FontWeight.w700,
@@ -453,7 +549,7 @@ class MelbelTheme {
       ),
       textButtonTheme: TextButtonThemeData(
         style: TextButton.styleFrom(
-          foregroundColor: palette.sage,
+          foregroundColor: palette.accentInk,
           minimumSize: const Size(48, 48),
           padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
           shape: RoundedRectangleBorder(
@@ -470,12 +566,59 @@ class MelbelTheme {
       ),
       pageTransitionsTheme: const PageTransitionsTheme(
         builders: {
-          TargetPlatform.android: FadeForwardsPageTransitionsBuilder(),
-          TargetPlatform.iOS: FadeUpwardsPageTransitionsBuilder(),
-          TargetPlatform.windows: FadeUpwardsPageTransitionsBuilder(),
-          TargetPlatform.linux: FadeUpwardsPageTransitionsBuilder(),
-          TargetPlatform.macOS: FadeUpwardsPageTransitionsBuilder(),
+          TargetPlatform.android: MelbelFlowPageTransitionsBuilder(),
+          TargetPlatform.iOS: MelbelFlowPageTransitionsBuilder(),
+          TargetPlatform.windows: MelbelFlowPageTransitionsBuilder(),
+          TargetPlatform.linux: MelbelFlowPageTransitionsBuilder(),
+          TargetPlatform.macOS: MelbelFlowPageTransitionsBuilder(),
         },
+      ),
+    );
+  }
+}
+
+/// GPU-composited horizontal flow transition (`FadeTransition` + subtle
+/// parallax `SlideTransition`) that stays at 60 FPS and respects reduced motion.
+class MelbelFlowPageTransitionsBuilder extends PageTransitionsBuilder {
+  const MelbelFlowPageTransitionsBuilder();
+
+  @override
+  Widget buildTransitions<T>(
+    PageRoute<T> route,
+    BuildContext context,
+    Animation<double> animation,
+    Animation<double> secondaryAnimation,
+    Widget child,
+  ) {
+    if (MediaQuery.disableAnimationsOf(context)) return child;
+
+    final primary = CurvedAnimation(
+      parent: animation,
+      curve: Curves.easeOutCubic,
+      reverseCurve: Curves.easeInCubic,
+    );
+    final secondary = CurvedAnimation(
+      parent: secondaryAnimation,
+      curve: Curves.easeOutCubic,
+      reverseCurve: Curves.easeInCubic,
+    );
+
+    return RepaintBoundary(
+      child: SlideTransition(
+        position: Tween<Offset>(
+          begin: Offset.zero,
+          end: const Offset(-0.025, 0),
+        ).animate(secondary),
+        child: SlideTransition(
+          position: Tween<Offset>(
+            begin: const Offset(0.06, 0),
+            end: Offset.zero,
+          ).animate(primary),
+          child: FadeTransition(
+            opacity: primary,
+            child: child,
+          ),
+        ),
       ),
     );
   }

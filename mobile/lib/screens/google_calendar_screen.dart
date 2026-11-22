@@ -145,7 +145,7 @@ class _GoogleCalendarScreenState extends State<GoogleCalendarScreen>
                   tone: MelbelCardTone.amber,
                   child: Row(
                     children: [
-                      Icon(Icons.cloud_off_outlined, color: palette.amber),
+                      Icon(Icons.cloud_off_outlined, color: palette.amberInk),
                       const SizedBox(width: 10),
                       Expanded(child: Text(_error!)),
                     ],
@@ -197,7 +197,7 @@ class _GoogleCalendarScreenState extends State<GoogleCalendarScreen>
                         ),
                         child: Icon(
                           Icons.calendar_month_outlined,
-                          color: palette.sage,
+                          color: palette.accentInk,
                         ),
                       ),
                       title: Text(
@@ -396,6 +396,8 @@ class _GoogleCalendarAccountState extends State<_GoogleCalendarAccount> {
       if (!mounted) return;
       final apply = await showModalBottomSheet<bool>(
         context: context,
+        showDragHandle: true,
+        isScrollControlled: true,
         builder: (sheet) => SafeArea(
             child: Padding(
           padding: const EdgeInsets.all(20),

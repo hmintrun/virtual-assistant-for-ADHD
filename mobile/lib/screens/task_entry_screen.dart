@@ -438,7 +438,7 @@ class _TaskEntryScreenState extends State<TaskEntryScreen> {
                                     _voiceHint!,
                                     textAlign: TextAlign.center,
                                     style: textTheme.bodySmall?.copyWith(
-                                      color: palette.amber,
+                                      color: palette.amberInk,
                                       fontWeight: FontWeight.w500,
                                     ),
                                   ),
@@ -513,7 +513,7 @@ class _TaskEntryScreenState extends State<TaskEntryScreen> {
                                             Icon(
                                               Icons.graphic_eq_rounded,
                                               size: 20,
-                                              color: palette.amber,
+                                              color: palette.amberInk,
                                             ),
                                             const SizedBox(width: 10),
                                             Expanded(
@@ -779,7 +779,7 @@ class _VoiceRecordButtonState extends State<_VoiceRecordButton>
                           shape: BoxShape.circle,
                           border: Border.all(
                             width: 2.5,
-                            color: palette.sage,
+                            color: palette.accentInk,
                           ),
                         ),
                       ),

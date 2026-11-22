@@ -804,7 +804,8 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                   child: Row(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Icon(Icons.spa_outlined, size: 17, color: palette.sage),
+                      Icon(Icons.spa_outlined,
+                          size: 17, color: palette.accentInk),
                       const SizedBox(width: 8),
                       Expanded(
                         child: Text(
@@ -873,7 +874,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
               child: Icon(
                 Icons.timelapse_rounded,
                 size: 20,
-                color: palette.sage,
+                color: palette.accentInk,
               ),
             ),
             const SizedBox(width: 12),
@@ -884,8 +885,9 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                   Text(
                     '$date${clock(start)}–${clock(end)}',
                     style: text.labelMedium?.copyWith(
-                      color: palette.sage,
+                      color: palette.accentInk,
                       fontWeight: FontWeight.w700,
+                      fontFeatures: const [FontFeature.tabularFigures()],
                     ),
                   ),
                   const SizedBox(height: 3),
@@ -961,7 +963,7 @@ class _AdaptationBanner extends StatelessWidget {
               color: palette.amber.withValues(alpha: 0.14),
               borderRadius: BorderRadius.circular(12),
             ),
-            child: Icon(icon, size: 20, color: palette.amber),
+            child: Icon(icon, size: 20, color: palette.amberInk),
           ),
           const SizedBox(width: 12),
           Expanded(
@@ -988,7 +990,7 @@ class _AdaptationBanner extends StatelessWidget {
               ],
             ),
           ),
-          Icon(Icons.chevron_right_rounded, color: palette.amber),
+          Icon(Icons.chevron_right_rounded, color: palette.amberInk),
         ],
       ),
     );
@@ -1009,7 +1011,7 @@ class _HomeSectionTitle extends StatelessWidget {
       header: true,
       child: Row(
         children: [
-          Icon(icon, size: 19, color: palette.sage),
+          Icon(icon, size: 19, color: palette.accentInk),
           const SizedBox(width: 8),
           Expanded(
             child: Text(

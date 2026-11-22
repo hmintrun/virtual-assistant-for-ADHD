@@ -78,7 +78,7 @@ class _TaskReadyScreenState extends State<TaskReadyScreen> {
                       displayTitle,
                       style: textTheme.titleLarge?.copyWith(
                         fontWeight: FontWeight.w800,
-                        color: palette.sage,
+                        color: palette.accentInk,
                       ),
                     ),
                     const SizedBox(height: 16),
@@ -153,7 +153,7 @@ class _DetailLine extends StatelessWidget {
             color: palette.sageSoft,
             borderRadius: BorderRadius.circular(12),
           ),
-          child: Icon(icon, size: 19, color: palette.sage),
+          child: Icon(icon, size: 19, color: palette.accentInk),
         ),
         const SizedBox(width: 12),
         Expanded(

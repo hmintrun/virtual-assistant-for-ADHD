@@ -211,8 +211,7 @@ class _CalendarScreenState extends State<CalendarScreen> {
     final today = DateTime.now();
     final offset = _month.weekday - 1;
     final days = DateTime(_month.year, _month.month + 1, 0).day;
-    final activeTint =
-        isDark ? const Color(0xFFC5B2F2) : palette.sage;
+    final activeTint = palette.accentInk;
 
     return Scaffold(
       appBar: const MelbelAppBar(title: 'Lịch', showBack: true),
@@ -636,7 +635,7 @@ class _CalendarScreenState extends State<CalendarScreen> {
                       children: [
                         Icon(
                           Icons.cloud_off_outlined,
-                          color: palette.amber,
+                          color: palette.amberInk,
                           size: 20,
                         ),
                         const SizedBox(width: 10),

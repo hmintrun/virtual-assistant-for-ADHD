@@ -97,7 +97,7 @@ class MelbelAppBar extends StatelessWidget implements PreferredSizeWidget {
                   isDark
                       ? Icons.nightlight_outlined
                       : Icons.wb_sunny_outlined,
-                  color: isDark ? palette.amber : palette.sage,
+                  color: isDark ? palette.amberInk : palette.accentInk,
                   size: 21,
                 ),
               ),
@@ -108,7 +108,7 @@ class MelbelAppBar extends StatelessWidget implements PreferredSizeWidget {
               bg: palette.sageSoft,
               child: Icon(
                 leadingIcon ?? Icons.spa_outlined,
-                color: palette.sage,
+                color: palette.accentInk,
                 size: 20,
               ),
             ),
@@ -744,6 +744,7 @@ class PlanningStageHeader extends StatelessWidget {
     final theme = Theme.of(context);
     final palette = context.melbel;
     final isDark = theme.brightness == Brightness.dark;
+    final reducedMotion = MediaQuery.disableAnimationsOf(context);
     return Semantics(
       label: 'Bước $step trên 3: $label',
       child: MelbelEntrance(
@@ -776,19 +777,37 @@ class PlanningStageHeader extends StatelessWidget {
               children: [
                 for (var index = 1; index <= 3; index++)
                   Expanded(
-                    child: AnimatedContainer(
-                      duration: MediaQuery.disableAnimationsOf(context)
-                          ? Duration.zero
-                          : const Duration(milliseconds: 220),
-                      curve: Curves.easeOutCubic,
-                      height: 6,
-                      decoration: BoxDecoration(
-                        color: index <= step
-                            ? palette.sage
-                            : (isDark
-                                ? const Color(0xFF3E3454)
-                                : const Color(0xFFE6DCF7)),
-                        borderRadius: BorderRadius.circular(999),
+                    child: ClipRRect(
+                      borderRadius: BorderRadius.circular(999),
+                      child: Container(
+                        height: 6,
+                        color: isDark
+                            ? const Color(0xFF3E3454)
+                            : const Color(0xFFE6DCF7),
+                        child: RepaintBoundary(
+                          child: TweenAnimationBuilder<double>(
+                            tween: Tween<double>(
+                              end: index <= step ? 1.0 : 0.0,
+                            ),
+                            duration: reducedMotion
+                                ? Duration.zero
+                                : const Duration(milliseconds: 260),
+                            curve: Curves.easeOutCubic,
+                            builder: (context, factor, bar) => Transform.scale(
+                              alignment: Alignment.centerLeft,
+                              scaleX: factor,
+                              child: bar,
+                            ),
+                            child: SizedBox.expand(
+                              child: DecoratedBox(
+                                decoration: BoxDecoration(
+                                  color: palette.sage,
+                                  borderRadius: BorderRadius.circular(999),
+                                ),
+                              ),
+                            ),
+                          ),
+                        ),
                       ),
                     ),
                   ),
@@ -796,6 +815,48 @@ class PlanningStageHeader extends StatelessWidget {
             ),
           ],
         ),
+      ),
+    );
+  }
+}
+
+class _MelbelPressScale extends StatefulWidget {
+  const _MelbelPressScale({
+    required this.enabled,
+    required this.child,
+  });
+
+  final bool enabled;
+  final Widget child;
+
+  @override
+  State<_MelbelPressScale> createState() => _MelbelPressScaleState();
+}
+
+class _MelbelPressScaleState extends State<_MelbelPressScale> {
+  bool _pressed = false;
+
+  void _setPressed(bool next) {
+    if (_pressed == next || !mounted) return;
+    setState(() => _pressed = next);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final reducedMotion = MediaQuery.disableAnimationsOf(context);
+    final active = widget.enabled && !reducedMotion;
+    return Listener(
+      behavior: HitTestBehavior.translucent,
+      onPointerDown: active ? (_) => _setPressed(true) : null,
+      onPointerUp: active ? (_) => _setPressed(false) : null,
+      onPointerCancel: active ? (_) => _setPressed(false) : null,
+      child: AnimatedScale(
+        scale: active && _pressed ? 0.985 : 1.0,
+        duration: reducedMotion
+            ? Duration.zero
+            : const Duration(milliseconds: 90),
+        curve: Curves.easeOutCubic,
+        child: widget.child,
       ),
     );
   }
@@ -829,6 +890,7 @@ class MelbelCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final palette = context.melbel;
     final isDark = Theme.of(context).brightness == Brightness.dark;
+    final highContrast = MediaQuery.highContrastOf(context);
     final (bg, stroke) = switch (tone) {
       MelbelCardTone.neutral => (palette.surface, palette.hairline),
       MelbelCardTone.muted => (palette.mutedSurface, palette.hairline),
@@ -849,13 +911,18 @@ class MelbelCard extends StatelessWidget {
     final resolvedBg = color ?? bg;
     final effectiveBorderWidth = borderWidth > 0
         ? borderWidth
-        : (isDark &&
-                (tone == MelbelCardTone.neutral || tone == MelbelCardTone.muted))
-            ? 1.0
-            : 0.0;
+        : highContrast
+            ? 1.5
+            : (isDark &&
+                    (tone == MelbelCardTone.neutral ||
+                        tone == MelbelCardTone.muted))
+                ? 1.0
+                : 0.0;
     final effectiveBorderColor = borderWidth > 0
         ? (borderColor ?? stroke)
-        : palette.hairline.withValues(alpha: 0.65);
+        : highContrast
+            ? palette.controlOutline
+            : palette.hairline.withValues(alpha: 0.65);
     final side = effectiveBorderWidth <= 0
         ? BorderSide.none
         : BorderSide(color: effectiveBorderColor, width: effectiveBorderWidth);
@@ -880,7 +947,7 @@ class MelbelCard extends StatelessWidget {
                   ];
     final content = Padding(padding: padding, child: child);
 
-    return SizedBox(
+    final card = SizedBox(
       width: double.infinity,
       child: DecoratedBox(
         decoration: BoxDecoration(
@@ -896,17 +963,25 @@ class MelbelCard extends StatelessWidget {
           clipBehavior: Clip.antiAlias,
           child: onTap == null
               ? content
-              : InkWell(
-                  onTap: () {
-                    HapticFeedback.selectionClick();
-                    onTap!();
-                  },
-                  borderRadius: BorderRadius.circular(borderRadius),
-                  child: content,
+              : Semantics(
+                  button: true,
+                  child: InkWell(
+                    onTap: () {
+                      HapticFeedback.selectionClick();
+                      onTap!();
+                    },
+                    hoverColor: palette.accentInk.withValues(
+                      alpha: isDark ? 0.08 : 0.05,
+                    ),
+                    focusColor: palette.accentInk.withValues(alpha: 0.12),
+                    borderRadius: BorderRadius.circular(borderRadius),
+                    child: content,
+                  ),
                 ),
         ),
       ),
     );
+    return onTap == null ? card : _MelbelPressScale(enabled: true, child: card);
   }
 }
 
@@ -1062,62 +1137,65 @@ class PrimaryCta extends StatelessWidget {
     final textTheme = Theme.of(context).textTheme;
     final isDark = Theme.of(context).brightness == Brightness.dark;
     final enabled = onPressed != null;
-    final pillFill =
-        isDark && enabled ? const Color(0xFF9373D4) : palette.sage;
+    final pillFill = palette.sage;
 
-    return SizedBox(
-      width: double.infinity,
-      child: DecoratedBox(
-        decoration: BoxDecoration(
-          borderRadius: BorderRadius.circular(999),
-          boxShadow: enabled && !isDark
-              ? [
-                  BoxShadow(
-                    color: palette.sage.withValues(alpha: 0.25),
-                    blurRadius: 14,
-                    offset: const Offset(0, 5),
-                  ),
-                ]
-              : const [],
-        ),
-        child: ConstrainedBox(
-          constraints: BoxConstraints(minHeight: height),
-          child: ElevatedButton(
-            style: ElevatedButton.styleFrom(
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 14),
-              backgroundColor: pillFill,
-              foregroundColor: palette.onSage,
-              disabledBackgroundColor: palette.selectedSurface,
-              disabledForegroundColor: palette.onSurfaceVariant,
-              shape: const StadiumBorder(),
-              elevation: 0,
-              shadowColor: Colors.transparent,
-            ),
-            onPressed: onPressed == null
-                ? null
-                : () {
-                    HapticFeedback.selectionClick();
-                    onPressed!();
-                  },
-            child: Row(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                if (icon != null) ...[
-                  Icon(icon, size: 19),
-                  const SizedBox(width: 6),
-                ],
-                Flexible(
-                  child: Text(
-                    label,
-                    textAlign: TextAlign.center,
-                    style: textTheme.titleMedium?.copyWith(
-                      fontWeight: FontWeight.w700,
-                      color:
-                          enabled ? palette.onSage : palette.onSurfaceVariant,
+    return _MelbelPressScale(
+      enabled: enabled,
+      child: SizedBox(
+        width: double.infinity,
+        child: DecoratedBox(
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(999),
+            boxShadow: enabled && !isDark
+                ? [
+                    BoxShadow(
+                      color: palette.sage.withValues(alpha: 0.25),
+                      blurRadius: 14,
+                      offset: const Offset(0, 5),
+                    ),
+                  ]
+                : const [],
+          ),
+          child: ConstrainedBox(
+            constraints: BoxConstraints(minHeight: height),
+            child: ElevatedButton(
+              style: ElevatedButton.styleFrom(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 12, vertical: 14),
+                backgroundColor: pillFill,
+                foregroundColor: palette.onSage,
+                disabledBackgroundColor: palette.selectedSurface,
+                disabledForegroundColor: palette.onSurfaceVariant,
+                shape: const StadiumBorder(),
+                elevation: 0,
+                shadowColor: Colors.transparent,
+              ),
+              onPressed: onPressed == null
+                  ? null
+                  : () {
+                      HapticFeedback.selectionClick();
+                      onPressed!();
+                    },
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  if (icon != null) ...[
+                    Icon(icon, size: 19),
+                    const SizedBox(width: 6),
+                  ],
+                  Flexible(
+                    child: Text(
+                      label,
+                      textAlign: TextAlign.center,
+                      style: textTheme.titleMedium?.copyWith(
+                        fontWeight: FontWeight.w700,
+                        color:
+                            enabled ? palette.onSage : palette.onSurfaceVariant,
+                      ),
                     ),
                   ),
-                ),
-              ],
+                ],
+              ),
             ),
           ),
         ),
@@ -1147,71 +1225,78 @@ class SecondaryCta extends StatelessWidget {
     final palette = context.melbel;
     final textTheme = Theme.of(context).textTheme;
     final isDark = Theme.of(context).brightness == Brightness.dark;
+    final highContrast = MediaQuery.highContrastOf(context);
     final enabled = onPressed != null;
     final bg = backgroundColor ??
         (isDark ? const Color(0xFF231D2E) : palette.surface);
 
-    return SizedBox(
-      width: double.infinity,
-      child: DecoratedBox(
-        decoration: BoxDecoration(
-          borderRadius: BorderRadius.circular(999),
-          boxShadow: enabled && !isDark
-              ? [
-                  BoxShadow(
-                    color: const Color(0xFF534070).withValues(alpha: 0.07),
-                    blurRadius: 14,
-                    offset: const Offset(0, 4),
-                  ),
-                ]
-              : const [],
-        ),
-        child: ConstrainedBox(
-          constraints: BoxConstraints(minHeight: height),
-          child: OutlinedButton(
-            style: OutlinedButton.styleFrom(
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 14),
-              backgroundColor: bg,
-              foregroundColor: palette.onSurface,
-              disabledForegroundColor:
-                  palette.onSurfaceVariant.withValues(alpha: 0.6),
-              side: isDark
-                  ? BorderSide(color: palette.hairline, width: 1.0)
-                  : BorderSide.none,
-              shape: const StadiumBorder(),
-            ),
-            onPressed: onPressed == null
-                ? null
-                : () {
-                    HapticFeedback.selectionClick();
-                    onPressed!();
-                  },
-            child: Row(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                if (icon != null) ...[
-                  Icon(
-                    icon,
-                    size: 18,
-                    color: enabled
-                        ? palette.onSurface
-                        : palette.onSurfaceVariant.withValues(alpha: 0.6),
-                  ),
-                  const SizedBox(width: 6),
-                ],
-                Flexible(
-                  child: Text(
-                    label,
-                    textAlign: TextAlign.center,
-                    style: textTheme.titleMedium?.copyWith(
-                      fontWeight: FontWeight.w700,
+    return _MelbelPressScale(
+      enabled: enabled,
+      child: SizedBox(
+        width: double.infinity,
+        child: DecoratedBox(
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(999),
+            boxShadow: enabled && !isDark
+                ? [
+                    BoxShadow(
+                      color: const Color(0xFF534070).withValues(alpha: 0.07),
+                      blurRadius: 14,
+                      offset: const Offset(0, 4),
+                    ),
+                  ]
+                : const [],
+          ),
+          child: ConstrainedBox(
+            constraints: BoxConstraints(minHeight: height),
+            child: OutlinedButton(
+              style: OutlinedButton.styleFrom(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 12, vertical: 14),
+                backgroundColor: bg,
+                foregroundColor: palette.onSurface,
+                disabledForegroundColor:
+                    palette.onSurfaceVariant.withValues(alpha: 0.6),
+                side: highContrast
+                    ? BorderSide(color: palette.controlOutline, width: 1.5)
+                    : isDark
+                        ? BorderSide(color: palette.hairline, width: 1.0)
+                        : BorderSide.none,
+                shape: const StadiumBorder(),
+              ),
+              onPressed: onPressed == null
+                  ? null
+                  : () {
+                      HapticFeedback.selectionClick();
+                      onPressed!();
+                    },
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  if (icon != null) ...[
+                    Icon(
+                      icon,
+                      size: 18,
                       color: enabled
                           ? palette.onSurface
                           : palette.onSurfaceVariant.withValues(alpha: 0.6),
                     ),
+                    const SizedBox(width: 6),
+                  ],
+                  Flexible(
+                    child: Text(
+                      label,
+                      textAlign: TextAlign.center,
+                      style: textTheme.titleMedium?.copyWith(
+                        fontWeight: FontWeight.w700,
+                        color: enabled
+                            ? palette.onSurface
+                            : palette.onSurfaceVariant.withValues(alpha: 0.6),
+                      ),
+                    ),
                   ),
-                ),
-              ],
+                ],
+              ),
             ),
           ),
         ),
@@ -1415,7 +1500,7 @@ class MelbelChatBubble extends StatelessWidget {
                     child: Text(
                       badge!,
                       style: textTheme.labelSmall?.copyWith(
-                        fontSize: 11,
+                        fontSize: 12,
                         color: badgeFg.withValues(alpha: 0.9),
                         fontWeight: FontWeight.w600,
                       ),
@@ -2191,19 +2276,21 @@ class MelbelFloatingNavBar extends StatelessWidget {
   final ValueChanged<int> onSelected;
 
   static const _items = [
-    (Icons.today_rounded, 'Hôm nay'),
-    (Icons.calendar_month_outlined, 'Lịch'),
-    (Icons.add_circle_outline_rounded, 'Thêm việc'),
-    (Icons.tune_rounded, 'Tài khoản'),
+    (Icons.today_outlined, Icons.today_rounded, 'Hôm nay'),
+    (Icons.calendar_month_outlined, Icons.calendar_month_rounded, 'Lịch'),
+    (Icons.add_circle_outline_rounded, Icons.add_circle_rounded, 'Thêm việc'),
+    (Icons.tune_outlined, Icons.tune_rounded, 'Tài khoản'),
   ];
 
   @override
   Widget build(BuildContext context) {
     final palette = context.melbel;
     final isDark = Theme.of(context).brightness == Brightness.dark;
+    final highContrast = MediaQuery.highContrastOf(context);
     final reducedMotion = MediaQuery.disableAnimationsOf(context);
-    final activeTint =
-        isDark ? const Color(0xFFC5B2F2) : const Color(0xFF7658B8);
+    final activeTint = highContrast
+        ? palette.onSageSoft
+        : (isDark ? const Color(0xFFD4C5FA) : palette.accentInk);
 
     return ColoredBox(
       color: palette.background,
@@ -2219,12 +2306,14 @@ class MelbelFloatingNavBar extends StatelessWidget {
           decoration: BoxDecoration(
             color: isDark ? const Color(0xFF272136) : palette.surface,
             borderRadius: BorderRadius.circular(28),
-            border: isDark
-                ? Border.all(
-                    color: palette.hairline.withValues(alpha: 0.65),
-                    width: 1.0,
-                  )
-                : null,
+            border: highContrast
+                ? Border.all(color: palette.controlOutline, width: 1.5)
+                : isDark
+                    ? Border.all(
+                        color: palette.hairline.withValues(alpha: 0.65),
+                        width: 1.0,
+                      )
+                    : null,
             boxShadow: isDark
                 ? [
                     BoxShadow(
@@ -2241,22 +2330,60 @@ class MelbelFloatingNavBar extends StatelessWidget {
                     ),
                   ],
           ),
-          child: Row(
-            children: [
-              for (var i = 0; i < _items.length; i++)
-                Expanded(
-                  child: _FloatingNavTab(
-                    icon: _items[i].$1,
-                    label: _items[i].$2,
-                    isSelected: i == selectedIndex,
-                    activeColor: activeTint,
-                    pillColor: palette.selectedSurface,
-                    inactiveColor: palette.onSurfaceVariant,
-                    reducedMotion: reducedMotion,
-                    onTap: () => onSelected(i),
+          child: SizedBox(
+            height: 60,
+            child: Stack(
+              children: [
+                Positioned.fill(
+                  child: RepaintBoundary(
+                    child: AnimatedAlign(
+                      alignment: Alignment(
+                        -1.0 + (2.0 * selectedIndex / (_items.length - 1)),
+                        0,
+                      ),
+                      duration: reducedMotion
+                          ? Duration.zero
+                          : const Duration(milliseconds: 240),
+                      curve: Curves.easeOutCubic,
+                      child: FractionallySizedBox(
+                        widthFactor: 1 / _items.length,
+                        heightFactor: 1.0,
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 6,
+                            vertical: 3,
+                          ),
+                          child: DecoratedBox(
+                            decoration: BoxDecoration(
+                              color: palette.selectedSurface,
+                              borderRadius: BorderRadius.circular(20),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
                   ),
                 ),
-            ],
+                Row(
+                  children: [
+                    for (var i = 0; i < _items.length; i++)
+                      Expanded(
+                        child: _FloatingNavTab(
+                          icon: i == selectedIndex
+                              ? _items[i].$2
+                              : _items[i].$1,
+                          label: _items[i].$3,
+                          isSelected: i == selectedIndex,
+                          activeColor: activeTint,
+                          inactiveColor: palette.onSurfaceVariant,
+                          reducedMotion: reducedMotion,
+                          onTap: () => onSelected(i),
+                        ),
+                      ),
+                  ],
+                ),
+              ],
+            ),
           ),
         ),
       ),
@@ -2270,7 +2397,6 @@ class _FloatingNavTab extends StatelessWidget {
     required this.label,
     required this.isSelected,
     required this.activeColor,
-    required this.pillColor,
     required this.inactiveColor,
     required this.reducedMotion,
     required this.onTap,
@@ -2280,7 +2406,6 @@ class _FloatingNavTab extends StatelessWidget {
   final String label;
   final bool isSelected;
   final Color activeColor;
-  final Color pillColor;
   final Color inactiveColor;
   final bool reducedMotion;
   final VoidCallback onTap;
@@ -2292,45 +2417,45 @@ class _FloatingNavTab extends StatelessWidget {
       selected: isSelected,
       button: true,
       label: label,
-      child: InkWell(
-        onTap: onTap,
-        borderRadius: BorderRadius.circular(20),
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 2, vertical: 4),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              AnimatedContainer(
-                duration: reducedMotion
-                    ? Duration.zero
-                    : const Duration(milliseconds: 160),
-                curve: Curves.easeOutCubic,
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 18,
-                  vertical: 6,
+      excludeSemantics: true,
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(minHeight: 48),
+        child: InkWell(
+          onTap: onTap,
+          borderRadius: BorderRadius.circular(20),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 2, vertical: 6),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                AnimatedScale(
+                  scale: isSelected && !reducedMotion ? 1.06 : 1.0,
+                  duration: reducedMotion
+                      ? Duration.zero
+                      : const Duration(milliseconds: 160),
+                  curve: Curves.easeOutCubic,
+                  child: Icon(icon, size: 22, color: fg),
                 ),
-                decoration: BoxDecoration(
-                  color: isSelected ? pillColor : Colors.transparent,
-                  borderRadius: BorderRadius.circular(999),
+                const SizedBox(height: 4),
+                Flexible(
+                  child: FittedBox(
+                    fit: BoxFit.scaleDown,
+                    child: Text(
+                      label,
+                      maxLines: 1,
+                      textAlign: TextAlign.center,
+                      style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                            fontSize: 12,
+                            fontWeight:
+                                isSelected ? FontWeight.w700 : FontWeight.w500,
+                            color: fg,
+                          ),
+                    ),
+                  ),
                 ),
-                child: Icon(icon, size: 22, color: fg),
-              ),
-              const SizedBox(height: 4),
-              FittedBox(
-                fit: BoxFit.scaleDown,
-                child: Text(
-                  label,
-                  maxLines: 1,
-                  textAlign: TextAlign.center,
-                  style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                        fontSize: 12,
-                        fontWeight:
-                            isSelected ? FontWeight.w700 : FontWeight.w500,
-                        color: fg,
-                      ),
-                ),
-              ),
-            ],
+              ],
+            ),
           ),
         ),
       ),
@@ -2940,24 +3065,986 @@ class _SectionRimPawsPainter extends CustomPainter {
       oldDelegate.isDark != isDark;
 }
 
-/// Unified 24-hour (`HH:mm`) time picker across all platforms and system locales.
+/// Circular user avatar framed with cute rounded cat ears perched on top.
+class MelbelCatEarAvatar extends StatelessWidget {
+  const MelbelCatEarAvatar({
+    this.photoUrl,
+    this.displayName,
+    this.size = 76,
+    super.key,
+  });
+
+  final String? photoUrl;
+  final String? displayName;
+  final double size;
+
+  Widget _buildFallback(MelbelPalette palette, bool isDark) {
+    final trimmed = displayName?.trim() ?? '';
+    final hasCustomName =
+        trimmed.isNotEmpty && trimmed != 'Tài khoản của bạn';
+    final initial = hasCustomName ? trimmed[0].toUpperCase() : null;
+    final bg = isDark ? palette.selectedSurface : const Color(0xFFFFF8E2);
+
+    return DecoratedBox(
+      decoration: BoxDecoration(shape: BoxShape.circle, color: bg),
+      child: Center(
+        child: initial != null
+            ? Text(
+                initial,
+                style: TextStyle(
+                  fontSize: size * 0.38,
+                  fontWeight: FontWeight.w800,
+                  color: palette.accentInk,
+                ),
+              )
+            : Icon(
+                Icons.person_rounded,
+                size: size * 0.48,
+                color: palette.accentInk,
+              ),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = context.melbel;
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final borderColor =
+        isDark ? const Color(0xFF6B5891) : Colors.white.withValues(alpha: 0.92);
+    final earOuter = isDark ? const Color(0xFF4F3E6E) : palette.sage;
+    final earInner = isDark ? const Color(0xFF2B223C) : const Color(0xFFFFF4DC);
+    final trimmedUrl = photoUrl?.trim();
+    final fallback = _buildFallback(palette, isDark);
+
+    return Semantics(
+      image: true,
+      label: 'Ảnh đại diện tài khoản Google',
+      child: SizedBox(
+        width: size + 8,
+        height: size + 12,
+        child: Stack(
+          clipBehavior: Clip.none,
+          alignment: Alignment.bottomCenter,
+          children: [
+            Positioned.fill(
+              child: IgnorePointer(
+                child: RepaintBoundary(
+                  child: CustomPaint(
+                    painter: _CatEarAvatarFramePainter(
+                      circleDiameter: size,
+                      outerColor: earOuter,
+                      innerColor: earInner,
+                      borderColor: borderColor,
+                    ),
+                  ),
+                ),
+              ),
+            ),
+            Container(
+              width: size,
+              height: size,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                color: isDark ? palette.mutedSurface : const Color(0xFFFFF8E2),
+                border: Border.all(color: borderColor, width: 2.5),
+              ),
+              clipBehavior: Clip.antiAlias,
+              child: ClipOval(
+                child: trimmedUrl != null && trimmedUrl.isNotEmpty
+                    ? Image.network(
+                        trimmedUrl,
+                        width: size,
+                        height: size,
+                        fit: BoxFit.cover,
+                        errorBuilder: (_, __, ___) => fallback,
+                        loadingBuilder: (_, child, progress) =>
+                            progress == null ? child : fallback,
+                      )
+                    : fallback,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _CatEarAvatarFramePainter extends CustomPainter {
+  const _CatEarAvatarFramePainter({
+    required this.circleDiameter,
+    required this.outerColor,
+    required this.innerColor,
+    required this.borderColor,
+  });
+
+  final double circleDiameter;
+  final Color outerColor;
+  final Color innerColor;
+  final Color borderColor;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final radius = circleDiameter / 2;
+    final center = Offset(size.width / 2, size.height - radius);
+    final outerFill = Paint()..color = outerColor;
+    final innerFill = Paint()..color = innerColor;
+    final stroke = Paint()
+      ..color = borderColor
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 2.2
+      ..strokeJoin = StrokeJoin.round;
+
+    void drawEar(double dir) {
+      final baseInner = center + Offset(dir * radius * 0.28, -radius * 0.88);
+      final baseOuter = center + Offset(dir * radius * 0.88, -radius * 0.36);
+      final tip = center + Offset(dir * radius * 0.80, -radius * 1.18);
+
+      final path = Path()
+        ..moveTo(baseInner.dx, baseInner.dy)
+        ..quadraticBezierTo(
+          center.dx + dir * radius * 0.56,
+          center.dy - radius * 1.24,
+          tip.dx,
+          tip.dy,
+        )
+        ..quadraticBezierTo(
+          center.dx + dir * radius * 0.96,
+          center.dy - radius * 0.96,
+          baseOuter.dx,
+          baseOuter.dy,
+        )
+        ..close();
+
+      canvas.drawPath(path, outerFill);
+      canvas.drawPath(path, stroke);
+
+      final innerTip = Offset.lerp(center, tip, 0.92)!;
+      final innerA = Offset.lerp(baseInner, innerTip, 0.25)!;
+      final innerB = Offset.lerp(baseOuter, innerTip, 0.25)!;
+      final innerCenter = Offset.lerp(innerA, innerB, 0.5)!;
+      final innerPath = Path()
+        ..moveTo(innerA.dx, innerA.dy)
+        ..quadraticBezierTo(
+          innerTip.dx,
+          innerTip.dy,
+          innerB.dx,
+          innerB.dy,
+        )
+        ..quadraticBezierTo(
+          innerCenter.dx,
+          innerCenter.dy,
+          innerA.dx,
+          innerA.dy,
+        )
+        ..close();
+      canvas.drawPath(innerPath, innerFill);
+    }
+
+    drawEar(-1);
+    drawEar(1);
+  }
+
+  @override
+  bool shouldRepaint(_CatEarAvatarFramePainter oldDelegate) =>
+      oldDelegate.circleDiameter != circleDiameter ||
+      oldDelegate.outerColor != outerColor ||
+      oldDelegate.innerColor != innerColor ||
+      oldDelegate.borderColor != borderColor;
+}
+
+/// Unified 24-hour (`HH:mm`) custom Melbel digital alarm-clock picker.
 Future<TimeOfDay?> showMelbelTimePicker({
   required BuildContext context,
   required TimeOfDay initialTime,
   String? helpText,
   String? confirmText,
   TimePickerEntryMode initialEntryMode = TimePickerEntryMode.dial,
-}) =>
-    showTimePicker(
-      context: context,
+}) {
+  final isDark = Theme.of(context).brightness == Brightness.dark;
+  final reducedMotion = MediaQuery.disableAnimationsOf(context);
+  return showGeneralDialog<TimeOfDay>(
+    context: context,
+    barrierDismissible: true,
+    barrierLabel: 'Đóng chọn giờ',
+    barrierColor: Colors.black.withValues(alpha: isDark ? 0.62 : 0.36),
+    transitionDuration:
+        reducedMotion ? Duration.zero : const Duration(milliseconds: 220),
+    pageBuilder: (dialogContext, _, __) => _MelbelTimePickerDialog(
       initialTime: initialTime,
       helpText: helpText,
       confirmText: confirmText,
-      initialEntryMode: initialEntryMode,
-      builder: (pickerContext, child) => MediaQuery(
-        data: MediaQuery.of(pickerContext)
-            .copyWith(alwaysUse24HourFormat: true),
-        child: child!,
+    ),
+    transitionBuilder: (dialogContext, animation, _, child) {
+      if (reducedMotion) return child;
+      final curved = CurvedAnimation(
+        parent: animation,
+        curve: Curves.easeOutCubic,
+        reverseCurve: Curves.easeInCubic,
+      );
+      return FadeTransition(
+        opacity: curved,
+        child: ScaleTransition(
+          scale: Tween<double>(begin: 0.94, end: 1.0).animate(curved),
+          child: child,
+        ),
+      );
+    },
+  );
+}
+
+class _MelbelTimePickerDialog extends StatefulWidget {
+  const _MelbelTimePickerDialog({
+    required this.initialTime,
+    this.helpText,
+    this.confirmText,
+  });
+
+  final TimeOfDay initialTime;
+  final String? helpText;
+  final String? confirmText;
+
+  @override
+  State<_MelbelTimePickerDialog> createState() =>
+      _MelbelTimePickerDialogState();
+}
+
+class _MelbelTimePickerDialogState extends State<_MelbelTimePickerDialog> {
+  late final TextEditingController _hourController;
+  late final TextEditingController _minuteController;
+  final FocusNode _hourFocus = FocusNode();
+  final FocusNode _minuteFocus = FocusNode();
+  double _hourDragDelta = 0;
+  double _minuteDragDelta = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    _hourController = TextEditingController(
+      text: widget.initialTime.hour.toString().padLeft(2, '0'),
+    );
+    _minuteController = TextEditingController(
+      text: widget.initialTime.minute.toString().padLeft(2, '0'),
+    );
+    _hourFocus.addListener(_onHourFocusChange);
+    _minuteFocus.addListener(_onMinuteFocusChange);
+  }
+
+  void _onHourFocusChange() {
+    if (_hourFocus.hasFocus) {
+      _hourController.selection = TextSelection(
+        baseOffset: 0,
+        extentOffset: _hourController.text.length,
+      );
+    } else {
+      final h = _parsedHour;
+      if (h != null) {
+        _hourController.text = h.toString().padLeft(2, '0');
+      }
+    }
+    if (mounted) setState(() {});
+  }
+
+  void _onMinuteFocusChange() {
+    if (_minuteFocus.hasFocus) {
+      _minuteController.selection = TextSelection(
+        baseOffset: 0,
+        extentOffset: _minuteController.text.length,
+      );
+    } else {
+      final m = _parsedMinute;
+      if (m != null) {
+        _minuteController.text = m.toString().padLeft(2, '0');
+      }
+    }
+    if (mounted) setState(() {});
+  }
+
+  @override
+  void dispose() {
+    _hourFocus.removeListener(_onHourFocusChange);
+    _minuteFocus.removeListener(_onMinuteFocusChange);
+    _hourFocus.dispose();
+    _minuteFocus.dispose();
+    _hourController.dispose();
+    _minuteController.dispose();
+    super.dispose();
+  }
+
+  int? get _parsedHour {
+    final raw = _hourController.text.trim();
+    if (raw.isEmpty) return null;
+    final val = int.tryParse(raw);
+    if (val == null || val < 0 || val > 23) return null;
+    return val;
+  }
+
+  int? get _parsedMinute {
+    final raw = _minuteController.text.trim();
+    if (raw.isEmpty) return null;
+    final val = int.tryParse(raw);
+    if (val == null || val < 0 || val > 59) return null;
+    return val;
+  }
+
+  bool get _isValid => _parsedHour != null && _parsedMinute != null;
+
+  void _nudgeHour(int delta) {
+    final current = _parsedHour ?? widget.initialTime.hour;
+    final next = (current + delta) % 24;
+    final wrapped = next < 0 ? next + 24 : next;
+    _hourController.text = wrapped.toString().padLeft(2, '0');
+    HapticFeedback.selectionClick();
+    setState(() {});
+  }
+
+  void _nudgeMinute(int delta) {
+    final current = _parsedMinute ?? widget.initialTime.minute;
+    final next = (current + delta) % 60;
+    final wrapped = next < 0 ? next + 60 : next;
+    _minuteController.text = wrapped.toString().padLeft(2, '0');
+    HapticFeedback.selectionClick();
+    setState(() {});
+  }
+
+  void _submit() {
+    final h = _parsedHour;
+    final m = _parsedMinute;
+    if (h == null || m == null) return;
+    HapticFeedback.selectionClick();
+    Navigator.of(context).pop(TimeOfDay(hour: h, minute: m));
+  }
+
+  Widget _digitBox({
+    required TextEditingController controller,
+    required FocusNode focusNode,
+    required String semanticLabel,
+    required MelbelPalette palette,
+    required bool isDark,
+    required VoidCallback onIncrement,
+    required VoidCallback onDecrement,
+    required void Function(double delta) onDragUpdate,
+    required VoidCallback onDragReset,
+    required ValueChanged<String> onChanged,
+    TextInputAction textInputAction = TextInputAction.next,
+    VoidCallback? onSubmitted,
+  }) {
+    final focused = focusNode.hasFocus;
+    final highContrast = MediaQuery.highContrastOf(context);
+    return Semantics(
+      textField: true,
+      label: semanticLabel,
+      child: GestureDetector(
+        onVerticalDragStart: (_) => onDragReset(),
+        onVerticalDragUpdate: (details) => onDragUpdate(details.delta.dy),
+        onVerticalDragEnd: (_) => onDragReset(),
+        onVerticalDragCancel: onDragReset,
+        child: CallbackShortcuts(
+          bindings: {
+            const SingleActivator(LogicalKeyboardKey.arrowUp): onIncrement,
+            const SingleActivator(LogicalKeyboardKey.arrowDown): onDecrement,
+          },
+          child: AnimatedContainer(
+            duration: MediaQuery.disableAnimationsOf(context)
+                ? Duration.zero
+                : const Duration(milliseconds: 140),
+            width: 74,
+            height: 58,
+            alignment: Alignment.center,
+            decoration: BoxDecoration(
+              color: focused ? palette.selectedSurface : palette.sageSoft,
+              borderRadius: BorderRadius.circular(16),
+              border: Border.all(
+                color: focused
+                    ? palette.sage
+                    : highContrast
+                        ? palette.controlOutline
+                        : isDark
+                            ? palette.hairline
+                            : palette.sage.withValues(alpha: 0.22),
+                width: focused ? 2.0 : 1.2,
+              ),
+            ),
+            child: TextField(
+              controller: controller,
+              focusNode: focusNode,
+              keyboardType: TextInputType.number,
+              textAlign: TextAlign.center,
+              maxLines: 1,
+              textInputAction: textInputAction,
+              inputFormatters: [
+                FilteringTextInputFormatter.digitsOnly,
+                LengthLimitingTextInputFormatter(2),
+              ],
+              style: TextStyle(
+                fontFamily: 'Be Vietnam Pro',
+                fontSize: 30,
+                fontWeight: FontWeight.w800,
+                letterSpacing: -0.5,
+                color: palette.onSurface,
+                fontFeatures: const [FontFeature.tabularFigures()],
+              ),
+              decoration: const InputDecoration(
+                border: InputBorder.none,
+                enabledBorder: InputBorder.none,
+                focusedBorder: InputBorder.none,
+                errorBorder: InputBorder.none,
+                isDense: true,
+                filled: false,
+                contentPadding: EdgeInsets.zero,
+              ),
+              onChanged: onChanged,
+              onSubmitted: (_) => onSubmitted?.call(),
+            ),
+          ),
+        ),
       ),
     );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = context.melbel;
+    final theme = Theme.of(context);
+    final textTheme = theme.textTheme;
+    final isDark = theme.brightness == Brightness.dark;
+    final highContrast = MediaQuery.highContrastOf(context);
+    final reducedMotion = MediaQuery.disableAnimationsOf(context);
+    final screenPadding = MediaQuery.viewInsetsOf(context);
+
+    return SafeArea(
+      child: Center(
+        child: Padding(
+          padding: EdgeInsets.fromLTRB(
+            16,
+            16,
+            16,
+            16 + screenPadding.bottom,
+          ),
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 356),
+            child: SingleChildScrollView(
+              child: Material(
+                color: palette.surface,
+                elevation: isDark ? 0 : 10,
+                shadowColor: const Color(0xFF534070).withValues(alpha: 0.16),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(32),
+                  side: highContrast
+                      ? BorderSide(color: palette.controlOutline, width: 1.5)
+                      : isDark
+                          ? BorderSide(color: palette.hairline, width: 1.0)
+                          : BorderSide.none,
+                ),
+                clipBehavior: Clip.antiAlias,
+                child: Padding(
+                  padding: const EdgeInsets.fromLTRB(20, 18, 20, 18),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      Row(
+                        children: [
+                          Container(
+                            width: 42,
+                            height: 42,
+                            decoration: BoxDecoration(
+                              color: palette.sageSoft,
+                              borderRadius: BorderRadius.circular(14),
+                            ),
+                            alignment: Alignment.center,
+                            child: Icon(
+                              Icons.alarm_rounded,
+                              size: 22,
+                              color: palette.accentInk,
+                            ),
+                          ),
+                          const SizedBox(width: 12),
+                          Expanded(
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Flexible(
+                                  child: Text(
+                                    widget.helpText ?? 'Giờ bắt đầu',
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: textTheme.titleLarge?.copyWith(
+                                      fontSize: 20,
+                                      fontWeight: FontWeight.w800,
+                                      letterSpacing: -0.3,
+                                      color: palette.onSurface,
+                                    ),
+                                  ),
+                                ),
+                                const SizedBox(width: 4),
+                                Transform.translate(
+                                  offset: const Offset(0, -6),
+                                  child: Transform.rotate(
+                                    angle: 0.24,
+                                    child: MelbelDoodleRays(
+                                      size: 15,
+                                      color: palette.accentInk,
+                                    ),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                          IconButton(
+                            tooltip: 'Đóng',
+                            constraints: const BoxConstraints(
+                              minWidth: 48,
+                              minHeight: 48,
+                            ),
+                            padding: EdgeInsets.zero,
+                            onPressed: () => Navigator.of(context).pop(),
+                            icon: Container(
+                              width: 40,
+                              height: 40,
+                              decoration: BoxDecoration(
+                                color: palette.sageSoft,
+                                shape: BoxShape.circle,
+                              ),
+                              alignment: Alignment.center,
+                              child: Icon(
+                                Icons.close_rounded,
+                                size: 20,
+                                color: palette.onSurface,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 8),
+                      Center(
+                        child: FittedBox(
+                          fit: BoxFit.scaleDown,
+                          child: SizedBox(
+                            width: 268,
+                            height: 196,
+                            child: Stack(
+                              clipBehavior: Clip.none,
+                              alignment: Alignment.bottomCenter,
+                              children: [
+                                Positioned(
+                                  left: 0,
+                                  right: 0,
+                                  bottom: 0,
+                                  height: 146,
+                                  child: IgnorePointer(
+                                    child: RepaintBoundary(
+                                      child: CustomPaint(
+                                        painter: _MelbelAlarmClockPainter(
+                                          isDark: isDark,
+                                          palette: palette,
+                                        ),
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                                Positioned(
+                                  top: 0,
+                                  child: MelbelMascot(
+                                    width: 96,
+                                    height: 78,
+                                    expression: _isValid
+                                        ? CatExpression.neutral
+                                        : CatExpression.sleepy,
+                                  ),
+                                ),
+                                Positioned(
+                                  top: 8,
+                                  right: 38,
+                                  child: IgnorePointer(
+                                    child: Transform.rotate(
+                                      angle: 0.34,
+                                      child: MelbelDoodleRays(
+                                        size: 20,
+                                        color: palette.amber,
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                                Positioned(
+                                  bottom: 120,
+                                  width: 112,
+                                  height: 24,
+                                  child: IgnorePointer(
+                                    child: CustomPaint(
+                                      painter: _MelbelClockPawsPainter(
+                                        isDark: isDark,
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                                Positioned(
+                                  bottom: 36,
+                                  child: Row(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      _digitBox(
+                                        controller: _hourController,
+                                        focusNode: _hourFocus,
+                                        semanticLabel: 'Giờ (0 đến 23)',
+                                        palette: palette,
+                                        isDark: isDark,
+                                        onIncrement: () => _nudgeHour(1),
+                                        onDecrement: () => _nudgeHour(-1),
+                                        onDragReset: () => _hourDragDelta = 0,
+                                        onDragUpdate: (dy) {
+                                          _hourDragDelta += dy;
+                                          if (_hourDragDelta <= -16) {
+                                            _hourDragDelta = 0;
+                                            _nudgeHour(1);
+                                          } else if (_hourDragDelta >= 16) {
+                                            _hourDragDelta = 0;
+                                            _nudgeHour(-1);
+                                          }
+                                        },
+                                        onChanged: (value) {
+                                          setState(() {});
+                                          final h = int.tryParse(value);
+                                          if (value.length == 2 &&
+                                              h != null &&
+                                              h <= 23) {
+                                            _minuteFocus.requestFocus();
+                                          }
+                                        },
+                                      ),
+                                      Padding(
+                                        padding: const EdgeInsets.symmetric(
+                                          horizontal: 10,
+                                        ),
+                                        child: Text(
+                                          ':',
+                                          style: TextStyle(
+                                            fontFamily: 'Be Vietnam Pro',
+                                            fontSize: 32,
+                                            fontWeight: FontWeight.w800,
+                                            color: palette.onSurface,
+                                          ),
+                                        ),
+                                      ),
+                                      _digitBox(
+                                        controller: _minuteController,
+                                        focusNode: _minuteFocus,
+                                        semanticLabel: 'Phút (0 đến 59)',
+                                        palette: palette,
+                                        isDark: isDark,
+                                        textInputAction: TextInputAction.done,
+                                        onIncrement: () => _nudgeMinute(5),
+                                        onDecrement: () => _nudgeMinute(-5),
+                                        onDragReset: () => _minuteDragDelta = 0,
+                                        onDragUpdate: (dy) {
+                                          _minuteDragDelta += dy;
+                                          if (_minuteDragDelta <= -16) {
+                                            _minuteDragDelta = 0;
+                                            _nudgeMinute(5);
+                                          } else if (_minuteDragDelta >= 16) {
+                                            _minuteDragDelta = 0;
+                                            _nudgeMinute(-5);
+                                          }
+                                        },
+                                        onChanged: (_) => setState(() {}),
+                                        onSubmitted: () {
+                                          if (_isValid) _submit();
+                                        },
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 10),
+                      SizedBox(
+                        height: 26,
+                        child: AnimatedSwitcher(
+                          duration: reducedMotion
+                              ? Duration.zero
+                              : const Duration(milliseconds: 160),
+                          child: !_isValid
+                              ? Row(
+                                  key: const ValueKey('time_err'),
+                                  mainAxisAlignment: MainAxisAlignment.center,
+                                  children: [
+                                    Icon(
+                                      Icons.schedule_outlined,
+                                      size: 18,
+                                      color: palette.errorInk,
+                                    ),
+                                    const SizedBox(width: 6),
+                                    Flexible(
+                                      child: Text(
+                                        'Nhập thời gian hợp lệ',
+                                        maxLines: 1,
+                                        overflow: TextOverflow.ellipsis,
+                                        style: textTheme.bodySmall?.copyWith(
+                                          color: palette.errorInk,
+                                          fontWeight: FontWeight.w600,
+                                        ),
+                                      ),
+                                    ),
+                                  ],
+                                )
+                              : Center(
+                                  key: const ValueKey('time_hint'),
+                                  child: Text(
+                                    'Chạm số để nhập · vuốt lên/xuống để chỉnh',
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: textTheme.labelSmall?.copyWith(
+                                      color: palette.onSurfaceVariant,
+                                    ),
+                                  ),
+                                ),
+                        ),
+                      ),
+                      const SizedBox(height: 14),
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.end,
+                        children: [
+                          TextButton(
+                            onPressed: () => Navigator.of(context).pop(),
+                            child: const Text('Hủy'),
+                          ),
+                          const SizedBox(width: 8),
+                          _MelbelPressScale(
+                            enabled: _isValid,
+                            child: ConstrainedBox(
+                              constraints: const BoxConstraints(
+                                minWidth: 104,
+                                minHeight: 48,
+                              ),
+                              child: ElevatedButton(
+                                style: ElevatedButton.styleFrom(
+                                  minimumSize: const Size(104, 48),
+                                  backgroundColor: palette.sage,
+                                  foregroundColor: palette.onSage,
+                                  disabledBackgroundColor:
+                                      palette.selectedSurface,
+                                  disabledForegroundColor:
+                                      palette.onSurfaceVariant,
+                                  shape: const StadiumBorder(),
+                                  elevation: 0,
+                                  shadowColor: Colors.transparent,
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 24,
+                                    vertical: 12,
+                                  ),
+                                ),
+                                onPressed: _isValid ? _submit : null,
+                                child: Text(widget.confirmText ?? 'OK'),
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _MelbelAlarmClockPainter extends CustomPainter {
+  const _MelbelAlarmClockPainter({
+    required this.isDark,
+    required this.palette,
+  });
+
+  final bool isDark;
+  final MelbelPalette palette;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    const bodyRect = Rect.fromLTWH(20, 14, 224, 114);
+    final borderColor =
+        isDark ? const Color(0xFF9F8AD6) : palette.sage;
+    final chassisFill =
+        isDark ? const Color(0xFF332B45) : const Color(0xFFFFFBF4);
+    final accentFill =
+        isDark ? const Color(0xFF4A3C66) : const Color(0xFFD8C6FA);
+    final screenBezel =
+        isDark ? const Color(0xFF282138) : const Color(0xFFF3ECFC);
+
+    final shadowPaint = Paint()
+      ..color = isDark
+          ? Colors.black.withValues(alpha: 0.35)
+          : const Color(0xFFE5DBF8);
+    canvas.drawOval(
+      Rect.fromCenter(
+        center: Offset(size.width / 2, bodyRect.bottom + 8),
+        width: 228,
+        height: 18,
+      ),
+      shadowPaint,
+    );
+
+    if (isDark) {
+      final moonPaint = Paint()..color = const Color(0xFFA797C4);
+      canvas.drawCircle(Offset(size.width / 2, 0), 34, moonPaint);
+    }
+
+    // Left sage leaf sprig peeking beside the clock
+    final darkLeaf = Paint()
+      ..color = isDark ? const Color(0xFF7D9368) : const Color(0xFF9EB386);
+    final lightLeaf = Paint()
+      ..color = isDark ? const Color(0xFF9BAF85) : const Color(0xFFB7C8A0);
+    void drawLeaf(Offset base, double angle, double len, double hw, Paint p) {
+      canvas.save();
+      canvas.translate(base.dx, base.dy);
+      canvas.rotate(angle);
+      final path = Path()
+        ..moveTo(0, 0)
+        ..quadraticBezierTo(-hw, -len * 0.48, 0, -len)
+        ..quadraticBezierTo(hw, -len * 0.48, 0, 0)
+        ..close();
+      canvas.drawPath(path, p);
+      canvas.restore();
+    }
+
+    drawLeaf(Offset(28, bodyRect.bottom - 12), -0.78, 34, 8, lightLeaf);
+    drawLeaf(Offset(30, bodyRect.bottom - 2), -1.18, 28, 7, darkLeaf);
+
+    final knobFill = Paint()..color = accentFill;
+    final outline = Paint()
+      ..color = borderColor
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 2.4
+      ..strokeJoin = StrokeJoin.round;
+
+    // Two top snooze buttons
+    for (final x in [bodyRect.left + 32, bodyRect.right - 66]) {
+      final btn = RRect.fromRectAndCorners(
+        Rect.fromLTWH(x, bodyRect.top - 9, 34, 12),
+        topLeft: const Radius.circular(6),
+        topRight: const Radius.circular(6),
+      );
+      canvas.drawRRect(btn, knobFill);
+      canvas.drawRRect(btn, outline);
+    }
+
+    // Right side crown button
+    final sideKnob = RRect.fromRectAndCorners(
+      Rect.fromLTWH(bodyRect.right - 2, bodyRect.center.dy - 14, 11, 28),
+      topRight: const Radius.circular(8),
+      bottomRight: const Radius.circular(8),
+    );
+    canvas.drawRRect(sideKnob, knobFill);
+    canvas.drawRRect(sideKnob, outline);
+
+    // Two bottom clock feet
+    for (final x in [bodyRect.left + 34, bodyRect.right - 56]) {
+      final foot = RRect.fromRectAndCorners(
+        Rect.fromLTWH(x, bodyRect.bottom - 2, 22, 10),
+        bottomLeft: const Radius.circular(6),
+        bottomRight: const Radius.circular(6),
+      );
+      canvas.drawRRect(foot, knobFill);
+      canvas.drawRRect(foot, outline);
+    }
+
+    // Main alarm clock chassis
+    final outerRRect = RRect.fromRectAndRadius(
+      bodyRect,
+      const Radius.circular(32),
+    );
+    canvas.drawRRect(outerRRect, Paint()..color = chassisFill);
+    canvas.drawRRect(
+      outerRRect,
+      Paint()
+        ..color = borderColor
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 2.6,
+    );
+
+    // Inner digital screen bezel
+    final innerRRect = RRect.fromRectAndRadius(
+      bodyRect.deflate(12),
+      const Radius.circular(22),
+    );
+    canvas.drawRRect(innerRRect, Paint()..color = screenBezel);
+
+    // Subtle top-left rim sheen
+    final sheen = Paint()
+      ..color = Colors.white.withValues(alpha: isDark ? 0.12 : 0.72)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 2.4
+      ..strokeCap = StrokeCap.round;
+    canvas.drawArc(
+      Rect.fromLTWH(bodyRect.left + 6, bodyRect.top + 6, 36, 28),
+      math.pi,
+      math.pi * 0.45,
+      false,
+      sheen,
+    );
+
+    // Tiny decorative cat paw print at bottom-right of clock bezel
+    final pawPaint = Paint()
+      ..color = borderColor.withValues(alpha: isDark ? 0.55 : 0.45);
+    final pawCenter = Offset(bodyRect.right - 16, bodyRect.bottom - 14);
+    canvas.drawOval(
+      Rect.fromCenter(center: pawCenter, width: 8, height: 6.5),
+      pawPaint,
+    );
+    for (final toe in const [
+      Offset(-4.5, -4.5),
+      Offset(0, -6.0),
+      Offset(4.5, -4.5),
+    ]) {
+      canvas.drawCircle(pawCenter + toe, 1.7, pawPaint);
+    }
+  }
+
+  @override
+  bool shouldRepaint(_MelbelAlarmClockPainter oldDelegate) =>
+      oldDelegate.isDark != isDark || oldDelegate.palette != palette;
+}
+
+class _MelbelClockPawsPainter extends CustomPainter {
+  const _MelbelClockPawsPainter({required this.isDark});
+
+  final bool isDark;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final shadowPaint = Paint()
+      ..color = Colors.black.withValues(alpha: isDark ? 0.32 : 0.14);
+    final pawFill = Paint()..color = const Color(0xFF18181B);
+    final stroke = Paint()
+      ..color = isDark ? const Color(0xFF4F465E) : const Color(0xFF3A3544)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1.1;
+
+    for (final cx in [size.width * 0.25, size.width * 0.75]) {
+      canvas.drawRRect(
+        RRect.fromRectAndRadius(
+          Rect.fromCenter(center: Offset(cx, 14), width: 20, height: 15),
+          const Radius.circular(7.5),
+        ),
+        shadowPaint,
+      );
+      final paw = RRect.fromRectAndRadius(
+        Rect.fromCenter(center: Offset(cx, 11.5), width: 19, height: 14),
+        const Radius.circular(7),
+      );
+      canvas.drawRRect(paw, pawFill);
+      canvas.drawRRect(paw, stroke);
+    }
+  }
+
+  @override
+  bool shouldRepaint(_MelbelClockPawsPainter oldDelegate) =>
+      oldDelegate.isDark != isDark;
+}
 

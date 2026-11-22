@@ -471,7 +471,7 @@ class _FeasibilityScreenState extends State<FeasibilityScreen> {
                 child: Row(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Icon(Icons.schedule_outlined, color: palette.amber),
+                    Icon(Icons.schedule_outlined, color: palette.amberInk),
                     const SizedBox(width: 10),
                     Expanded(
                       child: Text(
@@ -924,57 +924,65 @@ class _ExtendTimeScreenState extends State<ExtendTimeScreen> {
     required String sub,
     required bool isSelected,
   }) {
-    return InkWell(
-      onTap: () => setState(() => _selectedOption = index),
-      borderRadius: BorderRadius.circular(12),
-      child: Container(
-        height: 52,
-        padding: const EdgeInsets.symmetric(horizontal: 16),
-        decoration: BoxDecoration(
-          color: isSelected
-              ? MelbelColors.kPrimaryContainer
-              : MelbelColors.kSurfaceContainer,
-          borderRadius: BorderRadius.circular(12),
-        ),
-        child: Row(
-          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-          children: [
-            Row(
-              children: [
-                Container(
-                  width: 8,
-                  height: 8,
-                  decoration: BoxDecoration(
-                    color: isSelected
-                        ? MelbelColors.kOnPrimaryContainer
-                        : MelbelColors.kOutline,
-                    shape: BoxShape.circle,
+    return Semantics(
+      inMutuallyExclusiveGroup: true,
+      selected: isSelected,
+      button: true,
+      label: '$label, $sub',
+      excludeSemantics: true,
+      child: InkWell(
+        onTap: () => setState(() => _selectedOption = index),
+        borderRadius: BorderRadius.circular(12),
+        child: Container(
+          height: 52,
+          padding: const EdgeInsets.symmetric(horizontal: 16),
+          decoration: BoxDecoration(
+            color: isSelected
+                ? MelbelColors.kPrimaryContainer
+                : MelbelColors.kSurfaceContainer,
+            borderRadius: BorderRadius.circular(12),
+          ),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Row(
+                children: [
+                  Container(
+                    width: 8,
+                    height: 8,
+                    decoration: BoxDecoration(
+                      color: isSelected
+                          ? MelbelColors.kOnPrimaryContainer
+                          : MelbelColors.kOutline,
+                      shape: BoxShape.circle,
+                    ),
                   ),
-                ),
-                const SizedBox(width: 12),
-                Text(
-                  label,
-                  style: TextStyle(
-                    fontSize: 16,
-                    fontWeight: isSelected ? FontWeight.w600 : FontWeight.w400,
-                    color: isSelected
-                        ? MelbelColors.kOnPrimaryContainer
-                        : MelbelColors.kOnSurface,
+                  const SizedBox(width: 12),
+                  Text(
+                    label,
+                    style: TextStyle(
+                      fontSize: 16,
+                      fontWeight:
+                          isSelected ? FontWeight.w600 : FontWeight.w400,
+                      color: isSelected
+                          ? MelbelColors.kOnPrimaryContainer
+                          : MelbelColors.kOnSurface,
+                    ),
                   ),
-                ),
-              ],
-            ),
-            Text(
-              sub,
-              style: TextStyle(
-                fontSize: 13,
-                fontWeight: isSelected ? FontWeight.w500 : FontWeight.w400,
-                color: isSelected
-                    ? MelbelColors.kOnPrimaryContainer
-                    : MelbelColors.kOutline,
+                ],
               ),
-            ),
-          ],
+              Text(
+                sub,
+                style: TextStyle(
+                  fontSize: 13,
+                  fontWeight: isSelected ? FontWeight.w500 : FontWeight.w400,
+                  color: isSelected
+                      ? MelbelColors.kOnPrimaryContainer
+                      : MelbelColors.kOnSurfaceVariant,
+                ),
+              ),
+            ],
+          ),
         ),
       ),
     );
@@ -1541,7 +1549,7 @@ class PlanLockedScreen extends StatelessWidget {
                         child: Icon(
                           Icons.lock_rounded,
                           size: 20,
-                          color: palette.sage,
+                          color: palette.accentInk,
                         ),
                       ),
                     ],
@@ -2425,9 +2433,10 @@ class _LockScreenPreviewState extends State<LockScreenPreview> {
                       '15:25',
                       style: TextStyle(
                         fontSize: 64,
-                        fontWeight: FontWeight.w300,
+                        fontWeight: FontWeight.w500,
                         color: MelbelColors.kPrimary,
                         letterSpacing: -1,
+                        fontFeatures: const [FontFeature.tabularFigures()],
                       ),
                     ),
                   ),
@@ -2509,24 +2518,30 @@ class _LockScreenPreviewState extends State<LockScreenPreview> {
               child: Row(
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
-                  InkWell(
-                    onTap: () => setState(() => _flashlightOn = !_flashlightOn),
-                    borderRadius: BorderRadius.circular(999),
-                    child: Container(
-                      width: 48,
-                      height: 48,
-                      decoration: BoxDecoration(
-                        color: _flashlightOn
-                            ? MelbelColors.kPrimaryContainer
-                            : MelbelColors.kSurfaceContainer,
-                        shape: BoxShape.circle,
-                      ),
-                      child: Icon(
-                        Icons.flashlight_on,
-                        size: 22,
-                        color: _flashlightOn
-                            ? MelbelColors.kOnPrimaryContainer
-                            : MelbelColors.kOnSurface,
+                  Semantics(
+                    button: true,
+                    toggled: _flashlightOn,
+                    label: 'Đèn pin',
+                    excludeSemantics: true,
+                    child: InkWell(
+                      onTap: () => setState(() => _flashlightOn = !_flashlightOn),
+                      borderRadius: BorderRadius.circular(999),
+                      child: Container(
+                        width: 48,
+                        height: 48,
+                        decoration: BoxDecoration(
+                          color: _flashlightOn
+                              ? MelbelColors.kPrimaryContainer
+                              : MelbelColors.kSurfaceContainer,
+                          shape: BoxShape.circle,
+                        ),
+                        child: Icon(
+                          Icons.flashlight_on,
+                          size: 22,
+                          color: _flashlightOn
+                              ? MelbelColors.kOnPrimaryContainer
+                              : MelbelColors.kOnSurface,
+                        ),
                       ),
                     ),
                   ),
@@ -2652,46 +2667,56 @@ class _LockScreenPreviewState extends State<LockScreenPreview> {
           const SizedBox(height: 12),
           Row(
             children: [
-              InkWell(
-                onTap: onBtn1,
-                borderRadius: BorderRadius.circular(12),
-                child: Container(
-                  height: 38,
-                  padding: const EdgeInsets.symmetric(horizontal: 16),
-                  decoration: BoxDecoration(
-                    color: MelbelColors.kSurfaceContainerHigh,
-                    borderRadius: BorderRadius.circular(12),
-                  ),
-                  alignment: Alignment.center,
-                  child: Text(
-                    btn1Text,
-                    style: TextStyle(
-                      fontSize: 13,
-                      fontWeight: FontWeight.w500,
-                      color: isBtn1Secondary
-                          ? MelbelColors.kSecondary
-                          : MelbelColors.kPrimary,
+              Semantics(
+                button: true,
+                label: btn1Text,
+                excludeSemantics: true,
+                child: InkWell(
+                  onTap: onBtn1,
+                  borderRadius: BorderRadius.circular(12),
+                  child: Container(
+                    constraints: const BoxConstraints(minHeight: 44),
+                    padding: const EdgeInsets.symmetric(horizontal: 16),
+                    decoration: BoxDecoration(
+                      color: MelbelColors.kSurfaceContainerHigh,
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    alignment: Alignment.center,
+                    child: Text(
+                      btn1Text,
+                      style: TextStyle(
+                        fontSize: 13,
+                        fontWeight: FontWeight.w500,
+                        color: isBtn1Secondary
+                            ? MelbelColors.kSecondary
+                            : MelbelColors.kPrimary,
+                      ),
                     ),
                   ),
                 ),
               ),
               const SizedBox(width: 8),
-              InkWell(
-                onTap: onBtn2,
-                borderRadius: BorderRadius.circular(12),
-                child: Container(
-                  height: 38,
-                  padding: const EdgeInsets.symmetric(horizontal: 16),
-                  decoration: BoxDecoration(
-                    color: MelbelColors.kSurfaceContainerLow,
-                    borderRadius: BorderRadius.circular(12),
-                  ),
-                  alignment: Alignment.center,
-                  child: Text(
-                    btn2Text,
-                    style: TextStyle(
-                      fontSize: 13,
-                      color: MelbelColors.kOnSurfaceVariant,
+              Semantics(
+                button: true,
+                label: btn2Text,
+                excludeSemantics: true,
+                child: InkWell(
+                  onTap: onBtn2,
+                  borderRadius: BorderRadius.circular(12),
+                  child: Container(
+                    constraints: const BoxConstraints(minHeight: 44),
+                    padding: const EdgeInsets.symmetric(horizontal: 16),
+                    decoration: BoxDecoration(
+                      color: MelbelColors.kSurfaceContainerLow,
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    alignment: Alignment.center,
+                    child: Text(
+                      btn2Text,
+                      style: TextStyle(
+                        fontSize: 13,
+                        color: MelbelColors.kOnSurfaceVariant,
+                      ),
                     ),
                   ),
                 ),
