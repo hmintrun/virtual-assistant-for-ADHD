@@ -2982,7 +2982,12 @@ async def _build_normal_proposal_plan(
                 "missed_start",
                 "user_reschedule",
             ) and (target_uuid is None or t_uuid == target_uuid)
-            needs_move = (not existing_valid) or (s_start < task_cursor) or is_targeted_reschedule
+            min_valid_start = (
+                task_cursors[t_uuid]
+                if trigger_reason == "expand_next_horizon" and t_uuid in task_cursors
+                else (calc_now if trigger_reason == "expand_next_horizon" else task_cursor)
+            )
+            needs_move = (not existing_valid) or (s_start < min_valid_start) or is_targeted_reschedule
             if not needs_move:
                 fixed_intervals.append((s_start, s_end, f"session:{sess.id}"))
                 _record_daily_work(t_uuid, s_start, sess.work_seconds)

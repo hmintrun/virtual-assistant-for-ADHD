@@ -19,7 +19,7 @@ from zoneinfo import ZoneInfo
 import pytest
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select, text, update
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from app.api.deps import CurrentUser, get_current_user
 from app.core.database import get_db, make_engine, session_factory
@@ -69,6 +69,17 @@ def _auth_headers(user_id: UUID, idempotency_key: str | None = None) -> dict[str
     return headers
 
 
+async def _truncate_pg_tables(engine: AsyncEngine) -> None:
+    preparer = engine.dialect.identifier_preparer
+    table_names = [preparer.format_table(table) for table in reversed(Base.metadata.sorted_tables)]
+    if not table_names:
+        return
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(f"TRUNCATE TABLE {', '.join(table_names)} RESTART IDENTITY CASCADE")
+        )
+
+
 @asynccontextmanager
 async def _regression_db_env() -> AsyncGenerator[async_sessionmaker[AsyncSession], None]:
     pg_url = (
@@ -78,6 +89,8 @@ async def _regression_db_env() -> AsyncGenerator[async_sessionmaker[AsyncSession
     engine = make_engine(url)
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+    if pg_url:
+        await _truncate_pg_tables(engine)
 
     sf = session_factory(engine)
 
@@ -100,8 +113,7 @@ async def _regression_db_env() -> AsyncGenerator[async_sessionmaker[AsyncSession
         else:
             app.dependency_overrides.pop(get_current_user, None)
         if pg_url:
-            async with engine.begin() as conn:
-                await conn.execute(text("SELECT 1"))
+            await _truncate_pg_tables(engine)
         await engine.dispose()
 
 
