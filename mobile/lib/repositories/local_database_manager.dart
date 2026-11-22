@@ -46,7 +46,11 @@ class LocalDatabaseManager {
     }
 
     while (_openCompleter != null) {
-      await _openCompleter!.future;
+      try {
+        await _openCompleter!.future;
+      } catch (_) {
+        break;
+      }
       if (_db != null && _db!.isOpen && _currentOwnerId == ownerId) {
         return _db!;
       }
@@ -57,7 +61,9 @@ class LocalDatabaseManager {
 
     try {
       if (_db != null && _db!.isOpen) {
-        await closeCurrentDatabase();
+        await _db!.close();
+        _db = null;
+        _currentOwnerId = null;
       }
 
       final dbPath = await _resolveDatabasePath(ownerId);
@@ -66,7 +72,7 @@ class LocalDatabaseManager {
       _db = await factory.openDatabase(
         dbPath,
         options: OpenDatabaseOptions(
-          version: 1,
+          version: 3,
           onCreate: _onCreate,
           onUpgrade: _onUpgrade,
         ),
@@ -93,11 +99,28 @@ class LocalDatabaseManager {
 
   /// Đóng kết nối cơ sở dữ liệu hiện tại khi chuyển tài khoản hoặc đăng xuất.
   Future<void> closeCurrentDatabase() async {
-    if (_db != null && _db!.isOpen) {
-      await _db!.close();
+    while (_openCompleter != null) {
+      try {
+        await _openCompleter!.future;
+      } catch (_) {
+        break;
+      }
     }
-    _db = null;
-    _currentOwnerId = null;
+    final closeCompleter = Completer<Database>();
+    closeCompleter.future.ignore();
+    _openCompleter = closeCompleter;
+    try {
+      if (_db != null && _db!.isOpen) {
+        await _db!.close();
+      }
+      _db = null;
+      _currentOwnerId = null;
+    } finally {
+      _openCompleter = null;
+      if (!closeCompleter.isCompleted) {
+        closeCompleter.completeError(StateError('Database closed'));
+      }
+    }
   }
 
   /// Xóa tệp cơ sở dữ liệu của một người dùng (dùng cho Reset hoặc Testing).
@@ -192,10 +215,50 @@ class LocalDatabaseManager {
       );
     ''');
 
+    // 5. local_thoughts: Lưu trữ ý nghĩ UF4 và phục vụ cơ chế Tombstone
+    batch.execute('''
+      CREATE TABLE IF NOT EXISTS local_thoughts (
+        id TEXT PRIMARY KEY,
+        owner_id TEXT NOT NULL,
+        title TEXT,
+        audio_path TEXT NOT NULL,
+        source_run_id TEXT,
+        state TEXT NOT NULL,
+        server_thought_id TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+    ''');
+    batch.execute('''
+      CREATE INDEX IF NOT EXISTS idx_local_thoughts_owner_state
+      ON local_thoughts(owner_id, state);
+    ''');
+
     await batch.commit(noResult: true);
   }
 
   Future<void> _onUpgrade(Database db, int oldVersion, int newVersion) async {
-    // Migration logic cho các phiên bản tiếp theo
+    // Migration logic cho các phiên bản tiếp theo (Additive-Only: Tuyệt đối không DROP TABLE)
+    if (oldVersion < 2) {
+      await db.execute('''
+        CREATE TABLE IF NOT EXISTS local_thoughts (
+          id TEXT PRIMARY KEY,
+          owner_id TEXT NOT NULL,
+          title TEXT,
+          audio_path TEXT NOT NULL,
+          source_run_id TEXT,
+          state TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+      ''');
+      await db.execute('''
+        CREATE INDEX IF NOT EXISTS idx_local_thoughts_owner_state
+        ON local_thoughts(owner_id, state);
+      ''');
+    }
+    if (oldVersion < 3) {
+      await db.execute('ALTER TABLE local_thoughts ADD COLUMN server_thought_id TEXT;');
+    }
   }
 }

@@ -7,12 +7,17 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 
 import '../core/api_client.dart';
+import '../core/api_session.dart';
 import '../models/focus_session_model.dart';
 import '../models/outbox_record.dart';
 import '../models/task_model.dart';
 import '../models/planning_models.dart';
+import '../models/thought_model.dart';
+import '../repositories/local_database_manager.dart';
 import '../repositories/local_outbox_repository.dart';
 import '../repositories/local_run_repository.dart';
+import '../repositories/local_schedule_repository.dart';
+import '../repositories/local_thought_repository.dart';
 import '../services/audio_recorder_service.dart';
 import '../services/alarm_service.dart';
 import '../services/clock_sync_service.dart';
@@ -21,6 +26,23 @@ import '../services/focus_native_controller.dart';
 import '../services/outbox_replay_worker.dart';
 import '../services/timer_service.dart';
 import '../services/voice_service.dart';
+
+/// Interface cho phép kiểm tra và khôi phục trạng thái native khi mở lại app.
+abstract class NativeRecoveryChecker {
+  Future<FocusRecovery?> recoverOnAppStart();
+
+  factory NativeRecoveryChecker.fromCallback(
+    Future<FocusRecovery?> Function() callback,
+  ) = _CallbackNativeRecoveryChecker;
+}
+
+class _CallbackNativeRecoveryChecker implements NativeRecoveryChecker {
+  const _CallbackNativeRecoveryChecker(this._callback);
+  final Future<FocusRecovery?> Function() _callback;
+
+  @override
+  Future<FocusRecovery?> recoverOnAppStart() => _callback();
+}
 
 enum FocusStage {
   reminder,
@@ -153,8 +175,12 @@ class FocusProvider extends ChangeNotifier {
     Clock? clock,
     FlutterSecureStorage? storage,
     LocalOutboxRepository? outboxRepository,
+    LocalScheduleRepository? scheduleRepository,
+    LocalThoughtRepository? thoughtRepository,
     OutboxReplayWorker? outboxWorker,
     ClockSyncService? clockSync,
+    NativeRecoveryChecker? nativeRecoveryChecker,
+    String? ownerId,
   })  : _clock = clock ?? const SystemClock(),
         timer = timer ?? FocusTimerService(clock: clock),
         microTaskTimer = microTaskTimer ?? FocusTimerService(clock: clock),
@@ -166,8 +192,12 @@ class FocusProvider extends ChangeNotifier {
                 ? SecureStorageRunRepository(storage: storage)
                 : SecureStorageRunRepository()),
         _outboxRepository = outboxRepository,
+        _scheduleRepository = scheduleRepository,
+        _thoughtRepository = thoughtRepository,
         _outboxWorker = outboxWorker,
-        _clockSync = clockSync {
+        _clockSync = clockSync,
+        _nativeRecoveryChecker = nativeRecoveryChecker,
+        _ownerId = ownerId ?? ApiSession.current?.ownerId ?? 'default' {
     this.timer.onElapsed = _onSegmentElapsed;
     this.timer.addListener(_onTimerChanged);
     this.microTaskTimer.onElapsed = _onMicroTaskElapsed;
@@ -188,8 +218,39 @@ class FocusProvider extends ChangeNotifier {
     this.recorder.onAutoStopFailed = _recordingFailedCallback;
   }
 
+  /// Factory DI khởi tạo FocusProvider kết nối đầy đủ các thành phần ngoại tuyến và SQLite.
+  static Future<FocusProvider> createOfflineAware({
+    required String ownerId,
+    required ApiClient apiClient,
+    NativeRecoveryChecker? nativeRecoveryChecker,
+  }) async {
+    final dbManager = LocalDatabaseManager.instance;
+    final db = await dbManager.openUserDatabase(ownerId);
+    final outboxRepo = SqliteOutboxRepository(db: db);
+    final scheduleRepo = SqliteScheduleRepository(db: db);
+    final thoughtRepo = SqliteThoughtRepository(db: db);
+    final clockSync = ClockSyncService.instance;
+    final worker = OutboxReplayWorker(
+      repository: outboxRepo,
+      apiClient: apiClient,
+      thoughtRepository: thoughtRepo,
+    );
+
+    return FocusProvider(
+      ownerId: ownerId,
+      api: apiClient,
+      outboxRepository: outboxRepo,
+      scheduleRepository: scheduleRepo,
+      thoughtRepository: thoughtRepo,
+      outboxWorker: worker,
+      clockSync: clockSync,
+      nativeRecoveryChecker: nativeRecoveryChecker,
+    );
+  }
+
   late final void Function(ThoughtRecording) _recordingStopped;
   late final void Function(RecorderException) _recordingFailedCallback;
+  final String _ownerId;
   final Clock _clock;
   final FocusTimerService timer;
   final FocusTimerService microTaskTimer;
@@ -198,13 +259,31 @@ class FocusProvider extends ChangeNotifier {
   final ApiClient _api;
   final LocalRunRepository _repository;
   final LocalOutboxRepository? _outboxRepository;
+  final LocalScheduleRepository? _scheduleRepository;
+  final LocalThoughtRepository? _thoughtRepository;
   final OutboxReplayWorker? _outboxWorker;
   final ClockSyncService? _clockSync;
+  final NativeRecoveryChecker? _nativeRecoveryChecker;
   final List<ThoughtRecord> _thoughts = [];
 
+  String get ownerId => _ownerId;
   LocalOutboxRepository? get outboxRepository => _outboxRepository;
+  LocalScheduleRepository? get scheduleRepository => _scheduleRepository;
+  LocalThoughtRepository? get thoughtRepository => _thoughtRepository;
   OutboxReplayWorker? get outboxWorker => _outboxWorker;
   ClockSyncService? get clockSync => _clockSync;
+  NativeRecoveryChecker? get nativeRecoveryChecker => _nativeRecoveryChecker;
+
+  bool _awaitingCheckIn = false;
+  bool _checkInExpired = false;
+
+  bool get awaitingCheckIn => _awaitingCheckIn;
+  bool get checkInExpired => _checkInExpired;
+
+  void clearCheckInExpiredBanner() {
+    _checkInExpired = false;
+    _notify();
+  }
 
   FocusSessionInfo? _session;
   DateTime? _runEndsAt;
@@ -325,12 +404,16 @@ class FocusProvider extends ChangeNotifier {
   Future<String> _getDeviceId() => _deviceId ??= _loadDeviceId();
 
   Future<String> _loadDeviceId() async {
-    final prefs = await SharedPreferences.getInstance();
-    final stored = prefs.getString('focus_device_id');
-    if (stored != null) return stored;
-    final device = ApiClient.newIdempotencyKey('device');
-    await prefs.setString('focus_device_id', device);
-    return device;
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final stored = prefs.getString('focus_device_id');
+      if (stored != null) return stored;
+      final device = ApiClient.newIdempotencyKey('device');
+      await prefs.setString('focus_device_id', device);
+      return device;
+    } catch (_) {
+      return ApiClient.newIdempotencyKey('device');
+    }
   }
 
   bool _appInForeground = true;
@@ -418,6 +501,14 @@ class FocusProvider extends ChangeNotifier {
   bool get canUndoDeletedThought => _pendingDeletedThought != null;
   bool get _usesNativeFocus =>
       !kIsWeb && defaultTargetPlatform == TargetPlatform.android;
+
+  Future<FocusRecovery?> _safeNativeRecover() async {
+    try {
+      return await FocusNativeController.instance.recoverOnAppStart();
+    } catch (_) {
+      return null;
+    }
+  }
   bool get canUndoThought {
     if (_thoughts.isEmpty) return false;
     final now = _clock.now();
@@ -449,11 +540,26 @@ class FocusProvider extends ChangeNotifier {
     if (_outboxWorker != null) {
       unawaited(_outboxWorker.triggerReplay());
     }
-    final nativeRecovery = _usesNativeFocus
-        ? await FocusNativeController.instance.recoverOnAppStart()
-        : null;
+    final nativeRecovery = _nativeRecoveryChecker != null
+        ? await _nativeRecoveryChecker.recoverOnAppStart()
+        : (_usesNativeFocus
+            ? await _safeNativeRecover()
+            : null);
     final json = await _repository.loadActiveRun();
     if (json == null) {
+      if (nativeRecovery?.state == FocusRecoveryState.checkInExpired) {
+        _stage = FocusStage.ended;
+        _checkInExpired = true;
+        _awaitingCheckIn = false;
+        _notify();
+        return;
+      } else if (nativeRecovery?.state == FocusRecoveryState.awaitingCheckIn) {
+        _stage = FocusStage.ended;
+        _awaitingCheckIn = true;
+        _checkInExpired = false;
+        _notify();
+        return;
+      }
       if (_thoughts.any((thought) => thought.isPendingSync)) {
         _ensureOfflineProbe();
       }
@@ -474,13 +580,31 @@ class FocusProvider extends ChangeNotifier {
         _skipSendTimer = Timer(Duration.zero, retryCheckInResponse);
       }
       _actualWorkSeconds = json['actual_work_seconds'] as int? ?? 0;
+      final nowUtc = _clockSync?.nowAdjusted() ?? _clock.now().toUtc();
+
       if (json['stage'] == FocusStage.ended.name) {
         _stage = FocusStage.ended;
-        _watchCheckInDeadline();
-        if (needsEndSync || hasPendingCheckInResponse) _startOfflineProbe();
+        final runEndsAt = DateTime.tryParse(json['run_ends_at'] as String? ?? '');
+        final isNativeExpired = nativeRecovery?.state == FocusRecoveryState.checkInExpired;
+        final secondsSinceEnd = runEndsAt != null
+            ? nowUtc.difference(runEndsAt.toUtc()).inSeconds
+            : null;
+        if (isNativeExpired || (secondsSinceEnd != null && secondsSinceEnd >= 300)) {
+          _checkInExpired = true;
+          _awaitingCheckIn = false;
+          _enqueueExpiredNoResponseOutbox();
+          await _repository.clearActiveRun();
+          await _restoreFocusMode();
+        } else {
+          _awaitingCheckIn = _pendingResponse == null && (_checkIn == null || canAnswerCheckIn);
+          _checkInExpired = false;
+          _watchCheckInDeadline();
+          if (needsEndSync || hasPendingCheckInResponse) _startOfflineProbe();
+        }
         _notify();
         return;
       }
+
       _segments = (json['segments'] as List<dynamic>? ?? const [])
           .whereType<Map<String, dynamic>>()
           .map(SessionSegmentModel.fromJson)
@@ -488,14 +612,6 @@ class FocusProvider extends ChangeNotifier {
       _segmentIndex = json['segment_index'] as int? ?? 0;
       _runEndsAt = DateTime.tryParse(json['run_ends_at'] as String? ?? '');
       _runEndsAt = nativeRecovery?.endsAt ?? _runEndsAt;
-      _resumeStage = FocusStage.values.firstWhere(
-        (stage) => stage.name == json['stage'],
-        orElse: () => FocusStage.active,
-      );
-      _dndApplied = supportsDnd && await dnd.isAppliedFor(_focusOwnerId);
-      _dndApplyState = _dndApplied ? 'applied' : 'not_applied';
-      _dndRestoreState = _dndApplied ? 'pending' : 'not_needed';
-      _stage = _resumeStage;
       final deadline =
           DateTime.tryParse(json['timer_deadline'] as String? ?? '');
       final duration = json['timer_duration'] as int? ?? 0;
@@ -505,35 +621,64 @@ class FocusProvider extends ChangeNotifier {
             .fold<int>(0, (total, segment) => total + segment.durationSeconds);
         _runEndsAt = deadline.add(Duration(seconds: secondsAfterCurrent));
       }
+
+      final runEndUtc = _runEndsAt?.toUtc();
+      final isNativeExpired = nativeRecovery?.state == FocusRecoveryState.checkInExpired;
+      final isNativeAwaiting = nativeRecovery?.state == FocusRecoveryState.awaitingCheckIn;
+
+      final bool hasRunEnded = (runEndUtc != null && !nowUtc.isBefore(runEndUtc)) ||
+          isNativeExpired ||
+          isNativeAwaiting;
+
+      if (hasRunEnded) {
+        final secondsSinceEnd = runEndUtc != null
+            ? nowUtc.difference(runEndUtc).inSeconds
+            : (isNativeExpired ? 301 : 0);
+
+        final bool isExpired = secondsSinceEnd >= 300 || isNativeExpired;
+
+        if (isExpired) {
+          // HẾT HẠN 5 PHÚT -> Dọn dẹp phiên, tắt DND & Wakelock, không vào Check-in
+          _stage = FocusStage.ended;
+          _checkInExpired = true;
+          _awaitingCheckIn = false;
+          _dndApplied = false;
+          _enqueueExpiredNoResponseOutbox();
+          await _repository.clearActiveRun();
+          await _restoreFocusMode();
+          _notify();
+          return;
+        } else {
+          // TRONG CỬA SỔ 5 PHÚT (< 300s) -> Vào Check-in UF5
+          _actualWorkSeconds = _segments
+              .where((segment) => segment.kind == 'work')
+              .fold(0, (total, segment) => total + segment.durationSeconds);
+          _segmentIndex = _segments.length;
+          _stage = FocusStage.ended;
+          _awaitingCheckIn = true;
+          _checkInExpired = false;
+          await _finishLocalRun(awaitCheckIn: true);
+          _notify();
+          return;
+        }
+      }
+
+      _resumeStage = FocusStage.values.firstWhere(
+        (stage) => stage.name == json['stage'],
+        orElse: () => FocusStage.active,
+      );
+      try {
+        _dndApplied = supportsDnd && await dnd.isAppliedFor(_focusOwnerId);
+      } catch (_) {
+        _dndApplied = false;
+      }
+      _dndApplyState = _dndApplied ? 'applied' : 'not_applied';
+      _dndRestoreState = _dndApplied ? 'pending' : 'not_needed';
+      _stage = _resumeStage;
+
       if (deadline != null && duration > 0) {
         final remainingMs = deadline.difference(_clock.now()).inMilliseconds;
         if (remainingMs <= 0) {
-          final runEndedWhileClosed = _serverRun != null &&
-              _runEndsAt != null &&
-              !_clock.now().isBefore(_runEndsAt!);
-          if (runEndedWhileClosed) {
-            _actualWorkSeconds = _segments
-                .where((segment) => segment.kind == 'work')
-                .fold(0, (total, segment) => total + segment.durationSeconds);
-            _segmentIndex = _segments.length;
-            await _finishLocalRun(awaitCheckIn: true);
-            return;
-          }
-          if (nativeRecovery?.state == FocusRecoveryState.checkInExpired) {
-            _stage = FocusStage.ended;
-            _dndApplied = false;
-            await _repository.clearActiveRun();
-            _notify();
-            return;
-          }
-          if (nativeRecovery?.state == FocusRecoveryState.awaitingCheckIn) {
-            if (currentSegment?.kind == 'work') {
-              _actualWorkSeconds += duration;
-            }
-            _stage = FocusStage.ended;
-            _notify();
-            return;
-          }
           // Segment có thể đã hết khi app đóng nhưng còn segment kế tiếp.
           // Khôi phục theo deadline tuyệt đối để timer tự chuyển tiếp.
           _stage = FocusStage.recovery;
@@ -551,6 +696,48 @@ class FocusProvider extends ChangeNotifier {
     }
   }
 
+  void _enqueueExpiredNoResponseOutbox() {
+    final run = _serverRun;
+    final repo = _outboxRepository;
+    if (run == null || repo == null) return;
+    final runId = run['run_id'] as String?;
+    if (runId == null) return;
+
+    final nowUtc = _clockSync?.nowAdjusted() ?? _clock.now().toUtc();
+    final clientEventId = (_pendingEnd?['event_id'] as String?) ??
+        ApiClient.newIdempotencyKey('end');
+    final endedAt = _pendingEnd?['ended_at'] as String? ??
+        (_runEndsAt?.toUtc() ?? nowUtc).toIso8601String();
+    final totalWork = _actualWorkSeconds > 0
+        ? _actualWorkSeconds
+        : _segments
+            .where((segment) => segment.kind == 'work')
+            .fold<int>(0, (total, segment) => total + segment.durationSeconds);
+
+    final payload = _pendingEnd ??
+        {
+          'device_id': run['device_id'] ?? 'device_offline',
+          'expected_run_revision': run['run_revision'] ?? 1,
+          'event_id': clientEventId,
+          'ended_at': endedAt,
+          'end_reason': 'timer_elapsed',
+          'work_elapsed_seconds': totalWork,
+          'rest_elapsed_seconds': 0,
+        };
+
+    final record = OutboxRecord(
+      clientEventId: clientEventId,
+      eventType: OutboxEventType.runEventBatch,
+      targetResourceId: runId,
+      endpoint: '/runs/$runId/end',
+      httpMethod: 'POST',
+      payload: payload,
+      occurredAt: nowUtc,
+      holdUntil: nowUtc,
+    );
+    unawaited(repo.enqueueOutboxRecord(record));
+  }
+
   Future<void> startSession(FocusSessionInfo session) async {
     if (isActiveRun || hasUnfinishedServerRun || _runCommandBusy) return;
     microTaskTimer.stop();
@@ -558,6 +745,8 @@ class FocusProvider extends ChangeNotifier {
     _serverRun = null;
     _startRequest = null;
     _runError = null;
+    _awaitingCheckIn = false;
+    _checkInExpired = false;
     _session = session;
     _runEndsAt = null;
     _segments = session.effectiveSegments
@@ -638,9 +827,37 @@ class FocusProvider extends ChangeNotifier {
               'start_${session.sessionId}', request.toString()),
         );
       } on ApiException catch (error) {
+        if (error.statusCode == 409 || error.code == 'ACTIVE_RUN_EXISTS') {
+          try {
+            final activeRunData = await _api.getData('/runs/active');
+            if (activeRunData['session_id'] == session.sessionId) {
+              _serverRun = activeRunData;
+              if (activeRunData['planned_ends_at'] != null) {
+                _runEndsAt = DateTime.parse(activeRunData['planned_ends_at'] as String).toUtc();
+              }
+              _startRequest = null;
+              await _beginLocalRun();
+              if (activeRunData['planned_ends_at'] != null) {
+                _runEndsAt = DateTime.parse(activeRunData['planned_ends_at'] as String).toUtc();
+              }
+              return;
+            }
+          } catch (_) {
+            // Nếu gọi active run thất bại, giữ nguyên xử lý lỗi cũ
+          }
+        }
         if (error.statusCode != null) {
           _startRequest = null;
           rethrow;
+        }
+        // Lỗi kết nối ngoại tuyến: Khóa chính sách offline_start_supported = false
+        // Kiểm tra xem đã có receipt server_run từ trước hay chưa
+        if (_serverRun == null) {
+          _isOffline = true;
+          throw const ApiException(
+            'Cần có kết nối mạng để bắt đầu phiên tập trung.',
+            code: 'OFFLINE_START_NOT_SUPPORTED',
+          );
         }
         _isOffline = true;
         _runError =
@@ -663,7 +880,7 @@ class FocusProvider extends ChangeNotifier {
       final totalSeconds = _segments
           .skip(_firstWorkIndex)
           .fold<int>(0, (total, segment) => total + segment.durationSeconds);
-      _runEndsAt = _clock.now().add(Duration(seconds: totalSeconds));
+      _runEndsAt ??= _clock.now().add(Duration(seconds: totalSeconds));
       try {
         try {
           await AlarmService.instance.requestPermissions();
@@ -689,7 +906,7 @@ class FocusProvider extends ChangeNotifier {
       final totalSeconds = _segments
           .skip(_firstWorkIndex)
           .fold<int>(0, (total, segment) => total + segment.durationSeconds);
-      _runEndsAt = _clock.now().add(Duration(seconds: totalSeconds));
+      _runEndsAt ??= _clock.now().add(Duration(seconds: totalSeconds));
       _dndApplied = false;
       try {
         await WakelockPlus.enable();
@@ -927,6 +1144,7 @@ class FocusProvider extends ChangeNotifier {
         });
         _checkInDeadline?.cancel();
         _pendingResponse = null;
+        _awaitingCheckIn = false;
         await _repository.clearActiveRun();
       } else {
         final response = await _api.putData(
@@ -938,6 +1156,7 @@ class FocusProvider extends ChangeNotifier {
         _serverRun = {..._serverRun!, 'check_in': response};
         _checkInDeadline?.cancel();
         _pendingResponse = null;
+        _awaitingCheckIn = false;
         await _repository.clearActiveRun();
       }
     } on ApiException catch (error) {
@@ -1050,10 +1269,12 @@ class FocusProvider extends ChangeNotifier {
   Future<void> _saveAudioThought(ThoughtRecording recording) async {
     final now = _clock.now();
     final attemptCount = (_recordingAttempts + 1).clamp(1, 3);
+    final currentRunId = _serverRun?['run_id'] as String? ?? _focusOwnerId;
     final thought = ThoughtRecord(
       clientThoughtId: now.microsecondsSinceEpoch.toString(),
       createdAt: now,
       undoDeadlineAt: now.add(const Duration(seconds: 5)),
+      sourceRunId: currentRunId,
       serverRunId: _serverRun?['run_id'] as String?,
       inputType: 'audio',
       localAudioPath: recording.path,
@@ -1111,10 +1332,12 @@ class FocusProvider extends ChangeNotifier {
     final normalized = text.trim();
     if (normalized.isEmpty) return;
     final now = _clock.now();
+    final currentRunId = _serverRun?['run_id'] as String? ?? _focusOwnerId;
     final thought = ThoughtRecord(
       clientThoughtId: now.microsecondsSinceEpoch.toString(),
       createdAt: now,
       undoDeadlineAt: now.add(const Duration(seconds: 5)),
+      sourceRunId: currentRunId,
       serverRunId: _serverRun?['run_id'] as String?,
       inputType: 'text',
       textContent: normalized,
@@ -1151,6 +1374,9 @@ class FocusProvider extends ChangeNotifier {
       } catch (_) {}
     }
     await _repository.deleteThought(thought.clientThoughtId);
+    if (_thoughtRepository != null) {
+      await _thoughtRepository.purgeTombstone(thought.clientThoughtId);
+    }
     if (_outboxRepository != null) {
       await _outboxRepository.cancelOutboxRecord(thought.clientThoughtId);
     }
@@ -1163,11 +1389,30 @@ class FocusProvider extends ChangeNotifier {
   Future<void> _saveThought(ThoughtRecord thought) async {
     await _repository.queueThought(thought);
     _thoughts.insert(0, thought);
+
+    if (_thoughtRepository != null) {
+      final currentRunId = thought.sourceRunId ??
+          _serverRun?['run_id'] as String? ??
+          _focusOwnerId;
+      final localThought = LocalThought(
+        id: thought.clientThoughtId,
+        ownerId: _ownerId,
+        title: thought.textContent,
+        audioPath: thought.localAudioPath ?? '',
+        sourceRunId: currentRunId,
+        state: LocalThoughtState.rawSaved,
+        createdAt: thought.createdAt.toUtc(),
+        updatedAt: thought.createdAt.toUtc(),
+      );
+      await _thoughtRepository.insertThought(localThought);
+    }
+
     if (_outboxRepository != null) {
       await _outboxRepository.enqueueOutboxRecord(
         OutboxRecord(
           clientEventId: thought.clientThoughtId,
           eventType: OutboxEventType.thoughtCapture,
+          targetResourceId: thought.clientThoughtId,
           endpoint: '/thoughts',
           httpMethod: 'POST',
           payload: {
@@ -1175,6 +1420,8 @@ class FocusProvider extends ChangeNotifier {
             'input_type': thought.inputType,
             if (thought.textContent != null)
               'text_content': thought.textContent,
+            if (thought.sourceRunId != null)
+              'source_run_id': thought.sourceRunId,
             'attempt_count': thought.attemptCount,
             'capture_state': thought.captureState,
           },
@@ -1185,17 +1432,41 @@ class FocusProvider extends ChangeNotifier {
     }
   }
 
-  Future<void> deleteThought(ThoughtRecord thought) async {
+  Future<void> deleteThought(dynamic thoughtOrId) async {
     if (_pendingDeletedThought != null) {
       await _finalizePendingThoughtDeletion();
     }
+    ThoughtRecord? target;
+    if (thoughtOrId is ThoughtRecord) {
+      target = thoughtOrId;
+    } else if (thoughtOrId is String) {
+      final found = _thoughts.where((item) => item.clientThoughtId == thoughtOrId).toList();
+      target = found.isNotEmpty
+          ? found.first
+          : ThoughtRecord(
+              clientThoughtId: thoughtOrId,
+              createdAt: _clock.now(),
+              undoDeadlineAt: _clock.now().add(const Duration(seconds: 5)),
+            );
+    }
+    if (target == null) return;
+
     final index = _thoughts.indexWhere(
-      (item) => item.clientThoughtId == thought.clientThoughtId,
+      (item) => item.clientThoughtId == target!.clientThoughtId,
     );
-    if (index < 0) return;
-    final removed = _thoughts.removeAt(index);
+    final removed = index >= 0 ? _thoughts.removeAt(index) : target;
     _pendingDeletedThought = removed;
     _undoneThoughtIds.add(removed.clientThoughtId);
+
+    // Đánh dấu tombstone ngay trong SQLite để ẩn khỏi UI và lọc khi reconcile
+    if (_thoughtRepository != null) {
+      await _thoughtRepository.markTombstone(
+        removed.clientThoughtId,
+        asOf: _clock.now(),
+        ownerId: _ownerId,
+      );
+    }
+
     _deleteUndoExpiry?.cancel();
     _deleteUndoExpiry = Timer(const Duration(seconds: 5), () {
       unawaited(_finalizePendingThoughtDeletion());
@@ -1211,8 +1482,46 @@ class FocusProvider extends ChangeNotifier {
     _deleteUndoExpiry = null;
     _pendingDeletedThought = null;
     _undoneThoughtIds.remove(thought.clientThoughtId);
-    _thoughts.insert(0, thought);
-    await _repository.queueThought(thought);
+
+    // Khôi phục trạng thái cũ trong SQLite nếu người dùng bấm Undo trong 5s
+    String? restoredServerId = thought.serverThoughtId;
+    if (_thoughtRepository != null) {
+      final existing = await _thoughtRepository.getThought(thought.clientThoughtId);
+      if (existing != null) {
+        restoredServerId ??= existing.serverThoughtId;
+        await _thoughtRepository.insertThought(
+          existing.copyWith(
+            state: thought.isPendingSync
+                ? LocalThoughtState.rawSaved
+                : LocalThoughtState.synced,
+            updatedAt: _clock.now().toUtc(),
+          ),
+        );
+      } else {
+        await _thoughtRepository.insertThought(
+          LocalThought(
+            id: thought.clientThoughtId,
+            ownerId: _ownerId,
+            title: thought.textContent,
+            audioPath: thought.localAudioPath ?? '',
+            sourceRunId: thought.sourceRunId,
+            state: thought.isPendingSync
+                ? LocalThoughtState.rawSaved
+                : LocalThoughtState.synced,
+            serverThoughtId: thought.serverThoughtId,
+            createdAt: thought.createdAt.toUtc(),
+            updatedAt: _clock.now().toUtc(),
+          ),
+        );
+      }
+    }
+
+    final restoredThought = restoredServerId != null && thought.serverThoughtId == null
+        ? thought.copyWith(serverThoughtId: restoredServerId)
+        : thought;
+    _thoughts.insert(0, restoredThought);
+    await _repository.queueThought(restoredThought);
+
     _scheduleOutboxFlush();
     _notify();
   }
@@ -1223,17 +1532,51 @@ class FocusProvider extends ChangeNotifier {
     _deleteUndoExpiry?.cancel();
     _deleteUndoExpiry = null;
     if (thought == null) return;
-    await _repository.deleteThought(thought.clientThoughtId);
-    if (_outboxRepository != null) {
-      await _outboxRepository.cancelOutboxRecord(thought.clientThoughtId);
+    try {
+      await _repository.deleteThought(thought.clientThoughtId);
+      if (_outboxRepository != null) {
+        // Nếu có yêu cầu POST tạo thought đang chờ trong outbox chưa gửi, hủy nó đi
+        await _outboxRepository.cancelOutboxRecord(thought.clientThoughtId, force: true);
+
+        // Đẩy yêu cầu DELETE /api/v1/thoughts/{id} vào hàng đợi Outbox
+        // Dòng tombstone trong local_thoughts vẫn ĐƯỢC GIỮ NGUYÊN để chống hiện thẻ ma khi GET /thoughts
+        // Cho đến khi OutboxReplayWorker gửi thành công nhận HTTP 200 OK mới purge.
+        final delEventId = ApiClient.stableIdempotencyKey(
+          'del_thought',
+          thought.clientThoughtId,
+        );
+        var deleteTargetId = thought.serverThoughtId;
+        if (deleteTargetId == null && _thoughtRepository != null) {
+          final localThought = await _thoughtRepository.getThought(thought.clientThoughtId);
+          if (localThought?.serverThoughtId != null && localThought!.serverThoughtId!.isNotEmpty) {
+            deleteTargetId = localThought.serverThoughtId;
+          }
+        }
+        deleteTargetId ??= thought.clientThoughtId;
+        await _outboxRepository.enqueueOutboxRecord(
+          OutboxRecord(
+            clientEventId: delEventId,
+            eventType: OutboxEventType.thoughtDelete,
+            targetResourceId: deleteTargetId,
+            endpoint: '/thoughts/$deleteTargetId',
+            httpMethod: 'DELETE',
+            payload: {'expected_thought_revision': 1},
+            occurredAt: _clock.now().toUtc(),
+            holdUntil: _clock.now().toUtc(),
+          ),
+        );
+        _outboxWorker?.triggerReplay();
+      }
+      if (thought.localAudioPath != null) {
+        try {
+          await recorder.deleteRecording(thought.localAudioPath!);
+        } catch (_) {}
+      }
+      _scheduleOutboxFlush();
+      _notify();
+    } catch (_) {
+      // Bẫy lỗi an toàn khi database đang đóng hoặc đã đóng trong quá trình logout / dispose
     }
-    if (thought.localAudioPath != null) {
-      try {
-        await recorder.deleteRecording(thought.localAudioPath!);
-      } catch (_) {}
-    }
-    _scheduleOutboxFlush();
-    _notify();
   }
 
   void _scheduleOutboxFlush() {
@@ -1267,9 +1610,63 @@ class FocusProvider extends ChangeNotifier {
 
   Future<void> _loadThoughts() async {
     final loaded = await _repository.loadThoughts();
+    Set<String> tombstoneIds = const {};
+    if (_thoughtRepository != null) {
+      tombstoneIds = (await _thoughtRepository.getTombstoneIds(_ownerId)).toSet();
+    }
+
     _thoughts
       ..clear()
-      ..addAll(loaded);
+      ..addAll(loaded.where((t) => !tombstoneIds.contains(t.clientThoughtId)));
+
+    if (_thoughtRepository != null) {
+      final activeLocal = await _thoughtRepository.getActiveThoughts(_ownerId);
+      for (final lt in activeLocal) {
+        if (!_thoughts.any((t) => t.clientThoughtId == lt.id)) {
+          _thoughts.add(
+            ThoughtRecord(
+              clientThoughtId: lt.id,
+              createdAt: lt.createdAt,
+              undoDeadlineAt: lt.createdAt.add(const Duration(seconds: 5)),
+              sourceRunId: lt.sourceRunId,
+              textContent: lt.title,
+              localAudioPath: lt.audioPath.isNotEmpty ? lt.audioPath : null,
+              inputType: lt.audioPath.isNotEmpty ? 'audio' : 'text',
+              captureState: lt.state == LocalThoughtState.rawSaved ? 'saved' : 'synced',
+              isPendingSync: lt.state == LocalThoughtState.rawSaved,
+              serverThoughtId: lt.serverThoughtId,
+            ),
+          );
+        }
+      }
+
+      // Xử lý ca biên: Đảm bảo các bản ghi tombstone trong SQLite sau sự cố tắt app đột ngột
+      // đều đã được đưa vào hàng đợi DELETE của Outbox và hủy lệnh POST tương ứng
+      if (_outboxRepository != null) {
+        final allThoughts = await _thoughtRepository.getAllThoughts(_ownerId);
+        final tombstones = allThoughts.where((t) => t.state == LocalThoughtState.tombstone);
+        for (final tb in tombstones) {
+          await _outboxRepository.cancelOutboxRecord(tb.id, force: true);
+          final delEventId = ApiClient.stableIdempotencyKey('del_thought', tb.id);
+          final existing = await _outboxRepository.getRecord(delEventId);
+          if (existing != null) continue;
+          final deleteTargetId = tb.serverThoughtId ?? tb.id;
+          await _outboxRepository.enqueueOutboxRecord(
+            OutboxRecord(
+              clientEventId: delEventId,
+              eventType: OutboxEventType.thoughtDelete,
+              targetResourceId: deleteTargetId,
+              endpoint: '/thoughts/$deleteTargetId',
+              httpMethod: 'DELETE',
+              payload: {'expected_thought_revision': 1},
+              occurredAt: tb.updatedAt,
+              holdUntil: _clock.now().toUtc(),
+            ),
+          );
+        }
+      }
+    }
+
     _scheduleOutboxFlush();
   }
 
@@ -1313,6 +1710,10 @@ class FocusProvider extends ChangeNotifier {
           if (serverId is! String || serverId.isEmpty) continue;
           await _repository.markThoughtSynced(
               thought.clientThoughtId, serverId);
+          if (_thoughtRepository != null) {
+            await _thoughtRepository.markSynced(thought.clientThoughtId,
+                serverThoughtId: serverId);
+          }
           final index = _thoughts
               .indexWhere((t) => t.clientThoughtId == thought.clientThoughtId);
           if (index >= 0) {
@@ -1530,6 +1931,11 @@ class FocusProvider extends ChangeNotifier {
   @override
   void dispose() {
     _disposed = true;
+    if (_pendingDeletedThought != null) {
+      try {
+        unawaited(_finalizePendingThoughtDeletion().catchError((_) {}));
+      } catch (_) {}
+    }
     _skipSendTimer?.cancel();
     _checkInDeadline?.cancel();
     _stopOfflineProbe();
