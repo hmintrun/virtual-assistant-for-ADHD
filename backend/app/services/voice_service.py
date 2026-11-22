@@ -1,6 +1,7 @@
 """Dịch vụ giọng nói Backend (Role Voice — V01 & A21): chuyển audio người dùng chủ động gửi thành chữ.
 
-Nhà cung cấp chính: Gemini 3.5 Flash-Lite inline audio (chế độ ``smart``) với định tuyến theo
+Nhà cung cấp chính: Gemini 3.5 Transcribe gửi audio inline qua ``generate_content`` (chế độ
+``verbatim``, đo ~2–2,9s cho câu 12–43s — xem docs/backend/VOICE_STT_BENCHMARK.md) với định tuyến theo
 mục đích (riêng ``uf5_checkin`` ưu tiên Groq Whisper cho câu trả lời ngắn) và dự phòng hai chiều.
 Dự phòng khi Backend lỗi/mất mạng nằm ở Mobile (``speech_to_text`` on-device), không nằm trong file này.
 
@@ -362,6 +363,27 @@ def _is_no_speech_sentinel(text: str) -> bool:
     return bool(_NO_SPEECH_SENTINEL_RE.match(cleaned))
 
 
+def _transcript_text_of(resp: Any) -> str:
+    """Lấy transcript từ response Transcribe: ưu tiên phần text, nếu trống thì đọc ``audio_transcription``."""
+    texts: list[str] = []
+    transcriptions: list[str] = []
+    for candidate in getattr(resp, "candidates", None) or []:
+        content = getattr(candidate, "content", None)
+        for part in getattr(content, "parts", None) or []:
+            text = getattr(part, "text", None)
+            if isinstance(text, str) and text:
+                texts.append(text)
+            tr = getattr(part, "audio_transcription", None)
+            tr_text = getattr(tr, "text", None)
+            if isinstance(tr_text, str) and tr_text:
+                transcriptions.append(tr_text)
+        break  # chỉ đọc candidate đầu tiên
+    if texts or transcriptions:
+        return ("".join(texts) or "".join(transcriptions)).strip()
+    fallback = getattr(resp, "text", None)
+    return fallback.strip() if isinstance(fallback, str) else ""
+
+
 def _accepts_purpose_kwarg(func: Any) -> bool:
     """Kiểm tra callable có nhận tham số ``purpose`` hoặc ``**kwargs`` hay không."""
     try:
@@ -380,10 +402,14 @@ def _accepts_purpose_kwarg(func: Any) -> bool:
 
 
 class GeminiSttProvider:
-    """Gemini STT hỗ trợ inline audio (``generate_content``) và luồng legacy ``transcribe_api``.
+    """Gemini STT: 3 cách gửi audio (``transport``).
 
-    - ``transport="auto"``: nếu ``"transcribe"`` nằm trong tên model -> dùng Files API + ``interactions.create``;
-      ngược lại dùng inline ``Part.from_bytes`` với ``models.generate_content`` (fallback Files API nếu > 15MB).
+    - ``transcribe_inline``: model Transcribe + ``models.generate_content`` với audio inline và
+      ``audio_transcription_config`` (không prompt, không upload/xóa file). Nhanh nhất: ~2–2,9s.
+    - ``inline``: model Flash/Flash-Lite + prompt "chép lời" + audio inline.
+    - ``transcribe_api`` (legacy): Files API upload -> ``interactions.create`` -> xóa file (~10s).
+    - ``transport="auto"``: model có chữ ``transcribe`` -> ``transcribe_inline``; ngược lại -> ``inline``.
+      Audio > 15MB luôn quay về Files API.
     - Hỗ trợ xác thực kép: ưu tiên ``GEMINI_API_KEY``, dự phòng Service Account (``enterprise=True``).
     """
 
@@ -396,7 +422,7 @@ class GeminiSttProvider:
         model: str,
         mode: Literal["smart", "verbatim"],
         language_code: str,
-        transport: Literal["auto", "inline", "transcribe_api"] = "auto",
+        transport: Literal["auto", "inline", "transcribe_inline", "transcribe_api"] = "auto",
         credentials_file: Path | None = None,
         project: str = "",
         location: str = "global",
@@ -451,9 +477,9 @@ class GeminiSttProvider:
 
         raise SttError(SttErrorCode.PROVIDER_UNAVAILABLE, "missing_gemini_credentials")
 
-    def _resolved_transport(self) -> Literal["inline", "transcribe_api"]:
+    def _resolved_transport(self) -> Literal["inline", "transcribe_inline", "transcribe_api"]:
         if self._transport == "auto":
-            return "transcribe_api" if "transcribe" in self._model.lower() else "inline"
+            return "transcribe_inline" if "transcribe" in self._model.lower() else "inline"
         return self._transport
 
     def _transcription_config(self) -> dict[str, Any]:
@@ -485,6 +511,36 @@ class GeminiSttProvider:
         finally:
             if uploaded is not None and uploaded.name:
                 await self._delete_quietly(client, uploaded.name)
+
+    async def _transcribe_via_transcribe_inline(
+        self, client: genai.Client, audio: bytes, mime_type: str
+    ) -> str:
+        """Model Transcribe qua ``generate_content`` + audio inline: 1 request duy nhất.
+
+        Đo trên 8 clip thật (speech-lab, 21/11/2026): nhanh gấp ~4 lần luồng Files API +
+        ``interactions`` và gấp ~2 lần ``interactions`` + inline, cùng chất lượng chép lời.
+        """
+        if len(audio) > _GEMINI_INLINE_MAX_BYTES:
+            return await self._transcribe_via_transcribe_api(client, audio, mime_type)
+        config = types.GenerateContentConfig(
+            audio_transcription_config=types.AudioTranscriptionConfig(
+                language_codes=[self._language_code],
+                mode=(
+                    types.AudioTranscriptionConfigMode.SMART
+                    if self._mode == "smart"
+                    else types.AudioTranscriptionConfigMode.VERBATIM
+                ),
+            ),
+        )
+        resp = await client.aio.models.generate_content(
+            model=self._model,
+            contents=[types.Part.from_bytes(data=audio, mime_type=mime_type)],
+            config=config,
+        )
+        cleaned = _clean_gemini_transcript(_transcript_text_of(resp))
+        if not cleaned:
+            raise SttError(SttErrorCode.NO_SPEECH, "empty_transcript")
+        return cleaned
 
     async def _transcribe_via_inline(
         self, client: genai.Client, audio: bytes, mime_type: str
@@ -536,7 +592,10 @@ class GeminiSttProvider:
     async def transcribe(self, audio: bytes, mime_type: str) -> str:
         client = self._get_client()
         try:
-            if self._resolved_transport() == "transcribe_api":
+            transport = self._resolved_transport()
+            if transport == "transcribe_inline":
+                return await self._transcribe_via_transcribe_inline(client, audio, mime_type)
+            if transport == "transcribe_api":
                 return await self._transcribe_via_transcribe_api(client, audio, mime_type)
             return await self._transcribe_via_inline(client, audio, mime_type)
         except Exception as exc:
@@ -759,7 +818,7 @@ async def _call_provider_details(
 
 
 class GroqWhisperSttProvider:
-    """Groq Whisper (``whisper-large-v3-turbo``) dùng làm nhánh STT tốc độ cao / dự phòng."""
+    """Groq Whisper (mặc định ``whisper-large-v3``) dùng làm nhánh STT tốc độ cao / dự phòng."""
 
     name = "groq"
 

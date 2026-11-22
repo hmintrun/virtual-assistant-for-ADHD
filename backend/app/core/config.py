@@ -72,7 +72,9 @@ class Settings(BaseSettings):
     GEMINI_UF1_MODEL: str = "gemini-3.5-flash-lite"
     GROQ_FALLBACK_MODEL: str = "qwen/qwen3.8-27b"
     GROQ_SECONDARY_FALLBACK_MODEL: str = "openai/gpt-oss-20b"
-    GROQ_STT_MODEL: str = "whisper-large-v3-turbo"
+    # v3 (không turbo): turbo + prompt bịa cả câu ở clip 25s và luôn trả no_speech_prob=0
+    # (bộ lọc im lặng vô hiệu) — xem docs/backend/VOICE_STT_BENCHMARK.md §6.
+    GROQ_STT_MODEL: str = "whisper-large-v3"
 
     # Tích hợp Google Calendar (A22.1 — O23 CalendarConnection & Event Ingestion)
     # Mode "fake": chạy mock adapter hoàn toàn offline, an toàn cho dev/CI/unit test.
@@ -104,18 +106,19 @@ class Settings(BaseSettings):
     ENABLE_CALENDAR_SYNC_WORKER: bool = True
     TESTING: bool = False
 
-    # Voice STT (V01 & A21) — hỗ trợ Gemini 3.5 Flash-Lite inline audio (chính) và Groq Whisper.
+    # Voice STT (V01 & A21) — Gemini 3.5 Transcribe inline qua generate_content (chính) và Groq Whisper.
+    # Số đo chọn model: docs/backend/VOICE_STT_BENCHMARK.md.
     # Mode "auto": ưu tiên Gemini -> Groq; riêng purpose="uf5_checkin" đảo sang Groq -> Gemini khi bật cờ.
     # Dự phòng khi Backend lỗi/mất mạng nằm ở Mobile (speech_to_text on-device).
     VOICE_STT_PROVIDER: Literal["gemini", "groq", "auto", "fake"] = "auto"
-    GEMINI_STT_MODEL: str = "gemini-3.5-flash-lite"
-    GEMINI_STT_TRANSPORT: Literal["auto", "inline", "transcribe_api"] = "auto"
-    GEMINI_STT_MODE: Literal["smart", "verbatim"] = "smart"
+    GEMINI_STT_MODEL: str = "gemini-3.5-transcribe"
+    GEMINI_STT_TRANSPORT: Literal["auto", "inline", "transcribe_inline", "transcribe_api"] = "auto"
+    GEMINI_STT_MODE: Literal["smart", "verbatim"] = "verbatim"
     VOICE_STT_LANGUAGE: str = "vi-VN"
     VOICE_STT_UF5_PREFER_GROQ: bool = True
     # Ngưỡng timeout nhánh chính để còn quỹ thời gian dự phòng sang nhánh phụ trong tổng ngân sách 12s.
     VOICE_STT_PRIMARY_TIMEOUT_SECONDS: float = Field(default=8.0, gt=0.0, le=60.0)
-    # Gemini 3.5 Flash-Lite inline audio ~1.5-4s; tổng ngân sách 12s đủ cả nhánh chính lẫn fallback Groq.
+    # Gemini 3.5 Transcribe inline ~2-2.9s (câu 12-43s); tổng ngân sách 12s đủ cả nhánh chính lẫn fallback Groq.
     VOICE_STT_TIMEOUT_SECONDS: float = Field(default=12.0, gt=0.0, le=120.0)
     VOICE_MAX_AUDIO_BYTES: int = Field(default=10 * 1024 * 1024, gt=0)
     MAX_JSON_BODY_BYTES: int = Field(default=1 * 1024 * 1024, gt=0)

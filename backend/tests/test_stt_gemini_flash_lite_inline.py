@@ -3,7 +3,8 @@
 Bao phủ toàn bộ 9 nhóm kịch bản (mock SDK, hoàn toàn offline):
 1. Inline audio gọi models.generate_content với Part.from_bytes & temperature=0.0, không gọi files.upload
    (kèm kiểm tra > 15MB tự upload Files API + xóa file trong finally, và làm sạch code fence / ngoặc kép).
-2. Model chứa 'transcribe' (transport='auto') -> đi luồng legacy files.upload + interactions.create + files.delete.
+2. transport='transcribe_api' (legacy, chọn tường minh) -> files.upload + interactions.create + files.delete.
+   (transport='auto' với model Transcribe giờ đi transcribe_inline — xem test_stt_gemini_transcribe_inline.py.)
 3. Không có GEMINI_API_KEY nhưng có file Service Account -> dùng genai.Client(enterprise=True, ...).
 4. Sentinel [NO_SPEECH] (kể cả [NO_SPEECH]., chữ thường, [silence], [inaudible], chuỗi rỗng) -> SttError(NO_SPEECH),
    Groq KHÔNG bị gọi; qua HTTP POST /api/v1/voice/transcriptions -> 422 NO_SPEECH_DETECTED.
@@ -14,7 +15,7 @@ Bao phủ toàn bộ 9 nhóm kịch bản (mock SDK, hoàn toàn offline):
 7. Custom SttProvider chỉ có chữ ký (audio, mime_type) vẫn chạy an toàn khi truyền purpose.
 8. Router POST /api/v1/voice/transcriptions truyền đúng purpose vào service (và vẫn tương thích mock cũ không nhận purpose).
 9. Settings defaults: VOICE_STT_TIMEOUT_SECONDS==12.0, VOICE_STT_PRIMARY_TIMEOUT_SECONDS==8.0,
-   VOICE_STT_UF5_PREFER_GROQ is True, VOICE_STT_PROVIDER=='auto', GEMINI_STT_MODEL=='gemini-3.5-flash-lite'.
+   VOICE_STT_UF5_PREFER_GROQ is True, VOICE_STT_PROVIDER=='auto', GEMINI_STT_MODEL=='gemini-3.5-transcribe'.
 """
 
 from __future__ import annotations
@@ -258,7 +259,7 @@ async def test_gemini_transcribe_model_routes_to_legacy_interactions_api() -> No
         model="gemini-3.5-transcribe",
         mode="smart",
         language_code="vi-VN",
-        transport="auto",
+        transport="transcribe_api",
     )
     provider._client = fake_client
 
@@ -653,8 +654,10 @@ def test_voice_stt_settings_defaults() -> None:
     assert cfg.VOICE_STT_PRIMARY_TIMEOUT_SECONDS == 8.0
     assert cfg.VOICE_STT_UF5_PREFER_GROQ is True
     assert cfg.VOICE_STT_PROVIDER == "auto"
-    assert cfg.GEMINI_STT_MODEL == "gemini-3.5-flash-lite"
+    assert cfg.GEMINI_STT_MODEL == "gemini-3.5-transcribe"
     assert cfg.GEMINI_STT_TRANSPORT == "auto"
+    assert cfg.GEMINI_STT_MODE == "verbatim"
+    assert cfg.GROQ_STT_MODEL == "whisper-large-v3"
 
 
 # ------------------------------------------------------------------------------

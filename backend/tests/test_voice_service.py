@@ -1,5 +1,5 @@
 """Kiểm thử Phase 3 STT (P3-C1, P3-C2, P3-C3 & RISK-03):
-- Mặc định VOICE_STT_PROVIDER='auto' -> build_voice_service trả 'gemini->groq' với GEMINI_STT_MODEL='gemini-3.5-flash-lite'.
+- Mặc định VOICE_STT_PROVIDER='auto' -> build_voice_service trả 'gemini->groq' với GEMINI_STT_MODEL='gemini-3.5-transcribe'.
 - Contextual biasing prompt (_DEFAULT_STT_PROMPT) chứa từ khóa ngày/giờ/ngoại lệ tiếng Việt.
 - Groq verbose_json: phát hiện hallucination & lọc im lặng âm học -> SttError(NO_SPEECH) / HTTP 422 NO_SPEECH_DETECTED,
   KHÔNG kích hoạt Gemini fallback trong mode auto.
@@ -153,7 +153,7 @@ def test_default_settings_auto_provider_and_vietnamese_prompt_keywords() -> None
     """Kiểm tra mặc định VOICE_STT_PROVIDER='auto', provider_name='gemini->groq' và từ khóa prompt."""
     cfg = Settings(_env_file=None)
     assert cfg.VOICE_STT_PROVIDER == "auto"
-    assert cfg.GEMINI_STT_MODEL == "gemini-3.5-flash-lite"
+    assert cfg.GEMINI_STT_MODEL == "gemini-3.5-transcribe"
 
     configured = Settings(
         _env_file=None,
