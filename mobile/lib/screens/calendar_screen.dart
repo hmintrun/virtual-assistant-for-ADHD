@@ -1,4 +1,7 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import '../core/api_client.dart';
 import '../core/responsive_layout.dart';
@@ -6,6 +9,7 @@ import '../core/theme.dart';
 import '../providers/task_provider.dart';
 import '../providers/focus_provider.dart';
 import '../models/focus_session_model.dart';
+import '../services/melbel_sound_service.dart';
 import '../services/schedule_service.dart';
 import 'focus_screen.dart';
 import '../widgets/melbel_ui.dart';
@@ -20,6 +24,8 @@ class CalendarScreen extends StatefulWidget {
 }
 
 class _CalendarScreenState extends State<CalendarScreen> {
+  final GlobalKey<MelbelMascotState> _melbelKey =
+      GlobalKey<MelbelMascotState>();
   late DateTime _month;
   DateTime? _hoveredDay;
   DateTime? _focusedDay;
@@ -76,8 +82,19 @@ class _CalendarScreenState extends State<CalendarScreen> {
             end.isAfter(day);
       }).toList();
 
+  void _petMelbel() {
+    final melbelState = _melbelKey.currentState;
+    if (melbelState != null) {
+      melbelState.pet();
+      return;
+    }
+    HapticFeedback.lightImpact();
+    unawaited(MelbelSoundService.instance.playMeow(volume: 0.6));
+  }
+
   Future<void> _openDay(DateTime day) async {
     if (_loading) return;
+    _petMelbel();
     final sessions = _onDate(day);
     final dayLabel = MaterialLocalizations.of(context).formatFullDate(day);
     final selected = await showModalBottomSheet<Object>(
@@ -244,9 +261,10 @@ class _CalendarScreenState extends State<CalendarScreen> {
                                 ),
                               ),
                             ),
-                            const Positioned(
+                            Positioned(
                               top: 6,
                               child: MelbelMascot(
+                                key: _melbelKey,
                                 width: 112,
                                 height: 102,
                                 forceLightSvg: true,

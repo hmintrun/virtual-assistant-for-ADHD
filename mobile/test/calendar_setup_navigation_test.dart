@@ -2,9 +2,11 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:provider/provider.dart';
 import 'package:proplan_va/core/api_client.dart';
+import 'package:proplan_va/core/theme.dart';
 import 'package:proplan_va/providers/theme_provider.dart';
 import 'package:proplan_va/screens/calendar_screen.dart';
 import 'package:proplan_va/screens/onboarding_screens.dart';
+import 'package:proplan_va/widgets/melbel_ui.dart';
 
 class _CalendarClient extends ApiClient {
   _CalendarClient(this.unavailable) : super(bindSession: false);
@@ -68,6 +70,42 @@ void main() {
     await tester.tap(find.byTooltip('Quay lại'));
     await tester.pumpAndSettle();
     expect(find.text('40 phút tập trung · 5 phút nghỉ'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('tapping a calendar day pets peeking Melbel with meo~ reaction',
+      (tester) async {
+    await tester.pumpWidget(MaterialApp(
+      theme: MelbelTheme.themeFor(isDark: false),
+      home: CalendarScreen(client: _CalendarClient(false)),
+    ));
+    await tester.pumpAndSettle();
+
+    AnimatedOpacity reactionOpacity() => tester.widget<AnimatedOpacity>(
+          find.ancestor(
+            of: find.descendant(
+              of: find.byType(MelbelMascot),
+              matching: find.text('meo~'),
+            ),
+            matching: find.byType(AnimatedOpacity),
+          ),
+        );
+
+    expect(reactionOpacity().opacity, 0.0);
+
+    await tester.tap(
+      find.descendant(
+        of: find.byType(GridView),
+        matching: find.text('15'),
+      ),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 220));
+
+    expect(reactionOpacity().opacity, 1.0);
+    expect(find.text('Thêm việc ngày này'), findsOneWidget);
+
+    await tester.pumpAndSettle();
     expect(tester.takeException(), isNull);
   });
 }

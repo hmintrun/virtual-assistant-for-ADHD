@@ -277,10 +277,10 @@ class MelbelMascot extends StatefulWidget {
   ];
 
   @override
-  State<MelbelMascot> createState() => _MelbelMascotState();
+  State<MelbelMascot> createState() => MelbelMascotState();
 }
 
-class _MelbelMascotState extends State<MelbelMascot>
+class MelbelMascotState extends State<MelbelMascot>
     with TickerProviderStateMixin {
   late final AnimationController _bounce = AnimationController(
     vsync: this,
@@ -307,6 +307,10 @@ class _MelbelMascotState extends State<MelbelMascot>
     _sparkles.dispose();
     super.dispose();
   }
+
+  /// Triggers Melbel's standard tap-pet reaction (haptic, meow, bounce,
+  /// sparkles, happy expression, and `meo~` cue).
+  void pet() => _triggerPet(isStroke: false);
 
   void _triggerPet({required bool isStroke}) {
     if (!widget.interactive) return;
