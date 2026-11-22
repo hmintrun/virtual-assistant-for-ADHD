@@ -239,6 +239,49 @@ class ApiClient {
     }
   }
 
+  Future<Map<String, dynamic>> deleteData(
+    String path, {
+    Object? data,
+    String? idempotencyKey,
+    bool idempotent = false,
+  }) async {
+    try {
+      final response = await dio.delete<Map<String, dynamic>>(
+        path,
+        data: data,
+        options: Options(
+          headers: idempotent
+              ? {
+                  'Idempotency-Key':
+                      idempotencyKey ?? newIdempotencyKey('mobile_delete'),
+                }
+              : null,
+        ),
+      );
+      return _unwrap(response.data);
+    } on DioException catch (error) {
+      throw ApiException.fromDio(error);
+    }
+  }
+
+  /// Checks `/api/v1/health` (unwrapped JSON) and falls back cleanly to
+  /// `/capabilities` on older backend versions returning 404.
+  Future<Map<String, dynamic>> checkHealth() async {
+    try {
+      final response = await dio.get<Map<String, dynamic>>('/health');
+      final body = response.data;
+      if (body != null && body['status'] == 'ok') {
+        return body;
+      }
+      return _unwrap(body);
+    } on DioException catch (error) {
+      if (error.response?.statusCode == 404) {
+        return getData('/capabilities');
+      }
+      throw ApiException.fromDio(error);
+    }
+  }
+
   Map<String, dynamic> _unwrap(Map<String, dynamic>? body) {
     if (body == null || body['data'] is! Map<String, dynamic>) {
       throw const ApiException('Backend trả về dữ liệu không đúng envelope.');

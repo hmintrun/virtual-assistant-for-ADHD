@@ -280,70 +280,73 @@ class _ProPlanAppState extends State<ProPlanApp> {
           : (_) => MaterialPageRoute<void>(
                 builder: (_) => const LoginScreen(),
               ),
-      builder: (context, child) => AnnotatedRegion<SystemUiOverlayStyle>(
-        value: SystemUiOverlayStyle(
-          statusBarColor: Colors.transparent,
-          statusBarIconBrightness:
-              MelbelColors.isDark ? Brightness.light : Brightness.dark,
-          systemNavigationBarColor: MelbelColors.kSurface,
-          systemNavigationBarIconBrightness:
-              MelbelColors.isDark ? Brightness.light : Brightness.dark,
-          systemNavigationBarDividerColor: MelbelColors.kOutline,
-        ),
-        child: LayoutBuilder(
-          builder: (context, constraints) {
-            final isWide =
-                constraints.maxWidth > MelbelLayout.maxContentWidth + 16;
-            final frameBackdrop = MelbelColors.isDark
-                ? const Color(0xFF0F0C15)
-                : const Color(0xFFE9E2D4);
-            final shell = Column(
-              children: [
-                Expanded(child: child ?? const SizedBox.shrink()),
-                if (needsSignIn)
-                  Material(
-                    color: MelbelColors.kSurface,
-                    child: SafeArea(
-                      top: false,
-                      child: ListTile(
-                        leading: const Icon(Icons.info_outline),
-                        title: const Text('Phiên đăng nhập đã hết hạn'),
-                        trailing: TextButton(
-                          onPressed: _openAccount,
-                          child: const Text('Đăng nhập lại'),
+      builder: (context, child) => MediaQuery(
+        data: MediaQuery.of(context).copyWith(alwaysUse24HourFormat: true),
+        child: AnnotatedRegion<SystemUiOverlayStyle>(
+          value: SystemUiOverlayStyle(
+            statusBarColor: Colors.transparent,
+            statusBarIconBrightness:
+                MelbelColors.isDark ? Brightness.light : Brightness.dark,
+            systemNavigationBarColor: MelbelColors.kSurface,
+            systemNavigationBarIconBrightness:
+                MelbelColors.isDark ? Brightness.light : Brightness.dark,
+            systemNavigationBarDividerColor: MelbelColors.kOutline,
+          ),
+          child: LayoutBuilder(
+            builder: (context, constraints) {
+              final isWide =
+                  constraints.maxWidth > MelbelLayout.maxContentWidth + 16;
+              final frameBackdrop = MelbelColors.isDark
+                  ? const Color(0xFF0F0C15)
+                  : const Color(0xFFE9E2D4);
+              final shell = Column(
+                children: [
+                  Expanded(child: child ?? const SizedBox.shrink()),
+                  if (needsSignIn)
+                    Material(
+                      color: MelbelColors.kSurface,
+                      child: SafeArea(
+                        top: false,
+                        child: ListTile(
+                          leading: const Icon(Icons.info_outline),
+                          title: const Text('Phiên đăng nhập đã hết hạn'),
+                          trailing: TextButton(
+                            onPressed: _openAccount,
+                            child: const Text('Đăng nhập lại'),
+                          ),
                         ),
                       ),
                     ),
-                  ),
-              ],
-            );
+                ],
+              );
 
-            if (!isWide) {
-              return ColoredBox(color: MelbelColors.kBackground, child: shell);
-            }
+              if (!isWide) {
+                return ColoredBox(color: MelbelColors.kBackground, child: shell);
+              }
 
-            return ColoredBox(
-              color: frameBackdrop,
-              child: Center(
-                child: Container(
-                  width: MelbelLayout.maxContentWidth,
-                  decoration: BoxDecoration(
-                    color: MelbelColors.kBackground,
-                    boxShadow: [
-                      BoxShadow(
-                        color: Colors.black.withValues(
-                          alpha: MelbelColors.isDark ? 0.42 : 0.08,
+              return ColoredBox(
+                color: frameBackdrop,
+                child: Center(
+                  child: Container(
+                    width: MelbelLayout.maxContentWidth,
+                    decoration: BoxDecoration(
+                      color: MelbelColors.kBackground,
+                      boxShadow: [
+                        BoxShadow(
+                          color: Colors.black.withValues(
+                            alpha: MelbelColors.isDark ? 0.42 : 0.08,
+                          ),
+                          blurRadius: 34,
                         ),
-                        blurRadius: 34,
-                      ),
-                    ],
+                      ],
+                    ),
+                    clipBehavior: Clip.antiAlias,
+                    child: shell,
                   ),
-                  clipBehavior: Clip.antiAlias,
-                  child: shell,
                 ),
-              ),
-            );
-          },
+              );
+            },
+          ),
         ),
       ),
       home: signedIn

@@ -93,7 +93,7 @@ class _WeeklyAvailabilityEditorState extends State<WeeklyAvailabilityEditor> {
                   Expanded(
                     child: OutlinedButton.icon(
                       onPressed: () async {
-                        final value = await showTimePicker(
+                        final value = await showMelbelTimePicker(
                           context: context,
                           initialTime: start,
                           helpText: 'Giờ bắt đầu rảnh',
@@ -102,14 +102,14 @@ class _WeeklyAvailabilityEditorState extends State<WeeklyAvailabilityEditor> {
                         if (value != null) setSheetState(() => start = value);
                       },
                       icon: const Icon(Icons.access_time, size: 18),
-                      label: Text('Từ ${start.format(context)}'),
+                      label: Text('Từ ${_formatTime(start)}'),
                     ),
                   ),
                   const SizedBox(width: 8),
                   Expanded(
                     child: OutlinedButton.icon(
                       onPressed: () async {
-                        final value = await showTimePicker(
+                        final value = await showMelbelTimePicker(
                           context: context,
                           initialTime: end,
                           helpText: 'Giờ kết thúc rảnh',
@@ -118,7 +118,7 @@ class _WeeklyAvailabilityEditorState extends State<WeeklyAvailabilityEditor> {
                         if (value != null) setSheetState(() => end = value);
                       },
                       icon: const Icon(Icons.access_time_filled, size: 18),
-                      label: Text('Đến ${end.format(context)}'),
+                      label: Text('Đến ${_formatTime(end)}'),
                     ),
                   ),
                 ],

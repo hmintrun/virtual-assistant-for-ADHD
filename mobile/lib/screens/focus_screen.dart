@@ -78,7 +78,11 @@ class _FocusScreenState extends State<FocusScreen> with WidgetsBindingObserver {
       _spokenCheckInRunId = runId;
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (mounted && context.read<FocusProvider>().canAnswerCheckIn) {
-          unawaited(_checkInVoice.speakFinalPrompt(runId));
+          unawaited(_checkInVoice.speakFinalPrompt(
+            runId,
+            isFinalSessionOfStep: session?.isLastSessionOfStep ?? false,
+            expectedOutput: session?.expectedOutput,
+          ));
         }
       });
     }
@@ -905,6 +909,17 @@ class _FocusScreenState extends State<FocusScreen> with WidgetsBindingObserver {
             session: session,
             actualSeconds: focus.actualWorkSeconds,
           ),
+          if (focus.serverRunId != null)
+            Align(
+              alignment: Alignment.centerRight,
+              child: TextButton.icon(
+                onPressed: focus.runCommandBusy
+                    ? null
+                    : () => _openActualCorrectionDialog(focus),
+                icon: const Icon(Icons.edit_outlined, size: 18),
+                label: const Text('Sửa thời gian thực tế'),
+              ),
+            ),
           const SizedBox(height: 16),
           if (focus.needsEndSync) ...[
             PrimaryCta(
@@ -1162,6 +1177,78 @@ class _FocusScreenState extends State<FocusScreen> with WidgetsBindingObserver {
       Navigator.of(context).push<void>(
         MaterialPageRoute(builder: (_) => const ThoughtInboxScreen()),
       );
+
+  Future<void> _openActualCorrectionDialog(FocusProvider focus) async {
+    final initialMinutes = (focus.actualWorkSeconds / 60).round();
+    final minutesController = TextEditingController(
+      text: initialMinutes.toString(),
+    );
+    final reasonController = TextEditingController();
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Sửa thời gian thực tế'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            TextField(
+              controller: minutesController,
+              keyboardType: TextInputType.number,
+              decoration: const InputDecoration(
+                labelText: 'Số phút làm thực tế',
+              ),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: reasonController,
+              maxLines: 2,
+              decoration: const InputDecoration(
+                labelText: 'Lý do điều chỉnh',
+                hintText: 'VD: Quên bấm kết thúc khi đã xong sớm',
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(false),
+            child: const Text('Hủy'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+            child: const Text('Lưu'),
+          ),
+        ],
+      ),
+    );
+    final minutesText = minutesController.text.trim();
+    final reasonText = reasonController.text.trim();
+    minutesController.dispose();
+    reasonController.dispose();
+    if (confirmed != true || !mounted) return;
+    final parsedMinutes = int.tryParse(minutesText);
+    if (parsedMinutes == null || parsedMinutes < 0 || reasonText.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Nhập số phút >= 0 và lý do điều chỉnh.'),
+        ),
+      );
+      return;
+    }
+    final ok = await focus.submitActualCorrection(
+      correctedWorkMinutes: parsedMinutes,
+      reason: reasonText,
+    );
+    if (!mounted) return;
+    if (ok) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Đã cập nhật thời gian làm thực tế.'),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+    }
+  }
 }
 
 class ThoughtInboxScreen extends StatefulWidget {
@@ -1211,7 +1298,7 @@ class _ThoughtInboxScreenState extends State<ThoughtInboxScreen> {
           onSelectionChanged: (value) =>
               setState(() => _showDraft = value.single),
         ),
-        if (_showDraft && task.title.isNotEmpty && !task.planLocked)
+        if (_showDraft && task.title.isNotEmpty && !task.planLocked) ...[
           MelbelCard(
             borderRadius: 24,
             padding: EdgeInsets.zero,
@@ -1245,8 +1332,34 @@ class _ThoughtInboxScreenState extends State<ThoughtInboxScreen> {
                 ),
               ),
             ),
-          )
-        else if (_showDraft)
+          ),
+          Align(
+            alignment: Alignment.centerRight,
+            child: TextButton.icon(
+              onPressed: task.isApiBusy
+                  ? null
+                  : () async {
+                      try {
+                        await task.deleteCurrentDraft();
+                        if (!context.mounted) return;
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(
+                            content: Text('Đã xóa bản nháp công việc.'),
+                            behavior: SnackBarBehavior.floating,
+                          ),
+                        );
+                      } catch (error) {
+                        if (!context.mounted) return;
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          SnackBar(content: Text('$error')),
+                        );
+                      }
+                    },
+              icon: const Icon(Icons.delete_outline_rounded),
+              label: const Text('Xóa bản nháp'),
+            ),
+          ),
+        ] else if (_showDraft)
           MelbelCard(
             borderRadius: 24,
             tone: MelbelCardTone.muted,

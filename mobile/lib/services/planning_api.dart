@@ -314,6 +314,10 @@ class PlanningApi {
         await _client.getData('/tasks/${Uri.encodeComponent(taskId)}'),
       );
 
+  Future<void> deleteDraft(String draftId) async {
+    await _client.deleteData('/drafts/${Uri.encodeComponent(draftId)}');
+  }
+
   Future<PlanCandidateModel> updateCandidateStep({
     required PlanCandidateModel candidate,
     required String clientStepKey,

@@ -1089,6 +1089,29 @@ class TaskProvider extends ChangeNotifier {
     }
   }
 
+  Future<void> deleteCurrentDraft() async {
+    if (_isApiBusy) return;
+    final draft = _draft;
+    if (draft != null && draft.confirmedTaskId == null) {
+      _isApiBusy = true;
+      _apiError = null;
+      notifyListeners();
+      try {
+        await _planningApi.deleteDraft(draft.draftId);
+      } on ApiException catch (error) {
+        if (error.statusCode != 404) {
+          _isApiBusy = false;
+          _apiError = error.message;
+          notifyListeners();
+          rethrow;
+        }
+      } finally {
+        _isApiBusy = false;
+      }
+    }
+    clearDraft();
+  }
+
   void clearDraft() {
     _editRevision++;
     _activeOperation = null;

@@ -114,7 +114,7 @@ class AccountScreen extends StatefulWidget {
 }
 
 class _AccountScreenState extends State<AccountScreen> {
-  final _connection = ApiClient().getData('/capabilities');
+  Future<Map<String, dynamic>> _connection = ApiClient().checkHealth();
   Future<List<Map<String, dynamic>>> _calendarConnections =
       GoogleCalendarApi(ApiClient()).connections();
 
@@ -349,16 +349,26 @@ class _AccountScreenState extends State<AccountScreen> {
                   ),
                   FutureBuilder<Map<String, dynamic>>(
                     future: _connection,
-                    builder: (context, snapshot) => _GroupedAccountTile(
-                      icon: Icons.cloud_outlined,
-                      title: 'Kết nối máy chủ',
-                      subtitle: snapshot.connectionState != ConnectionState.done
-                          ? 'Đang kiểm tra…'
-                          : snapshot.hasError
-                              ? 'Chưa kết nối được'
-                              : 'Đã kết nối',
-                      useHoney: true,
-                    ),
+                    builder: (context, snapshot) {
+                      final dbOk = snapshot.data?['database'] == 'ok';
+                      final subtitle =
+                          snapshot.connectionState != ConnectionState.done
+                              ? 'Đang kiểm tra…'
+                              : snapshot.hasError
+                                  ? 'Chưa kết nối được'
+                                  : dbOk
+                                      ? 'Đã kết nối · CSDL ổn định'
+                                      : 'Đã kết nối';
+                      return _GroupedAccountTile(
+                        icon: Icons.cloud_outlined,
+                        title: 'Kết nối máy chủ',
+                        subtitle: subtitle,
+                        useHoney: true,
+                        onTap: () => setState(
+                          () => _connection = ApiClient().checkHealth(),
+                        ),
+                      );
+                    },
                   ),
                 ],
               ),

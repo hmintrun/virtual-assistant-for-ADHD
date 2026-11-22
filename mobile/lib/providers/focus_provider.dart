@@ -24,6 +24,7 @@ import '../services/clock_sync_service.dart';
 import '../services/dnd_service.dart';
 import '../services/focus_native_controller.dart';
 import '../services/outbox_replay_worker.dart';
+import '../services/reminder_api.dart';
 import '../services/timer_service.dart';
 import '../services/voice_service.dart';
 
@@ -181,6 +182,7 @@ class FocusProvider extends ChangeNotifier {
     OutboxReplayWorker? outboxWorker,
     ClockSyncService? clockSync,
     NativeRecoveryChecker? nativeRecoveryChecker,
+    ReminderApi? reminderApi,
     String? ownerId,
   })  : _clock = clock ?? const SystemClock(),
         timer = timer ?? FocusTimerService(clock: clock),
@@ -199,6 +201,7 @@ class FocusProvider extends ChangeNotifier {
         _clockSync = clockSync,
         _nativeRecoveryChecker = nativeRecoveryChecker,
         _ownerId = ownerId ?? ApiSession.current?.ownerId ?? 'default' {
+    _reminderApi = reminderApi ?? ReminderApi(_api);
     this.timer.onElapsed = _onSegmentElapsed;
     this.timer.addListener(_onTimerChanged);
     this.microTaskTimer.onElapsed = _onMicroTaskElapsed;
@@ -265,9 +268,13 @@ class FocusProvider extends ChangeNotifier {
   final OutboxReplayWorker? _outboxWorker;
   final ClockSyncService? _clockSync;
   final NativeRecoveryChecker? _nativeRecoveryChecker;
+  late final ReminderApi _reminderApi;
   final List<ThoughtRecord> _thoughts = [];
+  List<Map<String, dynamic>> _upcomingReminders = const [];
 
   String get ownerId => _ownerId;
+  List<Map<String, dynamic>> get upcomingReminders =>
+      List.unmodifiable(_upcomingReminders);
   LocalOutboxRepository? get outboxRepository => _outboxRepository;
   LocalScheduleRepository? get scheduleRepository => _scheduleRepository;
   LocalThoughtRepository? get thoughtRepository => _thoughtRepository;
@@ -1187,6 +1194,98 @@ class FocusProvider extends ChangeNotifier {
       _notify();
     }
     if (_runError != null) await refreshRunCheckIn();
+  }
+
+  /// Hiệu chỉnh thời gian làm thực tế cho phiên đã chạy (`POST /runs/{run_id}/actual-corrections`).
+  Future<bool> submitActualCorrection({
+    required int correctedWorkMinutes,
+    required String reason,
+  }) async {
+    final runId = serverRunId;
+    final trimmedReason = reason.trim();
+    if (runId == null ||
+        correctedWorkMinutes < 0 ||
+        trimmedReason.isEmpty ||
+        _runCommandBusy) {
+      return false;
+    }
+    _runCommandBusy = true;
+    _runError = null;
+    _notify();
+    try {
+      final expectedRevision = (_serverRun?['run_revision'] as int?) ?? 1;
+      final selfReportSeconds = correctedWorkMinutes * 60;
+      final payload = {
+        'expected_run_revision': expectedRevision,
+        'self_report_work_seconds': selfReportSeconds,
+        'reason': trimmedReason,
+        'occurred_at': _clock.now().toUtc().toIso8601String(),
+      };
+      final response = await _api.postData(
+        '/runs/${Uri.encodeComponent(runId)}/actual-corrections',
+        data: payload,
+        idempotencyKey: ApiClient.stableIdempotencyKey(
+          'actual_correction_$runId',
+          '$expectedRevision:$selfReportSeconds:$trimmedReason',
+        ),
+      );
+      _actualWorkSeconds =
+          (response['actual_work_seconds'] as int?) ?? selfReportSeconds;
+      if (_serverRun != null && response['run_revision'] is int) {
+        _serverRun = {
+          ..._serverRun!,
+          'run_revision': response['run_revision'],
+        };
+      }
+      await _persistRun();
+      return true;
+    } on ApiException catch (error) {
+      _runError = error.message;
+      return false;
+    } finally {
+      _runCommandBusy = false;
+      _notify();
+    }
+  }
+
+  /// Đồng bộ danh sách nhắc nhở phiên sắp tới từ máy chủ (`GET /reminders`).
+  Future<void> syncUpcomingReminders({int? scheduleRevision}) async {
+    if (_disposed) return;
+    try {
+      final deviceId = await _getDeviceId();
+      final items = await _reminderApi.fetchUpcoming(
+        deviceId: deviceId,
+        scheduleRevision: scheduleRevision,
+      );
+      if (_disposed) return;
+      _upcomingReminders = items;
+      _notify();
+    } catch (_) {
+      // Bỏ qua khi ngoại tuyến để không làm gián đoạn phiên tập trung.
+    }
+  }
+
+  /// Ghi nhận trạng thái phát nhắc nhở (`POST /reminders/{id}/receipt`).
+  Future<void> reportReminderReceipt({
+    required String reminderId,
+    required int scheduleRevision,
+    required String deliveryState,
+    String? userAction,
+  }) async {
+    if (_disposed) return;
+    try {
+      final deviceId = await _getDeviceId();
+      await _reminderApi.reportReceipt(
+        reminderId: reminderId,
+        deviceId: deviceId,
+        scheduleRevision: scheduleRevision,
+        deliveryState: deliveryState,
+        occurredAt: _clock.now(),
+        userAction: userAction,
+      );
+    } catch (_) {
+      // Bỏ qua khi ngoại tuyến.
+    }
   }
 
   Future<void> endEarly() async {

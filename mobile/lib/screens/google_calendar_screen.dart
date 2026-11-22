@@ -561,6 +561,26 @@ class _GoogleCalendarAccountState extends State<_GoogleCalendarAccount> {
                 label: 'Chọn lịch ghi',
                 onPressed: _busy ? null : _chooseWriteCalendar,
               ),
+              const SizedBox(height: 8),
+              SecondaryCta(
+                label: 'Đồng bộ ngay',
+                icon: Icons.sync_rounded,
+                onPressed: _busy
+                    ? null
+                    : () {
+                        final messenger = ScaffoldMessenger.of(context);
+                        unawaited(_perform(() async {
+                          await widget.api.refreshConnection(_id);
+                          await _readDay();
+                          messenger.showSnackBar(
+                            const SnackBar(
+                              content: Text('Đã đồng bộ lịch Google.'),
+                              behavior: SnackBarBehavior.floating,
+                            ),
+                          );
+                        }));
+                      },
+              ),
               const SizedBox(height: 6),
               TextButton(
                 onPressed: _busy

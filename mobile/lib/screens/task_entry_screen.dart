@@ -125,7 +125,7 @@ class _TaskEntryScreenState extends State<TaskEntryScreen> {
         lastDate: DateTime(9999, 12, 31),
         helpText: 'Chọn ngày hạn chót');
     if (day == null || !mounted) return;
-    final time = await showTimePicker(
+    final time = await showMelbelTimePicker(
         context: context, initialTime: TimeOfDay.fromDateTime(initial));
     if (time == null || !mounted) return;
     final deadline =

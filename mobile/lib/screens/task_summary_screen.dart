@@ -70,14 +70,14 @@ class _TaskSummaryScreenState extends State<TaskSummaryScreen> {
       initialDate: today,
     );
     if (date == null || !mounted) return;
-    final start = await showTimePicker(
+    final start = await showMelbelTimePicker(
       context: context,
       helpText: 'Giờ bắt đầu',
       initialEntryMode: TimePickerEntryMode.input,
       initialTime: const TimeOfDay(hour: 18, minute: 0),
     );
     if (start == null || !mounted) return;
-    final end = await showTimePicker(
+    final end = await showMelbelTimePicker(
       context: context,
       helpText: 'Giờ kết thúc',
       initialEntryMode: TimePickerEntryMode.input,
@@ -247,7 +247,7 @@ class _TaskSummaryScreenState extends State<TaskSummaryScreen> {
       helpText: 'Chọn hạn chót',
     );
     if (day == null || !mounted) return;
-    final time = await showTimePicker(
+    final time = await showMelbelTimePicker(
       context: context,
       initialTime: TimeOfDay.fromDateTime(initial),
       initialEntryMode: TimePickerEntryMode.input,
@@ -462,20 +462,27 @@ class _TaskSummaryScreenState extends State<TaskSummaryScreen> {
                         ),
                         const SizedBox(width: 14),
                         Expanded(
-                          child: TextField(
-                            controller: _scopeController,
-                            focusNode: _scopeFocusNode,
-                            minLines: 1,
-                            maxLines: null,
-                            keyboardType: TextInputType.multiline,
-                            decoration: const InputDecoration(
-                              labelText: 'Phạm vi',
-                              hintText: 'VD: 5 trang Word, kèm biểu đồ',
-                            ),
-                            onChanged: (value) {
-                              task.setScope(value);
-                              setState(() {});
-                            },
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text('Phạm vi', style: textTheme.bodyLarge),
+                              const SizedBox(height: 6),
+                              TextField(
+                                controller: _scopeController,
+                                focusNode: _scopeFocusNode,
+                                minLines: 1,
+                                maxLines: null,
+                                keyboardType: TextInputType.multiline,
+                                decoration: const InputDecoration(
+                                  hintText: 'VD: 5 trang Word, kèm biểu đồ',
+                                  isDense: true,
+                                ),
+                                onChanged: (value) {
+                                  task.setScope(value);
+                                  setState(() {});
+                                },
+                              ),
+                            ],
                           ),
                         ),
                       ],
@@ -833,7 +840,7 @@ class _TimeConflictScreenState extends State<TimeConflictScreen> {
         helpText: 'Chọn hạn chót mới',
       );
       if (day == null || !mounted) return;
-      final time = await showTimePicker(
+      final time = await showMelbelTimePicker(
         context: context,
         initialTime: task.deadline == null
             ? const TimeOfDay(hour: 18, minute: 0)

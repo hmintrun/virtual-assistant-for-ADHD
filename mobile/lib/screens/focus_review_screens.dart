@@ -993,7 +993,7 @@ class _AvailabilityAdjustmentScreenState
   }
 
   Future<void> _pickTime({required bool start}) async {
-    final value = await showTimePicker(
+    final value = await showMelbelTimePicker(
       context: context,
       initialTime: start ? _start : _end,
     );

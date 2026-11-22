@@ -79,6 +79,32 @@ class DraftSavedScreen extends StatelessWidget {
                   icon: Icons.home_outlined,
                   onPressed: () =>
                       Navigator.popUntil(context, (route) => route.isFirst)),
+              if (!task.planLocked) ...[
+                const SizedBox(height: 6),
+                Center(
+                  child: TextButton.icon(
+                    onPressed: task.isApiBusy
+                        ? null
+                        : () async {
+                            try {
+                              await task.deleteCurrentDraft();
+                              if (!context.mounted) return;
+                              Navigator.popUntil(
+                                context,
+                                (route) => route.isFirst,
+                              );
+                            } catch (error) {
+                              if (!context.mounted) return;
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                SnackBar(content: Text('$error')),
+                              );
+                            }
+                          },
+                    icon: const Icon(Icons.delete_outline_rounded),
+                    label: const Text('Xóa bản nháp'),
+                  ),
+                ),
+              ],
             ],
           ),
         ),

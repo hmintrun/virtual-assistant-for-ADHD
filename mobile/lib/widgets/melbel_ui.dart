@@ -2940,3 +2940,24 @@ class _SectionRimPawsPainter extends CustomPainter {
       oldDelegate.isDark != isDark;
 }
 
+/// Unified 24-hour (`HH:mm`) time picker across all platforms and system locales.
+Future<TimeOfDay?> showMelbelTimePicker({
+  required BuildContext context,
+  required TimeOfDay initialTime,
+  String? helpText,
+  String? confirmText,
+  TimePickerEntryMode initialEntryMode = TimePickerEntryMode.dial,
+}) =>
+    showTimePicker(
+      context: context,
+      initialTime: initialTime,
+      helpText: helpText,
+      confirmText: confirmText,
+      initialEntryMode: initialEntryMode,
+      builder: (pickerContext, child) => MediaQuery(
+        data: MediaQuery.of(pickerContext)
+            .copyWith(alwaysUse24HourFormat: true),
+        child: child!,
+      ),
+    );
+

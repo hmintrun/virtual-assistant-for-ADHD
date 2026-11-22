@@ -1648,8 +1648,8 @@ class PlanLockedScreen extends StatelessWidget {
                                 ),
                               ),
                               subtitle: Text(
-                                '${TimeOfDay.fromDateTime(session.scheduledStart.toLocal()).format(context)} – '
-                                '${TimeOfDay.fromDateTime(session.scheduledEnd.toLocal()).format(context)}',
+                                '${localizations.formatTimeOfDay(TimeOfDay.fromDateTime(session.scheduledStart.toLocal()), alwaysUse24HourFormat: true)} – '
+                                '${localizations.formatTimeOfDay(TimeOfDay.fromDateTime(session.scheduledEnd.toLocal()), alwaysUse24HourFormat: true)}',
                               ),
                             ),
                         ],

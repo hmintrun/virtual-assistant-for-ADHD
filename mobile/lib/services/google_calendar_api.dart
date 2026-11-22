@@ -90,4 +90,37 @@ class GoogleCalendarApi {
     await _api.postData('${_connection(connectionId)}/disconnect',
         idempotent: false);
   }
+
+  Future<Map<String, dynamic>> refreshConnection(
+    String connectionId, {
+    DateTime? from,
+    DateTime? to,
+    int? expectedConnectionRevision,
+  }) =>
+      _api.postData(
+        '${_connection(connectionId)}/refresh',
+        data: {
+          if (from != null) 'from_at': from.toUtc().toIso8601String(),
+          if (to != null) 'to_at': to.toUtc().toIso8601String(),
+          if (expectedConnectionRevision != null)
+            'expected_connection_revision': expectedConnectionRevision,
+        },
+        idempotent: false,
+      );
+
+  Future<Map<String, dynamic>> getSyncJob(String jobId) =>
+      _api.getData('/calendar/sync-jobs/${Uri.encodeComponent(jobId)}');
+
+  Future<Map<String, dynamic>> retrySyncJob(
+    String jobId, {
+    int? expectedJobRevision,
+  }) =>
+      _api.postData(
+        '/calendar/sync-jobs/${Uri.encodeComponent(jobId)}/retry',
+        data: {
+          if (expectedJobRevision != null)
+            'expected_job_revision': expectedJobRevision,
+        },
+        idempotent: false,
+      );
 }
