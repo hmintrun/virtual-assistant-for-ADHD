@@ -431,7 +431,11 @@ async def apply_settings_change(
                     ) from exc
             task_uuid = _parse_uuid(payload.target_task_id)
             target_task = await db.scalar(
-                select(TaskRow).where(TaskRow.id == task_uuid, TaskRow.user_id == owner)
+                select(TaskRow).where(
+                    TaskRow.id == task_uuid,
+                    TaskRow.user_id == owner,
+                    TaskRow.status != "cancelled",
+                )
             )
             if target_task is None:
                 raise AppError(

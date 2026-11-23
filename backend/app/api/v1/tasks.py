@@ -1,11 +1,11 @@
-# Router cho nhóm API đọc công việc chính thức đã xác nhận UF2 (Dòng 13 & 14: GET /api/v1/tasks, GET /api/v1/tasks/{task_id})
+# Router cho nhóm API đọc và hủy công việc chính thức đã xác nhận UF2 (GET/DELETE /api/v1/tasks)
 from typing import Annotated
 
-from fastapi import APIRouter, Path, Query
+from fastapi import APIRouter, Header, Path, Query
 
 from app.api.deps import CurrentUserDep, DbSessionDep
-from app.schemas.common import SuccessEnvelope, build_response_meta
-from app.schemas.task import Task, TaskListData
+from app.schemas.common import ErrorEnvelope, SuccessEnvelope, build_response_meta
+from app.schemas.task import Task, TaskDeleteResult, TaskListData
 from app.services import plan_service
 
 router = APIRouter(prefix="/tasks", tags=["tasks"])
@@ -54,5 +54,51 @@ async def get_task(
     )
     return SuccessEnvelope(
         data=task,
+        meta=build_response_meta(),
+    )
+
+
+@router.delete(
+    "/{task_id}",
+    status_code=200,
+    response_model=SuccessEnvelope[TaskDeleteResult],
+    responses={
+        401: {"model": ErrorEnvelope},
+        404: {"model": ErrorEnvelope},
+        409: {"model": ErrorEnvelope},
+        422: {"model": ErrorEnvelope},
+    },
+)
+async def delete_task(
+    task_id: Annotated[
+        str,
+        Path(min_length=1, description="Mã công việc chính thức cần hủy/xóa (ví dụ: task_1)"),
+    ],
+    current_user: CurrentUserDep,
+    db: DbSessionDep,
+    idempotency_key: Annotated[
+        str | None,
+        Header(
+            alias="Idempotency-Key",
+            min_length=1,
+            max_length=128,
+            description="Mã chống gửi lặp tùy chọn cho lệnh hủy/xóa công việc",
+        ),
+    ] = None,
+    expected_task_revision: Annotated[
+        int | None,
+        Query(ge=1, description="Phiên bản công việc kỳ vọng để chống xung đột ghi đè"),
+    ] = None,
+) -> SuccessEnvelope[TaskDeleteResult]:
+    """Hủy mềm công việc chính thức, đóng các bước/phiên/nhắc nhở còn mở và đồng bộ xóa lịch Google Calendar."""
+    result = await plan_service.delete_task(
+        user_id=current_user.user_id,
+        task_id=task_id,
+        db=db,
+        idempotency_key=idempotency_key,
+        expected_task_revision=expected_task_revision,
+    )
+    return SuccessEnvelope(
+        data=result,
         meta=build_response_meta(),
     )

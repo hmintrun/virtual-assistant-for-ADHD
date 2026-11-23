@@ -224,6 +224,21 @@ class TaskListData(ApiModel):
     next_cursor: str | None = None
 
 
+class TaskDeleteResult(ApiModel):
+    """Kết quả hủy/xóa mềm công việc chính thức (DELETE /api/v1/tasks/{task_id})."""
+
+    task_id: str = Field(min_length=1)
+    deleted: bool = True
+    status: Literal["cancelled"] = "cancelled"
+    task_revision: int = Field(ge=1)
+    schedule_revision: int = Field(ge=1)
+    cancelled_session_ids: list[str] = Field(default_factory=list)
+    alarm_sync_state: Literal["pending", "not_required"] = "pending"
+    calendar_sync_summary: Literal["not_integrated", "pending", "synced", "failed"] = (
+        "not_integrated"
+    )
+
+
 class ExtractedFreeWindowSchema(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 

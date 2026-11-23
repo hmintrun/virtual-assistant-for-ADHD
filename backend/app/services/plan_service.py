@@ -9,11 +9,11 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from itertools import pairwise
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel, ValidationError
-from sqlalchemy import func, or_, select, update
+from sqlalchemy import exists, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -25,11 +25,14 @@ from app.models.calendar import (
     CalendarSyncJob,
     PlanningContext,
 )
+from app.models.execution import CheckIn, SessionRun
 from app.models.planning import PlanCandidate as CandidateRow
 from app.models.planning import PlanningDraft as DraftRow
 from app.models.planning import ScheduleVersion as VersionRow
+from app.models.schedule_proposal import RescheduleProposal
 from app.models.session import Session as SessionRow
 from app.models.settings import Availability as AvailabilityRow
+from app.models.settings import SettingChangeRequest
 from app.models.step import Step as StepRow
 from app.models.system import CommandReceipt, Reminder
 from app.models.task import Task as TaskRow
@@ -73,6 +76,7 @@ from app.schemas.task import (
     Step,
     Task,
     TaskDecompositionResult,
+    TaskDeleteResult,
     TaskListData,
 )
 from app.services import draft_service
@@ -2006,6 +2010,150 @@ async def _enqueue_calendar(
     return "pending"
 
 
+async def _enqueue_calendar_deletes_for_task(
+    db: AsyncSession,
+    owner: UUID,
+    session_ids: list[UUID],
+    version: int,
+    now: datetime,
+) -> Literal["not_integrated", "pending", "synced", "failed"]:
+    """Đóng job create chưa đồng bộ hoặc xếp hàng job delete khi hủy Task."""
+    if not session_ids:
+        return "not_integrated"
+
+    links = (
+        await db.scalars(
+            select(CalendarEventLink)
+            .where(
+                CalendarEventLink.user_id == owner,
+                CalendarEventLink.session_id.in_(session_ids),
+                CalendarEventLink.is_current.is_(True),
+            )
+            .order_by(CalendarEventLink.id)
+            .execution_options(populate_existing=True)
+        )
+    ).all()
+    if not links:
+        return "not_integrated"
+
+    for link in links:
+        queued_jobs = (
+            await db.scalars(
+                select(CalendarSyncJob)
+                .where(
+                    CalendarSyncJob.user_id == owner,
+                    CalendarSyncJob.event_link_id == link.id,
+                    CalendarSyncJob.job_state == "queued",
+                )
+                .order_by(CalendarSyncJob.created_at, CalendarSyncJob.id)
+                .execution_options(populate_existing=True)
+            )
+        ).all()
+
+        unleased_jobs = [
+            job
+            for job in queued_jobs
+            if job.lease_expires_at is None or job.lease_expires_at <= now
+        ]
+        leased_jobs = [
+            job
+            for job in queued_jobs
+            if job.lease_expires_at is not None and job.lease_expires_at > now
+        ]
+
+        if unleased_jobs:
+            await db.execute(
+                update(CalendarSyncJob)
+                .where(
+                    CalendarSyncJob.id.in_([job.id for job in unleased_jobs]),
+                    CalendarSyncJob.job_state == "queued",
+                    or_(
+                        CalendarSyncJob.lease_expires_at.is_(None),
+                        CalendarSyncJob.lease_expires_at <= now,
+                    ),
+                )
+                .values(
+                    job_state="completed",
+                    last_error_code=None,
+                    lease_expires_at=None,
+                    updated_at=now,
+                    revision=CalendarSyncJob.revision + 1,
+                )
+                .execution_options(synchronize_session="fetch")
+            )
+
+        is_unattempted_create = (
+            link.synced_schedule_revision is None
+            and not leased_jobs
+            and any(job.operation == "create" for job in unleased_jobs)
+            and all(
+                job.attempt_count == 0
+                for job in unleased_jobs
+                if job.operation == "create"
+            )
+        )
+
+        if is_unattempted_create or link.google_event_id is None:
+            await db.execute(
+                update(CalendarEventLink)
+                .where(CalendarEventLink.id == link.id)
+                .values(
+                    is_current=False,
+                    sync_state="deleted",
+                    desired_schedule_revision=version,
+                    updated_at=now,
+                    revision=CalendarEventLink.revision + 1,
+                )
+                .execution_options(synchronize_session="fetch")
+            )
+        else:
+            await db.execute(
+                update(CalendarEventLink)
+                .where(CalendarEventLink.id == link.id)
+                .values(
+                    desired_schedule_revision=version,
+                    sync_state="pending",
+                    updated_at=now,
+                    revision=CalendarEventLink.revision + 1,
+                )
+                .execution_options(synchronize_session="fetch")
+            )
+            db.add(
+                CalendarSyncJob(
+                    id=uuid4(),
+                    user_id=owner,
+                    connection_id=link.connection_id,
+                    event_link_id=link.id,
+                    target_kind="session_event",
+                    target_ref=str(link.session_id),
+                    operation="delete",
+                    target_schedule_revision=version,
+                    expected_google_etag=link.google_etag,
+                    payload_snapshot={
+                        "id": link.google_event_id,
+                        "google_calendar_id": link.google_calendar_id,
+                    },
+                    idempotency_key=(
+                        f"sync_session:{link.session_id}:v{version}:delete:{link.id.hex[:8]}"
+                    ),
+                    job_state="queued",
+                    attempt_count=0,
+                )
+            )
+
+    await db.flush()
+    state = await _calendar_state(db, owner, version)
+    if state == "not_integrated":
+        return "not_integrated"
+    if state == "pending":
+        return "pending"
+    if state == "synced":
+        return "synced"
+    if state == "failed":
+        return "failed"
+    return "pending"
+
+
 def _confirmed_payload(saved: dict[str, Any]) -> dict[str, Any]:
     data = json.loads(json.dumps(saved, default=str))
     task = data["task"]
@@ -2224,7 +2372,11 @@ async def get_task_by_id(*, user_id: str, task_id: str, db: AsyncSession) -> Tas
     owner = draft_service.resolve_user_uuid(user_id)
     row = await db.scalar(
         select(TaskRow)
-        .where(TaskRow.id == _uuid(task_id), TaskRow.user_id == owner)
+        .where(
+            TaskRow.id == _uuid(task_id),
+            TaskRow.user_id == owner,
+            TaskRow.status != "cancelled",
+        )
         .execution_options(populate_existing=True)
     )
     if row is None:
@@ -2329,7 +2481,7 @@ async def list_tasks(
     rows = (
         await db.scalars(
             select(TaskRow)
-            .where(TaskRow.user_id == owner)
+            .where(TaskRow.user_id == owner, TaskRow.status != "cancelled")
             .order_by(TaskRow.created_at, TaskRow.id)
             .execution_options(populate_existing=True)
         )
@@ -2476,6 +2628,237 @@ async def list_tasks(
         items=tasks,
         next_cursor=next_cursor,
     )
+
+
+async def delete_task(
+    *,
+    user_id: str,
+    task_id: str,
+    db: AsyncSession,
+    idempotency_key: str | None = None,
+    expected_task_revision: int | None = None,
+) -> TaskDeleteResult:
+    """Hủy mềm công việc chính thức: đóng bước/phiên/nhắc nhở còn mở và xếp hàng xóa Google Calendar."""
+    digest = (
+        _hash("delete_task", task_id, {"expected_task_revision": expected_task_revision})
+        if idempotency_key
+        else ""
+    )
+    await db.rollback()
+    async with db.begin():
+        await _lock_user(db, user_id)
+        if idempotency_key:
+            saved = await _receipt(db, user_id, idempotency_key, digest)
+            if saved is not None:
+                return TaskDeleteResult.model_validate(saved)
+
+        owner = draft_service.resolve_user_uuid(user_id)
+        task_uuid = _uuid(task_id)
+        row = await db.scalar(
+            select(TaskRow)
+            .where(TaskRow.id == task_uuid, TaskRow.user_id == owner)
+            .execution_options(populate_existing=True)
+        )
+        if row is None or row.status == "cancelled":
+            raise _error("RESOURCE_NOT_FOUND", "Không tìm thấy công việc.", 404, "reload")
+        if expected_task_revision is not None and row.revision != expected_task_revision:
+            raise AppError(
+                status_code=409,
+                code="REVISION_CONFLICT",
+                message="Công việc đã thay đổi.",
+                current_revisions={"task": row.revision},
+                next_action="reload_and_review",
+            )
+
+        step_rows = (
+            await db.scalars(
+                select(StepRow)
+                .where(StepRow.task_id == row.id, StepRow.user_id == owner)
+                .order_by(StepRow.order_index, StepRow.id)
+                .execution_options(populate_existing=True)
+            )
+        ).all()
+        session_rows = (
+            await db.scalars(
+                select(SessionRow)
+                .join(StepRow, StepRow.id == SessionRow.step_id)
+                .where(StepRow.task_id == row.id, SessionRow.user_id == owner)
+                .order_by(SessionRow.scheduled_start, SessionRow.id)
+                .execution_options(populate_existing=True)
+            )
+        ).all()
+        all_session_uuids = [sess.id for sess in session_rows]
+
+        now = datetime.now(UTC)
+        live_run_id = await db.scalar(
+            select(SessionRun.id)
+            .where(
+                SessionRun.user_id == owner,
+                SessionRun.run_state.in_(("running", "paused")),
+            )
+            .limit(1)
+        )
+        awaiting_run_id = (
+            await db.scalar(
+                select(SessionRun.id)
+                .where(
+                    SessionRun.user_id == owner,
+                    SessionRun.session_id.in_(all_session_uuids),
+                    SessionRun.run_state == "awaiting_checkin",
+                    or_(
+                        SessionRun.checkin_timeout_at.is_(None),
+                        SessionRun.checkin_timeout_at > now,
+                    ),
+                    ~exists(
+                        select(CheckIn.id).where(
+                            CheckIn.run_id == SessionRun.id,
+                            CheckIn.kind == "final",
+                            CheckIn.response_state.in_(("answered", "no_respond")),
+                        )
+                    ),
+                )
+                .limit(1)
+            )
+            if all_session_uuids
+            else None
+        )
+        if live_run_id is not None or awaiting_run_id is not None:
+            raise _error(
+                "ACTIVE_RUN_EXISTS",
+                "Đang có phiên tập trung hoạt động hoặc chờ check-in; vui lòng hoàn tất trước khi xóa công việc.",
+                409,
+                "finish_active_run",
+            )
+
+        current_version = await _schedule_revision(db, owner)
+        next_version = current_version + 1
+
+        row.status = "cancelled"
+        row.unexpanded_scope = None
+        row.revision += 1
+        row.updated_at = now
+
+        for step in step_rows:
+            if step.status not in ("completed", "skipped", "cancelled"):
+                step.status = "cancelled"
+                step.revision += 1
+                step.updated_at = now
+
+        cancelled_session_ids: list[str] = []
+        cancelled_session_uuids: list[UUID] = []
+        for sess in session_rows:
+            if sess.status not in ("completed", "skipped", "cancelled", "incomplete"):
+                sess.status = "cancelled"
+                sess.start_state = "superseded"
+                sess.schedule_revision = next_version
+                sess.revision += 1
+                sess.updated_at = now
+                cancelled_session_ids.append(str(sess.id))
+                cancelled_session_uuids.append(sess.id)
+
+        cancelled_reminders = 0
+        if all_session_uuids:
+            reminder_rows = (
+                await db.scalars(
+                    select(Reminder)
+                    .where(
+                        Reminder.user_id == owner,
+                        Reminder.session_id.in_(all_session_uuids),
+                        Reminder.delivery_state.in_(("scheduled", "snoozed")),
+                    )
+                    .execution_options(populate_existing=True)
+                )
+            ).all()
+            for rem in reminder_rows:
+                rem.delivery_state = "cancelled"
+                rem.updated_at = now
+                rem.revision += 1
+                cancelled_reminders += 1
+
+        calendar_summary = await _enqueue_calendar_deletes_for_task(
+            db, owner, cancelled_session_uuids, next_version, now
+        )
+
+        pref_row = await db.scalar(
+            select(PreferenceRow)
+            .where(PreferenceRow.user_id == owner)
+            .execution_options(populate_existing=True)
+        )
+        linked_proposal_id = pref_row.pending_proposal_id if pref_row is not None else None
+        pending_proposals = (
+            await db.scalars(
+                select(RescheduleProposal)
+                .where(
+                    RescheduleProposal.user_id == owner,
+                    RescheduleProposal.status == "pending",
+                    RescheduleProposal.target_task_id == row.id,
+                )
+                .execution_options(populate_existing=True)
+            )
+        ).all()
+        for prop in pending_proposals:
+            if linked_proposal_id is not None and prop.id == linked_proposal_id:
+                continue
+            prop.status = "superseded"
+            prop.revision += 1
+            prop.updated_at = now
+            linked_setting_reqs = (
+                await db.scalars(
+                    select(SettingChangeRequest)
+                    .where(
+                        SettingChangeRequest.user_id == owner,
+                        SettingChangeRequest.pending_proposal_id == prop.id,
+                        SettingChangeRequest.application_state.in_(
+                            ("pending_review", "pending_proposal")
+                        ),
+                    )
+                    .execution_options(populate_existing=True)
+                )
+            ).all()
+            for s_req in linked_setting_reqs:
+                s_req.application_state = "cancelled"
+                s_req.requested_revision = None
+                s_req.requested_availability_revision = None
+                s_req.updated_at = now
+                s_req.revision += 1
+
+        alarm_state: Literal["pending", "not_required"] = (
+            "pending" if (cancelled_session_ids or cancelled_reminders > 0) else "not_required"
+        )
+        db.add(
+            VersionRow(
+                user_id=owner,
+                version_number=next_version,
+                base_version=current_version if current_version > 0 else None,
+                approved_at=now,
+                affected_task_ids=[str(row.id)],
+                min_inter_session_gap_seconds=900,
+                alarm_sync_state=alarm_state,
+            )
+        )
+        await db.flush()
+
+        result = TaskDeleteResult(
+            task_id=str(row.id),
+            deleted=True,
+            status="cancelled",
+            task_revision=row.revision,
+            schedule_revision=next_version,
+            cancelled_session_ids=cancelled_session_ids,
+            alarm_sync_state=alarm_state,
+            calendar_sync_summary=calendar_summary,
+        )
+        if idempotency_key:
+            _record(
+                db,
+                user_id,
+                idempotency_key,
+                digest,
+                "delete_task",
+                result,
+                task_id=str(row.id),
+            )
+    return result
 
 
 async def _calendar_state(db: AsyncSession, owner: UUID, version: int) -> str:

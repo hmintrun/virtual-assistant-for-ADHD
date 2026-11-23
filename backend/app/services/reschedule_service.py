@@ -1801,7 +1801,13 @@ async def _build_continuation_plan(
         if source_step is not None
         else None
     )
-    if source_session is None or source_step is None or source_task is None:
+    if (
+        source_session is None
+        or source_step is None
+        or source_task is None
+        or source_task.status == "cancelled"
+        or source_session.status == "cancelled"
+    ):
         raise AppError(
             status_code=404,
             code="RESOURCE_NOT_FOUND",
@@ -2370,7 +2376,11 @@ async def _build_normal_proposal_plan(
     if target_task_id:
         target_uuid = _uuid_or_404(target_task_id, "Không tìm thấy công việc mục tiêu.")
         target_row = await db.scalar(
-            select(TaskRow).where(TaskRow.id == target_uuid, TaskRow.user_id == owner)
+            select(TaskRow).where(
+                TaskRow.id == target_uuid,
+                TaskRow.user_id == owner,
+                TaskRow.status != "cancelled",
+            )
         )
         if target_row is None:
             raise AppError(
@@ -5089,6 +5099,7 @@ async def approve_proposal(
                         select(TaskRow).where(
                             TaskRow.id == t_uuid,
                             TaskRow.user_id == owner,
+                            TaskRow.status != "cancelled",
                         )
                     )
                     if t_row is not None:
