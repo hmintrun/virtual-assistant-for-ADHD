@@ -1452,3 +1452,347 @@ async def test_w04_start_session_earlier_than_15m_grace_requires_replan(w04_clie
     assert res.status_code == 409, res.text
     assert res.json()["error"]["code"] == "START_REQUIRES_REPLAN"
 
+
+@pytest.mark.asyncio
+async def test_early_start_within_15m_grace_at_availability_left_boundary_succeeds(
+    w04_client, w04_env
+):
+    """Kiểm chứng BE-BUG-01:
+    - Bắt đầu sớm -3m trong 15m START_GRACE_SECONDS tại biên trái Availability + start_at -> 201 Created.
+    - Bắt đầu sớm -20m ngoài grace -> 409 START_REQUIRES_REPLAN.
+    - Biên phải Availability vẫn giữ chặt (không cho tràn cuối availability khi bắt đầu sớm) -> 409.
+    - Bắt đầu sớm -3m bị chặn 409 khi PlanningContext có busy interval ngay trước giờ rảnh.
+    """
+    user_id = w04_env["user_id"]
+    session_id = str(w04_env["session_id"])
+    start_time = w04_env["scheduled_start"]  # 2026-10-30 09:00 UTC (weekday=5), duration=70m
+
+    async with w04_env["sessions"]() as db:
+        task = await db.get(Task, w04_env["task_id"])
+        assert task is not None
+        task.time_constraint = {
+            "kind": "deadline",
+            "start_at": "2026-10-30T09:00:00+00:00",
+            "deadline_at": "2026-10-30T12:00:00+00:00",
+            "input_timezone": "UTC",
+        }
+        # Biên phải 10:05 UTC trước để kiểm chứng -3m (08:57 -> 10:07 UTC) vẫn không được tràn biên phải
+        task.availability = {
+            "timezone": "UTC",
+            "weekly_rules": [
+                {"weekday": 5, "start_local": "09:00:00", "end_local": "10:05:00"}
+            ],
+            "date_overrides": [],
+        }
+        avail = Availability(
+            user_id=user_id,
+            timezone="UTC",
+            weekly_rules=[],
+            date_overrides=[],
+            task_limits=[],
+            source="manual",
+        )
+        db.add(avail)
+        await db.flush()
+        ctx = PlanningContext(
+            user_id=user_id,
+            availability_id=avail.id,
+            availability_revision=1,
+            sync_state="valid",
+            coverage_state="complete",
+            fetched_at=start_time - timedelta(minutes=30),
+            query_start=start_time - timedelta(days=1),
+            query_end=start_time + timedelta(days=1),
+            selected_calendar_ids=[],
+            selected_calendar_sources=[],
+            calendar_errors=[],
+            event_snapshots=[],
+            excluded_sources=[],
+            busy_intervals=[
+                {
+                    "start_at": (start_time - timedelta(minutes=15)).isoformat(),
+                    "end_at": start_time.isoformat(),
+                    "source": {"event_id": "ext-cal-pre-avail"},
+                }
+            ],
+            manual_busy_intervals=[],
+        )
+        db.add(ctx)
+        await db.commit()
+        ctx_id = ctx.id
+
+    req_minus_20 = start_time - timedelta(minutes=20)
+    r_too_early = await w04_client.post(
+        f"/api/v1/sessions/{session_id}/start",
+        headers={"Idempotency-Key": str(uuid4())},
+        json={
+            "expected_schedule_revision": 1,
+            "device_id": "device-early-20m",
+            "requested_start_at": req_minus_20.isoformat(),
+        },
+    )
+    assert r_too_early.status_code == 409, r_too_early.text
+    assert r_too_early.json()["error"]["code"] == "START_REQUIRES_REPLAN"
+
+    req_minus_3 = start_time - timedelta(minutes=3)  # 08:57 -> 10:07 UTC
+
+    # 1. Busy interval [08:45, 09:00] trên PlanningContext chặn -3m dù Availability đã nới rộng
+    async with w04_env["sessions"]() as db:
+        task = await db.get(Task, w04_env["task_id"])
+        assert task is not None
+        task.availability = {
+            "timezone": "UTC",
+            "weekly_rules": [
+                {"weekday": 5, "start_local": "09:00:00", "end_local": "11:00:00"}
+            ],
+            "date_overrides": [],
+        }
+        await db.commit()
+
+    r_busy_pre = await w04_client.post(
+        f"/api/v1/sessions/{session_id}/start",
+        headers={"Idempotency-Key": str(uuid4())},
+        json={
+            "expected_schedule_revision": 1,
+            "device_id": "device-early-busy",
+            "requested_start_at": req_minus_3.isoformat(),
+        },
+    )
+    assert r_busy_pre.status_code == 409, r_busy_pre.text
+    assert r_busy_pre.json()["error"]["code"] == "START_REQUIRES_REPLAN"
+
+    # 2. Xóa busy interval, siết lại biên phải 10:05 UTC -> -3m (08:57 -> 10:07) vẫn bị chặn 409
+    async with w04_env["sessions"]() as db:
+        ctx_row = await db.get(PlanningContext, ctx_id)
+        task = await db.get(Task, w04_env["task_id"])
+        assert ctx_row is not None and task is not None
+        ctx_row.busy_intervals = []
+        task.availability = {
+            "timezone": "UTC",
+            "weekly_rules": [
+                {"weekday": 5, "start_local": "09:00:00", "end_local": "10:05:00"}
+            ],
+            "date_overrides": [],
+        }
+        await db.commit()
+
+    r_right_overflow = await w04_client.post(
+        f"/api/v1/sessions/{session_id}/start",
+        headers={"Idempotency-Key": str(uuid4())},
+        json={
+            "expected_schedule_revision": 1,
+            "device_id": "device-early-right-overflow",
+            "requested_start_at": req_minus_3.isoformat(),
+        },
+    )
+    assert r_right_overflow.status_code == 409, r_right_overflow.text
+    assert r_right_overflow.json()["error"]["code"] == "START_REQUIRES_REPLAN"
+
+    # 3. Khi Availability đủ [09:00, 11:00] và không có busy interval -> -3m tại biên trái thành công 201!
+    async with w04_env["sessions"]() as db:
+        task = await db.get(Task, w04_env["task_id"])
+        assert task is not None
+        task.availability = {
+            "timezone": "UTC",
+            "weekly_rules": [
+                {"weekday": 5, "start_local": "09:00:00", "end_local": "11:00:00"}
+            ],
+            "date_overrides": [],
+        }
+        await db.commit()
+
+    r_ok = await w04_client.post(
+        f"/api/v1/sessions/{session_id}/start",
+        headers={"Idempotency-Key": str(uuid4())},
+        json={
+            "expected_schedule_revision": 1,
+            "device_id": "device-early-ok",
+            "requested_start_at": req_minus_3.isoformat(),
+        },
+    )
+    assert r_ok.status_code == 201, r_ok.text
+    ok_data = r_ok.json()["data"]
+    assert ok_data["session_id"] == session_id
+    assert ok_data["run_state"] == "running"
+
+
+@pytest.mark.asyncio
+async def test_start_next_step_after_previous_step_session_postponed_or_skipped(
+    w04_client, w04_env, monkeypatch
+):
+    """Kiểm chứng BE-BUG-02:
+    - Step 0 có session kết thúc & check-in với outcome='incomplete' -> Step 1 vẫn bị chặn 409.
+    - Step 0 có session check-in skipped/postpone_session (Step 0 vẫn status='pending'), nhưng còn 1 phiên scheduled khác -> Step 1 vẫn bị chặn 409.
+    - Khi mọi session của Step 0 đều ở trạng thái completed/skipped và không còn active run (dù Step 0 vẫn 'pending') -> Start Step 1 thành công 201 Created!
+    """
+    user_id = w04_env["user_id"]
+    task_id = w04_env["task_id"]
+    step_0_id = w04_env["step_id"]
+    session_0_id = str(w04_env["session_id"])
+    start_time = w04_env["scheduled_start"]  # 2026-10-30 09:00 UTC
+
+    async with w04_env["sessions"]() as db:
+        step_1 = Step(
+            user_id=user_id,
+            task_id=task_id,
+            title="Bước 2 sau khi hoãn phiên Bước 1",
+            order_index=1,
+            status="pending",
+            estimated_base_seconds=1800,
+            remaining_base_seconds=1800,
+            buffer_multiplier=1.2,
+            estimate_source="user_confirmed",
+        )
+        db.add(step_1)
+        await db.flush()
+        sess_step1 = Session(
+            user_id=user_id,
+            step_id=step_1.id,
+            scheduled_start=start_time + timedelta(hours=3),  # 12:00 UTC
+            scheduled_end=start_time + timedelta(hours=4),  # 13:00 UTC
+            work_seconds=3000,
+            rest_seconds=600,
+            duration_seconds=3600,
+            segments=[
+                {"order_index": 0, "kind": "work", "duration_seconds": 3000},
+                {"order_index": 1, "kind": "rest", "duration_seconds": 600},
+            ],
+            schedule_revision=1,
+        )
+        db.add(sess_step1)
+        await db.commit()
+        sess_step1_id = str(sess_step1.id)
+        sess_step1_start = sess_step1.scheduled_start
+
+    # 1. Start và End Session 0 lúc 09:20 UTC
+    r_s0 = await w04_client.post(
+        f"/api/v1/sessions/{session_0_id}/start",
+        headers={"Idempotency-Key": str(uuid4())},
+        json={
+            "expected_schedule_revision": 1,
+            "device_id": "dev-step-dep",
+            "requested_start_at": start_time.isoformat(),
+        },
+    )
+    assert r_s0.status_code == 201, r_s0.text
+    run_0_id = r_s0.json()["data"]["run_id"]
+
+    end_0_at = start_time + timedelta(minutes=20)
+    monkeypatch.setattr(
+        run_service,
+        "_current_utc_now",
+        lambda now=None: (now or (end_0_at + timedelta(minutes=1))).astimezone(UTC),
+    )
+    r_end_0 = await w04_client.post(
+        f"/api/v1/runs/{run_0_id}/end",
+        headers={"Idempotency-Key": str(uuid4())},
+        json={
+            "device_id": "dev-step-dep",
+            "expected_run_revision": 1,
+            "event_id": "ev-end-step0",
+            "ended_at": end_0_at.isoformat(),
+            "end_reason": "user_stopped",
+            "work_elapsed_seconds": 1200,
+            "rest_elapsed_seconds": 0,
+        },
+    )
+    assert r_end_0.status_code == 200, r_end_0.text
+    checkin_0_id = r_end_0.json()["data"]["check_in"]["checkin_id"]
+
+    # 2. Check-in Session 0 là 'incomplete' -> Step 1 vẫn bị chặn 409 START_REQUIRES_REPLAN
+    r_ci_inc = await w04_client.put(
+        f"/api/v1/check-ins/{checkin_0_id}/response",
+        headers={"Idempotency-Key": str(uuid4())},
+        json={
+            "expected_response_revision": 0,
+            "responded_at": (end_0_at + timedelta(seconds=20)).isoformat(),
+            "session_outcome": "incomplete",
+        },
+    )
+    assert r_ci_inc.status_code == 200, r_ci_inc.text
+
+    r_blocked_inc = await w04_client.post(
+        f"/api/v1/sessions/{sess_step1_id}/start",
+        headers={"Idempotency-Key": str(uuid4())},
+        json={
+            "expected_schedule_revision": 1,
+            "device_id": "dev-step-dep",
+            "requested_start_at": sess_step1_start.isoformat(),
+        },
+    )
+    assert r_blocked_inc.status_code == 409, r_blocked_inc.text
+    assert r_blocked_inc.json()["error"]["code"] == "START_REQUIRES_REPLAN"
+
+    # 3. Sửa check-in Session 0 thành skipped + postpone_session (Step 0 vẫn status='pending')
+    r_ci_skip = await w04_client.put(
+        f"/api/v1/check-ins/{checkin_0_id}/response",
+        headers={"Idempotency-Key": str(uuid4())},
+        json={
+            "expected_response_revision": 1,
+            "responded_at": (end_0_at + timedelta(seconds=40)).isoformat(),
+            "session_outcome": "skipped",
+            "skip_scope": "postpone_session",
+        },
+    )
+    assert r_ci_skip.status_code == 200, r_ci_skip.text
+
+    # 4. Nếu Step 0 còn 1 phiên phụ trạng thái 'scheduled' -> Step 1 vẫn bị chặn 409 START_REQUIRES_REPLAN
+    async with w04_env["sessions"]() as db:
+        st0 = await db.get(Step, step_0_id)
+        s0 = await db.get(Session, w04_env["session_id"])
+        assert st0 is not None and st0.status == "pending"
+        assert s0 is not None and s0.status == "skipped"
+        extra_s0 = Session(
+            user_id=user_id,
+            step_id=step_0_id,
+            scheduled_start=start_time + timedelta(hours=1, minutes=30),  # 10:30 UTC
+            scheduled_end=start_time + timedelta(hours=2),  # 11:00 UTC
+            work_seconds=1500,
+            rest_seconds=300,
+            duration_seconds=1800,
+            segments=[
+                {"order_index": 0, "kind": "work", "duration_seconds": 1500},
+                {"order_index": 1, "kind": "rest", "duration_seconds": 300},
+            ],
+            schedule_revision=1,
+            status="scheduled",
+        )
+        db.add(extra_s0)
+        await db.commit()
+        extra_s0_id = extra_s0.id
+
+    r_blocked_extra = await w04_client.post(
+        f"/api/v1/sessions/{sess_step1_id}/start",
+        headers={"Idempotency-Key": str(uuid4())},
+        json={
+            "expected_schedule_revision": 1,
+            "device_id": "dev-step-dep",
+            "requested_start_at": sess_step1_start.isoformat(),
+        },
+    )
+    assert r_blocked_extra.status_code == 409, r_blocked_extra.text
+    assert r_blocked_extra.json()["error"]["code"] == "START_REQUIRES_REPLAN"
+
+    # 5. Khi phiên phụ cũng skipped (Step 0 vẫn 'pending') -> Start Step 1 thành công 201 Created!
+    async with w04_env["sessions"]() as db:
+        extra_row = await db.get(Session, extra_s0_id)
+        st0 = await db.get(Step, step_0_id)
+        assert extra_row is not None and st0 is not None
+        extra_row.status = "skipped"
+        assert st0.status == "pending"
+        await db.commit()
+
+    r_step1_ok = await w04_client.post(
+        f"/api/v1/sessions/{sess_step1_id}/start",
+        headers={"Idempotency-Key": str(uuid4())},
+        json={
+            "expected_schedule_revision": 1,
+            "device_id": "dev-step-dep",
+            "requested_start_at": sess_step1_start.isoformat(),
+        },
+    )
+    assert r_step1_ok.status_code == 201, r_step1_ok.text
+    assert r_step1_ok.json()["data"]["session_id"] == sess_step1_id
+    assert r_step1_ok.json()["data"]["run_state"] == "running"
+
+

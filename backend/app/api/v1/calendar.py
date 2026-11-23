@@ -350,7 +350,7 @@ async def create_configuration_preview(
     data = CalendarConfigurationPreviewResponse(
         preview_id=str(preview.id),
         connection_id=str(preview.connection_id),
-        read_calendar_ids=payload.read_calendar_ids,
+        read_calendar_ids=list((preview.payload or {}).get("read_calendar_ids") or []),
         write_calendar_id=payload.write_calendar_id,
         existing_event_action=payload.existing_event_action,
         status=preview.status,

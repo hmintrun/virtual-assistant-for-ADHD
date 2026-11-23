@@ -371,6 +371,10 @@ async def _validate_start_feasibility(
     req_start: datetime,
 ) -> None:
     req_end = req_start + timedelta(seconds=session.duration_seconds)
+    sched_start_utc = session.scheduled_start.astimezone(UTC)
+    sched_end_utc = session.scheduled_end.astimezone(UTC)
+    early_grace_bound_utc = sched_start_utc - timedelta(seconds=START_GRACE_SECONDS)
+    is_within_early_grace = early_grace_bound_utc <= req_start < sched_start_utc
 
     # 1. Trạng thái Session / Step / Task không được ở trạng thái kết thúc
     if session.status != "scheduled":
@@ -390,16 +394,53 @@ async def _validate_start_feasibility(
         raise _require_replan("Phiên tập trung này đã có lượt thực hiện.")
 
     # 2. Thứ tự phụ thuộc Step trong cùng Task & các Session đứng trước trong cùng Step
-    earlier_incomplete_step = await db.scalar(
-        select(StepRow.id).where(
-            StepRow.user_id == user_uuid,
-            StepRow.task_id == task.id,
-            StepRow.order_index < step.order_index,
-            StepRow.status.notin_(("completed", "skipped")),
+    earlier_incomplete_steps = list(
+        await db.scalars(
+            select(StepRow).where(
+                StepRow.user_id == user_uuid,
+                StepRow.task_id == task.id,
+                StepRow.order_index < step.order_index,
+                StepRow.status.notin_(("completed", "skipped")),
+            )
         )
     )
-    if earlier_incomplete_step is not None:
-        raise _require_replan("Bước trước đó của công việc chưa hoàn thành. Cần xếp lại lịch.")
+    if earlier_incomplete_steps:
+        earlier_step_ids = [s.id for s in earlier_incomplete_steps]
+        earlier_sessions = list(
+            await db.scalars(
+                select(SessionRow).where(
+                    SessionRow.user_id == user_uuid,
+                    SessionRow.step_id.in_(earlier_step_ids),
+                    SessionRow.status != "cancelled",
+                )
+            )
+        )
+        earlier_sess_ids = [s.id for s in earlier_sessions]
+        active_run_session_ids: set[UUID] = set()
+        if earlier_sess_ids:
+            active_run_session_ids = set(
+                await db.scalars(
+                    select(SessionRun.session_id).where(
+                        SessionRun.user_id == user_uuid,
+                        SessionRun.session_id.in_(earlier_sess_ids),
+                        SessionRun.ended_at.is_(None),
+                    )
+                )
+            )
+        sessions_by_step: dict[UUID, list[SessionRow]] = {sid: [] for sid in earlier_step_ids}
+        for s_row in earlier_sessions:
+            sessions_by_step.setdefault(s_row.step_id, []).append(s_row)
+
+        for prev_step in earlier_incomplete_steps:
+            st_sessions = sessions_by_step.get(prev_step.id, [])
+            if not st_sessions or any(
+                s_row.status not in ("completed", "skipped")
+                or s_row.id in active_run_session_ids
+                for s_row in st_sessions
+            ):
+                raise _require_replan(
+                    "Bước trước đó của công việc chưa hoàn thành. Cần xếp lại lịch."
+                )
 
     earlier_step_sessions = list(
         await db.scalars(
@@ -439,10 +480,17 @@ async def _validate_start_feasibility(
                 "Thời điểm bắt đầu mới khiến phiên vượt quá hạn chót của công việc. Cần xếp lại lịch."
             )
         start_bound_dt = _parse_iso_datetime(tc.get("start_at"))
-        if start_bound_dt is not None and req_start < start_bound_dt.astimezone(UTC):
-            raise _require_replan(
-                "Thời điểm bắt đầu nằm trước mốc mở công việc. Cần xếp lại lịch."
+        if start_bound_dt is not None:
+            start_bound_utc = start_bound_dt.astimezone(UTC)
+            min_allowed_start = (
+                start_bound_utc - timedelta(seconds=START_GRACE_SECONDS)
+                if is_within_early_grace and sched_start_utc >= start_bound_utc
+                else start_bound_utc
             )
+            if req_start < min_allowed_start:
+                raise _require_replan(
+                    "Thời điểm bắt đầu nằm trước mốc mở công việc. Cần xếp lại lịch."
+                )
 
     # 4. Kiểm tra khung giờ rảnh hiệu lực (Task.availability hoặc Availability của user)
     avail_schema: Availability | DraftAvailability | None = None
@@ -479,14 +527,23 @@ async def _validate_start_feasibility(
     if avail_schema is not None:
         free_intervals = compute_effective_free_intervals(
             avail_schema,
-            window_start=req_start,
-            window_end=req_end,
+            window_start=min(req_start, sched_start_utc),
+            window_end=max(req_end, sched_end_utc),
             task_id=str(task.id),
         )
-        covered = any(
-            iv.start_at.astimezone(UTC) <= req_start and iv.end_at.astimezone(UTC) >= req_end
-            for iv in free_intervals
-        )
+        covered = False
+        for iv in free_intervals:
+            iv_start = iv.start_at.astimezone(UTC)
+            iv_end = iv.end_at.astimezone(UTC)
+            if iv_end < req_end:
+                continue
+            if iv_start <= req_start or (
+                is_within_early_grace
+                and iv_start <= sched_start_utc
+                and iv_start - timedelta(seconds=START_GRACE_SECONDS) <= req_start
+            ):
+                covered = True
+                break
         if not covered:
             raise _require_replan(
                 "Thời điểm bắt đầu mới khiến phiên vượt khỏi giờ rảnh. Cần xếp lại lịch."

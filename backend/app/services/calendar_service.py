@@ -15,7 +15,7 @@ from typing import Any
 from uuid import NAMESPACE_DNS, UUID, uuid4, uuid5
 
 from sqlalchemy import delete, or_, select
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.calendar import (
@@ -146,6 +146,86 @@ class CalendarService:
     def __init__(self, db: AsyncSession):
         self.db = db
         self.client = get_calendar_client()
+
+    @staticmethod
+    def _sanitize_read_calendar_ids(
+        read_calendar_ids: list[str] | None,
+        write_calendar_id: str | None,
+        *,
+        account_ref: str | None = None,
+        raw_calendars: list[dict[str, Any]] | None = None,
+    ) -> list[str]:
+        """Loại bỏ lịch ghi chuyên dụng (ví dụ ProPlan VA Focus) và giá trị rỗng/trùng khỏi danh sách đọc lịch bận."""
+        primary_ids: set[str] = {"primary"}
+        excluded_ids: set[str] = set()
+
+        if isinstance(account_ref, str):
+            acct = account_ref.strip()
+            if acct and acct.lower() not in (
+                "google_calendar_user",
+                "unknown@gmail.com",
+                "unknown@google.com",
+            ):
+                primary_ids.add(acct)
+
+        if raw_calendars:
+            for cal in raw_calendars:
+                cal_id = cal.get("id")
+                if not isinstance(cal_id, str):
+                    continue
+                cal_id_clean = cal_id.strip()
+                if not cal_id_clean:
+                    continue
+                if cal.get("primary"):
+                    primary_ids.add(cal_id_clean)
+                elif str(cal.get("summary") or "").strip().lower() == "proplan va focus":
+                    excluded_ids.add(cal_id_clean)
+
+        if isinstance(write_calendar_id, str):
+            write_id_clean = write_calendar_id.strip()
+            if (
+                write_id_clean
+                and write_id_clean not in ("provision_new", "create_new")
+                and write_id_clean not in primary_ids
+            ):
+                excluded_ids.add(write_id_clean)
+
+        sanitized: list[str] = []
+        seen: set[str] = set()
+        for raw_id in read_calendar_ids or []:
+            if not isinstance(raw_id, str):
+                continue
+            cal_id = raw_id.strip()
+            if not cal_id or cal_id in excluded_ids or cal_id in seen:
+                continue
+            seen.add(cal_id)
+            sanitized.append(cal_id)
+        return sanitized
+
+    async def _try_fetch_calendars_for_sanitization(
+        self,
+        conn: CalendarConnection,
+        read_calendar_ids: list[str] | None,
+    ) -> list[dict[str, Any]] | None:
+        """Đọc danh sách lịch ở chế độ read-only (không commit DB) để nhận diện ProPlan VA Focus / primary IDs."""
+        has_non_primary_read = any(
+            isinstance(cid, str) and cid.strip() not in ("", "primary")
+            for cid in (read_calendar_ids or [])
+        )
+        if not has_non_primary_read or conn.connection_state != "connected":
+            return None
+        try:
+            creds = _deserialize_credentials_safe(
+                conn.credential_ref,
+                user_id=conn.user_id,
+                connection_id=conn.id,
+            )
+            access_token = creds.get("access_token")
+            if not isinstance(access_token, str) or not access_token:
+                return None
+            return await self.client.list_calendar_list(access_token)
+        except Exception:
+            return None
 
     async def create_authorization(
         self,
@@ -471,7 +551,29 @@ class CalendarService:
                             conn = await self.get_connection_by_id(user_id, connection_id) or conn
                     break
 
-        read_ids = set(conn.read_calendar_ids or [])
+        current_read_ids = list(conn.read_calendar_ids or [])
+        sanitized_read_ids = self._sanitize_read_calendar_ids(
+            current_read_ids,
+            conn.write_calendar_id,
+            account_ref=conn.account_ref,
+            raw_calendars=raw_items,
+        )
+        if sanitized_read_ids != current_read_ids:
+            conn.read_calendar_ids = sanitized_read_ids
+            try:
+                await self.db.commit()
+                await self.db.refresh(conn)
+            except SQLAlchemyError:
+                await self.db.rollback()
+                conn = await self.get_connection_by_id(user_id, connection_id) or conn
+                sanitized_read_ids = self._sanitize_read_calendar_ids(
+                    conn.read_calendar_ids,
+                    conn.write_calendar_id,
+                    account_ref=conn.account_ref,
+                    raw_calendars=raw_items,
+                )
+
+        read_ids = set(sanitized_read_ids)
         write_id = conn.write_calendar_id
 
         items = [
@@ -507,7 +609,13 @@ class CalendarService:
         if not conn:
             raise CalendarClientError("Không tìm thấy kết nối lịch tương ứng.", status_code=404)
 
-        conn.read_calendar_ids = read_calendar_ids
+        raw_cals = await self._try_fetch_calendars_for_sanitization(conn, read_calendar_ids)
+        conn.read_calendar_ids = self._sanitize_read_calendar_ids(
+            read_calendar_ids,
+            write_calendar_id,
+            account_ref=conn.account_ref,
+            raw_calendars=raw_cals,
+        )
         conn.write_calendar_id = write_calendar_id
         await self.db.commit()
         await self.db.refresh(conn)
@@ -537,6 +645,13 @@ class CalendarService:
         if not conn:
             raise CalendarClientError("Không tìm thấy kết nối lịch.", status_code=404)
 
+        raw_cals = await self._try_fetch_calendars_for_sanitization(conn, read_calendar_ids)
+        sanitized_read_ids = self._sanitize_read_calendar_ids(
+            read_calendar_ids,
+            write_calendar_id,
+            account_ref=conn.account_ref,
+            raw_calendars=raw_cals,
+        )
         preview = CalendarPreview(
             id=uuid4(),
             user_id=uid,
@@ -549,7 +664,7 @@ class CalendarService:
                 "connection_revision": conn.revision,
             },
             payload={
-                "read_calendar_ids": read_calendar_ids,
+                "read_calendar_ids": sanitized_read_ids,
                 "write_calendar_id": write_calendar_id,
                 "existing_event_action": existing_event_action,
             },
@@ -668,6 +783,7 @@ class CalendarService:
             read_ids = payload.get("read_calendar_ids", [])
             write_id = payload.get("write_calendar_id")
             action = payload.get("existing_event_action")
+            raw_cals: list[dict[str, Any]] | None = None
 
             # Provisioning secondary calendar "ProPlan VA Focus" nếu được yêu cầu (BUG-14: kiểm tra tránh tạo trùng)
             if action == "provision_new" or write_id in ("provision_new", "create_new"):
@@ -675,9 +791,10 @@ class CalendarService:
                 expected_conn_rev = conn.revision
                 # Kiểm tra xem tài khoản đã có lịch ProPlan VA Focus từ trước chưa
                 existing_cals = await self.client.list_calendar_list(access_token)
+                raw_cals = existing_cals
                 found_id = None
                 for c in existing_cals:
-                    if c.get("summary") == "ProPlan VA Focus":
+                    if str(c.get("summary") or "").strip().lower() == "proplan va focus":
                         found_id = c.get("id")
                         break
 
@@ -772,7 +889,14 @@ class CalendarService:
                         error_code="REVISION_CONFLICT",
                     )
 
-            conn.read_calendar_ids = read_ids
+            if raw_cals is None:
+                raw_cals = await self._try_fetch_calendars_for_sanitization(conn, read_ids)
+            conn.read_calendar_ids = self._sanitize_read_calendar_ids(
+                read_ids,
+                write_id,
+                account_ref=conn.account_ref,
+                raw_calendars=raw_cals,
+            )
             conn.write_calendar_id = write_id
             conn.last_successful_sync_at = datetime.now(UTC)
             preview.status = "confirmed"
