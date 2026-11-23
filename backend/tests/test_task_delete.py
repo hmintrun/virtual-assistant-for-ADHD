@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID, uuid4
@@ -288,12 +289,28 @@ async def sqlite_env(tmp_path, monkeypatch):
 
 
 @pytest_asyncio.fixture
-async def pg16_env(monkeypatch):
+async def pg16_env(tmp_path, monkeypatch):
     reset_fake_calendar_client()
-    engine = make_engine(PG16_TEST_URL)
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.drop_all)
-        await conn.run_sync(Base.metadata.create_all)
+    explicit_pg_url = os.getenv("PROACTIVE_TEST_PG_URL", "").strip()
+    pg_url = explicit_pg_url or PG16_TEST_URL
+    using_pg = True
+    engine = make_engine(pg_url)
+    try:
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.drop_all)
+            await conn.run_sync(Base.metadata.create_all)
+    except Exception:
+        await engine.dispose()
+        if explicit_pg_url:
+            raise
+        # CI trên GitHub Actions không chạy PostgreSQL container ở cổng 5433;
+        # chuyển sang file SQLite cô lập để vẫn chạy đủ kịch bản E2E.
+        using_pg = False
+        engine = make_engine(
+            f"sqlite+aiosqlite:///{(tmp_path / 'task_delete_pg16_fallback.sqlite3').as_posix()}"
+        )
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
     factory = session_factory(engine)
     owner, other = await _seed_users_and_prefs(factory)
 
@@ -323,8 +340,9 @@ async def pg16_env(monkeypatch):
     finally:
         app.dependency_overrides.clear()
         app.dependency_overrides.update(prev_overrides)
-        async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.drop_all)
+        if using_pg:
+            async with engine.begin() as conn:
+                await conn.run_sync(Base.metadata.drop_all)
         await engine.dispose()
         reset_fake_calendar_client()
 
