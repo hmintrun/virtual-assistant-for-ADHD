@@ -194,6 +194,19 @@ class GoogleCalendarClient(CalendarClientInterface):
                         account_ref = email.strip()
             except Exception as e:
                 logger.debug("Failed to fetch userinfo email: %s", e)
+            if account_ref == "unknown@google.com":
+                # Scope Calendar không gồm "email" nên userinfo thường bị từ chối.
+                # ID của lịch chính chính là email tài khoản → dùng làm account_ref,
+                # để mỗi tài khoản Google có một CalendarConnection riêng.
+                try:
+                    primary_resp = await client.get(
+                        f"{GOOGLE_CALENDAR_BASE_URL}/users/me/calendarList/primary",
+                        headers={"Authorization": f"Bearer {token_data.get('access_token')}"},
+                    )
+                    if primary_resp.status_code == 200:
+                        account_ref = primary_resp.json().get("id", account_ref)
+                except Exception as e:
+                    logger.debug("Failed to fetch primary calendar id: %s", e)
 
             if account_ref in ("unknown@google.com", "unknown@gmail.com"):
                 try:

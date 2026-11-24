@@ -39,6 +39,7 @@ class RecorderException implements Exception {
 /// - Lỗi thu/lưu: tối đa 3 lần → UI mở ô nhập chữ ([shouldFallbackToText]).
 class AudioRecorderService {
   AudioRecorderService._();
+  AudioRecorderService.taskEntry();
   static final AudioRecorderService instance = AudioRecorderService._();
 
   static const int maxFailures = 3;

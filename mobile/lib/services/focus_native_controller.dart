@@ -35,7 +35,12 @@ class FocusStartResult {
 
 /// Kết quả khi kết thúc phiên.
 class FocusStopResult {
-  const FocusStopResult({this.savedRecording});
+  const FocusStopResult({
+    this.savedRecording,
+    this.dndRestoreState = 'not_needed',
+  });
+
+  final String dndRestoreState;
 
   /// Nếu phiên kết thúc lúc user đang giữ "Cất suy nghĩ", bản thu được LƯU
   /// (không hủy) để không mất suy nghĩ. UI chuyển nó vào Hộp nháp như bình thường.
@@ -109,12 +114,23 @@ class FocusNativeController {
   Future<void> init() => AndroidAlarmManager.initialize();
 
   /// Gọi khi user bấm "Bắt đầu đếm giờ [X]p".
+  ///
+  /// [phases]: các đoạn Work/Rest của lượt (cùng thứ tự, cùng thời lượng với
+  /// `FocusSegment` trong FocusProvider, tính từ đoạn work đầu tiên). Khi truyền,
+  /// mỗi ranh giới Work ↔ Rest có 1 chuông riêng. Tổng thời lượng phải bằng
+  /// [duration]; nếu lệch, bỏ qua chuông chuyển pha (vẫn có chuông hết phiên).
   Future<FocusStartResult> start({
     required String runId,
     required Duration duration,
     required String stepTitle,
+    List<FocusPhase> phases = const [],
   }) {
-    return _beginRun(runId: runId, duration: duration, stepTitle: stepTitle);
+    return _beginRun(
+      runId: runId,
+      duration: duration,
+      stepTitle: stepTitle,
+      phases: phases,
+    );
   }
 
   /// Gọi khi user vừa xong phiên `previousRunId` và chọn làm tiếp phiên kế
@@ -124,8 +140,10 @@ class FocusNativeController {
     required String runId,
     required Duration duration,
     required String stepTitle,
+    List<FocusPhase> phases = const [],
   }) async {
     await _alarm.cancelEnd();
+    await _alarm.cancelPhaseAlarms();
     await AndroidAlarmManager.cancel(_checkInTimeoutAlarmId);
     final handedOver = await _dnd.handOver(
       fromRunId: previousRunId,
@@ -135,6 +153,7 @@ class FocusNativeController {
       runId: runId,
       duration: duration,
       stepTitle: stepTitle,
+      phases: phases,
       dndAlreadyHeld: handedOver,
     );
   }
@@ -157,14 +176,36 @@ class FocusNativeController {
     // Chỉ hủy chuông nếu đúng phiên đang chạy, tránh hủy nhầm chuông phiên mới.
     if (isActiveRun) {
       await _alarm.cancelEnd();
+      await _alarm.cancelPhaseAlarms();
       await AndroidAlarmManager.cancel(_checkInTimeoutAlarmId);
     }
-    await _dnd.restore(runId: runId);
+    final dndRestoreState = await _dnd.restore(runId: runId);
     if (isActiveRun) {
       await _setWakelock(false);
       await _clearActiveRun();
     }
-    return FocusStopResult(savedRecording: saved);
+    return FocusStopResult(
+      savedRecording: saved,
+      dndRestoreState: dndRestoreState,
+    );
+  }
+
+  /// Gọi định kỳ khi app ĐANG MỞ ở màn Check-in (vd. mỗi lần tick đồng hồ).
+  ///
+  /// Báo thức ngầm lúc `endsAt + 5 phút` chạy ở isolate riêng nên chỉ trả lại
+  /// DND được, không tắt được Wakelock (cờ giữ màn hình gắn với Activity). Nếu
+  /// app đang mở mà người dùng im lặng quá hạn, hàm này dọn nốt DND + Wakelock
+  /// và trả về true để UI ghi nhận `no_response` (KHÔNG đánh dấu hoàn thành).
+  Future<bool> releaseIfCheckInExpired({
+    required String runId,
+    DateTime? now,
+  }) async {
+    final active = await _loadActiveRun();
+    if (active == null || active.runId != runId) return false;
+    final deadline = active.endsAt.add(checkInDndTimeout);
+    if ((now ?? DateTime.now()).isBefore(deadline)) return false;
+    await stop(runId: runId);
+    return true;
   }
 
   /// Gọi 1 lần khi mở app (sau khi giao diện hiện lên). Khôi phục hoặc dọn dẹp
@@ -176,6 +217,7 @@ class FocusNativeController {
     if (active == null) {
       // Không có phiên: dọn chuông/báo thức ngầm mồ côi và DND bị kẹt.
       await _alarm.cancelEnd();
+      await _alarm.cancelPhaseAlarms();
       await AndroidAlarmManager.cancel(_checkInTimeoutAlarmId);
       final staleOwner = await _dnd.pendingOwnerRunId();
       if (staleOwner != null) await _dnd.restore(runId: staleOwner);
@@ -186,7 +228,12 @@ class FocusNativeController {
       // Phiên còn giờ: Wakelock mất theo tiến trình → bật lại. Đặt lại chuông
       // và báo thức ngầm cùng mốc (ID cố định nên không bao giờ bị nhân đôi).
       await _setWakelock(true);
-      await _scheduleAlarms(active.runId, active.endsAt, 'phiên hiện tại');
+      await _scheduleAlarms(
+        active.runId,
+        active.endsAt,
+        active.stepTitle,
+        active.phases,
+      );
       return FocusRecovery(
         FocusRecoveryState.running,
         runId: active.runId,
@@ -216,16 +263,20 @@ class FocusNativeController {
     required String runId,
     required Duration duration,
     required String stepTitle,
+    List<FocusPhase> phases = const [],
     bool dndAlreadyHeld = false,
   }) async {
     final endsAt = AlarmService.alignToSecond(DateTime.now().add(duration));
+    final validPhases =
+        phasesMatchDuration(phases, duration) ? phases : const <FocusPhase>[];
 
     // Ghi phiên đang chạy TRƯỚC mọi thao tác native: nếu app chết giữa chừng,
     // recoverOnAppStart() vẫn biết để dọn hoặc khôi phục.
-    await _saveActiveRun(runId, endsAt);
+    await _saveActiveRun(runId, endsAt, stepTitle, validPhases);
 
     // Chuông trước tiên: quan trọng nhất cho độ chính xác ≤1s.
-    final alarmScheduled = await _scheduleAlarms(runId, endsAt, stepTitle);
+    final alarmScheduled =
+        await _scheduleAlarms(runId, endsAt, stepTitle, validPhases);
     final dndApplied = dndAlreadyHeld || await _dnd.enable(runId: runId);
     final wakelockOn = await _setWakelock(true);
 
@@ -243,12 +294,23 @@ class FocusNativeController {
     String runId,
     DateTime endsAt,
     String stepTitle,
+    List<FocusPhase> phases,
   ) async {
     var endAlarmOk = true;
     try {
       await _alarm.scheduleEnd(endsAt, stepTitle: stepTitle);
     } catch (_) {
       endAlarmOk = false;
+    }
+    try {
+      // Luôn gọi (kể cả danh sách rỗng) để xóa chuông pha của lượt trước.
+      await _alarm.schedulePhaseAlarms(
+        endsAt: endsAt,
+        phases: phases,
+        stepTitle: stepTitle,
+      );
+    } catch (_) {
+      // Chuông pha là phụ: đồng hồ trên màn hình vẫn chuyển pha.
     }
     try {
       await AndroidAlarmManager.oneShotAt(
@@ -276,25 +338,52 @@ class FocusNativeController {
     }
   }
 
-  Future<void> _saveActiveRun(String runId, DateTime endsAt) async {
+  /// Chuông pha chỉ hợp lệ khi tổng các đoạn đúng bằng thời lượng lượt.
+  static bool phasesMatchDuration(List<FocusPhase> phases, Duration duration) {
+    if (phases.isEmpty) return false;
+    final total = phases.fold<int>(0, (sum, p) => sum + p.durationSeconds);
+    return total == duration.inSeconds;
+  }
+
+  Future<void> _saveActiveRun(
+    String runId,
+    DateTime endsAt,
+    String stepTitle,
+    List<FocusPhase> phases,
+  ) async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString(
       _activeRunKey,
       jsonEncode({
         'run_id': runId,
         'ends_at': endsAt.toUtc().toIso8601String(),
+        'step_title': stepTitle,
+        'phases': [for (final p in phases) p.toJson()],
       }),
     );
   }
 
-  Future<({String runId, DateTime endsAt})?> _loadActiveRun() async {
+  Future<
+      ({
+        String runId,
+        DateTime endsAt,
+        String stepTitle,
+        List<FocusPhase> phases,
+      })?> _loadActiveRun() async {
     final prefs = await SharedPreferences.getInstance();
     final raw = prefs.getString(_activeRunKey);
     if (raw == null) return null;
     final data = jsonDecode(raw) as Map<String, dynamic>;
+    // Bản ghi cũ (trước tuần 4) không có step_title/phases → giá trị mặc định.
+    final rawPhases = data['phases'] as List? ?? const [];
     return (
       runId: data['run_id'] as String,
       endsAt: DateTime.parse(data['ends_at'] as String).toLocal(),
+      stepTitle: data['step_title'] as String? ?? 'phiên hiện tại',
+      phases: [
+        for (final p in rawPhases)
+          FocusPhase.fromJson(Map<String, dynamic>.from(p as Map)),
+      ],
     );
   }
 

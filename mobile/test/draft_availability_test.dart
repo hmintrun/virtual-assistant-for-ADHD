@@ -14,6 +14,7 @@ void main() {
       FlutterSecureStorage.setMockInitialValues({});
       final paths = <String>[];
       final summary = <String, dynamic>{};
+      var rawInput = "";
       final dio = Dio(BaseOptions(baseUrl: 'http://backend.test'));
       dio.interceptors.add(
         InterceptorsWrapper(
@@ -21,7 +22,14 @@ void main() {
             paths.add('${request.method} ${request.path}');
             final payload = request.data as Map<String, dynamic>?;
             if (request.path == '/drafts') {
-              final input = payload!['summary'] as Map<String, dynamic>;
+              rawInput = payload!['raw_input'] as String;
+              final input = payload['summary'] as Map<String, dynamic>;
+              summary.clear();
+              if (rawInput == 'Chuẩn bị buổi họp') {
+                expect(input.containsKey('scope'), isFalse);
+                expect(input.containsKey('time_constraint'), isFalse);
+                expect(input.containsKey('availability'), isFalse);
+              }
               expect(input.containsKey('availability_ref'), isFalse);
               expect(input.containsKey('availability'), isFalse);
               summary.addAll(input);
@@ -38,7 +46,7 @@ void main() {
                 data: <String, dynamic>{
                   'data': <String, dynamic>{
                     'draft_id': 'draft-uf1',
-                    'raw_input': 'Viết báo cáo',
+                    'raw_input': rawInput,
                     'stage': 'summary_ready',
                     'summary_revision': 1,
                     'planning_input_revision': 1,
@@ -91,6 +99,14 @@ void main() {
         'PATCH /drafts/draft-uf1',
         'GET /drafts/draft-uf1',
       ]);
+
+      expect(reopened.scope, 'Tóm tắt kết quả');
+      reopened.setTitle('Chuẩn bị buổi họp');
+      expect(reopened.scope, isEmpty);
+      expect(reopened.deadline, isNull);
+      await reopened.prepareDraftAndAnalyze();
+      expect(reopened.availabilitySummary, contains('Chưa chọn khung giờ'));
+      expect(paths.skip(4), ['POST /drafts', 'POST /drafts/draft-uf1/analyze']);
     },
   );
 }

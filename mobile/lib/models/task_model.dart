@@ -61,6 +61,7 @@ class SessionModel {
     this.restSeconds = 300,
     this.durationSeconds = 1800,
     this.status = 'scheduled',
+    this.scheduleRevision = 1,
     this.segments = const [],
   });
 
@@ -73,6 +74,7 @@ class SessionModel {
   final int restSeconds;
   final int durationSeconds;
   final String status;
+  final int scheduleRevision;
   final List<SessionSegmentModel> segments;
 
   factory SessionModel.fromJson(Map<String, dynamic> json) {
@@ -85,6 +87,7 @@ class SessionModel {
       workSeconds: json['work_seconds'] as int? ?? 1500,
       restSeconds: json['rest_seconds'] as int? ?? 300,
       durationSeconds: json['duration_seconds'] as int? ?? 1800,
+      scheduleRevision: json['schedule_revision'] as int? ?? 1,
       status: json['status'] as String? ?? 'scheduled',
       segments: (json['segments'] as List<dynamic>? ?? const [])
           .whereType<Map<String, dynamic>>()
@@ -103,6 +106,7 @@ class SessionModel {
         'rest_seconds': restSeconds,
         'duration_seconds': durationSeconds,
         'status': status,
+        'schedule_revision': scheduleRevision,
         'segments': segments.map((segment) => segment.toJson()).toList(),
       };
 }

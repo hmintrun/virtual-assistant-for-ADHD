@@ -10,12 +10,17 @@ dependencies:
   flutter:
     sdk: flutter
 
+  flutter_localizations:
+    sdk: flutter
+
   # State Management
   provider: ^6.1.2
 
   # Networking & Security
   dio: ^5.7.0
   flutter_secure_storage: ^9.2.2
+  sqflite: ^2.3.3+1
+  path: ^1.9.0
 
   # Focus, DND & Notifications
   flutter_dnd:
@@ -31,22 +36,43 @@ dependencies:
   speech_to_text: ^7.0.0
 
   # UI Components & Timing
-  table_calendar: ^3.1.2
+  table_calendar: ^3.2.0
   circular_countdown_timer: ^0.2.3
   shimmer: ^3.0.0
-  intl: ^0.19.0
-  google_fonts: ^8.2.1
+  intl: ^0.20.2
   timezone: ^0.9.4
   shared_preferences: ^2.5.6
   android_alarm_manager_plus: ^5.1.2
+  flutter_svg: ^2.3.2
+  google_sign_in: 7.2.0
+  google_sign_in_web: 1.1.0
+  url_launcher: ^6.3.3
+  app_links: ^7.2.2
 
 dev_dependencies:
   flutter_test:
     sdk: flutter
   flutter_lints: ^4.0.0
+  sqflite_common_ffi: ^2.3.3
 
 flutter:
   uses-material-design: true
+  assets:
+    - assets/branding/
+    - assets/melbel_svg/
+    - assets/audio/
+    - assets/fonts/OFL.txt
+  fonts:
+    - family: Be Vietnam Pro
+      fonts:
+        - asset: assets/fonts/BeVietnamPro-Regular.ttf
+          weight: 400
+        - asset: assets/fonts/BeVietnamPro-Medium.ttf
+          weight: 500
+        - asset: assets/fonts/BeVietnamPro-SemiBold.ttf
+          weight: 600
+        - asset: assets/fonts/BeVietnamPro-Bold.ttf
+          weight: 700
 
 dependency_overrides:
   # record 5.x chon record_linux cu, khong tuong thich platform interface 1.5+.

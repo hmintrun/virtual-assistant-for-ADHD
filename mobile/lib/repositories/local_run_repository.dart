@@ -43,7 +43,7 @@ abstract class LocalRunRepository {
   Future<void> saveThoughts(List<ThoughtRecord> thoughts);
   Future<List<ThoughtRecord>> loadThoughts();
   Future<void> queueThought(ThoughtRecord thought);
-  Future<void> markThoughtSynced(String thoughtId);
+  Future<void> markThoughtSynced(String thoughtId, String serverThoughtId);
   Future<void> deleteThought(String thoughtId);
   Future<void> clearAllThoughts();
 }
@@ -135,7 +135,7 @@ class SecureStorageRunRepository extends LocalRunRepository {
       });
 
   @override
-  Future<void> markThoughtSynced(String thoughtId) =>
+  Future<void> markThoughtSynced(String thoughtId, String serverThoughtId) =>
       _thoughtsLock.synchronized(() async {
         final raw = await _storage.read(key: thoughtsKey);
         if (raw == null) return;
@@ -150,7 +150,10 @@ class SecureStorageRunRepository extends LocalRunRepository {
         }
         final index = existing.indexWhere((item) => item.clientThoughtId == thoughtId);
         if (index >= 0) {
-          existing[index] = existing[index].copyWith(isPendingSync: false);
+          existing[index] = existing[index].copyWith(
+            isPendingSync: false,
+            serverThoughtId: serverThoughtId,
+          );
           final list = existing.map((t) => t.toJson()).toList();
           await _storage.write(key: thoughtsKey, value: jsonEncode(list));
         }
@@ -225,11 +228,14 @@ class InMemoryRunRepository extends LocalRunRepository {
       });
 
   @override
-  Future<void> markThoughtSynced(String thoughtId) =>
+  Future<void> markThoughtSynced(String thoughtId, String serverThoughtId) =>
       _thoughtsLock.synchronized(() async {
         final index = _thoughts.indexWhere((item) => item.clientThoughtId == thoughtId);
         if (index >= 0) {
-          _thoughts[index] = _thoughts[index].copyWith(isPendingSync: false);
+          _thoughts[index] = _thoughts[index].copyWith(
+            isPendingSync: false,
+            serverThoughtId: serverThoughtId,
+          );
         }
       });
 

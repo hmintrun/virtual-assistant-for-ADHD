@@ -1,0 +1,384 @@
+import 'dart:async';
+import 'dart:convert';
+
+import 'package:flutter/foundation.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import 'package:google_sign_in/google_sign_in.dart';
+
+import '../core/api_client.dart';
+import '../core/api_session.dart';
+import '../repositories/local_database_manager.dart';
+import 'pre_session_reminder_sync.dart';
+
+class AuthService extends ChangeNotifier {
+  static const isDev = String.fromEnvironment('AUTH_MODE') == 'dev_user';
+  static const _webClientId = String.fromEnvironment('GOOGLE_CLIENT_ID');
+  static const _serverClientId =
+      String.fromEnvironment('GOOGLE_SERVER_CLIENT_ID');
+  static const _sessionKey = 'proplan.auth.session.v1';
+  static const _onboardingKeyPrefix = 'proplan.onboarding.v1.';
+  static const _onboardingProgressKeyPrefix = 'proplan.onboarding.progress.v1.';
+
+  final _storage = const FlutterSecureStorage();
+  final _publicApi = ApiClient(bindSession: false);
+  final _google = GoogleSignIn.instance;
+  Future<void>? _googleInitialization;
+  StreamSubscription<GoogleSignInAuthenticationEvent>? _webEvents;
+  Future<bool>? _renewing;
+  String? _refreshToken;
+  DateTime? _refreshExpiresAt;
+
+  ApiSession? session;
+  Map<String, dynamic>? user;
+  bool loading = true;
+  bool busy = false;
+  bool needsSignIn = false;
+  bool onboardingRequired = false;
+  String? error;
+
+  String? get photoUrl {
+    final raw =
+        user?['photo_url'] ?? user?['avatar_url'] ?? user?['picture'];
+    if (raw is! String) return null;
+    final trimmed = raw.trim();
+    return trimmed.isEmpty ? null : trimmed;
+  }
+
+  String get displayName {
+    final raw = user?['display_name'];
+    if (raw is String && raw.trim().isNotEmpty) return raw.trim();
+    return 'Tài khoản của bạn';
+  }
+
+  bool get configured => kIsWeb
+      ? _webClientId.isNotEmpty
+      : defaultTargetPlatform == TargetPlatform.android &&
+          _serverClientId.isNotEmpty;
+
+  Future<void> initializeGoogle() =>
+      _googleInitialization ??= _initializeGoogle();
+
+  Future<void> _initializeGoogle() async {
+    await _google.initialize(
+      clientId: kIsWeb ? _webClientId : null,
+      serverClientId: kIsWeb ? null : _serverClientId,
+    );
+    if (kIsWeb) {
+      _webEvents = _google.authenticationEvents.listen((event) {
+        if (event is GoogleSignInAuthenticationEventSignIn && !busy) {
+          unawaited(_signIn(() async => event.user));
+        }
+      }, onError: (Object error) => _showError(error));
+    }
+  }
+
+  Future<void> restore() async {
+    try {
+      if (isDev) {
+        _bind(ApiSession('dev_user'), null);
+        onboardingRequired = !await _isOnboardingComplete('dev_user');
+        return;
+      }
+      final raw = await _storage.read(key: _sessionKey);
+      if (raw == null) return;
+      final saved = jsonDecode(raw) as Map<String, dynamic>;
+      final profile = saved['user'] as Map<String, dynamic>;
+      final owner = profile['user_id'] as String;
+      final bound = ApiSession(owner, token: saved['token'] as String);
+      _refreshToken = saved['refresh_token'] as String?;
+      _refreshExpiresAt =
+          DateTime.tryParse(saved['refresh_expires_at'] as String? ?? '');
+      _bind(bound, profile);
+      onboardingRequired = !await _isOnboardingComplete(owner);
+      try {
+        final verified = await ApiClient().getData('/auth/me');
+        if (verified['user_id'] != owner) {
+          await signOut();
+          return;
+        }
+        final cachedPhoto = profile['photo_url'] as String?;
+        user = {
+          ...verified,
+          if ((verified['photo_url'] as String?)?.isNotEmpty != true &&
+              cachedPhoto != null &&
+              cachedPhoto.isNotEmpty)
+            'photo_url': cachedPhoto,
+        };
+      } on ApiException {
+        // Keep the cache bound to its last authenticated account.
+        needsSignIn = true;
+      }
+    } catch (_) {
+      if (session == null) error = 'Chưa khôi phục được phiên đăng nhập.';
+    } finally {
+      loading = false;
+      notifyListeners();
+    }
+  }
+
+  void _bind(ApiSession bound, Map<String, dynamic>? profile) {
+    session = bound;
+    ApiSession.current = bound;
+    user = profile;
+    if (!isDev) {
+      bound.renew = () => _renewing ??= _renew(bound).whenComplete(() {
+            _renewing = null;
+          });
+      bound.onUnauthorized = () {
+        if (!needsSignIn) {
+          needsSignIn = true;
+          notifyListeners();
+        }
+      };
+    }
+  }
+
+  Future<bool> _renew(ApiSession bound) async {
+    if (busy || !bound.active || session != bound) return false;
+    final refreshToken = _refreshToken;
+    final expiresAt = _refreshExpiresAt;
+    if (refreshToken != null &&
+        (expiresAt == null || expiresAt.isAfter(DateTime.now()))) {
+      try {
+        final data = await _publicApi.postData(
+          '/auth/refresh',
+          data: {'refresh_token': refreshToken},
+          idempotent: false,
+        );
+        if (session != bound || !bound.active || user == null) return false;
+        final rawProfile = data['user'] is Map<String, dynamic>
+            ? data['user'] as Map<String, dynamic>
+            : user!;
+        final existingPhoto = user?['photo_url'] as String?;
+        final profile = <String, dynamic>{
+          ...rawProfile,
+          if ((rawProfile['photo_url'] as String?)?.isNotEmpty != true &&
+              existingPhoto != null &&
+              existingPhoto.isNotEmpty)
+            'photo_url': existingPhoto,
+        };
+        if (profile['user_id'] != bound.ownerId) return false;
+        await _saveTokens(data, profile, keepRefreshToken: true);
+        bound.token = data['access_token'] as String;
+        user = profile;
+        needsSignIn = false;
+        error = null;
+        notifyListeners();
+        return true;
+      } on ApiException catch (failure) {
+        if (failure.statusCode != 401 && failure.statusCode != 404)
+          return false;
+      } catch (_) {
+        return false;
+      }
+    }
+    if (!configured || kIsWeb || busy || !bound.active) return false;
+    try {
+      await initializeGoogle();
+      final account = await _google.attemptLightweightAuthentication();
+      if (account == null || !bound.active) return false;
+      await _exchange(account, bound);
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  Future<void> signIn() => _signIn(() async {
+        await initializeGoogle();
+        return _google.authenticate();
+      });
+
+  Future<void> _signIn(
+      Future<GoogleSignInAccount> Function() getAccount) async {
+    if (busy || loading) return;
+    if (_renewing != null) await _renewing;
+    if (busy || loading) return;
+    final previous = session;
+    busy = true;
+    error = null;
+    notifyListeners();
+    try {
+      await _exchange(await getAccount(), previous);
+    } catch (failure) {
+      _showError(failure);
+    } finally {
+      busy = false;
+      notifyListeners();
+    }
+  }
+
+  Future<void> _exchange(
+      GoogleSignInAccount account, ApiSession? previous) async {
+    final idToken = account.authentication.idToken;
+    if (idToken == null) {
+      throw const ApiException(
+          'Google chưa trả thông tin xác thực. Hãy thử lại.');
+    }
+    final data = await _publicApi.postData(
+      '/auth/google',
+      data: {'id_token': idToken},
+      idempotent: false,
+    );
+    final rawProfile = Map<String, dynamic>.from(data['user'] as Map);
+    final googlePhoto = account.photoUrl?.trim();
+    final profile = <String, dynamic>{
+      ...rawProfile,
+      if (googlePhoto != null && googlePhoto.isNotEmpty)
+        'photo_url': googlePhoto,
+    };
+    final owner = profile['user_id'] as String;
+    final token = data['access_token'] as String;
+    if (session != previous) return;
+    if (previous != null && previous.ownerId != owner) {
+      throw const ApiException(
+          'Hãy dùng lại tài khoản hiện tại hoặc đăng xuất trước khi đổi tài khoản.');
+    }
+    await _saveTokens(data, profile);
+    if (previous == null) {
+      onboardingRequired = !await _isOnboardingComplete(owner);
+      _bind(ApiSession(owner, token: token), profile);
+    } else {
+      previous.token = token;
+      user = profile;
+    }
+    needsSignIn = false;
+    error = null;
+    notifyListeners();
+  }
+
+  Future<void> _saveTokens(
+    Map<String, dynamic> data,
+    Map<String, dynamic> profile, {
+    bool keepRefreshToken = false,
+  }) async {
+    final refresh = data['refresh_token'] as String? ??
+        (keepRefreshToken ? _refreshToken : null);
+    final expiresIn = data['refresh_expires_in'] as int?;
+    final expiresAt = expiresIn != null
+        ? DateTime.now().toUtc().add(Duration(seconds: expiresIn))
+        : (keepRefreshToken ? _refreshExpiresAt : null);
+    await _storage.write(
+      key: _sessionKey,
+      value: jsonEncode({
+        'user': profile,
+        'token': data['access_token'] as String,
+        'refresh_token': refresh,
+        'refresh_expires_at': expiresAt?.toIso8601String(),
+      }),
+    );
+    _refreshToken = refresh;
+    _refreshExpiresAt = expiresAt;
+  }
+
+  void _showError(Object failure) {
+    if (failure is GoogleSignInException &&
+        failure.code == GoogleSignInExceptionCode.canceled) return;
+    error = failure is ApiException
+        ? failure.message
+        : 'Chưa đăng nhập được với Google. Hãy kiểm tra cấu hình và thử lại.';
+    notifyListeners();
+  }
+
+  Future<void> signOut() async {
+    if (busy) return;
+    busy = true;
+    notifyListeners();
+    try {
+      await _renewing;
+      // Logout is a public refresh-token operation. Keep local sign-out
+      // available when the server is offline or still lacks the target route.
+      final refreshToken = _refreshToken;
+      if (!isDev && refreshToken != null) {
+        try {
+          await _publicApi.postData(
+            '/auth/logout',
+            data: {'refresh_token': refreshToken},
+            idempotent: false,
+          );
+        } catch (_) {}
+      }
+      try {
+        await LocalDatabaseManager.instance.closeCurrentDatabase();
+      } catch (_) {}
+      await PreSessionReminderSync.instance.cancelAll();
+      await _storage.delete(key: _sessionKey);
+      _refreshToken = null;
+      _refreshExpiresAt = null;
+      session?.active = false;
+      session = null;
+      ApiSession.current = null;
+      user = null;
+      error = null;
+      needsSignIn = false;
+      onboardingRequired = false;
+      if (_googleInitialization != null) {
+        try {
+          await _googleInitialization;
+          await _google.signOut();
+        } catch (_) {
+          error = 'Đã thoát ứng dụng. Google chưa xác nhận đăng xuất.';
+        }
+      }
+    } catch (failure) {
+      _showError(failure);
+    } finally {
+      busy = false;
+      notifyListeners();
+    }
+  }
+
+  Future<bool> _isOnboardingComplete(String ownerId) async {
+    try {
+      return await _storage.read(key: '$_onboardingKeyPrefix$ownerId') ==
+          'complete';
+    } catch (_) {
+      return false;
+    }
+  }
+
+  Future<Map<String, dynamic>?> loadOnboardingProgress() async {
+    final ownerId = session?.ownerId;
+    if (ownerId == null) return null;
+    try {
+      final raw = await _storage.read(
+          key: '$_onboardingProgressKeyPrefix$ownerId');
+      return raw == null
+          ? null
+          : jsonDecode(raw) as Map<String, dynamic>;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<void> saveOnboardingProgress(Map<String, dynamic> progress) async {
+    final ownerId = session?.ownerId;
+    if (ownerId == null) return;
+    try {
+      await _storage.write(
+        key: '$_onboardingProgressKeyPrefix$ownerId',
+        value: jsonEncode(progress),
+      );
+    } catch (_) {}
+  }
+
+  Future<void> completeOnboarding() async {
+    final ownerId = session?.ownerId;
+    if (ownerId == null) return;
+    await _storage.write(
+      key: '$_onboardingKeyPrefix$ownerId',
+      value: 'complete',
+    );
+    onboardingRequired = false;
+    notifyListeners();
+    try {
+      await _storage.delete(key: '$_onboardingProgressKeyPrefix$ownerId');
+    } catch (_) {}
+  }
+
+  @override
+  void dispose() {
+    unawaited(_webEvents?.cancel());
+    super.dispose();
+  }
+}
