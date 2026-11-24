@@ -1244,7 +1244,7 @@ Endpoint Dòng 8 trong Sheet (`multipart/form-data`: `purpose` ∈ `{"uf1_input"
 | `409` | `IDEMPOTENCY_KEY_REUSED` | `false` | `use_original_payload_or_new_command` | Trùng `Idempotency-Key` với nội dung audio/metadata khác. |
 | `503` | `STT_UNAVAILABLE` | `false` | `use_on_device_stt_or_type` | Provider STT chưa cấu hình key hoặc bị từ chối quyền. |
 | `503` | `STT_RATE_LIMITED` | `true` | `use_on_device_stt_or_type` | Provider STT bị HTTP 429. |
-| `503` | `STT_PROVIDER_ERROR` | `true` | `use_on_device_stt_or_type` | Lỗi mạng / 5xx từ Groq Whisper. |
+| `503` | `STT_PROVIDER_ERROR` | `true` | `use_on_device_stt_or_type` | Lỗi mạng / 5xx từ STT provider (Deepgram / Gemini / Groq Whisper). |
 | `504` | `STT_TIMEOUT` | `true` | `use_on_device_stt_or_type` | Quá thời gian chờ STT. |
 
 #### b) `POST /api/v1/voice/tts` `[Đã có trong code]`
@@ -1410,7 +1410,7 @@ Endpoint Dòng 8 trong Sheet (`multipart/form-data`: `purpose` ∈ `{"uf1_input"
 - **Tầng 2 (Feasibility Advisor & Extra Constraints):** `FeasibilityReport` bổ sung `earliest_feasible_end_at` (bảo toàn Proof-of-Feasibility và `min_contiguous_slot_seconds`), `suggested_extra_free_seconds_per_day`, và `applied_extra_constraints` (`AppliedExtraConstraints`: `max_daily_work_seconds`, `min_contiguous_slot_seconds`, `preferred_time_windows`); chẩn đoán `FRAGMENTED_FREE_SLOTS` theo trần công suất từng ngày.
 - **Tầng 3 & 4 (Structural Ops, Undo, Rolling Horizon, Calendar Outbox & UF6 Bridge):**
   - `POST /api/v1/candidates/{candidate_id}/undo` hoàn tác 1 bước chỉnh sửa gần nhất; sửa phi thời gian (`changed_timing=False`) giữ nguyên `scheduled_start`/`scheduled_end` và không gọi lại LLM enrich.
-  - Rolling Horizon `planning_horizon` cho phép `14..21` ngày (`> 21` ngày kẹp về `21` ngày); khi Confirm đặt `Task.extension_candidate_at`, enqueue Google Calendar Outbox summary `[ProPlan] ...` kèm `description` (`Mục tiêu`, `Đầu ra dự kiến`, `Khởi động 2p`).
+  - Rolling Horizon `planning_horizon` cho phép `14..21` ngày (`> 21` ngày kẹp về `21` ngày); khi Confirm đặt `Task.extension_candidate_at`, enqueue Google Calendar Outbox summary `[ProPlan] ...` kèm `description` (`Mục tiêu`, `Đầu ra dự kiến`).
   - UF6 `expand_next_horizon` hỗ trợ **Branch 1** (sinh thêm Step từ `unexpanded_scope` + batch enrich) và **Branch 2** (xếp tiếp các Step đang pending qua nhiều chặng tới `complete`); `ProposalSessionData` trả đủ `title`, `session_goal`, `expected_output` và `ProposedStepItem` hỗ trợ `expected_output`.
 
 ## 15. W4-02 — Bộ bàn giao OpenAPI và JSON fixtures

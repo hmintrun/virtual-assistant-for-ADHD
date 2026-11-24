@@ -183,3 +183,26 @@ Lưu ý: hedge gửi thêm request khi Edge đang chậm; nếu sau này thấy 
 
 Chạy lại: `BACKEND=backend backend/.venv/bin/python -I speech-lab/run_tts_hedge_bench.py 40`
 (kết quả `speech-lab/results/tts_hedge_bench.json`).
+
+
+## 9. Nâng cấp STT 3 tầng: Deepgram Nova-3 + Gemini Transcribe + Groq Whisper (25/11/2026)
+
+Để khắc phục giới hạn **`25 RPD / 2 RPM`** của Free Tier `gemini-3.5-transcribe` khi test/demo đồng thời giữ chất lượng tiếng Việt cho UF1, `voice_service.py` và `config.py` bổ sung `DeepgramSttProvider` (`nova-3`) cùng chuỗi dự phòng **3 tầng** trong `VOICE_STT_PROVIDER=auto`:
+
+- **Khi `.env` có `DEEPGRAM_API_KEY` (`has_deepgram_key=True`):**
+  1. **Tier 1 (Primary):** **`Deepgram Nova-3`** (`model=nova-3`, `language=vi`, `punctuate=true`, **`smart_format=false`**, **`use_keyterms=false`**, `DEEPGRAM_STT_TIMEOUT_SECONDS=5.0`).
+  2. **Tier 2 (Fallback 1):** **`gemini-3.5-transcribe`** (`verbatim`, trong phần ngân sách còn lại của `12.0s` — chừa tối thiểu quỹ cho Tier 3).
+  3. **Tier 3 (Fallback 2):** **Groq `whisper-large-v3`** (tự động remux ADTS `.aac → .m4a` thuần Python trong RAM).
+  - Lỗi nội dung/im lặng (`NO_SPEECH`, `UNSUPPORTED_AUDIO`, `AUDIO_TOO_LARGE`) dừng ngay ở Tier 1 (`HTTP 422`), **không** gọi tiếp Tier 2/3.
+- **Khi chưa cấu hình `DEEPGRAM_API_KEY`:** giữ nguyên **100%** luồng 2 tầng `gemini → groq` (`uf5_checkin` ưu tiên Groq khi `VOICE_STT_UF5_PREFER_GROQ=true`).
+
+### Số đo thực nghiệm trên 49 file `.aac` thật (`33` Zalo + `16` Holdout/Adversarial, tổng `497.13s`)
+
+| Chỉ số | Deepgram Nova-3 (`vi`, tắt `keyterm` & `smart_format`) | Gemini 3.5 Transcribe (Baseline TWOKEY) |
+| :--- | :---: | :---: |
+| **Chép câu có lời & Chặn `429`** | **47/47** (`0` lỗi `429`, chạy 5 luồng hết `15.17s`) | 47/47 (phải tách 2 Project Key + giãn 30s) |
+| **Chặn im lặng `T29`, `T30`** | **2/2 (100%)** (`conf=0.0`, `HTTP 422 NO_SPEECH_DETECTED`) | **2/2 (100%)** (`REJECTED_422`) |
+| **Độ trễ gọi trực tiếp (`avg / P50 / P95`)** | **`944 ms / 487 ms / 2277 ms`** *(E2E HTTP `avg=1964 ms`)* | `3754 ms / 3803 ms / 4671 ms` |
+| **Hỗ trợ từ T2 ITN/AST + Prompt T3 + Zone 2** | **100% đồng bộ:** `T2` xử lý `<giờ_chữ>:<phút_chữ>` + ngày/tháng chữ + tách buổi; `Zone 2` mở rộng `hảng/hãng/hàng/hản/háng/hán` + `<variant> chót` giúp đạt **`FPCR = 0/49 (0.0%)`** | Dùng chung lưới Zone 2 (`hẹn/hạng/...`) |
+
+- **Lưu ý A/B `keyterm`:** Thử nghiệm 16 ca cho thấy truyền danh sách `keyterm` pha tiếng Anh kèm `language=vi` gây lặp từ/nuốt chữ trên `nova-3` nên mặc định **`DEEPGRAM_STT_USE_KEYTERMS=false`** và **`DEEPGRAM_STT_SMART_FORMAT=false`**.
