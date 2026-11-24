@@ -190,6 +190,8 @@ API liên quan: [dòng 9](https://docs.google.com/spreadsheets/d/1RTI0Hv0DydDX5S
 | `source_revisions` | SourceRevisions | Các revision của giờ rảnh, cấu hình, lịch nền và CalendarContext dùng tính; xác nhận phải kiểm lại các nguồn này. |
 | `user_step_proposal` | string \| null | Ý tưởng chia bước nguồn đã dùng để tạo phương án, hoặc null khi người dùng giao trợ lý đề xuất. |
 | `stale` | boolean | Server tính từ toàn bộ revisions/nguồn hiện hành; không tin cờ false lưu từ lần tính cũ. |
+| `can_undo` | boolean | Cờ dẫn xuất (`true` khi tồn tại `previous_snapshot` để hoàn tác 1 bước trước confirm). |
+| `previous_snapshot` | object \| null | *(Cột DB nội bộ từ `20261124_01`, không trả trực tiếp trong response API)* Ảnh chụp phương án trước lần `PATCH` gần nhất để phục vụ `POST /candidates/{candidate_id}/undo`; bị xóa về `null` khi tạo mới, sau khi undo hoặc confirm. |
 
 CandidateStep/CandidateSession tương ứng O08/O09, dùng client key trước confirm và chưa có lịch vận hành. feasible chỉ áp dụng các Steps trong verification_scope và horizon; không tự bao gồm unexpanded_scope. Candidate cũ có schema PlanningPart chỉ được chuyển đổi để đọc, bị đánh stale và phải tạo lại trước confirm.
 
@@ -217,6 +219,7 @@ API liên quan: [dòng 12](https://docs.google.com/spreadsheets/d/1RTI0Hv0DydDX5
 | `source_summary_revision` | integer \| null | Phiên bản summary đã xác nhận để tạo Task; null nếu dữ liệu cũ không có bằng chứng. |
 | `source_planning_input_revision` | integer \| null | Phiên bản đầu vào đã dùng khi confirm. |
 | `unexpanded_scope` | string \| null | Phạm vi còn chưa chia, giữ nguyên ở Task để lập tiếp về sau. |
+| `extension_candidate_at` | date-time \| null | *(Cột DB từ `20261124_01`)* Mốc gợi ý bắt đầu mở rộng chặng Rolling Horizon kế tiếp khi `decomposition_state` hoặc `scheduling_state` còn `partial`; chuyển về `null` khi hoàn tất toàn bộ phạm vi. |
 | `task_id` | string | Trường bổ sung từ response Sheet; mã tài nguyên hoặc liên kết server. |
 | `steps` | array<Step> | Trường bổ sung từ response Sheet; xem điều kiện trả của endpoint tương ứng. |
 | `sessions` | array<Session> | Trường bổ sung từ response Sheet; xem điều kiện trả của endpoint tương ứng. |
@@ -254,6 +257,9 @@ API liên quan: [dòng 9](https://docs.google.com/spreadsheets/d/1RTI0Hv0DydDX5S
 | `step_id` | string | Bước được thực hiện trong phiên; từ đó xác định Task. |
 | `scheduled_start` | date-time | Giờ bắt đầu theo lịch đã xếp. |
 | `scheduled_end` | date-time | Giờ kết thúc; bằng giờ bắt đầu cộng tổng thời lượng phiên. |
+| `title` | string \| null | *(Cột DB từ `20261124_01`)* Tiêu đề phiên tập trung (đặc biệt khi một Step tách nhiều phiên dạng `(Phần i/n)` hoặc kế thừa `Step.title`). |
+| `session_goal` | string \| null | *(Cột DB từ `20261124_01`)* Mục tiêu cụ thể của riêng phiên hiện tại. |
+| `expected_output` | string \| null | *(Cột DB từ `20261124_01`)* Đầu ra dự kiến của phiên (có thể phân tách theo từng phần từ `Step.expected_output`). |
 | `micro_task_seconds` | integer \| null | Độ dài gợi ý nếu có số ước lượng; hiện có thể null. Không có timer micro-task và không cộng vào Session chính. |
 | `work_seconds` | integer | Tổng thời gian làm chính của mọi quãng, đã gồm buffer phân bổ. |
 | `rest_seconds` | integer | Tổng nghỉ bên trong phiên; không gồm 15 phút giữa hai Session. |
@@ -288,7 +294,10 @@ API liên quan: [dòng 9](https://docs.google.com/spreadsheets/d/1RTI0Hv0DydDX5S
 | `deficit_seconds` | integer \| null | Cận dưới thiếu thời lượng khi so required_seconds với available_seconds cho phần đã ước lượng. Bằng 0 vẫn có thể không xếp được; không cộng 900 giây vào từng phiên. |
 | `unscheduled_step_keys` | array<string> | client_step_key của Steps đã biết nhưng chưa được xếp đủ trong Candidate. |
 | `unexpanded_scope` | string \| null | Phạm vi chưa chia/chưa ước lượng; không gộp thành 0 giây hoặc vào required_seconds. |
-| `extension_candidate_at` | date-time \| null | Mốc kết thúc được gợi ý sau khi thử xếp thêm; không gọi là hạn tối thiểu tối ưu nếu chưa chứng minh. |
+| `extension_candidate_at` | date-time \| null | Mốc kết thúc/gợi ý mở rộng chặng Rolling Horizon kế tiếp khi còn phạm vi chưa xếp đủ hoặc chưa chia hết. |
+| `earliest_feasible_end_at` | date-time \| null | Hạn chót khả thi sớm nhất tìm được khi phương án hiện tại `infeasible` (bảo toàn Proof-of-Feasibility và `min_contiguous_slot_seconds`). |
+| `suggested_extra_free_seconds_per_day` | integer \| null | Số giây rảnh gợi ý cần mở thêm mỗi ngày để kịp deadline hiện tại (khi áp dụng được). |
+| `applied_extra_constraints` | AppliedExtraConstraints \| null | Các ràng buộc bổ sung thực tế đã áp từ `extra_requirements`: `max_daily_work_seconds`, `min_contiguous_slot_seconds`, `preferred_time_windows`. |
 
 ### O11 ScheduleVersion
 
@@ -713,13 +722,15 @@ Các cấu trúc dưới đây phục vụ endpoint cụ thể, không tự đá
 
 Server tạo client keys và ghi estimate_source=user_confirmed cho nguồn thủ công. Cùng Context/preferences và Algorithm được dùng như nhánh AI; vẫn cần user review và confirm riêng. A04 cần làm rõ trả 422 DECOMPOSITION_REQUIRES_CLARIFICATION, field user_step_proposal; Draft được giữ, chưa có Candidate mới.
 
-`PATCH /api/v1/candidates/{candidate_id}` giữ expected_review_revision, nhận **đúng một** trong edits (sửa có cấu trúc hiện có) hoặc user_instruction (string 1–2000 ký tự, không chỉ khoảng trắng). Success vẫn là O06 PlanCandidate; không thay response bằng text của AI.
+`PATCH /api/v1/candidates/{candidate_id}` giữ `expected_review_revision`, nhận **đúng một** trong `edits` (sửa có cấu trúc) hoặc `user_instruction` (string 1–2000 ký tự, không chỉ khoảng trắng). Success vẫn là O06 PlanCandidate (với `can_undo=true` sau khi áp dụng thay đổi thành công); không thay response bằng text của AI.
 
-- NL chỉ sửa Step đã có: title, expected_output, estimated_base_seconds, order_index. Dùng đúng client_step_key qua reorder; không thêm/xóa/gộp hoặc sửa Session bằng NL trong bản này. Sửa Session có cấu trúc tiếp tục dùng edits.sessions.
-- Kết quả AI nội bộ có keyed step_edits và các cờ cần hỏi lại/đổi Draft/thao tác chưa hỗ trợ. Đây là DTO nội bộ, không tạo object DB hoặc endpoint mới.
-- Đổi availability/deadline/window trả 422 DRAFT_UPDATE_REQUIRED, next_action=edit_draft_and_reconfirm. User sửa Draft, xác nhận UF1 và tạo lại nguồn/phương án phù hợp; không áp một phần Step của yêu cầu hỗn hợp.
-- 422 ADJUSTMENT_REQUIRES_CLARIFICATION / UNSUPPORTED_CANDIDATE_CHANGE / NO_CANDIDATE_CHANGES hoặc 503 AI_UNAVAILABLE giữ nguyên phương án/revision. Lỗi có câu hỏi/field_errors; không lấy assistant_note làm bằng chứng đã thay đổi lịch.
-- Kết quả AI cũ gặp nguồn/review revision đã đổi bị chặn 409. Replay lệnh thành công vẫn đọc receipt trước kiểm bản đã thay đổi; cùng key khác payload bị từ chối.
+- **`edits` (`CandidateEdits`):** Ngoài sửa trường của `steps` (`CandidateStepEdit` gồm `title`, `expected_output`, `estimated_base_seconds`, `order_index`, `micro_task_text`) và `sessions` (`CandidateSessionEdit` gồm `scheduled_start`, `scheduled_end`, `title`, `session_goal`, `expected_output`, `micro_task_text`), hỗ trợ thêm các thao tác cấu trúc bước: `add_steps` (`CandidateStepAdd`), `delete_step_keys` (`array<string>`), `merge_steps` (`CandidateStepMerge`), `split_steps` (`CandidateStepSplit`), giới hạn tổng bước sau chỉnh sửa trong `1..20`. Không chỉnh đồng thời thông số thời lượng/cấu trúc bước và giờ phiên trong cùng một request (`422 VALIDATION_ERROR`).
+- **`user_instruction` (`adjust_candidate_by_nl`):** Hỗ trợ ánh xạ sang `step_edits`, `add_steps`, `delete_step_keys`, `merge_steps`, `split_steps` theo `client_step_key` hợp lệ.
+- **Hoàn tác 1 bước (`POST /api/v1/candidates/{candidate_id}/undo`):** Nhận header `Idempotency-Key` và body `UndoCandidateRequest` (`expected_review_revision >= 1`). Khôi phục toàn bộ ảnh chụp từ `previous_snapshot` gần nhất, tăng `review_revision` và đặt lại `can_undo=false`; gọi lần 2 khi không còn snapshot trả `409 UNDO_UNAVAILABLE`.
+- Kết quả AI nội bộ có keyed `step_edits`, các mảng structural ops và các cờ cần hỏi lại/đổi Draft/thao tác chưa hỗ trợ. Đây là DTO nội bộ, không tạo object DB mới.
+- Đổi availability/deadline/window trả `422 DRAFT_UPDATE_REQUIRED`, `next_action=edit_draft_and_reconfirm`. User sửa Draft, xác nhận UF1 và tạo lại nguồn/phương án phù hợp; không áp một phần Step của yêu cầu hỗn hợp.
+- `422 ADJUSTMENT_REQUIRES_CLARIFICATION` / `UNSUPPORTED_CANDIDATE_CHANGE` / `NO_CANDIDATE_CHANGES` hoặc `503 AI_UNAVAILABLE` giữ nguyên phương án/revision. Lỗi có câu hỏi/`field_errors`; không lấy `assistant_note` làm bằng chứng đã thay đổi lịch.
+- Kết quả AI cũ gặp nguồn/review revision đã đổi bị chặn `409 REVISION_CONFLICT`. Replay lệnh thành công vẫn đọc receipt trước kiểm bản đã thay đổi; cùng key khác payload bị từ chối.
 
 ### ConfirmSummaryResult
 
@@ -937,6 +948,7 @@ Bảng này là chỉ mục, không thay request validation. Các trường dư�
 | 10 | GET `/api/v1/candidates/{candidate_id}` | path: candidate_id; body: null |
 | 11 | PATCH `/api/v1/candidates/{candidate_id}` | path: candidate_id; body: expected_review_revision, edits |
 | 12 | POST `/api/v1/candidates/{candidate_id}/confirm` | path: candidate_id; body: expected_review_revision, expected_summary_revision, expected_source_revisions, expected_planning_input_revision |
+| Bổ sung (UF2 Undo) | POST `/api/v1/candidates/{candidate_id}/undo` | path: candidate_id; header: Idempotency-Key; body: expected_review_revision |
 | 13 | GET `/api/v1/tasks` | query: limit; body: null |
 | 14 | GET `/api/v1/tasks/{task_id}` | path: task_id; body: null |
 | 15 | GET `/api/v1/schedule` | query: from, to; body: null |
@@ -1385,6 +1397,21 @@ Endpoint Dòng 8 trong Sheet (`multipart/form-data`: `purpose` ∈ `{"uf1_input"
   }
   ```
 - **Errors:** `503 DATABASE_UNAVAILABLE` (`retryable=true`, `next_action="retry_later"`, trả theo chuẩn `ErrorEnvelope`) khi truy vấn kiểm tra `SELECT 1` xuống DB thất bại.
+
+---
+
+### 14.4. Nâng cấp UF2 Toàn trình (5 Tầng) & Migration `20261124_01` `[Đã có trong code — 24/11/2026]`
+
+- **Migration `20261124_01_uf2_upgrade_columns.py` (`down_revision="20261118_01"`):**
+  - Thêm `plan_candidates.previous_snapshot` (`JSON`, nullable) để lưu snapshot 1 bước cho Undo trước Confirm.
+  - Thêm `tasks.extension_candidate_at` (`DateTime(timezone=True)`, nullable) để lưu mốc gợi ý mở rộng chặng Rolling Horizon kế tiếp khi `Task` còn `partial`.
+  - Thêm `sessions.title` (`String(160)`), `sessions.session_goal` (`Text`), `sessions.expected_output` (`Text`) đều nullable để lưu metadata phiên giàu ngữ cảnh.
+- **Tầng 1 (Option 1 Batch Session Enrichment & NL Structural Ops):** `build_single_session_enrichment()` xử lý miễn phí các Step 1 phiên (`0` LLM call); `enrich_split_sessions()` gộp thành **1 batch LLM call** (Khung C `3.0s`) cho các Step bị tách nhiều phiên (`(Phần i/n)`), kèm fallback Python tất định khi hết giờ/lỗi; `adjust_candidate_by_nl()` mở rộng hỗ trợ `add_steps`, `delete_step_keys`, `merge_steps`, `split_steps` và `micro_task_text`.
+- **Tầng 2 (Feasibility Advisor & Extra Constraints):** `FeasibilityReport` bổ sung `earliest_feasible_end_at` (bảo toàn Proof-of-Feasibility và `min_contiguous_slot_seconds`), `suggested_extra_free_seconds_per_day`, và `applied_extra_constraints` (`AppliedExtraConstraints`: `max_daily_work_seconds`, `min_contiguous_slot_seconds`, `preferred_time_windows`); chẩn đoán `FRAGMENTED_FREE_SLOTS` theo trần công suất từng ngày.
+- **Tầng 3 & 4 (Structural Ops, Undo, Rolling Horizon, Calendar Outbox & UF6 Bridge):**
+  - `POST /api/v1/candidates/{candidate_id}/undo` hoàn tác 1 bước chỉnh sửa gần nhất; sửa phi thời gian (`changed_timing=False`) giữ nguyên `scheduled_start`/`scheduled_end` và không gọi lại LLM enrich.
+  - Rolling Horizon `planning_horizon` cho phép `14..21` ngày (`> 21` ngày kẹp về `21` ngày); khi Confirm đặt `Task.extension_candidate_at`, enqueue Google Calendar Outbox summary `[ProPlan] ...` kèm `description` (`Mục tiêu`, `Đầu ra dự kiến`, `Khởi động 2p`).
+  - UF6 `expand_next_horizon` hỗ trợ **Branch 1** (sinh thêm Step từ `unexpanded_scope` + batch enrich) và **Branch 2** (xếp tiếp các Step đang pending qua nhiều chặng tới `complete`); `ProposalSessionData` trả đủ `title`, `session_goal`, `expected_output` và `ProposedStepItem` hỗ trợ `expected_output`.
 
 ## 15. W4-02 — Bộ bàn giao OpenAPI và JSON fixtures
 
@@ -2517,6 +2544,7 @@ Chưa có xác nhận các thành viên đã nhận fixture; người thực hi�
                   "task_id": "task-1",
                   "order_index": 2,
                   "title": "Hoàn thiện bản nháp",
+                  "expected_output": null,
                   "estimated_base_seconds": 3600
                 }
               ],

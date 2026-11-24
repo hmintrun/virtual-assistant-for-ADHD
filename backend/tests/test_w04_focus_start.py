@@ -10,6 +10,7 @@ from uuid import UUID, uuid4
 
 import httpx
 import pytest
+import sqlalchemy as sa
 from pydantic import BaseModel, ValidationError
 from sqlalchemy import create_engine, event, select
 from sqlalchemy.exc import IntegrityError
@@ -31,6 +32,7 @@ from app.models import (
     Step,
     Task,
 )
+from app.models.base import UTCDateTime
 from app.schemas.common import SessionSegment
 from app.schemas.execution import (
     CheckInData,
@@ -1216,13 +1218,137 @@ def test_migration_20261107_01_to_20261107_02_populated_awaiting_checkin(sqlite_
         connection.execute("PRAGMA foreign_keys=ON")
 
     with SyncSession(engine_pre) as db:
-        user, _pref, _task, _step, session = make_plan(db)
+        conn = db.connection()
+        meta = sa.MetaData()
+        users_t = sa.Table(
+            "users",
+            meta,
+            sa.Column("id", sa.Uuid(), primary_key=True),
+            sa.Column("created_at", UTCDateTime()),
+            sa.Column("updated_at", UTCDateTime()),
+            autoload_with=conn,
+            extend_existing=True,
+        )
+        tasks_t = sa.Table(
+            "tasks",
+            meta,
+            sa.Column("id", sa.Uuid(), primary_key=True),
+            sa.Column("user_id", sa.Uuid()),
+            sa.Column("time_constraint", sa.JSON()),
+            sa.Column("created_at", UTCDateTime()),
+            sa.Column("updated_at", UTCDateTime()),
+            autoload_with=conn,
+            extend_existing=True,
+        )
+        steps_t = sa.Table(
+            "steps",
+            meta,
+            sa.Column("id", sa.Uuid(), primary_key=True),
+            sa.Column("user_id", sa.Uuid()),
+            sa.Column("task_id", sa.Uuid()),
+            sa.Column("created_at", UTCDateTime()),
+            sa.Column("updated_at", UTCDateTime()),
+            autoload_with=conn,
+            extend_existing=True,
+        )
+        sessions_t = sa.Table(
+            "sessions",
+            meta,
+            sa.Column("id", sa.Uuid(), primary_key=True),
+            sa.Column("user_id", sa.Uuid()),
+            sa.Column("step_id", sa.Uuid()),
+            sa.Column("scheduled_start", UTCDateTime()),
+            sa.Column("scheduled_end", UTCDateTime()),
+            sa.Column("segments", sa.JSON()),
+            sa.Column("created_at", UTCDateTime()),
+            sa.Column("updated_at", UTCDateTime()),
+            autoload_with=conn,
+            extend_existing=True,
+        )
+        user_id = uuid4()
+        task_id = uuid4()
+        step_id = uuid4()
+        session_id = uuid4()
+        now_dt = datetime.now(UTC)
+        session_start = datetime(2026, 10, 30, 9, tzinfo=UTC)
+        session_end = session_start + timedelta(seconds=4200)
+
+        db.execute(
+            users_t.insert().values(
+                id=user_id,
+                email="tn@example.test",
+                display_name="TN",
+                is_active=True,
+                current_streak_days=0,
+                streak_frozen=False,
+                streak_freeze_tokens=0,
+                created_at=now_dt,
+                updated_at=now_dt,
+                revision=1,
+            )
+        )
+        db.execute(
+            tasks_t.insert().values(
+                id=task_id,
+                user_id=user_id,
+                title="Báo cáo",
+                time_constraint={"kind": "window"},
+                status="pending",
+                avoidance_count=0,
+                decomposition_state="complete",
+                created_at=now_dt,
+                updated_at=now_dt,
+                revision=1,
+            )
+        )
+        db.execute(
+            steps_t.insert().values(
+                id=step_id,
+                user_id=user_id,
+                task_id=task_id,
+                title="Tìm tài liệu",
+                order_index=0,
+                estimated_base_seconds=3000,
+                remaining_base_seconds=3000,
+                buffer_multiplier=1.2,
+                estimate_source="user_confirmed",
+                status="pending",
+                created_at=now_dt,
+                updated_at=now_dt,
+                revision=1,
+            )
+        )
+        db.execute(
+            sessions_t.insert().values(
+                id=session_id,
+                user_id=user_id,
+                step_id=step_id,
+                scheduled_start=session_start,
+                scheduled_end=session_end,
+                work_seconds=3600,
+                rest_seconds=600,
+                duration_seconds=4200,
+                segments=[
+                    {"order_index": 0, "kind": "work", "duration_seconds": 1500},
+                    {"order_index": 1, "kind": "rest", "duration_seconds": 300},
+                    {"order_index": 2, "kind": "work", "duration_seconds": 1500},
+                    {"order_index": 3, "kind": "rest", "duration_seconds": 300},
+                    {"order_index": 4, "kind": "work", "duration_seconds": 600},
+                ],
+                schedule_revision=1,
+                status="scheduled",
+                start_state="waiting",
+                created_at=now_dt,
+                updated_at=now_dt,
+                revision=1,
+            )
+        )
         run_awaiting = SessionRun(
-            user_id=user.id,
-            session_id=session.id,
+            user_id=user_id,
+            session_id=session_id,
             device_id="dev-pre-w04",
-            started_at=session.scheduled_start,
-            ended_at=session.scheduled_end,
+            started_at=session_start,
+            ended_at=session_end,
             run_state="awaiting_checkin",
             active_phase="ended",
             segment_index=None,
@@ -1236,10 +1362,10 @@ def test_migration_20261107_01_to_20261107_02_populated_awaiting_checkin(sqlite_
 
         # Tại 20261107_01: run_state='awaiting_checkin' vẫn nằm trong uq_user_live_run nên chèn 'running' bị IntegrityError
         run_blocked = SessionRun(
-            user_id=user.id,
-            session_id=session.id,
+            user_id=user_id,
+            session_id=session_id,
             device_id="dev-blocked",
-            started_at=session.scheduled_end + timedelta(minutes=20),
+            started_at=session_end + timedelta(minutes=20),
             run_state="running",
             active_phase="work",
             segment_index=0,
@@ -1250,10 +1376,6 @@ def test_migration_20261107_01_to_20261107_02_populated_awaiting_checkin(sqlite_
         with pytest.raises(IntegrityError):
             db.commit()
         db.rollback()
-
-        user_id = user.id
-        session_id = session.id
-        session_end = session.scheduled_end
 
     engine_pre.dispose()
 

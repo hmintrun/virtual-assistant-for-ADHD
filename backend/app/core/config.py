@@ -75,6 +75,7 @@ class Settings(BaseSettings):
     GEMINI_FLASH_MODEL: str = "gemini-3.5-flash-lite"
     GEMINI_BACKUP_MODEL: str = "gemini-3.5-flash-lite"
     GEMINI_UF1_MODEL: str = "gemini-3.5-flash-lite"
+    GEMINI_UF1_BACKUP_MODEL: str = ""
     GROQ_FALLBACK_MODEL: str = "qwen/qwen3.8-27b"
     GROQ_SECONDARY_FALLBACK_MODEL: str = "openai/gpt-oss-20b"
     # v3 (không turbo): turbo + prompt bịa cả câu ở clip 25s và luôn trả no_speech_prob=0
@@ -141,6 +142,7 @@ class Settings(BaseSettings):
     VOICE_TTS_PREWARM: bool = True
 
     # UF1: trần cơ sở, ưu tiên Gemini và mốc hedge là ba giới hạn riêng.
+    UF1_AUDIO_NATIVE_ENABLED: bool = False
     AI_UF1_TIMEOUT_SECONDS: float = Field(default=6.0, gt=0.0, le=15.0)
     AI_UF1_ADAPTIVE_TIMEOUT_ENABLED: bool = True
     AI_UF1_PRIMARY_PRIORITY_SECONDS: float = Field(default=4.5, ge=0.0, le=15.0)
@@ -159,11 +161,19 @@ class Settings(BaseSettings):
     AI_UF2_WARM_BACKUP_DELAY_SECONDS: float = Field(default=2.0, ge=0.0, le=25.0)
     AI_UF2_GROQ_HEDGE_DELAY_SECONDS: float = Field(default=5.0, ge=0.0, le=25.0)
 
+    # Khung thời gian C — Làm giàu ngữ nghĩa từng phiên khi Step tách >= 2 phiên (UF2 Nhịp 1B):
+    AI_UF2_ENRICH_TIMEOUT_SECONDS: float = Field(default=3.0, gt=0.0, le=10.0)
+    AI_UF2_ENRICH_PRIMARY_PRIORITY_SECONDS: float = Field(default=1.8, gt=0.0, le=10.0)
+    AI_UF2_ENRICH_WARM_BACKUP_DELAY_SECONDS: float = Field(default=1.0, ge=0.0, le=10.0)
+    AI_UF2_ENRICH_GROQ_HEDGE_DELAY_SECONDS: float = Field(default=1.6, ge=0.0, le=10.0)
+
     # Cấu hình mặc định của Trợ lý ở Giai đoạn Lập kế hoạch Tuần 1 (O01 UserPreference)
     DEFAULT_WORK_INTERVAL_SECONDS: int = 1500  # 25 phút tập trung
     DEFAULT_REST_INTERVAL_SECONDS: int = 300  # 5 phút nghỉ ngắn
     DEFAULT_MICRO_TASK_SECONDS: int = 120  # 2 phút khởi động phá vỡ tê liệt ADHD
     PLANNING_REVIEW_LEAD_SECONDS: int = Field(default=300, ge=120)
+    DEFAULT_PLANNING_HORIZON_DAYS: int = Field(default=14, ge=7, le=21)
+    MAX_PLANNING_HORIZON_DAYS: int = Field(default=21, ge=14, le=30)
     DEFAULT_MIN_INTER_SESSION_GAP_SECONDS: int = 900  # Khoảng cách tối thiểu 15 phút giữa 2 phiên
     DEFAULT_BUFFER_MULTIPLIER: float = 1.2
     DEFAULT_TIMEZONE: str = "Asia/Ho_Chi_Minh"

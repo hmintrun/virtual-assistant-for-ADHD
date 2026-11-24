@@ -87,6 +87,279 @@ def _iso_language_code(language_code: str) -> str:
     return cleaned.split("-", 1)[0].split("_", 1)[0]
 
 
+_ADTS_SAMPLE_RATES: tuple[int, ...] = (
+    96000,
+    88200,
+    64000,
+    48000,
+    44100,
+    32000,
+    24000,
+    22050,
+    16000,
+    12000,
+    11025,
+    8000,
+    7350,
+)
+_UNITY_MATRIX = struct.pack(
+    ">9I",
+    0x00010000,
+    0,
+    0,
+    0,
+    0x00010000,
+    0,
+    0,
+    0,
+    0x40000000,
+)
+
+
+def _skip_id3v2(audio: bytes) -> int:
+    """Bỏ qua phần header ID3v2 ở đầu file ADTS nếu có (an toàn cho buffer ngắn/lỗi)."""
+    if len(audio) >= 10 and audio[:3] == b"ID3":
+        size_bytes = audio[6:10]
+        if all(b < 0x80 for b in size_bytes):
+            tag_size = (
+                (size_bytes[0] << 21)
+                | (size_bytes[1] << 14)
+                | (size_bytes[2] << 7)
+                | size_bytes[3]
+            )
+            has_footer = (audio[5] & 0x10) != 0
+            end_offset = 10 + tag_size + (10 if has_footer else 0)
+            if end_offset < len(audio):
+                return end_offset
+    return 0
+
+
+def _parse_adts_header(
+    audio: bytes, offset: int
+) -> tuple[int, int, int, int, int, int] | None:
+    """Giải mã header ADTS 7 hoặc 9 byte tại ``offset``."""
+    total = len(audio)
+    if offset + 7 > total:
+        return None
+    b0 = audio[offset]
+    b1 = audio[offset + 1]
+    if b0 != 0xFF or (b1 & 0xF6) != 0xF0:
+        return None
+    protection_absent = b1 & 0x01
+    header_len = 7 if protection_absent else 9
+    if offset + header_len > total:
+        return None
+    b2 = audio[offset + 2]
+    b3 = audio[offset + 3]
+    b4 = audio[offset + 4]
+    b5 = audio[offset + 5]
+    b6 = audio[offset + 6]
+    profile = (b2 >> 6) & 0x03
+    freq_idx = (b2 >> 2) & 0x0F
+    if freq_idx >= len(_ADTS_SAMPLE_RATES):
+        return None
+    channel_config = ((b2 & 0x01) << 2) | ((b3 >> 6) & 0x03)
+    frame_len = ((b3 & 0x03) << 11) | (b4 << 3) | ((b5 >> 5) & 0x07)
+    if frame_len < header_len or offset + frame_len > total:
+        return None
+    num_blocks = (b6 & 0x03) + 1
+    return header_len, frame_len, profile, freq_idx, channel_config, num_blocks
+
+
+def _is_adts_aac(audio: bytes) -> bool:
+    """Kiểm tra buffer có phải luồng ADTS AAC hợp lệ hay không (pure-Python)."""
+    if not audio or len(audio) < 7:
+        return False
+    start = _skip_id3v2(audio)
+    first = _parse_adts_header(audio, start)
+    if first is None:
+        return False
+    _, frame_len, _, _, _, _ = first
+    next_off = start + frame_len
+    if next_off == len(audio):
+        return True
+    return _parse_adts_header(audio, next_off) is not None
+
+
+def _mp4_box(box_type: bytes, payload: bytes) -> bytes:
+    return struct.pack(">I", 8 + len(payload)) + box_type + payload
+
+
+def _mp4_full_box(box_type: bytes, version: int, flags: int, payload: bytes) -> bytes:
+    ver_flags = ((version & 0xFF) << 24) | (flags & 0xFFFFFF)
+    return _mp4_box(box_type, struct.pack(">I", ver_flags) + payload)
+
+
+def _remux_adts_aac_to_m4a(audio: bytes) -> bytes:
+    """Đóng gói các frame ADTS AAC thô thành container ISO BMFF ``.m4a`` chuẩn (pure-Python)."""
+    if not audio or len(audio) < 7:
+        raise ValueError("ADTS audio buffer too short")
+
+    offset = _skip_id3v2(audio)
+    total = len(audio)
+    raw_frames: list[bytes] = []
+    frame_sizes: list[int] = []
+    sample_deltas: list[int] = []
+    first_profile: int | None = None
+    first_freq_idx: int | None = None
+    first_channel_config: int | None = None
+
+    while offset < total:
+        if total - offset == 128 and audio[offset : offset + 3] == b"TAG":
+            break
+        parsed = _parse_adts_header(audio, offset)
+        if parsed is None:
+            raise ValueError(f"Malformed ADTS frame at offset {offset}")
+        header_len, frame_len, profile, freq_idx, channel_config, num_blocks = parsed
+        if first_profile is None:
+            first_profile = profile
+            first_freq_idx = freq_idx
+            first_channel_config = channel_config
+        payload = audio[offset + header_len : offset + frame_len]
+        if not payload:
+            raise ValueError(f"Empty AAC payload at offset {offset}")
+        raw_frames.append(payload)
+        frame_sizes.append(len(payload))
+        sample_deltas.append(num_blocks * 1024)
+        offset += frame_len
+
+    if not raw_frames or first_profile is None or first_freq_idx is None or first_channel_config is None:
+        raise ValueError("No valid ADTS AAC frames found")
+
+    audio_object_type = first_profile + 1
+    if not (1 <= audio_object_type <= 31):
+        raise ValueError("Unsupported AAC audioObjectType")
+    sample_rate = _ADTS_SAMPLE_RATES[first_freq_idx]
+    channel_count = (
+        8
+        if first_channel_config == 7
+        else (2 if first_channel_config == 0 else first_channel_config)
+    )
+    asc_word = (audio_object_type << 11) | (first_freq_idx << 7) | (first_channel_config << 3)
+    asc_bytes = struct.pack(">H", asc_word)
+
+    total_samples = sum(sample_deltas)
+    mdat_payload = b"".join(raw_frames)
+    duration_sec = total_samples / sample_rate if sample_rate > 0 else 0.0
+    avg_bitrate = int((len(mdat_payload) * 8) / duration_sec) if duration_sec > 0 else 64000
+    max_frame_bits = max(frame_sizes) * 8 * sample_rate // 1024 if sample_rate > 0 else avg_bitrate
+    max_bitrate = max(avg_bitrate, max_frame_bits)
+
+    ftyp_box = _mp4_box(b"ftyp", b"M4A " + struct.pack(">I", 0) + b"M4A mp42isom")
+    mdat_box = _mp4_box(b"mdat", mdat_payload)
+
+    dec_specific = bytes([0x05, len(asc_bytes)]) + asc_bytes
+    dec_config_body = (
+        struct.pack(">BB3sII", 0x40, 0x15, b"\x00\x00\x00", max_bitrate, avg_bitrate)
+        + dec_specific
+    )
+    dec_config = bytes([0x04, len(dec_config_body)]) + dec_config_body
+    sl_config = b"\x06\x01\x02"
+    es_body = struct.pack(">HB", 1, 0) + dec_config + sl_config
+    es_desc = bytes([0x03, len(es_body)]) + es_body
+    esds_box = _mp4_full_box(b"esds", 0, 0, es_desc)
+
+    mp4a_payload = (
+        b"\x00" * 6
+        + struct.pack(">H", 1)
+        + b"\x00" * 8
+        + struct.pack(">HHHH", channel_count, 16, 0, 0)
+        + struct.pack(">I", min(sample_rate, 65535) << 16)
+        + esds_box
+    )
+    mp4a_box = _mp4_box(b"mp4a", mp4a_payload)
+    stsd_box = _mp4_full_box(b"stsd", 0, 0, struct.pack(">I", 1) + mp4a_box)
+
+    rle_entries: list[tuple[int, int]] = []
+    for delta in sample_deltas:
+        if rle_entries and rle_entries[-1][1] == delta:
+            rle_entries[-1] = (rle_entries[-1][0] + 1, delta)
+        else:
+            rle_entries.append((1, delta))
+    stts_payload = struct.pack(">I", len(rle_entries)) + b"".join(
+        struct.pack(">II", count, delta) for count, delta in rle_entries
+    )
+    stts_box = _mp4_full_box(b"stts", 0, 0, stts_payload)
+    stsc_box = _mp4_full_box(b"stsc", 0, 0, struct.pack(">IIII", 1, 1, len(raw_frames), 1))
+    stsz_payload = struct.pack(">II", 0, len(frame_sizes)) + struct.pack(
+        f">{len(frame_sizes)}I", *frame_sizes
+    )
+    stsz_box = _mp4_full_box(b"stsz", 0, 0, stsz_payload)
+
+    url_box = _mp4_full_box(b"url ", 0, 1, b"")
+    dref_box = _mp4_full_box(b"dref", 0, 0, struct.pack(">I", 1) + url_box)
+    dinf_box = _mp4_box(b"dinf", dref_box)
+    smhd_box = _mp4_full_box(b"smhd", 0, 0, struct.pack(">HH", 0, 0))
+    mdhd_box = _mp4_full_box(
+        b"mdhd",
+        0,
+        0,
+        struct.pack(">IIIIHH", 0, 0, sample_rate, total_samples, 0x55C4, 0),
+    )
+    hdlr_box = _mp4_full_box(
+        b"hdlr",
+        0,
+        0,
+        struct.pack(">I4s12s", 0, b"soun", b"\x00" * 12) + b"SoundHandler\x00",
+    )
+    tkhd_box = _mp4_full_box(
+        b"tkhd",
+        0,
+        7,
+        struct.pack(
+            ">IIIII8shhHH",
+            0,
+            0,
+            1,
+            0,
+            total_samples,
+            b"\x00" * 8,
+            0,
+            0,
+            0x0100,
+            0,
+        )
+        + _UNITY_MATRIX
+        + struct.pack(">II", 0, 0),
+    )
+    mvhd_box = _mp4_full_box(
+        b"mvhd",
+        0,
+        0,
+        struct.pack(">IIIIIH", 0, 0, sample_rate, total_samples, 0x00010000, 0x0100)
+        + b"\x00" * 10
+        + _UNITY_MATRIX
+        + b"\x00" * 24
+        + struct.pack(">I", 2),
+    )
+
+    def _build_moov(chunk_offset: int) -> bytes:
+        stco_box = _mp4_full_box(b"stco", 0, 0, struct.pack(">II", 1, chunk_offset))
+        stbl_box = _mp4_box(b"stbl", stsd_box + stts_box + stsc_box + stsz_box + stco_box)
+        minf_box = _mp4_box(b"minf", smhd_box + dinf_box + stbl_box)
+        mdia_box = _mp4_box(b"mdia", mdhd_box + hdlr_box + minf_box)
+        trak_box = _mp4_box(b"trak", tkhd_box + mdia_box)
+        return _mp4_box(b"moov", mvhd_box + trak_box)
+
+    moov_placeholder = _build_moov(0)
+    mdat_payload_offset = len(ftyp_box) + len(moov_placeholder) + 8
+    if mdat_payload_offset > 0xFFFFFFFF:
+        raise ValueError("M4A chunk offset exceeds 32-bit stco limit")
+    moov_box = _build_moov(mdat_payload_offset)
+    return ftyp_box + moov_box + mdat_box
+
+
+def _ensure_groq_compatible_audio(audio: bytes, mime_type: str) -> tuple[bytes, str]:
+    """Chuyển đổi ADTS ``.aac`` sang ``.m4a`` trong RAM để Groq Whisper giải mã chuẩn xác."""
+    if mime_type == "audio/aac" or _is_adts_aac(audio):
+        try:
+            remuxed = _remux_adts_aac_to_m4a(audio)
+            return remuxed, "audio/m4a"
+        except (ValueError, struct.error, IndexError):
+            return audio, mime_type
+    return audio, mime_type
+
+
 class SttErrorCode(StrEnum):
     """Mã lỗi chuẩn của adapter STT — Router đổi sang Error Envelope của Sheet."""
 
@@ -384,8 +657,12 @@ def _transcript_text_of(resp: Any) -> str:
     return fallback.strip() if isinstance(fallback, str) else ""
 
 
-def _accepts_purpose_kwarg(func: Any) -> bool:
-    """Kiểm tra callable có nhận tham số ``purpose`` hoặc ``**kwargs`` hay không."""
+_MAX_CONTEXTUAL_HINT_CHARS = 400
+_HINT_UNSAFE_CHARS_RE = re.compile(r"[\r\n\t`\"'\[\]{}<>|\\]+")
+
+
+def _accepts_kwarg(func: Any, kwarg_name: str) -> bool:
+    """Kiểm tra callable có nhận tham số keyword ``kwarg_name`` hoặc ``**kwargs`` hay không."""
     try:
         sig = inspect.signature(func)
     except (TypeError, ValueError):
@@ -393,12 +670,48 @@ def _accepts_purpose_kwarg(func: Any) -> bool:
     for param in sig.parameters.values():
         if param.kind == inspect.Parameter.VAR_KEYWORD:
             return True
-        if param.name == "purpose" and param.kind in (
+        if param.name == kwarg_name and param.kind in (
             inspect.Parameter.POSITIONAL_OR_KEYWORD,
             inspect.Parameter.KEYWORD_ONLY,
         ):
             return True
     return False
+
+
+def _accepts_purpose_kwarg(func: Any) -> bool:
+    """Kiểm tra callable có nhận tham số ``purpose`` hoặc ``**kwargs`` hay không."""
+    return _accepts_kwarg(func, "purpose")
+
+
+def _format_contextual_hints(
+    contextual_hints: list[str] | None,
+    *,
+    max_chars: int = _MAX_CONTEXTUAL_HINT_CHARS,
+) -> str:
+    """Chuẩn hóa danh sách từ vựng cá nhân thành chuỗi an toàn ``<= max_chars`` ký tự."""
+    if not contextual_hints or max_chars <= 0:
+        return ""
+    seen: set[str] = set()
+    parts: list[str] = []
+    total_len = 0
+    for raw_item in contextual_hints:
+        if not isinstance(raw_item, str):
+            continue
+        cleaned = " ".join(_HINT_UNSAFE_CHARS_RE.sub(" ", raw_item).split()).strip(" ,.;:-–—")
+        if not cleaned:
+            continue
+        folded = cleaned.casefold()
+        if folded in seen:
+            continue
+        if len(cleaned) > max_chars:
+            cleaned = cleaned[:max_chars].rstrip()
+        sep_len = 2 if parts else 0
+        if total_len + sep_len + len(cleaned) > max_chars:
+            break
+        seen.add(folded)
+        parts.append(cleaned)
+        total_len += sep_len + len(cleaned)
+    return ", ".join(parts)
 
 
 class GeminiSttProvider:
@@ -543,11 +856,23 @@ class GeminiSttProvider:
         return cleaned
 
     async def _transcribe_via_inline(
-        self, client: genai.Client, audio: bytes, mime_type: str
+        self,
+        client: genai.Client,
+        audio: bytes,
+        mime_type: str,
+        *,
+        contextual_hints: list[str] | None = None,
     ) -> str:
         prompt = (
             _GEMINI_STT_PROMPT_SMART if self._mode == "smart" else _GEMINI_STT_PROMPT_VERBATIM
         )
+        hint_str = _format_contextual_hints(contextual_hints)
+        if hint_str:
+            prompt = (
+                f"{prompt}\n"
+                "Từ vựng tham khảo của người dùng (chỉ dùng khi khớp âm thanh thực tế, "
+                f"không tự chèn thêm): {hint_str}"
+            )
         config = types.GenerateContentConfig(
             temperature=0.0,
             candidate_count=1,
@@ -589,7 +914,13 @@ class GeminiSttProvider:
             raise SttError(SttErrorCode.NO_SPEECH, "prompt_echo_filtered")
         return cleaned
 
-    async def transcribe(self, audio: bytes, mime_type: str) -> str:
+    async def transcribe(
+        self,
+        audio: bytes,
+        mime_type: str,
+        *,
+        contextual_hints: list[str] | None = None,
+    ) -> str:
         client = self._get_client()
         try:
             transport = self._resolved_transport()
@@ -597,7 +928,12 @@ class GeminiSttProvider:
                 return await self._transcribe_via_transcribe_inline(client, audio, mime_type)
             if transport == "transcribe_api":
                 return await self._transcribe_via_transcribe_api(client, audio, mime_type)
-            return await self._transcribe_via_inline(client, audio, mime_type)
+            return await self._transcribe_via_inline(
+                client,
+                audio,
+                mime_type,
+                contextual_hints=contextual_hints,
+            )
         except Exception as exc:
             raise map_provider_exception(exc) from exc
 
@@ -787,12 +1123,27 @@ def _extract_segment_metrics(
     )
 
 
+def _build_optional_stt_kwargs(
+    func: Any,
+    *,
+    purpose: str | None = None,
+    contextual_hints: list[str] | None = None,
+) -> dict[str, Any]:
+    extra: dict[str, Any] = {}
+    if purpose is not None and _accepts_kwarg(func, "purpose"):
+        extra["purpose"] = purpose
+    if contextual_hints is not None and _accepts_kwarg(func, "contextual_hints"):
+        extra["contextual_hints"] = contextual_hints
+    return extra
+
+
 async def _call_provider_details(
     provider: Any,
     audio: bytes,
     mime_type: str,
     *,
     purpose: str | None = None,
+    contextual_hints: list[str] | None = None,
 ) -> SttProviderDetails:
     """Gọi provider ưu tiên transcribe_verbose, nhưng tôn trọng mock patch.object(..., 'transcribe')."""
     inst_dict = getattr(provider, "__dict__", {}) or {}
@@ -801,17 +1152,21 @@ async def _call_provider_details(
         "transcribe" in inst_dict and "transcribe_verbose" not in inst_dict
     ) or not callable(transcribe_verbose):
         transcribe_fn = provider.transcribe
-        if purpose is not None and _accepts_purpose_kwarg(transcribe_fn):
-            raw = await transcribe_fn(audio, mime_type, purpose=purpose)
-        else:
-            raw = await transcribe_fn(audio, mime_type)
+        extra_kwargs = _build_optional_stt_kwargs(
+            transcribe_fn,
+            purpose=purpose,
+            contextual_hints=contextual_hints,
+        )
+        raw = await transcribe_fn(audio, mime_type, **extra_kwargs)
         if isinstance(raw, SttProviderDetails):
             return raw
         return SttProviderDetails(text=raw)
-    if purpose is not None and _accepts_purpose_kwarg(transcribe_verbose):
-        raw_details = await transcribe_verbose(audio, mime_type, purpose=purpose)
-    else:
-        raw_details = await transcribe_verbose(audio, mime_type)
+    extra_verbose_kwargs = _build_optional_stt_kwargs(
+        transcribe_verbose,
+        purpose=purpose,
+        contextual_hints=contextual_hints,
+    )
+    raw_details = await transcribe_verbose(audio, mime_type, **extra_verbose_kwargs)
     if isinstance(raw_details, SttProviderDetails):
         return raw_details
     return SttProviderDetails(text=str(raw_details))
@@ -849,23 +1204,39 @@ class GroqWhisperSttProvider:
             )
         return self._client
 
-    async def transcribe_verbose(self, audio: bytes, mime_type: str) -> SttProviderDetails:
+    def _effective_prompt(self, contextual_hints: list[str] | None = None) -> str | None:
+        hint_str = _format_contextual_hints(contextual_hints)
+        if not hint_str:
+            return self._prompt
+        if self._prompt is not None:
+            return f"{self._prompt} Từ vựng cá nhân: {hint_str}"
+        return hint_str
+
+    async def transcribe_verbose(
+        self,
+        audio: bytes,
+        mime_type: str,
+        *,
+        contextual_hints: list[str] | None = None,
+    ) -> SttProviderDetails:
         client = self._get_client()
-        ext = _MIME_TO_EXTENSION.get(mime_type, ".m4a")
+        send_audio, send_mime = _ensure_groq_compatible_audio(audio, mime_type)
+        ext = _MIME_TO_EXTENSION.get(send_mime, ".m4a")
+        effective_prompt = self._effective_prompt(contextual_hints)
         try:
-            if self._prompt is not None:
+            if effective_prompt is not None:
                 response = await client.audio.transcriptions.create(
                     model=self._model,
-                    file=(f"audio{ext}", audio, mime_type),
+                    file=(f"audio{ext}", send_audio, send_mime),
                     language=self._language,
-                    prompt=self._prompt,
+                    prompt=effective_prompt,
                     response_format="verbose_json",
                     temperature=0.0,
                 )
             else:
                 response = await client.audio.transcriptions.create(
                     model=self._model,
-                    file=(f"audio{ext}", audio, mime_type),
+                    file=(f"audio{ext}", send_audio, send_mime),
                     language=self._language,
                     response_format="verbose_json",
                     temperature=0.0,
@@ -886,8 +1257,18 @@ class GroqWhisperSttProvider:
         except Exception as exc:
             raise map_provider_exception(exc) from exc
 
-    async def transcribe(self, audio: bytes, mime_type: str) -> str:
-        details = await self.transcribe_verbose(audio, mime_type)
+    async def transcribe(
+        self,
+        audio: bytes,
+        mime_type: str,
+        *,
+        contextual_hints: list[str] | None = None,
+    ) -> str:
+        details = await self.transcribe_verbose(
+            audio,
+            mime_type,
+            contextual_hints=contextual_hints,
+        )
         return details.text
 
 
@@ -897,18 +1278,31 @@ async def _call_fallback_within_budget(
     mime_type: str,
     *,
     purpose: str | None,
+    contextual_hints: list[str] | None = None,
     started: float,
     total_timeout_seconds: float | None,
 ) -> SttProviderDetails:
     """Chạy nhánh STT dự phòng trong đúng phần ngân sách thời gian còn lại (không nới sàn 1.0s)."""
     if total_timeout_seconds is None:
-        return await _call_provider_details(provider, audio, mime_type, purpose=purpose)
+        return await _call_provider_details(
+            provider,
+            audio,
+            mime_type,
+            purpose=purpose,
+            contextual_hints=contextual_hints,
+        )
     remaining = total_timeout_seconds - (time.perf_counter() - started)
     if remaining <= 0.0:
         raise SttError(SttErrorCode.TIMEOUT, "fallback_timeout")
     try:
         return await asyncio.wait_for(
-            _call_provider_details(provider, audio, mime_type, purpose=purpose),
+            _call_provider_details(
+                provider,
+                audio,
+                mime_type,
+                purpose=purpose,
+                contextual_hints=contextual_hints,
+            ),
             timeout=remaining,
         )
     except TimeoutError as exc:
@@ -935,7 +1329,11 @@ class FallbackSttProvider:
         self.name = f"{primary.name}->{fallback.name}"
 
     async def transcribe_verbose_with_provider(
-        self, audio: bytes, mime_type: str, purpose: str | None = None
+        self,
+        audio: bytes,
+        mime_type: str,
+        purpose: str | None = None,
+        contextual_hints: list[str] | None = None,
     ) -> tuple[SttProviderDetails, str]:
         if purpose is not None and purpose in self._prefer_fallback_purposes:
             first, second = self._fallback, self._primary
@@ -950,7 +1348,13 @@ class FallbackSttProvider:
             first_timeout = self._total_timeout_seconds
 
         try:
-            first_coro = _call_provider_details(first, audio, mime_type, purpose=purpose)
+            first_coro = _call_provider_details(
+                first,
+                audio,
+                mime_type,
+                purpose=purpose,
+                contextual_hints=contextual_hints,
+            )
             if first_timeout is not None:
                 try:
                     details = await asyncio.wait_for(first_coro, timeout=first_timeout)
@@ -984,23 +1388,40 @@ class FallbackSttProvider:
             audio,
             mime_type,
             purpose=purpose,
+            contextual_hints=contextual_hints,
             started=started,
             total_timeout_seconds=self._total_timeout_seconds,
         )
         return details, second.name
 
     async def transcribe_with_provider(
-        self, audio: bytes, mime_type: str, purpose: str | None = None
+        self,
+        audio: bytes,
+        mime_type: str,
+        purpose: str | None = None,
+        contextual_hints: list[str] | None = None,
     ) -> tuple[str, str]:
         details, provider_name = await self.transcribe_verbose_with_provider(
-            audio, mime_type, purpose=purpose
+            audio,
+            mime_type,
+            purpose=purpose,
+            contextual_hints=contextual_hints,
         )
         return details.text, provider_name
 
     async def transcribe(
-        self, audio: bytes, mime_type: str, purpose: str | None = None
+        self,
+        audio: bytes,
+        mime_type: str,
+        purpose: str | None = None,
+        contextual_hints: list[str] | None = None,
     ) -> str:
-        text, _ = await self.transcribe_with_provider(audio, mime_type, purpose=purpose)
+        text, _ = await self.transcribe_with_provider(
+            audio,
+            mime_type,
+            purpose=purpose,
+            contextual_hints=contextual_hints,
+        )
         return text
 
 
@@ -1033,6 +1454,7 @@ class VoiceService:
         content_type: str | None = None,
         filename: str | None = None,
         purpose: str | None = None,
+        contextual_hints: list[str] | None = None,
     ) -> SttResult:
         """Chuyển audio thành chữ. Ném ``SttError`` nếu không có chữ hợp lệ để đưa sang A01."""
         if not audio:
@@ -1065,21 +1487,23 @@ class VoiceService:
                 and "transcribe_with_provider" not in inst_dict
                 and "transcribe" not in inst_dict
             ):
-                if purpose is not None and _accepts_purpose_kwarg(
-                    transcribe_verbose_with_provider
-                ):
-                    coro = transcribe_verbose_with_provider(audio, mime_type, purpose=purpose)
-                else:
-                    coro = transcribe_verbose_with_provider(audio, mime_type)
+                extra_vwp = _build_optional_stt_kwargs(
+                    transcribe_verbose_with_provider,
+                    purpose=purpose,
+                    contextual_hints=contextual_hints,
+                )
+                coro = transcribe_verbose_with_provider(audio, mime_type, **extra_vwp)
                 details, active_provider = await asyncio.wait_for(
                     coro,
                     timeout=outer_timeout,
                 )
             elif callable(transcribe_with_provider) and "transcribe" not in inst_dict:
-                if purpose is not None and _accepts_purpose_kwarg(transcribe_with_provider):
-                    coro = transcribe_with_provider(audio, mime_type, purpose=purpose)
-                else:
-                    coro = transcribe_with_provider(audio, mime_type)
+                extra_wp = _build_optional_stt_kwargs(
+                    transcribe_with_provider,
+                    purpose=purpose,
+                    contextual_hints=contextual_hints,
+                )
+                coro = transcribe_with_provider(audio, mime_type, **extra_wp)
                 raw_text, active_provider = await asyncio.wait_for(
                     coro,
                     timeout=outer_timeout,
@@ -1101,7 +1525,11 @@ class VoiceService:
                 try:
                     details = await asyncio.wait_for(
                         _call_provider_details(
-                            self._provider, audio, mime_type, purpose=purpose
+                            self._provider,
+                            audio,
+                            mime_type,
+                            purpose=purpose,
+                            contextual_hints=contextual_hints,
                         ),
                         timeout=primary_timeout,
                     )
@@ -1128,6 +1556,7 @@ class VoiceService:
                             audio,
                             mime_type,
                             purpose=purpose,
+                            contextual_hints=contextual_hints,
                             started=started,
                             total_timeout_seconds=self._timeout_seconds,
                         )

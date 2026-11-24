@@ -1,6 +1,7 @@
 """UF1–UF2 regression coverage using an isolated DB and no external providers."""
 
 from datetime import UTC, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -494,7 +495,7 @@ async def test_analyze_raw_input_then_confirm_and_plan(api, monkeypatch):
             {
                 "expected_summary_revision": 1,
                 "expected_planning_input_revision": 1,
-                "message": "Đủ thông tin về phạm vi, thời gian và giờ rảnh",
+                "message": "Đủ thông tin về phạm vi, thời gian và giờ rảnh từ 00:00 đến 23:59",
             },
         )
     assert response.status_code == 200, response.text
@@ -1106,6 +1107,8 @@ async def test_patch_draft_clears_generic_ai_clarification_after_manual_completi
     """Nếu R1 sinh AI_CLARIFICATION (clarification_questions[0]) rồi R2 fallback Tier 3, PATCH điền đủ 4 trường phải cho confirm."""
     client, _ = api
     future_deadline = (datetime.now(UTC) + timedelta(days=8)).replace(microsecond=0)
+    future_date_str = future_deadline.astimezone(ZoneInfo("Asia/Ho_Chi_Minh")).strftime("%d/%m/%Y")
+    mock_raw_input = f"Đọc 3 chương đầu sách Clean Code trước {future_date_str} 22:00"
     created = await post(
         client,
         "/drafts",
@@ -1113,7 +1116,7 @@ async def test_patch_draft_clears_generic_ai_clarification_after_manual_completi
         {
             "client_draft_id": "uf1-manual-clear-create",
             "input_source": "text",
-            "raw_input": "Đọc 3 chương đầu sách Clean Code trước 22h tối mai",
+            "raw_input": mock_raw_input,
         },
     )
     assert created.status_code == 201, created.text
@@ -1175,7 +1178,7 @@ async def test_patch_draft_clears_generic_ai_clarification_after_manual_completi
             {
                 "expected_summary_revision": draft["summary_revision"],
                 "expected_planning_input_revision": draft["planning_input_revision"],
-                "raw_input": "Đọc 3 chương đầu sách Clean Code trước 22h tối mai",
+                "raw_input": mock_raw_input,
             },
         )
         assert r1.status_code == 200, r1.text

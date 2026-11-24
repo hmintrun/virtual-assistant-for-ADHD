@@ -55,6 +55,7 @@ from app.schemas.task import (
 from app.services.ai_service import UF1_FALLBACK_NOTICE, UF1_FALLBACK_QUESTIONS, ai_service
 from app.services.command_service import durable_command, lock_owner
 from app.services.scheduler_engine import validate_planning_prerequisites
+from app.utils.temporal_parser import extract_temporal_anchors
 from app.utils.vietnamese_itn import normalize_vietnamese_transcript
 
 
@@ -550,7 +551,12 @@ def _item_dates(item: ExtractedFreeWindowSchema) -> list[date]:
     return []
 
 
-_UF1_QTY = r"(?:\d+|một|hai|ba|bốn|năm|sáu|bảy|tám|chín|mười)"
+_UF1_QTY = (
+    r"(?:\d+"
+    r"|(?:hai|ba|bốn|năm|sáu|bảy|tám|chín)\s+mươi(?:\s+(?:mốt|hai|ba|tư|bốn|lăm|sáu|bảy|tám|chín))?"
+    r"|mười(?:\s+(?:một|hai|ba|bốn|tư|lăm|năm|sáu|bảy|tám|chín))?"
+    r"|một|hai|ba|bốn|tư|năm|sáu|bảy|tám|chín)"
+)
 _UF1_SCOPE_UNIT = (
     r"(?:trang|slide|chương|bài|mục|đề|endpoint|biểu\s+đồ|module|service|báo\s+cáo|video|file|phần)"
 )
@@ -636,30 +642,222 @@ _UF1_SCOPE_CHOICE_RE = re.compile(
 )
 _UF1_SCOPE_ALTERNATIVES_RE = re.compile(r"\b(?:hoặc|hay|phương\s+án)\b", re.IGNORECASE)
 _UF1_SCOPE_UNDECIDED_RE = re.compile(
-    r"\b(?:chưa\s+(?:chốt|quyết\s+định|chọn|biết)(?:\s+được)?|phân\s+vân)\b",
+    r"\b(?:chưa\s+(?:chốt|quyết\s+định|chọn|biết)(?:\s+được)?|phân\s+vân"
+    r"|(?:đang\s+)?cân\s+nhắc|lưỡng\s+lự|băn\s+khoăn"
+    r"|(?:không\s+biết\s+)?nên\s+(?:làm|viết|soạn|chọn))\b",
     re.IGNORECASE,
 )
 _UF1_SCOPE_ALT_DELIVERABLE_RE = re.compile(
     r"\b" + _UF1_QTY + r"\s+" + _UF1_SCOPE_UNIT
-    + r"\b[^.!?\n]{0,25}\b(?:hoặc|hay|với|và)\b[^.!?\n]{0,25}\b"
+    + r"\b[^.!?\n]{0,45}\b(?:hoặc|hay|với|và)\b[^.!?\n]{0,45}\b"
+    + _UF1_QTY + r"\s+" + _UF1_SCOPE_UNIT + r"\b"
+    + r"|\b(?:phương\s+án|đầu\s+ra|phạm\s+vi)\b[^.!?\n]{0,40}\b(?:hoặc|hay)\b",
+    re.IGNORECASE,
+)
+_UF1_SCOPE_DISJUNCTIVE_DELIVERABLE_RE = re.compile(
+    r"\b" + _UF1_QTY + r"\s+" + _UF1_SCOPE_UNIT
+    + r"\b[^.!?\n]{0,45}\b(?:hoặc|hay)\b[^.!?\n]{0,45}\b"
     + _UF1_QTY + r"\s+" + _UF1_SCOPE_UNIT + r"\b"
     + r"|\b(?:phương\s+án|đầu\s+ra|phạm\s+vi)\b[^.!?\n]{0,40}\b(?:hoặc|hay)\b",
     re.IGNORECASE,
 )
 _UF1_SCOPE_UNIT_RE = re.compile(r"\b" + _UF1_SCOPE_UNIT + r"\b", re.IGNORECASE)
+_UF1_SCOPE_CLASSIFIER_PAT = (
+    r"(?:(?:báo\s+cáo|bài(?:\s+tập|\s+viết|\s+luận|\s+chi\s+tiết)?|"
+    r"bản(?:\s+tóm\s+tắt|\s+nháp|\s+chi\s+tiết|\s+đầy\s+đủ)?|"
+    r"tóm\s+tắt|tài\s+liệu|bộ|đề|phần)\s+){0,2}"
+)
 _UF1_SCOPE_SELECTION_RE = re.compile(
-    r"(?:^|[.!?;\n,])\s*(?:(?:tôi|mình|em|anh|chị|nhóm|chúng\s+tôi|thôi|vậy|thế|ok|oke)\s+){0,2}"
+    r"(?:^|[.!?;\n,])\s*(?:(?:à|ờ|ừ|ừm|dạ|tôi|mình|em|anh|chị|nhóm|chúng\s+tôi|thôi|vậy|thế|ok|oke)\s+){0,4}"
     r"(?:chốt|chọn|quyết\s+định|lấy)\b"
-    r"|(?:^|[.!?;\n,])\s*(?:(?:thôi|vậy|mình|tôi|em|anh|chị)\s+)?(?:làm|viết|soạn|nộp)\s+"
-    r"(?:(?:báo\s+cáo|bài|bản|tài\s+liệu|bộ|đề|phần)\s+)?"
+    r"|(?:^|[.!?;\n,])\s*(?:(?:thôi|vậy|mình|tôi|em|anh|chị)\s+){0,2}(?:làm|viết|soạn|nộp)\s+"
+    + _UF1_SCOPE_CLASSIFIER_PAT
     + _UF1_QTY + r"\s+" + _UF1_SCOPE_UNIT + r"\b"
-    r"|^\s*(?:(?:báo\s+cáo|bài|bản|tài\s+liệu|bộ)\s+)?"
+    r"|^\s*" + _UF1_SCOPE_CLASSIFIER_PAT
     + _UF1_QTY + r"\s+" + _UF1_SCOPE_UNIT
     + r"(?:\s+(?:word|pdf|powerpoint|ppt|pptx|excel|docs?|thuyết\s+trình))?"
-    + r"\s*(?:(?:thôi|nhé|nha|đi|nhỉ|là\s+được|như\s+vậy)\s*)?[.!]?$"
-    r"|\bphương\s+án\s+(?:\d+|một|hai|ba|đầu(?:\s+tiên)?|thứ\s+(?:nhất|hai|ba)|sau|cuối)\b",
+    + r"\s*(?:(?:thôi|nhé|nha|đi|nhỉ|ạ|là\s+được|như\s+vậy)\s*){0,2}[.!]?$"
+    r"|\bphương\s+án\s+(?:" + _UF1_QTY + r"|đầu(?:\s+tiên)?|thứ\s+(?:nhất|hai|ba)|sau|cuối)\b",
     re.IGNORECASE,
 )
+_UF1_SCOPE_QUALITATIVE_SELECTION_RE = re.compile(
+    r"(?:^|[.!?;\n,])\s*(?:(?:à|ờ|ừ|ừm|dạ|thôi|vậy|thế|mình|tôi|em|anh|chị|nhóm|chúng\s+tôi|ok|oke)\s+){0,4}"
+    r"(?:làm|viết|soạn|nộp|lấy|theo)\s+"
+    r"(?:bản|bài|phần|phương\s+án|báo\s+cáo|slide)\s+"
+    r"(?:tóm\s+tắt|chi\s+tiết|đầy\s+đủ|ngắn(?:\s+gọn)?|dài|nháp|chính\s+thức)\b",
+    re.IGNORECASE,
+)
+_UF1_TITLE_CONFIRM_PHRASE_RE = re.compile(
+    r"\b(?:đúng(?:\s+rồi)?|xác\s+nhận|chuẩn(?:\s+rồi)?|đồng\s+ý)\b.*\b(?:tên|tiêu\s+đề|title)\b"
+    r"|\b(?:tên|tiêu\s+đề|title)\b.*\b(?:đúng|chuẩn|ok|oke|giữ)\b",
+    re.IGNORECASE,
+)
+_UF1_DISJUNCTION_TOKEN_RE = re.compile(r"\b(?:hoặc|hay)\b", re.IGNORECASE)
+_UF1_NEGATED_CLAUSE_PREFIX_RE = re.compile(
+    r"\b(?:không|khỏi|bỏ|trừ|chứ\s+không)\b[^.!?,;\n]{0,30}$",
+    re.IGNORECASE,
+)
+_UF1_ZONE2_HOMOPHONE_RE = re.compile(
+    r"(?<!cuộc\s)(?<!lịch\s)(?<!buổi\s)(?<!đi\s)(?<!có\s)"
+    r"(?:\bhẹn\b(?!\s+(?:hò|khám|ăn|chơi|nhau)\b)"
+    r"|\bhạng\b(?!\s+(?:mục|nhất|nhì|ba|tư|bốn|năm|sáu|bảy|bẩy|tám|chín|mười|bét|\d+(?![/\-:hHgG]))\b))",
+    re.IGNORECASE,
+)
+_UF1_ZONE2_HOMOPHONE_PREFIX_EXCLUDE_RE = re.compile(
+    r"\b(?:cuộc|lịch|buổi|đi|có|đặt|giờ|lỡ|trễ|hủy|dời|xếp|thứ|đạt)\s+$",
+    re.IGNORECASE,
+)
+_UF1_ZONE2_MEETING_CONTEXT_RE = re.compile(
+    r"\b(?:gặp|với|bác\s+sĩ|nha\s+sĩ|khách(?:\s+hàng)?|(?:gặp|với|hẹn)\s+bạn|nhóm|phỏng\s+vấn|đối\s+tác|thầy|cô|họp)\b",
+    re.IGNORECASE,
+)
+_UF1_FORCE_BLOCKING_AI_CODES: frozenset[str] = frozenset(
+    {
+        "AI_MISSING_TITLE",
+        "AI_TITLE_REQUIRED",
+        "AI_TITLE_CONFIRMATION_REQUIRED",
+        "AI_AVAILABILITY_INCOMPLETE",
+        "AI_DEADLINE_CONFIRMATION_NEEDED",
+        "AI_SCOPE_CHOICE_REQUIRED",
+    }
+)
+
+
+def _has_unnegated_disjunction(text: str) -> bool:
+    """Kiểm tra câu còn chứa liên từ phân vân ``hay`` / ``hoặc`` không đứng sau phủ định."""
+    if not text or not text.strip():
+        return False
+    for match in _UF1_DISJUNCTION_TOKEN_RE.finditer(text):
+        prefix = text[max(0, match.start() - 35) : match.start()]
+        if not _UF1_NEGATED_CLAUSE_PREFIX_RE.search(prefix):
+            return True
+    return False
+
+
+def _detect_zone2_deadline_confirmation_issue(
+    text: str,
+    *,
+    timezone_name: str,
+    reference_now: datetime,
+) -> ClarificationIssue | None:
+    """Zone 2 Medium Confidence Check: phát hiện ``hẹn``/``hạng`` nghi đồng âm ``hạn`` đi kèm mốc ngày/thứ/giờ."""
+    if not text or not text.strip():
+        return None
+    norm_text = normalize_vietnamese_transcript(text)
+    if not norm_text or not norm_text.strip():
+        return None
+
+    anchors = extract_temporal_anchors(
+        norm_text,
+        reference_now=reference_now,
+        timezone=timezone_name,
+    )
+    if not anchors:
+        return None
+
+    clause_sep_re = re.compile(r"[,;.!?\n]+")
+    unpunctuated_hen_split_re = re.compile(
+        r"(?<!\w)(?=\bhẹn\s+(?:tối|sáng|trưa|chiều|đêm|khuya|buổi|thứ|chủ\s+nhật|cn|ngày|hôm|mai|mốt|cuối\s+tuần|tuần|\d))",
+        re.IGNORECASE,
+    )
+    cursor = 0
+    punct_clauses: list[tuple[int, int, str]] = []
+    for sep in clause_sep_re.finditer(norm_text):
+        if sep.start() > cursor:
+            punct_clauses.append((cursor, sep.start(), norm_text[cursor : sep.start()]))
+        cursor = sep.end()
+    if cursor < len(norm_text):
+        punct_clauses.append((cursor, len(norm_text), norm_text[cursor:]))
+
+    clauses: list[tuple[int, int, str]] = []
+    for p_start, _p_end, p_raw in punct_clauses:
+        split_offsets: list[int] = [0]
+        for hm in unpunctuated_hen_split_re.finditer(p_raw):
+            pos = hm.start()
+            if (
+                pos > 0
+                and not _UF1_ZONE2_HOMOPHONE_PREFIX_EXCLUDE_RE.search(p_raw[:pos])
+                and not re.search(r"\bnhắc\s+$", p_raw[:pos], re.IGNORECASE)
+                and any(
+                    a.span_start < p_start + pos and a.span_end > p_start
+                    for a in anchors
+                )
+            ):
+                split_offsets.append(pos)
+        split_offsets.append(len(p_raw))
+        for idx in range(len(split_offsets) - 1):
+            s_off = split_offsets[idx]
+            e_off = split_offsets[idx + 1]
+            if e_off > s_off:
+                clauses.append((p_start + s_off, p_start + e_off, p_raw[s_off:e_off]))
+
+    for c_start, c_end, clause_raw in clauses:
+        clause_clean = clause_raw.strip()
+        if not clause_clean:
+            continue
+        if _UF1_ZONE2_MEETING_CONTEXT_RE.search(clause_clean):
+            continue
+        if re.search(r"\brảnh\b", clause_clean, re.IGNORECASE) and not re.search(
+            r"\b(?:hạn(?:\s+chót)?|deadline|nộp)\b", clause_clean, re.IGNORECASE
+        ):
+            continue
+
+        homophone_hit = None
+        for hit in _UF1_ZONE2_HOMOPHONE_RE.finditer(clause_clean):
+            if not _UF1_ZONE2_HOMOPHONE_PREFIX_EXCLUDE_RE.search(clause_clean[: hit.start()]):
+                homophone_hit = hit
+                break
+        if homophone_hit is None:
+            continue
+
+        matched_anchor = next(
+            (
+                a
+                for a in anchors
+                if a.span_start < c_end
+                and a.span_end > c_start
+                and (
+                    a.resolved_date is not None
+                    or a.explicit_date is not None
+                    or a.iso_weekday is not None
+                    or a.start_local is not None
+                    or a.end_local is not None
+                    or a.has_explicit_clock_time
+                )
+            ),
+            None,
+        )
+        if matched_anchor is None:
+            continue
+
+        hint_parts: list[str] = []
+        target_date_str = matched_anchor.resolved_date or matched_anchor.explicit_date
+        if target_date_str:
+            try:
+                parsed_d = date.fromisoformat(target_date_str)
+                hint_parts.append(f"{parsed_d.day:02d}/{parsed_d.month:02d}/{parsed_d.year:04d}")
+            except ValueError:
+                hint_parts.append(target_date_str)
+        if matched_anchor.start_local and matched_anchor.end_local:
+            hint_parts.append(f"{matched_anchor.start_local}–{matched_anchor.end_local}")
+        elif matched_anchor.start_local:
+            hint_parts.append(f"lúc {matched_anchor.start_local}")
+        elif matched_anchor.period:
+            hint_parts.append(f"buổi {matched_anchor.period}")
+        candidate_hint = ", ".join(hint_parts) if hint_parts else matched_anchor.raw_span.strip()
+        candidate_phrase = " ".join(clause_clean.split()).strip(" ,.;:!?")[:80]
+
+        return ClarificationIssue(
+            code="AI_DEADLINE_CONFIRMATION_NEEDED",
+            field_path="time_constraint",
+            message="Cụm thời gian có khả năng là hạn chót bị nhận dạng đồng âm, cần xác nhận lại.",
+            question=(
+                f"Mình thấy bạn nhắc '{candidate_phrase}' ({candidate_hint}) — "
+                "đây là hạn chót hoàn thành hay một buổi hẹn cụ thể ạ?"
+            ),
+            blocking=True,
+        )
+    return None
 _UF1_REVIEW_FIELD_LABELS = {
     "title": "tiêu đề",
     "description": "nội dung",
@@ -1930,7 +2128,12 @@ async def patch_draft(
             if issue.code.startswith("AI_")
             and (
                 issue.code.endswith("_REVIEW_REQUIRED")
-                or issue.code == "AI_SCOPE_CHOICE_REQUIRED"
+                or issue.code
+                in {
+                    "AI_SCOPE_CHOICE_REQUIRED",
+                    "AI_TITLE_CONFIRMATION_REQUIRED",
+                    "AI_DEADLINE_CONFIRMATION_NEEDED",
+                }
             )
         }
         all_sent_fields_under_review = bool(payload.changes.summary.model_fields_set) and (
@@ -2303,15 +2506,19 @@ async def _analyze_draft_impl(
     reviewed_edits = set(requested_edits)
     if pending_fields and not latest_message and new_raw_text:
         reviewed_edits.update(_uf1_requested_edits(new_raw_text, summary))
-    scope_needs_choice = bool(
+    normalized_latest = normalize_vietnamese_transcript(latest_text) if latest_text else ""
+    normalized_edit = normalize_vietnamese_transcript(edit_text) if edit_text else ""
+    scope_needs_choice = any(
         (
-            _UF1_SCOPE_CHOICE_RE.search(latest_text)
-            and _UF1_SCOPE_ALTERNATIVES_RE.search(latest_text)
+            _UF1_SCOPE_CHOICE_RE.search(candidate_txt)
+            and _UF1_SCOPE_ALTERNATIVES_RE.search(candidate_txt)
         )
         or (
-            _UF1_SCOPE_UNDECIDED_RE.search(latest_text)
-            and _UF1_SCOPE_ALT_DELIVERABLE_RE.search(latest_text)
+            _UF1_SCOPE_UNDECIDED_RE.search(candidate_txt)
+            and _UF1_SCOPE_ALT_DELIVERABLE_RE.search(candidate_txt)
         )
+        for candidate_txt in (latest_text, normalized_latest)
+        if candidate_txt
     )
     scope_choice_pending = any(
         issue.code == "AI_SCOPE_CHOICE_REQUIRED" for issue in summary.clarification_issues
@@ -2319,16 +2526,45 @@ async def _analyze_draft_impl(
     has_explicit_decision_verb = bool(
         re.search(r"\b(?:chốt|chọn|quyết\s+định)\b", edit_text, re.IGNORECASE)
     )
+    has_disjunction = _has_unnegated_disjunction(edit_text)
+    qualitative_scope_selected = bool(
+        _UF1_SCOPE_QUALITATIVE_SELECTION_RE.search(edit_text)
+        or _UF1_SCOPE_QUALITATIVE_SELECTION_RE.search(normalized_edit)
+    )
     user_selected_scope = bool(
         not scope_needs_choice
-        and _UF1_SCOPE_SELECTION_RE.search(edit_text)
-        and (has_explicit_decision_verb or not _UF1_SCOPE_ALT_DELIVERABLE_RE.search(edit_text))
+        and not has_disjunction
+        and (
+            _UF1_SCOPE_SELECTION_RE.search(edit_text)
+            or _UF1_SCOPE_SELECTION_RE.search(normalized_edit)
+        )
+        and (
+            has_explicit_decision_verb
+            or not (
+                _UF1_SCOPE_DISJUNCTIVE_DELIVERABLE_RE.search(edit_text)
+                or _UF1_SCOPE_DISJUNCTIVE_DELIVERABLE_RE.search(normalized_edit)
+            )
+        )
     )
     needs_scope_decision = scope_needs_choice or (scope_choice_pending and not user_selected_scope)
     normalized_input = normalize_vietnamese_transcript(input_text)
     normalized_followup = (
         normalize_vietnamese_transcript(latest_message) if latest_message else None
     )
+    prior_raw_clean = (
+        normalize_vietnamese_transcript(snapshot_draft.raw_input or "").strip().lower()
+    )
+    msg_norm_low = (normalized_followup or "").strip().lower()
+    has_prior_unrepeated_seed = bool(
+        latest_message
+        and (
+            prior_raw_clean
+            or (summary.title and summary.title.strip())
+            or (summary.description and summary.description.strip())
+        )
+        and (not prior_raw_clean or prior_raw_clean not in msg_norm_low)
+    )
+    initial_turn_for_i4 = bool(never_analyzed and not has_prior_unrepeated_seed)
     try:
         extracted = TaskExtractionResult.model_validate(
             await ai_service.extract_task_intent(
@@ -2341,6 +2577,7 @@ async def _analyze_draft_impl(
                 requested_edit_fields=tuple(sorted(reviewed_edits | active_pending_fields)),
                 needs_user_decision=needs_scope_decision,
                 retrying_fallback_edit=bool(active_pending_fields),
+                is_initial_turn=initial_turn_for_i4,
             )
         )
     except (TimeoutError, ValidationError) as exc:
@@ -2390,6 +2627,18 @@ async def _analyze_draft_impl(
     ai_issues: list[ClarificationIssue] = []
     has_followup_message = bool(payload.message and payload.message.strip())
     used_fallback = extracted.generation_tier == "tier_3_rule_based"
+    if (
+        scope_choice_pending
+        and not user_selected_scope
+        and not scope_needs_choice
+        and not has_disjunction
+        and not used_fallback
+        and qualitative_scope_selected
+        and extracted.scope is not None
+        and bool(extracted.scope.strip())
+    ):
+        user_selected_scope = True
+        needs_scope_decision = False
     if used_fallback:
         frozen_fields = set(pending_fields) | set(requested_edits)
     else:
@@ -2681,8 +2930,17 @@ async def _analyze_draft_impl(
             )
     proposed_availability, availability_state = None, None
     if "availability" not in frozen_fields:
+        avail_extracted = extracted
+        if (
+            has_followup_message
+            and not extracted.structured_free_windows
+            and extracted.availability_update_mode == "replace"
+            and not _user_explicitly_edits_field(edit_text, "availability")
+            and not _UF1_FIELD_MENTION_PATTERNS["availability"].search(edit_text)
+        ):
+            avail_extracted = extracted.model_copy(update={"availability_update_mode": "merge"})
         proposed_availability, availability_state = _availability_proposal(
-            extracted,
+            avail_extracted,
             current_draft,
             availability,
             timezone_name,
@@ -2805,6 +3063,26 @@ async def _analyze_draft_impl(
         )
     )
 
+    if (
+        not has_tc
+        and not extracted.has_conflict
+        and not any(
+            i.field_path == "time_constraint" or i.field_path.startswith("time_constraint.")
+            for i in ai_issues
+        )
+    ):
+        try:
+            zone2_tz = ZoneInfo(timezone_name)
+        except ZoneInfoNotFoundError:
+            zone2_tz = UTC
+        zone2_issue = _detect_zone2_deadline_confirmation_issue(
+            latest_text if latest_text.strip() else normalized_input,
+            timezone_name=timezone_name,
+            reference_now=datetime.now(zone2_tz),
+        )
+        if zone2_issue is not None:
+            ai_issues.append(zone2_issue)
+
     availability_resolved_cleanly = (
         availability_state is not None
         and not unresolved
@@ -2853,14 +3131,12 @@ async def _analyze_draft_impl(
                     "AI_TIME_CONSTRAINT_REQUIRED",
                     "AI_MISSING_DEADLINE",
                     "AI_TIME_INCOMPLETE",
+                    "AI_DEADLINE_CONFIRMATION_NEEDED",
                 }
             )
         ):
             continue
-        if has_title and (
-            item.field_path == "title"
-            or normalized_code in {"AI_MISSING_TITLE", "AI_TITLE_REQUIRED"}
-        ):
+        if has_title and normalized_code in {"AI_MISSING_TITLE", "AI_TITLE_REQUIRED"}:
             continue
         if has_content and (
             item.field_path in {"description", "content", "goal"}
@@ -2869,7 +3145,10 @@ async def _analyze_draft_impl(
             continue
         if any(i.field_path == item.field_path for i in ai_issues):
             continue
-        ai_issues.append(item.model_copy(update={"code": normalized_code}))
+        forced_blocking = item.blocking or (normalized_code in _UF1_FORCE_BLOCKING_AI_CODES)
+        ai_issues.append(
+            item.model_copy(update={"code": normalized_code, "blocking": forced_blocking})
+        )
 
     ambiguous_windows = [w for w in extracted.structured_free_windows if w.is_ambiguous]
     ambiguous_phrases = [w.raw_phrase for w in ambiguous_windows]
@@ -3037,10 +3316,48 @@ async def _analyze_draft_impl(
             if issue not in ai_issues:
                 ai_issues.append(issue)
             continue
+        if issue.code == "AI_TITLE_CONFIRMATION_REQUIRED":
+            raw_title_code = issue.code.removeprefix("AI_")
+            user_confirmed_title_in_turn = bool(
+                edit_text
+                and (
+                    _user_explicitly_edits_field(edit_text, "title")
+                    or _UF1_FIELD_MENTION_PATTERNS["title"].search(edit_text)
+                    or _UF1_TITLE_CONFIRM_PHRASE_RE.search(edit_text)
+                )
+            )
+            title_resolved_explicitly = not used_fallback and (
+                "title" in merged_updates
+                or user_confirmed_title_in_turn
+                or key in extracted.resolved_issue_keys
+                or issue.code in extracted.resolved_issue_keys
+                or raw_title_code in extracted.resolved_issue_keys
+                or "title" in extracted.resolved_issue_keys
+                or issue.question in extracted.resolved_issue_keys
+                or any(
+                    current.field_path == "title" and current.code == "AI_FIELD_REVIEW_REQUIRED"
+                    for current in ai_issues
+                )
+            )
+            if title_resolved_explicitly:
+                continue
+            if issue not in ai_issues:
+                ai_issues.append(issue)
+            continue
+        if issue.code == "AI_DEADLINE_CONFIRMATION_NEEDED" and any(
+            i.field_path == "time_constraint" or i.field_path.startswith("time_constraint.")
+            for i in ai_issues
+        ):
+            continue
         if (
             not issue.code.endswith("_REVIEW_REQUIRED")
             and (
-                issue.code in {"AI_TIME_INCOMPLETE", "AI_MISSING_TIME_CONSTRAINT"}
+                issue.code
+                in {
+                    "AI_TIME_INCOMPLETE",
+                    "AI_MISSING_TIME_CONSTRAINT",
+                    "AI_DEADLINE_CONFIRMATION_NEEDED",
+                }
                 or issue.field_path == "time_constraint"
             )
             and (complete_time is not None or current_draft.summary.time_constraint is not None)
@@ -3085,7 +3402,12 @@ async def _analyze_draft_impl(
             or (
                 (
                     issue.field_path == "time_constraint"
-                    or issue.code in {"AI_TIME_INCOMPLETE", "AI_MISSING_TIME_CONSTRAINT"}
+                    or issue.code
+                    in {
+                        "AI_TIME_INCOMPLETE",
+                        "AI_MISSING_TIME_CONSTRAINT",
+                        "AI_DEADLINE_CONFIRMATION_NEEDED",
+                    }
                 )
                 and not has_tc
             )
@@ -3137,6 +3459,12 @@ async def _analyze_draft_impl(
         i
         for i in ai_issues
         if i.code != "AI_CLARIFICATION" or i.question not in structured_questions
+    ]
+    ai_issues = [
+        i.model_copy(update={"blocking": True})
+        if (i.code in _UF1_FORCE_BLOCKING_AI_CODES and not i.blocking)
+        else i
+        for i in ai_issues
     ]
     ai_issues = list({(i.code, i.field_path, i.question): i for i in ai_issues}.values())
     merged_summary = TaskSummary.model_validate(

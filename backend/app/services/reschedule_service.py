@@ -12,6 +12,7 @@ Triển khai đầy đủ 7 endpoints theo API Sheet (Dòng 64 và Dòng 33–38
 
 from __future__ import annotations
 
+import math
 import zoneinfo
 from datetime import UTC, date, datetime, time, timedelta
 from typing import Any, Literal, cast
@@ -80,8 +81,10 @@ from app.schemas.reschedule import (
     TimelineSessionItem,
     UpcomingScheduleContextData,
 )
+from app.schemas.task import SplitSessionInputItem
 from app.services import command_service, draft_service, run_service
 from app.services.ai_service import ai_service
+from app.services.plan_service import build_calendar_event_text
 from app.services.planning.availability import compute_effective_free_intervals
 from app.services.planning.durations import (
     calculate_buffered_work,
@@ -2369,6 +2372,7 @@ async def _build_normal_proposal_plan(
     calc_now: datetime,
     override_preferences: dict[str, Any] | None = None,
     override_availability: dict[str, Any] | None = None,
+    allow_ai_rollback: bool = True,
 ) -> tuple[UUID | None, list[str], ProposedChanges, FeasibilityData, str]:
     """Tính toán phương án tái lập lịch thường & tái phân đoạn UF7 (giữ cứng gap = 900s)."""
     target_uuid: UUID | None = None
@@ -3079,6 +3083,11 @@ async def _build_normal_proposal_plan(
 
     if trigger_reason == "expand_next_horizon" and target_row is not None:
         target_row_id = target_row.id
+        target_id_str = str(target_row_id)
+        target_title = target_row.title
+        target_extra_reqs = list(target_row.extra_requirements or [])
+        step_meta: dict[str, tuple[str, str | None, str]] = {}
+        did_ai_rollback = False
         horizon_sess_counter = 0
 
         def _append_horizon_sessions(
@@ -3096,7 +3105,7 @@ async def _build_normal_proposal_plan(
                     ProposedSessionAddItem(
                         temp_session_id=f"temp_horizon_{horizon_sess_counter}",
                         action="create_session",
-                        task_id=str(target_row_id),
+                        task_id=target_id_str,
                         step_id=step_id_str,
                         source_run_id=None,
                         before=None,
@@ -3125,37 +3134,45 @@ async def _build_normal_proposal_plan(
         horizon_constraints = _get_constraints(target_row_id, target_row)
         horizon_daily_used = daily_work_by_task.setdefault(target_row_id, {})
 
-        if pending_unscheduled_steps:
-            next_start = max(initial_cursor, task_cursors.get(target_row.id, initial_cursor))
+        async def _prepare_horizon_window(
+            target_obj: TaskRow,
+        ) -> tuple[datetime, datetime, datetime, list[tuple[datetime, datetime]], datetime | None]:
+            w_start = max(initial_cursor, task_cursors.get(target_row_id, initial_cursor))
             latest_task_sess_end = await db.scalar(
                 select(func.max(SessionRow.scheduled_end))
                 .join(StepRow, StepRow.id == SessionRow.step_id)
                 .where(
                     StepRow.user_id == owner,
-                    StepRow.task_id == target_row.id,
+                    StepRow.task_id == target_row_id,
                     SessionRow.status.notin_(("cancelled", "skipped")),
                 )
             )
             if latest_task_sess_end is not None:
-                next_start = max(
-                    next_start,
+                w_start = max(
+                    w_start,
                     _ensure_aware(latest_task_sess_end)
                     + timedelta(seconds=STANDARD_INTER_SESSION_GAP_SECONDS),
                 )
-            _, t_deadline = _extract_task_time_bounds(target_row)
-            window_limit = next_start + timedelta(days=14)
-            next_end = min(t_deadline, window_limit) if t_deadline is not None else window_limit
-            horizon_from_dt = next_start
-            horizon_to_dt = next_end
-            if next_end > horizon_end:
-                extra_busy, _, _ = await _load_google_busy_items(db, owner, horizon_end, next_end)
+            _, deadline_dt = _extract_task_time_bounds(target_obj)
+            w_limit = w_start + timedelta(days=14)
+            w_end = min(deadline_dt, w_limit) if deadline_dt is not None else w_limit
+            if w_end > horizon_end:
+                extra_busy, _, _ = await _load_google_busy_items(db, owner, horizon_end, w_end)
                 for b in extra_busy:
                     fixed_intervals.append((b.start, b.end, f"busy:{b.event_id}"))
-            task_free, t_deadline = _task_free_windows(
-                target_row,
-                window_start_override=next_start,
-                window_end_override=next_end,
+            w_free, deadline_dt = _task_free_windows(
+                target_obj,
+                window_start_override=w_start,
+                window_end_override=w_end,
             )
+            return w_start, w_limit, w_end, w_free, deadline_dt
+
+        if pending_unscheduled_steps:
+            next_start, window_limit, next_end, task_free, t_deadline = (
+                await _prepare_horizon_window(target_row)
+            )
+            horizon_from_dt = next_start
+            horizon_to_dt = next_end
             step_cursor = next_start
             for st_row in pending_unscheduled_steps:
                 eff_st_buf = (
@@ -3168,6 +3185,12 @@ async def _build_normal_proposal_plan(
                 )
                 micro_text = f"Mở tài liệu và bắt đầu 2 phút cho: {st_row.title[:80]}"
                 micro_secs = new_micro_sec if new_micro_sec > 0 else 120
+                st_id_str = str(st_row.id)
+                step_meta[st_id_str] = (
+                    st_row.title,
+                    st_row.expected_output or st_row.title,
+                    micro_text,
+                )
                 planned_horizon, rem_work, step_end_cursor = _plan_step_sessions_with_constraints(
                     target_work=target_work,
                     task_free=task_free,
@@ -3186,12 +3209,12 @@ async def _build_normal_proposal_plan(
                     break
                 expanded_steps_count += 1
                 step_cursor = step_end_cursor
-                _append_horizon_sessions(str(st_row.id), micro_text, micro_secs, planned_horizon)
+                _append_horizon_sessions(st_id_str, micro_text, micro_secs, planned_horizon)
         else:
             existing_task_steps = (
                 await db.scalars(
                     select(StepRow)
-                    .where(StepRow.user_id == owner, StepRow.task_id == target_row.id)
+                    .where(StepRow.user_id == owner, StepRow.task_id == target_row_id)
                     .order_by(StepRow.order_index.asc())
                 )
             ).all()
@@ -3207,30 +3230,111 @@ async def _build_normal_proposal_plan(
             ]
             if not all_parts and raw_unexpanded:
                 all_parts = [raw_unexpanded]
-            raw_parts = all_parts[:6]
-            leftover_parts = all_parts[6:]
-            remaining_unexpanded_scope = "; ".join(leftover_parts) if leftover_parts else None
 
-            base_est_per_step = max(300, round(new_work_int / max(new_buffer, 1.0)))
-            for idx, part_title in enumerate(raw_parts):
-                steps_to_add.append(
-                    ProposedStepItem(
-                        step_id=str(uuid4()),
-                        task_id=str(target_row.id),
-                        title=part_title[:200],
-                        order_index=next_order_idx + idx,
-                        estimated_base_seconds=base_est_per_step,
-                    )
+            next_start, window_limit, next_end, task_free, t_deadline = (
+                await _prepare_horizon_window(target_row)
+            )
+            horizon_from_dt = next_start
+            horizon_to_dt = next_end
+            avail_slots_for_window = _subtract_blocked_from_free(task_free, fixed_intervals)
+            window_free_secs = sum(
+                max(0, int((slot_end - max(slot_start, next_start)).total_seconds()))
+                for slot_start, slot_end in avail_slots_for_window
+                if slot_end > max(slot_start, next_start)
+            )
+            window_free_hours = round(window_free_secs / 3600.0, 2)
+            total_rem_days = (
+                max(1, math.ceil((t_deadline - calc_now).total_seconds() / 86400))
+                if t_deadline is not None
+                else 14
+            )
+
+            if allow_ai_rollback and not bool(db.info.get("defer_command_commit")):
+                await db.rollback()
+                did_ai_rollback = True
+
+            ai_result = None
+            try:
+                ai_result = await ai_service.decompose_task(
+                    task_title=target_title,
+                    scope=raw_unexpanded,
+                    extra_requirements=target_extra_reqs,
+                    user_focus_duration=max(1, new_work_int // 60),
+                    planning_horizon_days=14,
+                    total_project_days=total_rem_days,
+                    total_free_hours=window_free_hours,
                 )
+            except Exception:
+                ai_result = None
 
-            task_free, t_deadline = _task_free_windows(target_row)
+            if (
+                ai_result is not None
+                and ai_result.generation_tier != "tier_3_rule_based"
+                and not ai_result.requires_clarification
+                and ai_result.steps
+            ):
+                selected_ai = ai_result.steps[:6]
+                for idx, ai_step in enumerate(selected_ai):
+                    step_id_str = str(uuid4())
+                    step_title_str = ai_step.title[:200]
+                    step_exp_out = (ai_step.expected_output or "").strip() or step_title_str
+                    steps_to_add.append(
+                        ProposedStepItem(
+                            step_id=step_id_str,
+                            task_id=target_id_str,
+                            title=step_title_str,
+                            expected_output=step_exp_out,
+                            order_index=next_order_idx + idx,
+                            estimated_base_seconds=ai_step.estimated_base_seconds,
+                        )
+                    )
+                    step_meta[step_id_str] = (
+                        step_title_str,
+                        step_exp_out,
+                        ai_step.micro_task_prompt,
+                    )
+                extra_titles = (
+                    "; ".join(s.title for s in ai_result.steps[6:])
+                    if len(ai_result.steps) > 6
+                    else ""
+                )
+                raw_ai_rem = (ai_result.unexpanded_scope or "").strip()
+                if raw_ai_rem and extra_titles:
+                    remaining_unexpanded_scope = f"{extra_titles}; {raw_ai_rem}"
+                else:
+                    remaining_unexpanded_scope = raw_ai_rem or extra_titles or None
+            else:
+                raw_parts = all_parts[:6]
+                leftover_parts = all_parts[6:]
+                remaining_unexpanded_scope = "; ".join(leftover_parts) if leftover_parts else None
+                base_est_per_step = max(300, round(new_work_int / max(new_buffer, 1.0)))
+                for idx, part_title in enumerate(raw_parts):
+                    step_id_str = str(uuid4())
+                    step_title_str = part_title[:200]
+                    steps_to_add.append(
+                        ProposedStepItem(
+                            step_id=step_id_str,
+                            task_id=target_id_str,
+                            title=step_title_str,
+                            expected_output=step_title_str,
+                            order_index=next_order_idx + idx,
+                            estimated_base_seconds=base_est_per_step,
+                        )
+                    )
+                    step_meta[step_id_str] = (
+                        step_title_str,
+                        step_title_str,
+                        f"Mở tài liệu và bắt đầu 2 phút cho: {step_title_str[:80]}",
+                    )
+
+            scheduled_horizon_steps: list[ProposedStepItem] = []
+            step_cursor = next_start
             for st_item in steps_to_add:
                 target_work = calculate_buffered_work(
                     st_item.estimated_base_seconds, new_buffer
                 )
-                micro_text = f"Mở tài liệu và bắt đầu 2 phút cho: {st_item.title[:80]}"
+                micro_text = step_meta[st_item.step_id][2]
                 micro_secs = new_micro_sec if new_micro_sec > 0 else 120
-                step_cursor = task_cursors.get(target_row.id, initial_cursor)
                 planned_horizon, rem_work, step_end_cursor = _plan_step_sessions_with_constraints(
                     target_work=target_work,
                     task_free=task_free,
@@ -3243,13 +3347,116 @@ async def _build_normal_proposal_plan(
                     local_tz=local_tz,
                 )
                 if rem_work > 0:
+                    if (t_deadline is None or window_limit < t_deadline) and expanded_steps_count > 0:
+                        unscheduled_tail = [
+                            s.title for s in steps_to_add[expanded_steps_count:]
+                        ]
+                        if remaining_unexpanded_scope:
+                            unscheduled_tail.append(remaining_unexpanded_scope)
+                        remaining_unexpanded_scope = "; ".join(unscheduled_tail) or None
+                        steps_to_add = scheduled_horizon_steps
+                        break
                     _record_blocking(t_deadline, step_end_cursor, rem_work, task_free)
+                    break
+                expanded_steps_count += 1
+                scheduled_horizon_steps.append(st_item)
+                step_cursor = step_end_cursor
                 _append_horizon_sessions(
                     st_item.step_id, micro_text, micro_secs, planned_horizon
                 )
-            expanded_steps_count = len(steps_to_add)
-        if str(target_row.id) not in affected_tasks:
-            affected_tasks.append(str(target_row.id))
+
+        horizon_adds = [item for item in adds if item.reason == "expand_next_horizon"]
+        if horizon_adds:
+            grouped_horizon: dict[str, list[ProposedSessionAddItem]] = {}
+            for item in sorted(horizon_adds, key=lambda x: x.after.start):
+                grouped_horizon.setdefault(item.step_id, []).append(item)
+            split_inputs: list[SplitSessionInputItem] = []
+            split_part_idx: dict[str, int] = {}
+            for step_id_str, group in grouped_horizon.items():
+                s_title, s_exp_out, s_micro = step_meta.get(
+                    step_id_str, ("Bước tiếp theo", None, "Mở tài liệu và bắt đầu 2 phút.")
+                )
+                eff_exp_out = (s_exp_out or "").strip() or s_title
+                if len(group) == 1:
+                    item = group[0]
+                    enriched = ai_service.build_single_session_enrichment(
+                        client_session_key=item.temp_session_id,
+                        step_title=s_title,
+                        step_expected_output=eff_exp_out,
+                        micro_task_text=item.after.micro_task_text or s_micro,
+                    )
+                    item.after.title = enriched.title
+                    item.after.session_goal = enriched.session_goal
+                    item.after.expected_output = enriched.expected_output
+                    if not (item.after.micro_task_text and item.after.micro_task_text.strip()):
+                        item.after.micro_task_text = enriched.micro_task_text
+                elif len(group) <= 50:
+                    total_parts = len(group)
+                    for p_idx, item in enumerate(group):
+                        part_num = p_idx + 1
+                        split_part_idx[item.temp_session_id] = part_num
+                        split_inputs.append(
+                            SplitSessionInputItem(
+                                client_session_key=item.temp_session_id,
+                                client_step_key=step_id_str,
+                                step_title=s_title[:255],
+                                step_expected_output=eff_exp_out[:500],
+                                step_micro_task_prompt=(s_micro[:300] if s_micro else None),
+                                session_index=part_num,
+                                total_sessions_in_step=total_parts,
+                                work_minutes=max(1, min(480, round(item.after.work_seconds / 60))),
+                            )
+                        )
+                else:
+                    total_parts = len(group)
+                    for p_idx, item in enumerate(group):
+                        part_num = p_idx + 1
+                        enriched = ai_service.build_single_session_enrichment(
+                            client_session_key=item.temp_session_id,
+                            step_title=f"{s_title} (Phần {part_num}/{total_parts})",
+                            step_expected_output=eff_exp_out,
+                            micro_task_text=item.after.micro_task_text or s_micro,
+                        )
+                        item.after.title = enriched.title
+                        item.after.session_goal = enriched.session_goal
+                        item.after.expected_output = enriched.expected_output
+                        if p_idx >= 1 or not (
+                            item.after.micro_task_text and item.after.micro_task_text.strip()
+                        ):
+                            item.after.micro_task_text = enriched.micro_task_text
+
+            if split_inputs:
+                if (
+                    allow_ai_rollback
+                    and not bool(db.info.get("defer_command_commit"))
+                    and not did_ai_rollback
+                ):
+                    await db.rollback()
+                    did_ai_rollback = True
+                enrichment_items: list[Any] = []
+                for start in range(0, len(split_inputs), 60):
+                    chunk = split_inputs[start : start + 60]
+                    enrich_res = await ai_service.enrich_split_sessions(
+                        split_sessions=chunk,
+                        task_title=target_title,
+                    )
+                    enrichment_items.extend(enrich_res.sessions)
+                enriched_map = {e.client_session_key: e for e in enrichment_items}
+                for item in horizon_adds:
+                    enriched = enriched_map.get(item.temp_session_id)
+                    if enriched is None:
+                        continue
+                    part_num = split_part_idx.get(item.temp_session_id, 1)
+                    item.after.title = enriched.title
+                    item.after.session_goal = enriched.session_goal
+                    item.after.expected_output = enriched.expected_output
+                    if part_num >= 2 or not (
+                        item.after.micro_task_text and item.after.micro_task_text.strip()
+                    ):
+                        item.after.micro_task_text = enriched.micro_task_text
+
+        if target_id_str not in affected_tasks:
+            affected_tasks.append(target_id_str)
 
     if target_uuid is not None and str(target_uuid) not in affected_tasks and (
         moves or adds or cancels or steps_to_add or trigger_reason == "settings_change"
@@ -3457,6 +3664,7 @@ async def create_proposal(
             allowed_task_ids=payload.allowed_task_ids,
             request_text=payload.request_text,
             calc_now=calc_now,
+            allow_ai_rollback=not deferred,
         )
         effective_allowed = list(dict.fromkeys(payload.allowed_task_ids))
         if target_uuid is not None and str(target_uuid) not in effective_allowed:
@@ -3704,6 +3912,7 @@ async def create_settings_change_proposal(
         calc_now=calc_now,
         override_preferences=override_preferences,
         override_availability=override_availability,
+        allow_ai_rollback=False,
     )
     packed_changes = _pack_proposed_changes(
         changes,
@@ -3956,6 +4165,7 @@ async def rebuild_proposal(
             calc_now=calc_now,
             override_preferences=override_prefs,
             override_availability=override_avail,
+            allow_ai_rollback=not deferred,
         )
         packed_changes = _pack_proposed_changes(
             changes,
@@ -4157,6 +4367,18 @@ async def _sync_calendar_on_approve(
     )
 
     job_enqueued = False
+    all_step_ids = list({sess.step_id for sess in added_sessions + moved_sessions})
+    step_titles: dict[UUID, str] = {}
+    if all_step_ids:
+        st_pairs = (
+            await db.execute(
+                select(StepRow.id, StepRow.title).where(
+                    StepRow.user_id == owner,
+                    StepRow.id.in_(all_step_ids),
+                )
+            )
+        ).all()
+        step_titles = {st_id: st_title for st_id, st_title in st_pairs}
 
     for sess in added_sessions:
         event_id = await _next_session_google_event_id(
@@ -4181,9 +4403,15 @@ async def _sync_calendar_on_approve(
         db.add(link)
         await db.flush()
 
-        payload_snapshot = {
+        summary, description = build_calendar_event_text(
+            sess.title,
+            step_titles.get(sess.step_id),
+            sess.session_goal,
+            sess.expected_output,
+        )
+        payload_snapshot: dict[str, Any] = {
             "id": event_id,
-            "summary": "ProPlan VA Focus Session",
+            "summary": summary,
             "start": {
                 "dateTime": _ensure_aware(sess.scheduled_start).isoformat(),
                 "timeZone": "Asia/Ho_Chi_Minh",
@@ -4201,6 +4429,8 @@ async def _sync_calendar_on_approve(
                 }
             },
         }
+        if description is not None:
+            payload_snapshot["description"] = description
         db.add(
             CalendarSyncJob(
                 id=uuid4(),
@@ -4309,9 +4539,15 @@ async def _sync_calendar_on_approve(
             existing_link.sync_state = "pending"
             op = "update"
 
-        payload_snapshot = {
+        summary, description = build_calendar_event_text(
+            sess.title,
+            step_titles.get(sess.step_id),
+            sess.session_goal,
+            sess.expected_output,
+        )
+        payload_snapshot: dict[str, Any] = {
             "id": event_id,
-            "summary": "ProPlan VA Focus Session",
+            "summary": summary,
             "start": {
                 "dateTime": _ensure_aware(sess.scheduled_start).isoformat(),
                 "timeZone": "Asia/Ho_Chi_Minh",
@@ -4329,6 +4565,8 @@ async def _sync_calendar_on_approve(
                 }
             },
         }
+        if description is not None:
+            payload_snapshot["description"] = description
         db.add(
             CalendarSyncJob(
                 id=uuid4(),
@@ -4405,6 +4643,9 @@ def _session_row_to_schema(sess: SessionRow, link_id: str | None = None) -> Sess
         step_id=str(sess.step_id),
         scheduled_start=_ensure_aware(sess.scheduled_start),
         scheduled_end=_ensure_aware(sess.scheduled_end),
+        title=sess.title,
+        session_goal=sess.session_goal,
+        expected_output=sess.expected_output,
         micro_task_text=sess.micro_task_text,
         micro_task_seconds=sess.micro_task_seconds,
         work_seconds=sess.work_seconds,
@@ -4705,7 +4946,7 @@ async def approve_proposal(
                     task_id=UUID(st_item.task_id),
                     order_index=st_item.order_index,
                     title=st_item.title,
-                    expected_output=st_item.title,
+                    expected_output=st_item.expected_output or st_item.title,
                     estimated_base_seconds=st_item.estimated_base_seconds,
                     remaining_base_seconds=st_item.estimated_base_seconds,
                     buffer_multiplier=eff_buf,
@@ -4788,6 +5029,9 @@ async def approve_proposal(
             step_id=UUID(after.step_id),
             scheduled_start=add_start,
             scheduled_end=add_end,
+            title=after.title,
+            session_goal=after.session_goal,
+            expected_output=after.expected_output,
             micro_task_text=after.micro_task_text
             or "Mở tài liệu và bắt đầu 2 phút đầu tiên.",
             micro_task_seconds=after.micro_task_seconds,
@@ -4930,8 +5174,21 @@ async def approve_proposal(
                 )
                 if not remaining_pending and not has_unexpanded:
                     exp_task.decomposition_state = "complete"
+                    exp_task.extension_candidate_at = None
                 else:
                     exp_task.decomposition_state = "partial"
+                    latest_end = await db.scalar(
+                        select(func.max(SessionRow.scheduled_end))
+                        .join(StepRow, StepRow.id == SessionRow.step_id)
+                        .where(
+                            StepRow.user_id == owner,
+                            StepRow.task_id == exp_tid,
+                            SessionRow.status.notin_(("cancelled", "skipped")),
+                        )
+                    )
+                    exp_task.extension_candidate_at = (
+                        _ensure_aware(latest_end) if latest_end is not None else None
+                    )
                 exp_task.revision += 1
                 exp_task.updated_at = approve_now
         await db.flush()

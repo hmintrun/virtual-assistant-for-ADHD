@@ -26,6 +26,7 @@ from app.services import command_service
 from app.services.ai_service import ai_service
 from app.services.draft_service import resolve_user_uuid
 from app.services.thought_service import ensure_thought_eligible_for_draft_conversion
+from app.services.user_vocabulary_service import get_user_vocabulary_service
 from app.services.voice_service import (
     SttError,
     SttErrorCode,
@@ -97,8 +98,8 @@ def _stt_error_to_app_error(exc: SttError) -> AppError:
     )
 
 
-def _accepts_purpose_kwarg(func: Any) -> bool:
-    """Kiểm tra callable có chấp nhận tham số keyword ``purpose`` hoặc ``**kwargs`` hay không."""
+def _accepts_kwarg(func: Any, kwarg_name: str) -> bool:
+    """Kiểm tra callable có chấp nhận tham số keyword ``kwarg_name`` hoặc ``**kwargs`` hay không."""
     try:
         sig = inspect.signature(func)
     except (TypeError, ValueError):
@@ -106,12 +107,17 @@ def _accepts_purpose_kwarg(func: Any) -> bool:
     for param in sig.parameters.values():
         if param.kind == inspect.Parameter.VAR_KEYWORD:
             return True
-        if param.name == "purpose" and param.kind in (
+        if param.name == kwarg_name and param.kind in (
             inspect.Parameter.POSITIONAL_OR_KEYWORD,
             inspect.Parameter.KEYWORD_ONLY,
         ):
             return True
     return False
+
+
+def _accepts_purpose_kwarg(func: Any) -> bool:
+    """Kiểm tra callable có chấp nhận tham số keyword ``purpose`` hoặc ``**kwargs`` hay không."""
+    return _accepts_kwarg(func, "purpose")
 
 
 async def _call_transcribe(
@@ -121,19 +127,19 @@ async def _call_transcribe(
     content_type: str | None,
     filename: str | None,
     purpose: str,
+    contextual_hints: list[str] | None = None,
 ) -> Any:
-    """Gọi ``service.transcribe`` và chỉ truyền ``purpose=`` khi tương thích chữ ký (giữ an toàn cho mock cũ)."""
-    if _accepts_purpose_kwarg(service.transcribe):
-        return await service.transcribe(
-            audio_bytes,
-            content_type=content_type,
-            filename=filename,
-            purpose=purpose,
-        )
+    """Gọi ``service.transcribe`` và chỉ truyền ``purpose``/``contextual_hints`` khi tương thích chữ ký (giữ an toàn cho mock cũ)."""
+    extra_kwargs: dict[str, Any] = {}
+    if _accepts_kwarg(service.transcribe, "purpose"):
+        extra_kwargs["purpose"] = purpose
+    if contextual_hints is not None and _accepts_kwarg(service.transcribe, "contextual_hints"):
+        extra_kwargs["contextual_hints"] = contextual_hints
     return await service.transcribe(
         audio_bytes,
         content_type=content_type,
         filename=filename,
+        **extra_kwargs,
     )
 
 
@@ -421,6 +427,14 @@ async def create_transcription(
                 await ensure_thought_eligible_for_draft_conversion(db, owner, thought_uuid)
 
             await check_thought()
+            contextual_hints: list[str] | None = None
+            if purpose in ("uf1_input", "thought_to_draft"):
+                try:
+                    contextual_hints = await get_user_vocabulary_service().get_hints(
+                        db, resolve_user_uuid(current_user.user_id)
+                    )
+                except Exception:
+                    contextual_hints = []
             # Đóng transaction đọc trước khi chờ provider.
             if db.in_transaction():
                 await db.rollback()
@@ -433,6 +447,7 @@ async def create_transcription(
                     content_type=file.content_type,
                     filename=file.filename,
                     purpose=purpose,
+                    contextual_hints=contextual_hints,
                 )
             except SttError as exc:
                 raise _stt_error_to_app_error(exc) from exc

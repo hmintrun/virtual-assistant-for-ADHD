@@ -28,7 +28,7 @@ import time
 import unittest
 from datetime import UTC, datetime, timedelta, timezone
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
@@ -1058,7 +1058,7 @@ class TestE2EUF1ToUF2(unittest.TestCase):
             uf1 = asyncio.run(
                 svc.extract_task_intent(
                     "Tuần này mình cần làm báo cáo môn Phân tích Dữ liệu "
-                    "nộp trước 5h chiều Chủ Nhật, tối thứ 6 và sáng thứ 7 mình rảnh",
+                    "nộp trước 5h chiều Chủ Nhật, tối thứ 6 từ 19h đến 21h và sáng thứ 7 từ 9h đến 11h mình rảnh",
                     reference_now=NOW_REF,
                 )
             )
@@ -1687,21 +1687,33 @@ class TestUF1UF2PDFGaps(unittest.TestCase):
                         db, owner, target_task_id=task.task_id
                     )
                     sched_rev = await reschedule_service._get_current_schedule_revision(db, owner)
-                    proposal = await reschedule_service.create_proposal(
-                        db,
-                        user_id="user_a",
-                        idempotency_key="rh-prop-create-1",
-                        payload=CreateProposalRequest(
-                            trigger_reason="expand_next_horizon",
-                            target_task_id=task.task_id,
-                            allowed_task_ids=[task.task_id],
-                            expected_base_schedule_revision=sched_rev,
-                            expected_source_revisions=ProposalSourceRevisions.model_validate(
-                                revs.model_dump()
-                            ),
+                    with (
+                        patch.object(
+                            reschedule_service.ai_service,
+                            "decompose_task",
+                            new=AsyncMock(side_effect=TimeoutError("offline deterministic test")),
                         ),
-                        now=now + timedelta(days=1),
-                    )
+                        patch.object(
+                            reschedule_service.ai_service,
+                            "enrich_split_sessions",
+                            new=AsyncMock(side_effect=TimeoutError("offline deterministic test")),
+                        ),
+                    ):
+                        proposal = await reschedule_service.create_proposal(
+                            db,
+                            user_id="user_a",
+                            idempotency_key="rh-prop-create-1",
+                            payload=CreateProposalRequest(
+                                trigger_reason="expand_next_horizon",
+                                target_task_id=task.task_id,
+                                allowed_task_ids=[task.task_id],
+                                expected_base_schedule_revision=sched_rev,
+                                expected_source_revisions=ProposalSourceRevisions.model_validate(
+                                    revs.model_dump()
+                                ),
+                            ),
+                            now=now + timedelta(days=1),
+                        )
                     self.assertEqual(proposal.status, "pending")
                     self.assertEqual(len(proposal.proposed_changes.steps_to_add), 2)
                     self.assertGreaterEqual(len(proposal.proposed_changes.sessions_to_add), 2)
@@ -1836,21 +1848,33 @@ class TestUF1UF2PDFGaps(unittest.TestCase):
                         db, owner, target_task_id=task.task_id
                     )
                     sched_rev = await reschedule_service._get_current_schedule_revision(db, owner)
-                    prop1 = await reschedule_service.create_proposal(
-                        db,
-                        user_id="user_a",
-                        idempotency_key="f5b2-prop-1",
-                        payload=CreateProposalRequest(
-                            trigger_reason="expand_next_horizon",
-                            target_task_id=task.task_id,
-                            allowed_task_ids=[task.task_id],
-                            expected_base_schedule_revision=sched_rev,
-                            expected_source_revisions=ProposalSourceRevisions.model_validate(
-                                revs.model_dump()
-                            ),
+                    with (
+                        patch.object(
+                            reschedule_service.ai_service,
+                            "decompose_task",
+                            new=AsyncMock(side_effect=TimeoutError("offline deterministic test")),
                         ),
-                        now=now + timedelta(days=1),
-                    )
+                        patch.object(
+                            reschedule_service.ai_service,
+                            "enrich_split_sessions",
+                            new=AsyncMock(side_effect=TimeoutError("offline deterministic test")),
+                        ),
+                    ):
+                        prop1 = await reschedule_service.create_proposal(
+                            db,
+                            user_id="user_a",
+                            idempotency_key="f5b2-prop-1",
+                            payload=CreateProposalRequest(
+                                trigger_reason="expand_next_horizon",
+                                target_task_id=task.task_id,
+                                allowed_task_ids=[task.task_id],
+                                expected_base_schedule_revision=sched_rev,
+                                expected_source_revisions=ProposalSourceRevisions.model_validate(
+                                    revs.model_dump()
+                                ),
+                            ),
+                            now=now + timedelta(days=1),
+                        )
                     self.assertEqual(len(prop1.proposed_changes.steps_to_add), 6)
                     self.assertEqual(
                         prop1.feasibility.next_horizon_preview["unexpanded_scope"],
@@ -1886,21 +1910,33 @@ class TestUF1UF2PDFGaps(unittest.TestCase):
                         db, owner, target_task_id=task.task_id
                     )
                     sched_rev2 = await reschedule_service._get_current_schedule_revision(db, owner)
-                    prop2 = await reschedule_service.create_proposal(
-                        db,
-                        user_id="user_a",
-                        idempotency_key="f5b2-prop-2",
-                        payload=CreateProposalRequest(
-                            trigger_reason="expand_next_horizon",
-                            target_task_id=task.task_id,
-                            allowed_task_ids=[task.task_id],
-                            expected_base_schedule_revision=sched_rev2,
-                            expected_source_revisions=ProposalSourceRevisions.model_validate(
-                                revs2.model_dump()
-                            ),
+                    with (
+                        patch.object(
+                            reschedule_service.ai_service,
+                            "decompose_task",
+                            new=AsyncMock(side_effect=TimeoutError("offline deterministic test")),
                         ),
-                        now=now + timedelta(days=2),
-                    )
+                        patch.object(
+                            reschedule_service.ai_service,
+                            "enrich_split_sessions",
+                            new=AsyncMock(side_effect=TimeoutError("offline deterministic test")),
+                        ),
+                    ):
+                        prop2 = await reschedule_service.create_proposal(
+                            db,
+                            user_id="user_a",
+                            idempotency_key="f5b2-prop-2",
+                            payload=CreateProposalRequest(
+                                trigger_reason="expand_next_horizon",
+                                target_task_id=task.task_id,
+                                allowed_task_ids=[task.task_id],
+                                expected_base_schedule_revision=sched_rev2,
+                                expected_source_revisions=ProposalSourceRevisions.model_validate(
+                                    revs2.model_dump()
+                                ),
+                            ),
+                            now=now + timedelta(days=2),
+                        )
                     self.assertEqual(len(prop2.proposed_changes.steps_to_add), 2)
                     self.assertIsNone(
                         prop2.feasibility.next_horizon_preview["unexpanded_scope"]

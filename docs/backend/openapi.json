@@ -2124,6 +2124,79 @@
         }
       }
     },
+    "/api/v1/candidates/{candidate_id}/undo": {
+      "post": {
+        "tags": [
+          "planning"
+        ],
+        "summary": "Undo Candidate",
+        "description": "Hoàn tác 1 bước chỉnh sửa gần nhất trên Candidate trước khi Confirm (UF2).",
+        "operationId": "undo_candidate_api_v1_candidates__candidate_id__undo_post",
+        "security": [
+          {
+            "AppBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "candidate_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Mã phương án lịch cần hoàn tác chỉnh sửa gần nhất (UF2).",
+              "title": "Candidate Id"
+            },
+            "description": "Mã phương án lịch cần hoàn tác chỉnh sửa gần nhất (UF2)."
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Mã chống gửi lặp cho lệnh hoàn tác Candidate.",
+              "title": "Idempotency-Key"
+            },
+            "description": "Mã chống gửi lặp cho lệnh hoàn tác Candidate."
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UndoCandidateRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SuccessEnvelope_PlanCandidate_"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/tasks": {
       "get": {
         "tags": [
@@ -5269,6 +5342,44 @@
         "title": "AdaptationSuggestionData",
         "description": "Dòng 43 trên API Sheet (O19 AdaptationSuggestion): GET /api/v1/suggestions/current."
       },
+      "AppliedExtraConstraints": {
+        "properties": {
+          "max_daily_work_seconds": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "exclusiveMinimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Daily Work Seconds"
+          },
+          "min_contiguous_slot_seconds": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "exclusiveMinimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Min Contiguous Slot Seconds"
+          },
+          "preferred_time_windows": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Preferred Time Windows"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "AppliedExtraConstraints"
+      },
       "ApprovalEnvelope": {
         "properties": {
           "rule": {
@@ -6548,6 +6659,66 @@
               }
             ],
             "title": "Sessions"
+          },
+          "add_steps": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/CandidateStepAdd"
+                },
+                "type": "array",
+                "minItems": 1
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Add Steps"
+          },
+          "delete_step_keys": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array",
+                "minItems": 1
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Delete Step Keys"
+          },
+          "merge_steps": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/CandidateStepMerge"
+                },
+                "type": "array",
+                "minItems": 1
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Merge Steps"
+          },
+          "split_steps": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/CandidateStepSplit"
+                },
+                "type": "array",
+                "minItems": 1
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Split Steps"
           }
         },
         "additionalProperties": false,
@@ -6596,6 +6767,39 @@
             "type": "string",
             "format": "date-time",
             "title": "Scheduled End"
+          },
+          "title": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Title"
+          },
+          "session_goal": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Session Goal"
+          },
+          "expected_output": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expected Output"
           },
           "micro_task_text": {
             "type": "string",
@@ -6700,6 +6904,45 @@
             ],
             "title": "Scheduled End"
           },
+          "title": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 160,
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Title"
+          },
+          "session_goal": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 300,
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Session Goal"
+          },
+          "expected_output": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 300,
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expected Output"
+          },
           "micro_task_text": {
             "anyOf": [
               {
@@ -6784,6 +7027,62 @@
         ],
         "title": "CandidateStep"
       },
+      "CandidateStepAdd": {
+        "properties": {
+          "title": {
+            "type": "string",
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "Title"
+          },
+          "expected_output": {
+            "type": "string",
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Expected Output"
+          },
+          "estimated_base_seconds": {
+            "type": "integer",
+            "maximum": 28800.0,
+            "minimum": 300.0,
+            "title": "Estimated Base Seconds"
+          },
+          "micro_task_text": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 300,
+                "minLength": 3
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Micro Task Text"
+          },
+          "insert_at_index": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Insert At Index"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "title",
+          "expected_output",
+          "estimated_base_seconds"
+        ],
+        "title": "CandidateStepAdd",
+        "description": "Thao tác thêm một Step mới vào Candidate (UF2 Layer 3)."
+      },
       "CandidateStepEdit": {
         "properties": {
           "client_step_key": {
@@ -6795,6 +7094,7 @@
             "anyOf": [
               {
                 "type": "string",
+                "maxLength": 255,
                 "minLength": 1
               },
               {
@@ -6807,6 +7107,7 @@
             "anyOf": [
               {
                 "type": "string",
+                "maxLength": 500,
                 "minLength": 1
               },
               {
@@ -6838,6 +7139,19 @@
               }
             ],
             "title": "Order Index"
+          },
+          "micro_task_text": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 300,
+                "minLength": 3
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Micro Task Text"
           }
         },
         "additionalProperties": false,
@@ -6847,6 +7161,92 @@
         ],
         "title": "CandidateStepEdit",
         "description": "Allowlist các trường được phép sửa trên một CandidateStep theo client_step_key (Dòng 11)."
+      },
+      "CandidateStepMerge": {
+        "properties": {
+          "source_step_keys": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "maxItems": 20,
+            "minItems": 2,
+            "title": "Source Step Keys"
+          },
+          "title": {
+            "type": "string",
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "Title"
+          },
+          "expected_output": {
+            "type": "string",
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Expected Output"
+          },
+          "estimated_base_seconds": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "maximum": 28800.0,
+                "minimum": 300.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Estimated Base Seconds"
+          },
+          "micro_task_text": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 300,
+                "minLength": 3
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Micro Task Text"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "source_step_keys",
+          "title",
+          "expected_output"
+        ],
+        "title": "CandidateStepMerge",
+        "description": "Thao tác gộp >= 2 Step hiện có thành 1 Step mới (UF2 Layer 3)."
+      },
+      "CandidateStepSplit": {
+        "properties": {
+          "source_step_key": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Source Step Key"
+          },
+          "new_steps": {
+            "items": {
+              "$ref": "#/components/schemas/CandidateStepAdd"
+            },
+            "type": "array",
+            "maxItems": 10,
+            "minItems": 2,
+            "title": "New Steps"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "source_step_key",
+          "new_steps"
+        ],
+        "title": "CandidateStepSplit",
+        "description": "Thao tác tách 1 Step hiện có thành >= 2 Step mới (UF2 Layer 3)."
       },
       "CandidateVerificationScope": {
         "properties": {
@@ -8580,6 +8980,40 @@
               }
             ],
             "title": "Extension Candidate At"
+          },
+          "earliest_feasible_end_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Earliest Feasible End At"
+          },
+          "suggested_extra_free_seconds_per_day": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 1.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Suggested Extra Free Seconds Per Day"
+          },
+          "applied_extra_constraints": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AppliedExtraConstraints"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "additionalProperties": false,
@@ -9002,6 +9436,7 @@
           },
           "expected_output": {
             "type": "string",
+            "maxLength": 500,
             "minLength": 1,
             "title": "Expected Output"
           },
@@ -9142,6 +9577,11 @@
           "stale": {
             "type": "boolean",
             "title": "Stale"
+          },
+          "can_undo": {
+            "type": "boolean",
+            "title": "Can Undo",
+            "default": false
           },
           "user_step_proposal": {
             "anyOf": [
@@ -9783,6 +10223,39 @@
             "format": "date-time",
             "title": "Scheduled End"
           },
+          "title": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Title"
+          },
+          "session_goal": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Session Goal"
+          },
+          "expected_output": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expected Output"
+          },
           "micro_task_text": {
             "anyOf": [
               {
@@ -10018,6 +10491,39 @@
             "type": "string",
             "format": "date-time",
             "title": "End"
+          },
+          "title": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Title"
+          },
+          "session_goal": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Session Goal"
+          },
+          "expected_output": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expected Output"
           },
           "work_seconds": {
             "type": "integer",
@@ -10332,6 +10838,17 @@
             "type": "string",
             "minLength": 1,
             "title": "Title"
+          },
+          "expected_output": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expected Output"
           },
           "estimated_base_seconds": {
             "type": "integer",
@@ -10917,6 +11434,39 @@
             "type": "string",
             "format": "date-time",
             "title": "Scheduled End"
+          },
+          "title": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Title"
+          },
+          "session_goal": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Session Goal"
+          },
+          "expected_output": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expected Output"
           },
           "micro_task_seconds": {
             "anyOf": [
@@ -13356,6 +13906,18 @@
             ],
             "title": "Unexpanded Scope"
           },
+          "extension_candidate_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Extension Candidate At"
+          },
           "steps": {
             "items": {
               "$ref": "#/components/schemas/Step"
@@ -14484,6 +15046,21 @@
         ],
         "title": "UF5VoiceCheckInPromptResponse",
         "description": "Dữ liệu câu hỏi Check-in 2 chiều + 3 chip Bỏ qua + audio TTS (fallback on-device nếu cần)."
+      },
+      "UndoCandidateRequest": {
+        "properties": {
+          "expected_review_revision": {
+            "type": "integer",
+            "minimum": 1.0,
+            "title": "Expected Review Revision"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "expected_review_revision"
+        ],
+        "title": "UndoCandidateRequest"
       },
       "UpcomingScheduleContextData": {
         "properties": {

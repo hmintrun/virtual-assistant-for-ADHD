@@ -31,6 +31,9 @@ class Session(RecordMixin, Base):
     step_id: Mapped[UUID] = mapped_column(ForeignKey("steps.id", ondelete="RESTRICT"), index=True)
     scheduled_start: Mapped[datetime] = mapped_column(UTCDateTime(), index=True)
     scheduled_end: Mapped[datetime] = mapped_column(UTCDateTime())
+    title: Mapped[str | None] = mapped_column(String(160))
+    session_goal: Mapped[str | None] = mapped_column(Text)
+    expected_output: Mapped[str | None] = mapped_column(Text)
     micro_task_text: Mapped[str | None] = mapped_column(Text)
     micro_task_seconds: Mapped[int | None]
     work_seconds: Mapped[int]

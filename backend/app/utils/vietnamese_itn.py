@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
+from collections.abc import Callable
 from typing import NamedTuple
 
 # Danh sách cụm từ điều hành / đính chính / do dự bắt buộc bảo toàn 100% (T3.2 Guardrail)
@@ -267,6 +268,11 @@ _STUTTER_FUNC_WORD_RE = re.compile(
     re.IGNORECASE,
 )
 
+_NON_STUTTER_NGAY_PREFIX_RE = re.compile(
+    r"(?<!\w)(?:hằng|hàng|mỗi|mọi|cả|suốt|nguyên|ban)[ \t]+$",
+    re.IGNORECASE,
+)
+
 _STUTTER_COMMA_OR_TRIPLE_TU_NGAY_RE = re.compile(
     r"(?<!\w)(từ|ngày)(?:(?:[ \t]*,[ \t]+\1)+|(?:[ \t]*,?[ \t]+\1){2,})(?!\w)",
     re.IGNORECASE,
@@ -305,6 +311,10 @@ _WEEKDAY_WORD_TO_DIGIT: dict[str, str] = {
 }
 
 # Chỉ khớp "thứ hai".."thứ bảy", chống dương tính giả với "thứ tự", "thứ tư duy", "thứ ba mươi", "bước thứ hai"
+_ORDINAL_BEFORE_THU_RE = re.compile(
+    r"(?<!\w)(?:lần|bước|phần|chương|tuần|ngày|buổi|mục|câu|bài|phương[ \t]+án|ý|hạng|tập|vị[ \t]+trí)[ \t]+$",
+    re.IGNORECASE,
+)
 _SPOKEN_WEEKDAY_RE = re.compile(
     r"(?<!\w)(?<!bước\s)(?<!lần\s)(?<!phần\s)(?<!chương\s)(?<!mục\s)"
     r"thứ[ \t]+(?P<wd>hai|ba|tư|bốn|năm|sáu|bảy|bẩy)(?!\w)"
@@ -325,9 +335,9 @@ _PERIOD_PAT = (
 
 # Biểu thức lõi của 1 mốc giờ (chưa gồm buổi):
 # - Nhánh 1: <hour> (chữ hoặc số) + giờ kém <min> | kém <min> | giờ rưỡi | rưỡi | giờ <min> | giờ
-# - Nhánh 2: <digit_hour> + h/g kém <min> | h/g rưỡi | h/g/: <digit_min> | h/g
+# - Nhánh 2: <digit_hour> + (:00|h|g) kém <min> | h/g rưỡi | h/g/: <digit_min> | h/g (không khớp G hoa)
 _TIME_CORE_PAT = (
-    r"(?<!\w)(?<!\d[.,])(?<!Thứ\s)(?<!thứ\s)(?<!ngày\s)(?<!tháng\s)"
+    r"(?<!\w)(?<!\d[.,/])(?<!Thứ\s)(?<!thứ\s)(?<!ngày\s)(?<!tháng\s)"
     r"(?:"
     rf"{_HOUR_TOKEN_PAT}"
     r"(?:"
@@ -335,16 +345,16 @@ _TIME_CORE_PAT = (
     rf"|[ \t]+kém[ \t]+{_MIN_TOKEN_PAT}(?:[ \t]+phút|[ \t]*p)?"
     r"|[ \t]+giờ[ \t]+rưỡi"
     r"|[ \t]+rưỡi"
-    rf"|[ \t]+giờ[ \t]+{_MIN_TOKEN_PAT}(?:[ \t]+phút|[ \t]*p)?(?![ \t]*(?:giờ|h|g|:|rưỡi|kém)\b)"
+    rf"|[ \t]+giờ[ \t]+{_MIN_TOKEN_PAT}(?:[ \t]+phút|[ \t]*p)?(?![ \t]*(?:giờ|(?-i:[hHg])|:|rưỡi|kém)\b)"
     r"|[ \t]+giờ(?:[ \t]+đúng)?"
     r")"
     r"|"
     r"(?:2[0-4]|1\d|0?\d)[ \t]*"
     r"(?:"
-    rf"(?:h|g)[ \t]+kém[ \t]+{_MIN_TOKEN_PAT}(?:[ \t]+phút|[ \t]*p)?"
-    r"|(?:h|g)[ \t]+rưỡi"
-    r"|(?:h|g|:)[ \t]*(?:[0-5]\d|\d)(?:[ \t]+phút|[ \t]*p)?"
-    r"|(?:h|g)"
+    rf"(?::[ \t]*00|(?-i:[hHg])(?:[ \t]*00)?)[ \t]+kém[ \t]+{_MIN_TOKEN_PAT}(?:[ \t]+phút|[ \t]*p)?"
+    r"|(?-i:[hHg])[ \t]+rưỡi"
+    r"|(?-i:[hHg:])[ \t]*(?:[0-5]\d|\d)(?:[ \t]+phút|[ \t]*p)?"
+    r"|(?-i:[hHg])"
     r")"
     r")(?!\w)"
 )
@@ -363,10 +373,10 @@ _TIME_CORE_PARSE_RE = re.compile(
     r"|"
     r"(?P<d_hour>2[0-4]|1\d|0?\d)[ \t]*"
     r"(?:"
-    rf"(?:h|g)[ \t]+kém[ \t]+(?P<h_kem_min>{_MIN_TOKEN_PAT})(?:[ \t]+phút|[ \t]*p)?"
-    r"|(?P<h_ruoi>(?:h|g)[ \t]+rưỡi)"
-    r"|(?:h|g|:)[ \t]*(?P<hm_min>[0-5]\d|\d)(?:[ \t]+phút|[ \t]*p)?"
-    r"|(?P<exact_h>(?:h|g))"
+    rf"(?::[ \t]*00|(?-i:[hHg])(?:[ \t]*00)?)[ \t]+kém[ \t]+(?P<h_kem_min>{_MIN_TOKEN_PAT})(?:[ \t]+phút|[ \t]*p)?"
+    r"|(?P<h_ruoi>(?-i:[hHg])[ \t]+rưỡi)"
+    r"|(?-i:[hHg:])[ \t]*(?P<hm_min>[0-5]\d|\d)(?:[ \t]+phút|[ \t]*p)?"
+    r"|(?P<exact_h>(?-i:[hHg]))"
     r")"
     r")$",
     re.IGNORECASE,
@@ -375,9 +385,69 @@ _TIME_CORE_PARSE_RE = re.compile(
 _TIME_RANGE_RE = re.compile(
     rf"(?P<start_core>{_TIME_CORE_PAT})"
     rf"(?:[ \t]+(?P<start_period>{_PERIOD_PAT}))?"
-    r"(?P<sep>[ \t]*(?:đến|tới|-|–|~)[ \t]*)"
+    r"(?P<sep>[ \t]*(?:đến|tới|-|–|~)[ \t]*(?:(?:khoảng|tầm|cỡ)[ \t]+)?)"
     rf"(?P<end_core>{_TIME_CORE_PAT})"
     rf"(?:[ \t]+(?P<end_period>{_PERIOD_PAT}))?",
+    re.IGNORECASE,
+)
+
+_PERIOD_WORD_RE = re.compile(rf"(?<!\w){_PERIOD_PAT}", re.IGNORECASE)
+_SUBCLAUSE_BOUNDARY_RE = re.compile(
+    r"[,;!?]+|\n+|\.(?=\s|$)|"
+    r"(?<!\w)(?:"
+    r"hạn(?:[ \t]+chót)?|deadline|trước|trừ|ngoại[ \t]+trừ|riêng"
+    r"|nộp(?=[ \t]+(?:trước|vào|lúc|ngày|thứ|chủ[ \t]+nhật|cn|hôm|mai|mốt|\d))"
+    r"|(?:còn|nhưng|rồi|và)(?=[ \t]+(?:(?:rảnh|bận|vào|lúc|từ)[ \t]+)*(?:ngày|mai|mốt|hôm|thứ|chủ[ \t]+nhật|cn|\d{1,2}/))"
+    r")(?!\w)",
+    re.IGNORECASE,
+)
+_NUMERIC_COLON_KEM_PAT = (
+    rf"(?<!\w)(?<!\d[.,/])(?<!Thứ\s)(?<!thứ\s)(?<!ngày\s)(?<!tháng\s)"
+    rf"(?:(?:2[0-4]|1\d|0?\d):[ \t]*00|(?:2[0-4]|1\d|0?\d)[ \t]*(?-i:[hHg])(?:[ \t]*00)?|{_HOUR_TOKEN_PAT}[ \t]+giờ)"
+    rf"[ \t]+kém[ \t]+{_MIN_TOKEN_PAT}(?:[ \t]+phút|[ \t]*p)?(?!\w)"
+)
+_NUMERIC_COLON_TIME_PAT = (
+    rf"(?<!\w)(?<!\d[.,/])(?<!Thứ\s)(?<!thứ\s)(?<!ngày\s)(?<!tháng\s)"
+    rf"(?:"
+    rf"(?:2[0-4]|1\d|0?\d):[ \t]*00[ \t]+kém[ \t]+{_MIN_TOKEN_PAT}(?:[ \t]+phút|[ \t]*p)?"
+    rf"|(?:1[0-2]|0?[1-9]):[0-5]\d"
+    rf")(?!\w)"
+)
+_NUMERIC_COLON_END_PAT = (
+    rf"(?<!\w)(?<!\d[.,/])(?<!Thứ\s)(?<!thứ\s)(?<!ngày\s)(?<!tháng\s)"
+    rf"(?:"
+    rf"(?:2[0-4]|1\d|0?\d):[ \t]*00[ \t]+kém[ \t]+{_MIN_TOKEN_PAT}(?:[ \t]+phút|[ \t]*p)?"
+    rf"|(?:2[0-4]|1\d|0?\d):[0-5]\d"
+    rf")(?!\w)"
+)
+_LEADING_PERIOD_NUMERIC_RANGE_RE = re.compile(
+    rf"(?P<start_core>{_NUMERIC_COLON_TIME_PAT})"
+    r"(?P<sep>[ \t]*(?:đến|tới|-|–)[ \t]*(?:(?:khoảng|tầm|cỡ)[ \t]+)?)"
+    rf"(?P<end_core>{_NUMERIC_COLON_END_PAT})"
+    rf"(?![ \t]+{_PERIOD_PAT})",
+    re.IGNORECASE,
+)
+_LEADING_PERIOD_SINGLE_KEM_RE = re.compile(
+    rf"(?P<core>{_NUMERIC_COLON_KEM_PAT})(?![ \t]+{_PERIOD_PAT})",
+    re.IGNORECASE,
+)
+_PRE_ITN_3PT_STUTTER_RE = re.compile(
+    rf"(?P<c1>{_TIME_CORE_PAT})"
+    r"[ \t]+(?:đến|tới)[ \t]+(?:(?:khoảng|tầm|cỡ)[ \t]+)?"
+    rf"(?P<c2>{_TIME_CORE_PAT})"
+    r"[ \t]+(?:đến|tới)[ \t]+(?:(?:khoảng|tầm|cỡ)[ \t]+)?"
+    rf"(?P<c3>{_TIME_CORE_PAT})"
+    rf"(?P<tail_period>(?:[ \t]+{_PERIOD_PAT})?)",
+    re.IGNORECASE,
+)
+_POST_ITN_3PT_STUTTER_RE = re.compile(
+    r"(?<!\w)(?<!\d[:./])"
+    r"(?P<t1>(?:2[0-4]|[01]?\d):[0-5]\d)"
+    r"[ \t]+(?:đến|tới)[ \t]+(?:(?:khoảng|tầm|cỡ)[ \t]+)?"
+    r"(?P<t2>(?:2[0-4]|[01]?\d):[0-5]\d)"
+    r"[ \t]+(?:đến|tới)[ \t]+(?:(?:khoảng|tầm|cỡ)[ \t]+)?"
+    r"(?P<t3>(?:2[0-4]|[01]?\d):[0-5]\d)"
+    r"(?![:\d/])(?!\w)",
     re.IGNORECASE,
 )
 
@@ -512,7 +582,9 @@ def _resolve_24h_time(core: _ParsedTimeCore, period: str | None) -> str | None:
     if p is None:
         if 13 <= h <= 23:
             base_h24 = h
-        elif h == 24 and m == 0 and not core.is_kem:
+        elif h == 24 and (m == 0 or core.is_kem):
+            base_h24 = 24
+        elif h == 0 and core.is_kem:
             base_h24 = 24
         else:
             return None
@@ -636,7 +708,13 @@ def _replace_time_range(match: re.Match[str]) -> str:
     if start_str is None or end_str is None:
         return match.group(0)
 
-    return f"{start_str}{match.group('sep')}{end_str}"
+    trailing_period_for_nay = (
+        f" {match.group('end_period').strip()}"
+        if match.group("end_period")
+        and re.match(r"^[ \t]+nay\b", match.string[match.end() :], re.IGNORECASE)
+        else ""
+    )
+    return f"{start_str}{match.group('sep')}{end_str}{trailing_period_for_nay}"
 
 
 def _replace_single_time_with_period(match: re.Match[str]) -> str:
@@ -644,7 +722,11 @@ def _replace_single_time_with_period(match: re.Match[str]) -> str:
     if core is None:
         return match.group(0)
     resolved = _resolve_24h_time(core, match.group("period"))
-    return resolved if resolved is not None else match.group(0)
+    if resolved is None:
+        return match.group(0)
+    if re.match(r"^[ \t]+nay\b", match.string[match.end() :], re.IGNORECASE):
+        return f"{resolved} {match.group('period').strip()}"
+    return resolved
 
 
 def _replace_unambiguous_24h_time(match: re.Match[str]) -> str:
@@ -656,6 +738,8 @@ def _replace_unambiguous_24h_time(match: re.Match[str]) -> str:
 
 
 def _replace_spoken_weekday(match: re.Match[str]) -> str:
+    if _ORDINAL_BEFORE_THU_RE.search(match.string[: match.start()]):
+        return match.group(0)
     wd_word = match.group("wd").lower()
     digit = _WEEKDAY_WORD_TO_DIGIT.get(wd_word)
     return f"Thứ {digit}" if digit is not None else match.group(0)
@@ -701,6 +785,15 @@ def _replace_spoken_min_duration(match: re.Match[str]) -> str:
     return f"{val} phút"
 
 
+def _replace_stutter_tu_ngay(match: re.Match[str]) -> str:
+    word = match.group(1)
+    if word.lower() == "ngày" and _NON_STUTTER_NGAY_PREFIX_RE.search(
+        match.string[: match.start()]
+    ):
+        return match.group(0)
+    return word
+
+
 def _replace_leading_filler(match: re.Match[str]) -> str:
     punct = match.group(1)
     if not punct:
@@ -708,6 +801,243 @@ def _replace_leading_filler(match: re.Match[str]) -> str:
     if punct == "\n":
         return "\n"
     return f"{punct} "
+
+
+def _sub_tracking_spans(
+    text: str,
+    pattern: re.Pattern[str],
+    repl: Callable[[re.Match[str]], str],
+    locked_spans: list[tuple[int, int]],
+) -> tuple[str, list[tuple[int, int]]]:
+    """Thay thế các khớp ngoài ``locked_spans`` và cập nhật lại tập span đã chuẩn hóa."""
+    parts: list[str] = []
+    new_locked: list[tuple[int, int]] = []
+    cursor = 0
+    out_len = 0
+    lock_idx = 0
+    n_locks = len(locked_spans)
+
+    def _emit_untouched(seg_start: int, seg_end: int) -> None:
+        nonlocal out_len, lock_idx
+        if seg_end <= seg_start:
+            while lock_idx < n_locks and locked_spans[lock_idx][1] <= seg_end:
+                lock_idx += 1
+            return
+        delta = out_len - seg_start
+        while lock_idx < n_locks and locked_spans[lock_idx][0] < seg_end:
+            ls, le = locked_spans[lock_idx]
+            if ls >= seg_start and le <= seg_end:
+                new_locked.append((ls + delta, le + delta))
+            lock_idx += 1
+        seg = text[seg_start:seg_end]
+        parts.append(seg)
+        out_len += len(seg)
+
+    for match in pattern.finditer(text):
+        ms, me = match.start(), match.end()
+        overlaps_locked = any(ms < le and me > ls for ls, le in locked_spans)
+        if overlaps_locked:
+            continue
+        replacement = repl(match)
+        if replacement == match.group(0):
+            continue
+        _emit_untouched(cursor, ms)
+        while lock_idx < n_locks and locked_spans[lock_idx][1] <= me:
+            lock_idx += 1
+        rep_start = out_len
+        parts.append(replacement)
+        out_len += len(replacement)
+        new_locked.append((rep_start, out_len))
+        cursor = me
+
+    _emit_untouched(cursor, len(text))
+    return "".join(parts), new_locked
+
+
+def _core_minutes(core: _ParsedTimeCore) -> int | None:
+    """Quy đổi `_ParsedTimeCore` sang số phút đơn điệu để so sánh thứ tự tăng dần."""
+    h = core.hour
+    m = core.minute
+    if core.is_kem:
+        effective_h = 24 if h == 0 else h
+        return effective_h * 60 - m
+    return h * 60 + m
+
+
+def _collapse_pre_itn_stutters(text: str) -> str:
+    """Gộp nói lắp 3 mốc thời gian tăng nghiêm ngặt trước bước quy đổi buổi (VD: 7h đến 8h đến 9h tối)."""
+    def _repl(match: re.Match[str]) -> str:
+        c1 = _parse_time_core(match.group("c1"))
+        c2 = _parse_time_core(match.group("c2"))
+        c3 = _parse_time_core(match.group("c3"))
+        if c1 is None or c2 is None or c3 is None:
+            return match.group(0)
+        m1, m2, m3 = _core_minutes(c1), _core_minutes(c2), _core_minutes(c3)
+        if m1 is None or m2 is None or m3 is None or not (m1 < m2 < m3):
+            return match.group(0)
+        tail = match.group("tail_period") or ""
+        return f"{match.group('c1')} đến {match.group('c3')}{tail}"
+
+    out = text
+    for _ in range(4):
+        updated = _PRE_ITN_3PT_STUTTER_RE.sub(_repl, out)
+        if updated == out:
+            break
+        out = updated
+    return out
+
+
+def _propagate_leading_period_in_subclauses(
+    text: str, locked_spans: list[tuple[int, int]]
+) -> tuple[str, list[tuple[int, int]]]:
+    """Kế thừa buổi đứng trước trong cùng tiểu mệnh đề cho khoảng giờ H1:M1..H2:M2 (1<=H1<=11) và <digit>:00 kém <min>."""
+    boundaries: list[tuple[int, int]] = [(0, 0)]
+    for b_match in _SUBCLAUSE_BOUNDARY_RE.finditer(text):
+        boundaries.append((b_match.start(), b_match.end()))
+    boundaries.append((len(text), len(text)))
+
+    subclauses: list[tuple[int, int]] = []
+    for idx in range(len(boundaries) - 1):
+        s_start = boundaries[idx][1]
+        s_end = boundaries[idx + 1][0]
+        if s_end > s_start:
+            subclauses.append((s_start, s_end))
+
+    edits: list[tuple[int, int, str]] = []
+    for sub_start, sub_end in subclauses:
+        sub_text = text[sub_start:sub_end]
+        period_matches = [
+            (sub_start + pm.start(), sub_start + pm.end(), _clean_period(pm.group(0)))
+            for pm in _PERIOD_WORD_RE.finditer(sub_text)
+        ]
+        if not period_matches:
+            continue
+
+        covered_ranges: list[tuple[int, int]] = []
+        for rm in _LEADING_PERIOD_NUMERIC_RANGE_RE.finditer(sub_text):
+            abs_s = sub_start + rm.start()
+            abs_e = sub_start + rm.end()
+            abs_start_core_end = abs_s + len(rm.group("start_core"))
+            if any(abs_s < le and abs_start_core_end > ls for ls, le in locked_spans):
+                continue
+            active_period: str | None = None
+            for _, pe, p_name in period_matches:
+                if pe <= abs_s and p_name:
+                    active_period = p_name
+            if not active_period:
+                continue
+            start_core = _parse_time_core(rm.group("start_core"))
+            end_core = _parse_time_core(rm.group("end_core"))
+            if start_core is None or end_core is None:
+                continue
+            if 1 <= start_core.hour <= 11:
+                pass
+            elif start_core.hour == 12 and (
+                active_period == "trưa"
+                or (active_period == "sáng" and 1 <= end_core.hour <= 11)
+            ):
+                pass
+            else:
+                continue
+            start_str = _resolve_24h_time(start_core, active_period)
+            end_str = _resolve_24h_time(end_core, active_period)
+            if (
+                start_str is not None
+                and end_str is not None
+                and _hhmm_to_minutes(end_str) <= _hhmm_to_minutes(start_str)
+            ):
+                if active_period in ("sáng", "trưa"):
+                    alt_end = _resolve_24h_time(end_core, "chiều")
+                    if alt_end is not None and _hhmm_to_minutes(alt_end) > _hhmm_to_minutes(start_str):
+                        end_str = alt_end
+                elif active_period in ("tối", "đêm", "khuya") and 1 <= end_core.hour <= 5:
+                    alt_end = _resolve_24h_time(end_core, "đêm")
+                    if alt_end is not None:
+                        end_str = alt_end
+            if start_str is None or end_str is None:
+                continue
+            edits.append((abs_s, abs_e, f"{start_str}{rm.group('sep')}{end_str}"))
+            covered_ranges.append((abs_s, abs_e))
+
+        for km in _LEADING_PERIOD_SINGLE_KEM_RE.finditer(sub_text):
+            abs_s = sub_start + km.start()
+            abs_e = sub_start + km.end()
+            if any(abs_s < le and abs_e > ls for ls, le in locked_spans):
+                continue
+            if any(abs_s < ce and abs_e > cs for cs, ce in covered_ranges):
+                continue
+            active_period = None
+            for _, pe, p_name in period_matches:
+                if pe <= abs_s and p_name:
+                    active_period = p_name
+            if not active_period:
+                continue
+            core = _parse_time_core(km.group("core"))
+            if core is None:
+                continue
+            resolved = _resolve_24h_time(core, active_period)
+            if resolved is not None:
+                edits.append((abs_s, abs_e, resolved))
+
+    if not edits:
+        return text, locked_spans
+
+    edits.sort(key=lambda item: item[0])
+    parts: list[str] = []
+    new_locked: list[tuple[int, int]] = []
+    cursor = 0
+    out_len = 0
+    lock_idx = 0
+    n_locks = len(locked_spans)
+    for es, ee, rep in edits:
+        if es < cursor:
+            continue
+        delta = out_len - cursor
+        while lock_idx < n_locks and locked_spans[lock_idx][0] < es:
+            ls, le = locked_spans[lock_idx]
+            if ls >= cursor and le <= es:
+                new_locked.append((ls + delta, le + delta))
+            lock_idx += 1
+        if es > cursor:
+            seg = text[cursor:es]
+            parts.append(seg)
+            out_len += len(seg)
+        while lock_idx < n_locks and locked_spans[lock_idx][1] <= ee:
+            lock_idx += 1
+        rep_start = out_len
+        parts.append(rep)
+        out_len += len(rep)
+        new_locked.append((rep_start, out_len))
+        cursor = ee
+    if cursor < len(text):
+        delta = out_len - cursor
+        while lock_idx < n_locks:
+            ls, le = locked_spans[lock_idx]
+            if ls >= cursor:
+                new_locked.append((ls + delta, le + delta))
+            lock_idx += 1
+        parts.append(text[cursor:])
+    return "".join(parts), new_locked
+
+
+def _collapse_post_itn_stutters(text: str) -> str:
+    """Gộp chuỗi 3 mốc HH:MM tăng nghiêm ngặt T1 đến T2 đến T3 (T1 < T2 < T3) thành T1 đến T3."""
+    def _repl(match: re.Match[str]) -> str:
+        t1 = match.group("t1")
+        t2 = match.group("t2")
+        t3 = match.group("t3")
+        m1, m2, m3 = _hhmm_to_minutes(t1), _hhmm_to_minutes(t2), _hhmm_to_minutes(t3)
+        if not (m1 < m2 < m3):
+            return match.group(0)
+        return f"{t1} đến {t3}"
+
+    out = text
+    for _ in range(4):
+        updated = _POST_ITN_3PT_STUTTER_RE.sub(_repl, out)
+        if updated == out:
+            break
+        out = updated
+    return out
 
 
 def normalize_vietnamese_transcript(text: str) -> str:
@@ -725,7 +1055,7 @@ def normalize_vietnamese_transcript(text: str) -> str:
     out = _LEADING_OR_POST_PUNCT_FILLER_RE.sub(_replace_leading_filler, out)
     out = _INLINE_HESITATION_RE.sub(" ", out)
     out = _STUTTER_FUNC_WORD_RE.sub(r"\1", out)
-    out = _STUTTER_COMMA_OR_TRIPLE_TU_NGAY_RE.sub(r"\1", out)
+    out = _STUTTER_COMMA_OR_TRIPLE_TU_NGAY_RE.sub(_replace_stutter_tu_ngay, out)
     out = _STUTTER_TU_TEMPORAL_RE.sub(r"\1", out)
     out = _STUTTER_NGAY_TEMPORAL_RE.sub(r"\1", out)
     out = _MULTI_HSPACE_RE.sub(" ", out)
@@ -733,10 +1063,24 @@ def normalize_vietnamese_transcript(text: str) -> str:
     # 2. T3.1: Chuẩn hóa Thứ chữ tiếng Việt ("thứ hai".."thứ bảy" -> "Thứ 2".."Thứ 7")
     out = _SPOKEN_WEEKDAY_RE.sub(_replace_spoken_weekday, out)
 
+    # 2b. Gộp nói lắp 3 mốc thời gian tăng dần trước khi quy đổi buổi
+    out = _collapse_pre_itn_stutters(out)
+
     # 3. T3.1: Chuẩn hóa khoảng giờ nói (kế thừa buổi ở vế sau nếu vế đầu chưa có buổi) & mốc giờ đơn lẻ
-    out = _TIME_RANGE_RE.sub(_replace_time_range, out)
-    out = _SINGLE_TIME_WITH_PERIOD_RE.sub(_replace_single_time_with_period, out)
-    out = _UNAMBIGUOUS_24H_TIME_RE.sub(_replace_unambiguous_24h_time, out)
+    locked_spans: list[tuple[int, int]] = []
+    out, locked_spans = _sub_tracking_spans(out, _TIME_RANGE_RE, _replace_time_range, locked_spans)
+    out, locked_spans = _sub_tracking_spans(
+        out, _SINGLE_TIME_WITH_PERIOD_RE, _replace_single_time_with_period, locked_spans
+    )
+    out, locked_spans = _sub_tracking_spans(
+        out, _UNAMBIGUOUS_24H_TIME_RE, _replace_unambiguous_24h_time, locked_spans
+    )
+
+    # 3b. Kế thừa buổi đứng trước trong cùng tiểu mệnh đề (không băng qua dấu câu hoặc hạn/trước/trừ/ngoại trừ)
+    out, locked_spans = _propagate_leading_period_in_subclauses(out, locked_spans)
+
+    # 3c. Gộp chuỗi 3 mốc HH:MM tăng nghiêm ngặt T1 đến T2 đến T3 thành T1 đến T3
+    out = _collapse_post_itn_stutters(out)
 
     # 4. T3.1: Chuẩn hóa thời lượng nói tiếng Việt sang "<N> phút"
     out = _HALF_HOUR_RE.sub("30 phút", out)

@@ -16,6 +16,7 @@ from __future__ import annotations
 import hashlib
 import json
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 
@@ -41,7 +42,10 @@ from app.services.voice_service import (
     SttError,
     SttErrorCode,
     VoiceService,
+    _ensure_groq_compatible_audio,
+    _is_adts_aac,
     _is_whisper_hallucination,
+    _remux_adts_aac_to_m4a,
     build_voice_service,
     get_voice_service,
 )
@@ -667,3 +671,167 @@ async def test_risk03_legacy_receipt_without_low_confidence_backward_compatible(
         "thought_id": None,
         "low_confidence": False,
     }
+
+
+# ==============================================================================
+# Trụ cột 1a — Pure-Python ADTS (.aac -> .m4a) Remuxer
+# ==============================================================================
+
+
+def _build_synthetic_adts_stream(
+    *,
+    profile_minus_1: int = 1,
+    freq_idx: int = 4,
+    chan_cfg: int = 1,
+    payloads: tuple[bytes, ...] = (b"\x21\x10\x04\x60\x8c\x1c", b"\x21\x10\x04\x60\x8c\x1d"),
+    include_id3v2: bool = False,
+) -> bytes:
+    """Tạo luồng ADTS AAC hợp lệ thuần byte cho unit test (không phụ thuộc file ngoài)."""
+    frames = bytearray()
+    for raw_frame in payloads:
+        frame_len = 7 + len(raw_frame)
+        header = bytearray(7)
+        header[0] = 0xFF
+        header[1] = 0xF1  # MPEG-4 ADTS, protection_absent=1
+        header[2] = ((profile_minus_1 & 0x03) << 6) | ((freq_idx & 0x0F) << 2) | ((chan_cfg >> 2) & 0x01)
+        header[3] = ((chan_cfg & 0x03) << 6) | ((frame_len >> 11) & 0x03)
+        header[4] = (frame_len >> 3) & 0xFF
+        header[5] = ((frame_len & 0x07) << 5) | 0x1F
+        header[6] = 0xFC
+        frames.extend(header)
+        frames.extend(raw_frame)
+
+    if include_id3v2:
+        tag_body = b"TIT2\x00\x00\x00\x04\x00\x00\x00abc"
+        size = len(tag_body)
+        syncsafe = bytes(
+            [
+                (size >> 21) & 0x7F,
+                (size >> 14) & 0x7F,
+                (size >> 7) & 0x7F,
+                size & 0x7F,
+            ]
+        )
+        return b"ID3\x03\x00\x00" + syncsafe + tag_body + bytes(frames)
+    return bytes(frames)
+
+
+def _find_mp4_box(data: bytes, target_type: bytes) -> tuple[int, int] | None:
+    """Tìm atom ISO BMFF cấp trên trong buffer, trả về (start_offset, box_size)."""
+    pos = 0
+    while pos + 8 <= len(data):
+        size = int.from_bytes(data[pos : pos + 4], "big")
+        box_type = data[pos + 4 : pos + 8]
+        if size < 8:
+            break
+        if box_type == target_type:
+            return pos, size
+        pos += size
+    return None
+
+
+def test_adts_aac_detection_and_pure_python_m4a_remuxer() -> None:
+    aac_44k = _build_synthetic_adts_stream(freq_idx=4, chan_cfg=1, include_id3v2=True)
+    aac_16k = _build_synthetic_adts_stream(freq_idx=8, chan_cfg=1, include_id3v2=False)
+
+    assert _is_adts_aac(aac_44k) is True
+    assert _is_adts_aac(aac_16k) is True
+    assert _is_adts_aac(b"RIFF\x24\x00\x00\x00WAVE") is False
+
+    for freq_idx, raw_aac, expected_asc in (
+        (4, aac_44k, bytes([0x12, 0x08])),  # AAC-LC (2), 44100Hz (4), mono (1)
+        (8, aac_16k, bytes([0x14, 0x08])),  # AAC-LC (2), 16000Hz (8), mono (1)
+    ):
+        remuxed, mime = _ensure_groq_compatible_audio(raw_aac, "audio/aac")
+        assert mime == "audio/m4a"
+        assert remuxed[:8] == int.to_bytes(_find_mp4_box(remuxed, b"ftyp")[1], 4, "big") + b"ftyp"
+        assert b"M4A " in remuxed[:24]
+        for box_name in (b"moov", b"mvhd", b"trak", b"mdia", b"hdlr", b"soun", b"stsd", b"mp4a", b"esds", b"stco", b"mdat"):
+            assert box_name in remuxed, (freq_idx, box_name)
+        assert expected_asc in remuxed
+
+        # Kiểm tra offset stco trỏ chính xác vào đầu payload của mdat
+        mdat_pos, _ = _find_mp4_box(remuxed, b"mdat")
+        stco_idx = remuxed.index(b"stco")
+        stco_offset = int.from_bytes(remuxed[stco_idx + 12 : stco_idx + 16], "big")
+        assert stco_offset == mdat_pos + 8
+
+        # Kiểm tra không còn header ADTS lọt vào bên trong payload mdat
+        mdat_payload = remuxed[stco_offset:]
+        assert mdat_payload == b"\x21\x10\x04\x60\x8c\x1c\x21\x10\x04\x60\x8c\x1d"
+
+
+def test_adts_remuxer_high_sample_rates_96khz_88_2khz_and_7_1_channel_mapping() -> None:
+    # freq_idx=0 -> 96000Hz, chan_cfg=7 -> 7.1 (8 channels)
+    aac_96k_7_1 = _build_synthetic_adts_stream(freq_idx=0, chan_cfg=7)
+    # freq_idx=1 -> 88200Hz, chan_cfg=0 -> fallback 2 channels in mp4a
+    aac_88k_cfg0 = _build_synthetic_adts_stream(freq_idx=1, chan_cfg=0)
+
+    for raw_aac, expected_sr, expected_ch, expected_asc in (
+        (aac_96k_7_1, 96000, 8, bytes([0x10, 0x38])),
+        (aac_88k_cfg0, 88200, 2, bytes([0x10, 0x80])),
+    ):
+        remuxed, mime = _ensure_groq_compatible_audio(raw_aac, "audio/aac")
+        assert mime == "audio/m4a"
+        assert expected_asc in remuxed
+
+        # mp4a: offset +8 (header) +6 (reserved) +2 (dref_idx) +8 (reserved) = +24 -> channels (uint16)
+        # offset +32 -> samplerate 16.16 fixed-point capped at 65535 << 16
+        mp4a_idx = remuxed.index(b"mp4a") - 4
+        channels_written = int.from_bytes(remuxed[mp4a_idx + 24 : mp4a_idx + 26], "big")
+        sr_fixed_written = int.from_bytes(remuxed[mp4a_idx + 32 : mp4a_idx + 36], "big")
+        assert channels_written == expected_ch
+        assert sr_fixed_written == (65535 << 16)
+
+        # mdhd (FullBox v0): box_start + 12 (header+ver/flags) + 8 (ctime+mtime) = +20 -> timescale (uint32)
+        mdhd_idx = remuxed.index(b"mdhd") - 4
+        mdhd_timescale = int.from_bytes(remuxed[mdhd_idx + 20 : mdhd_idx + 24], "big")
+        assert mdhd_timescale == expected_sr
+
+
+def test_adts_remuxer_malformed_bytes_fallback_safely() -> None:
+    malformed = b"NOT-VALID-ADTS-BYTES"
+    out_bytes, out_mime = _ensure_groq_compatible_audio(malformed, "audio/aac")
+    assert out_bytes == malformed
+    assert out_mime == "audio/aac"
+
+    with pytest.raises(ValueError):
+        _remux_adts_aac_to_m4a(b"\xFF\xF1\x50")
+
+
+@pytest.mark.asyncio
+async def test_groq_whisper_transcribe_verbose_remuxes_adts_aac_and_safely_passes_malformed() -> None:
+    observed_files: list[tuple[str, bytes, str]] = []
+
+    async def _fake_create(**kwargs: Any) -> dict[str, Any]:
+        file_arg = kwargs["file"]
+        observed_files.append((file_arg[0], file_arg[1], file_arg[2]))
+        return {
+            "text": "Họp nhóm lúc 19:00 tối mai",
+            "segments": [{"no_speech_prob": 0.05, "avg_logprob": -0.2}],
+        }
+
+    fake_client = SimpleNamespace(
+        audio=SimpleNamespace(transcriptions=SimpleNamespace(create=AsyncMock(side_effect=_fake_create)))
+    )
+    provider = GroqWhisperSttProvider(
+        api_key="gsk_test",
+        model="whisper-large-v3",
+        language_code="vi-VN",
+        timeout_seconds=5.0,
+    )
+    provider._client = fake_client
+
+    adts_audio = _build_synthetic_adts_stream(freq_idx=8, chan_cfg=1)
+    res_ok = await provider.transcribe_verbose(adts_audio, "audio/aac")
+    assert res_ok.text == "Họp nhóm lúc 19:00 tối mai"
+    assert observed_files[0][0] == "audio.m4a"
+    assert observed_files[0][2] == "audio/m4a"
+    assert _find_mp4_box(observed_files[0][1], b"ftyp") is not None
+
+    # Nếu byte audio giả/lỗi không đúng ADTS -> không crash, truyền nguyên gốc
+    bad_audio = b"synthetic-invalid-aac-bytes"
+    await provider.transcribe_verbose(bad_audio, "audio/aac")
+    assert observed_files[1][0] == "audio.aac"
+    assert observed_files[1][1] == bad_audio
+    assert observed_files[1][2] == "audio/aac"

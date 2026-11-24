@@ -10,6 +10,7 @@ from app.schemas.planning import (
     ConfirmCandidateResult,
     GenerateCandidateRequest,
     PlanCandidate,
+    UndoCandidateRequest,
     UpdateCandidateRequest,
 )
 from app.services import plan_service
@@ -156,5 +157,43 @@ async def confirm_candidate(
     )
     return SuccessEnvelope(
         data=result,
+        meta=build_response_meta(),
+    )
+
+
+@router.post(
+    "/candidates/{candidate_id}/undo",
+    response_model=SuccessEnvelope[PlanCandidate],
+)
+async def undo_candidate(
+    candidate_id: Annotated[
+        str,
+        Path(
+            min_length=1,
+            description="Mã phương án lịch cần hoàn tác chỉnh sửa gần nhất (UF2).",
+        ),
+    ],
+    payload: UndoCandidateRequest,
+    idempotency_key: Annotated[
+        str,
+        Header(
+            alias="Idempotency-Key",
+            min_length=1,
+            description="Mã chống gửi lặp cho lệnh hoàn tác Candidate.",
+        ),
+    ],
+    current_user: CurrentUserDep,
+    db: DbSessionDep,
+) -> SuccessEnvelope[PlanCandidate]:
+    """Hoàn tác 1 bước chỉnh sửa gần nhất trên Candidate trước khi Confirm (UF2)."""
+    candidate = await plan_service.undo_candidate_edit(
+        user_id=current_user.user_id,
+        db=db,
+        candidate_id=candidate_id,
+        idempotency_key=idempotency_key,
+        payload=payload,
+    )
+    return SuccessEnvelope(
+        data=candidate,
         meta=build_response_meta(),
     )
