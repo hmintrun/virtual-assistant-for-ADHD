@@ -161,6 +161,7 @@ def test_default_settings_auto_provider_and_vietnamese_prompt_keywords() -> None
 
     configured = Settings(
         _env_file=None,
+        DEEPGRAM_API_KEY="",
         GEMINI_API_KEY="test-gemini-key",
         GROQ_API_KEY="test-groq-key",
     )

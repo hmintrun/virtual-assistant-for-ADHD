@@ -35,6 +35,7 @@ from pathlib import Path, PurePath
 from typing import Any, Literal, Protocol
 
 import edge_tts
+import httpx
 from google import genai
 from google.genai import types
 from google.oauth2 import service_account
@@ -190,6 +191,11 @@ def _mp4_full_box(box_type: bytes, version: int, flags: int, payload: bytes) -> 
     return _mp4_box(box_type, struct.pack(">I", ver_flags) + payload)
 
 
+_MAX_ADTS_FRAMES = 60_000
+_ADTS_THREAD_OFFLOAD_BYTES = 256 * 1024
+_GROQ_MAX_EFFECTIVE_PROMPT_CHARS = 480
+
+
 def _remux_adts_aac_to_m4a(audio: bytes) -> bytes:
     """Đóng gói các frame ADTS AAC thô thành container ISO BMFF ``.m4a`` chuẩn (pure-Python)."""
     if not audio or len(audio) < 7:
@@ -205,6 +211,8 @@ def _remux_adts_aac_to_m4a(audio: bytes) -> bytes:
     first_channel_config: int | None = None
 
     while offset < total:
+        if len(raw_frames) >= _MAX_ADTS_FRAMES:
+            raise ValueError(f"ADTS frame count exceeds limit ({_MAX_ADTS_FRAMES})")
         if total - offset == 128 and audio[offset : offset + 3] == b"TAG":
             break
         parsed = _parse_adts_header(audio, offset)
@@ -406,12 +414,13 @@ class SttResult:
 
 @dataclass(frozen=True, slots=True)
 class SttProviderDetails:
-    """Chi tiết kết quả từ provider STT (kèm chỉ số âm học từ verbose_json nếu có)."""
+    """Chi tiết kết quả từ provider STT (kèm chỉ số âm học từ verbose_json / Deepgram nếu có)."""
 
     text: str
     no_speech_prob: float | None = None
     avg_logprob: float | None = None
     all_segments_silent: bool | None = None
+    low_confidence: bool | None = None
 
 
 class SttProvider(Protocol):
@@ -658,7 +667,7 @@ def _transcript_text_of(resp: Any) -> str:
 
 
 _MAX_CONTEXTUAL_HINT_CHARS = 400
-_HINT_UNSAFE_CHARS_RE = re.compile(r"[\r\n\t`\"'\[\]{}<>|\\]+")
+_HINT_UNSAFE_CHARS_RE = re.compile(r"[\x00-\x1f\x7f\r\n\t`\"'\[\]{}<>|\\#]+")
 
 
 def _accepts_kwarg(func: Any, kwarg_name: str) -> bool:
@@ -941,7 +950,7 @@ class GeminiSttProvider:
     async def _delete_quietly(client: genai.Client, file_name: str) -> None:
         """Xóa file đã upload; lỗi xóa chỉ ghi cảnh báo (Google tự hết hạn file sau một thời gian)."""
         try:
-            await client.aio.files.delete(name=file_name)
+            await asyncio.wait_for(client.aio.files.delete(name=file_name), timeout=5.0)
         except Exception as exc:
             logger.warning("Không xóa được file STT tạm trên Gemini (%s).", type(exc).__name__)
 
@@ -1007,15 +1016,18 @@ def _is_whisper_hallucination(text: str) -> bool:
             if all(words[i : i + phrase_len] == unit for i in range(0, n_words, phrase_len)):
                 return True
         max_start = n_words - phrase_len * 4
-        for start in range(max_start + 1):
-            unit = words[start : start + phrase_len]
-            repeats = 1
-            cursor = start + phrase_len
-            while cursor + phrase_len <= n_words and words[cursor : cursor + phrase_len] == unit:
-                repeats += 1
-                cursor += phrase_len
-            if repeats >= 4 and (repeats * phrase_len) / n_words >= 0.8:
-                return True
+        for phase in range(phrase_len):
+            start = phase
+            while start <= max_start:
+                unit = words[start : start + phrase_len]
+                repeats = 1
+                cursor = start + phrase_len
+                while cursor + phrase_len <= n_words and words[cursor : cursor + phrase_len] == unit:
+                    repeats += 1
+                    cursor += phrase_len
+                if repeats >= 4 and (repeats * phrase_len) / n_words >= 0.8:
+                    return True
+                start = cursor
 
     return False
 
@@ -1205,12 +1217,18 @@ class GroqWhisperSttProvider:
         return self._client
 
     def _effective_prompt(self, contextual_hints: list[str] | None = None) -> str | None:
-        hint_str = _format_contextual_hints(contextual_hints)
-        if not hint_str:
-            return self._prompt
-        if self._prompt is not None:
-            return f"{self._prompt} Từ vựng cá nhân: {hint_str}"
-        return hint_str
+        base_prompt = self._prompt
+        if base_prompt is not None:
+            prefix = f"{base_prompt} Từ vựng cá nhân: "
+            remaining = _GROQ_MAX_EFFECTIVE_PROMPT_CHARS - len(prefix)
+            hint_str = _format_contextual_hints(contextual_hints, max_chars=max(0, remaining))
+            if not hint_str:
+                return base_prompt[:_GROQ_MAX_EFFECTIVE_PROMPT_CHARS]
+            return f"{prefix}{hint_str}"
+        hint_str = _format_contextual_hints(
+            contextual_hints, max_chars=_GROQ_MAX_EFFECTIVE_PROMPT_CHARS
+        )
+        return hint_str or None
 
     async def transcribe_verbose(
         self,
@@ -1220,7 +1238,14 @@ class GroqWhisperSttProvider:
         contextual_hints: list[str] | None = None,
     ) -> SttProviderDetails:
         client = self._get_client()
-        send_audio, send_mime = _ensure_groq_compatible_audio(audio, mime_type)
+        if len(audio) > _ADTS_THREAD_OFFLOAD_BYTES and (
+            mime_type == "audio/aac" or _is_adts_aac(audio)
+        ):
+            send_audio, send_mime = await asyncio.to_thread(
+                _ensure_groq_compatible_audio, audio, mime_type
+            )
+        else:
+            send_audio, send_mime = _ensure_groq_compatible_audio(audio, mime_type)
         ext = _MIME_TO_EXTENSION.get(send_mime, ".m4a")
         effective_prompt = self._effective_prompt(contextual_hints)
         try:
@@ -1256,6 +1281,189 @@ class GroqWhisperSttProvider:
             )
         except Exception as exc:
             raise map_provider_exception(exc) from exc
+
+    async def transcribe(
+        self,
+        audio: bytes,
+        mime_type: str,
+        *,
+        contextual_hints: list[str] | None = None,
+    ) -> str:
+        details = await self.transcribe_verbose(
+            audio,
+            mime_type,
+            contextual_hints=contextual_hints,
+        )
+        return details.text
+
+
+_DEEPGRAM_LOW_CONFIDENCE_THRESHOLD = 0.65
+_DEEPGRAM_MAX_KEYTERMS = 50
+_DEEPGRAM_MAX_KEYTERM_CHARS = 100
+
+
+def _sanitize_deepgram_keyterms(contextual_hints: list[str] | None) -> list[str]:
+    """Chuẩn hóa danh sách từ khóa an toàn cho query param ``keyterm`` của Deepgram."""
+    if not contextual_hints:
+        return []
+    seen: set[str] = set()
+    terms: list[str] = []
+    for raw_item in contextual_hints:
+        if not isinstance(raw_item, str):
+            continue
+        cleaned = " ".join(_HINT_UNSAFE_CHARS_RE.sub(" ", raw_item).split()).strip(" ,.;:-–—")
+        if not cleaned:
+            continue
+        if len(cleaned) > _DEEPGRAM_MAX_KEYTERM_CHARS:
+            cleaned = cleaned[:_DEEPGRAM_MAX_KEYTERM_CHARS].rstrip()
+        folded = cleaned.casefold()
+        if folded in seen:
+            continue
+        seen.add(folded)
+        terms.append(cleaned)
+        if len(terms) >= _DEEPGRAM_MAX_KEYTERMS:
+            break
+    return terms
+
+
+class DeepgramSttProvider:
+    """Deepgram Nova-3 STT qua REST API ``/v1/listen`` (Tier 1 tốc độ cao, giữ verbatim)."""
+
+    name = "deepgram"
+
+    def __init__(
+        self,
+        *,
+        api_key: str,
+        model: str = "nova-3",
+        language_code: str = "vi-VN",
+        punctuate: bool = True,
+        smart_format: bool = False,
+        base_url: str = "https://api.deepgram.com/v1/listen",
+        use_keyterms: bool = False,
+        timeout_seconds: float = 5.0,
+        http_client: httpx.AsyncClient | None = None,
+    ) -> None:
+        self._api_key = (api_key or "").strip()
+        self._model = model
+        self._language = _iso_language_code(language_code)
+        self._punctuate = punctuate
+        self._smart_format = smart_format
+        self._base_url = base_url.strip() or "https://api.deepgram.com/v1/listen"
+        self._use_keyterms = use_keyterms
+        self._timeout_seconds = timeout_seconds
+        self._http_client = http_client
+
+    async def transcribe_verbose(
+        self,
+        audio: bytes,
+        mime_type: str,
+        *,
+        contextual_hints: list[str] | None = None,
+    ) -> SttProviderDetails:
+        if not self._api_key:
+            raise SttError(SttErrorCode.PROVIDER_UNAVAILABLE, "missing_deepgram_api_key")
+
+        if len(audio) > _ADTS_THREAD_OFFLOAD_BYTES and (
+            mime_type == "audio/aac" or _is_adts_aac(audio)
+        ):
+            send_audio, send_mime = await asyncio.to_thread(
+                _ensure_groq_compatible_audio, audio, mime_type
+            )
+        else:
+            send_audio, send_mime = _ensure_groq_compatible_audio(audio, mime_type)
+
+        content_type = "audio/mp4" if send_mime == "audio/m4a" else send_mime
+        params: list[tuple[str, str]] = [
+            ("model", self._model),
+            ("language", self._language),
+            ("punctuate", "true" if self._punctuate else "false"),
+            ("smart_format", "true" if self._smart_format else "false"),
+        ]
+        if self._use_keyterms:
+            for term in _sanitize_deepgram_keyterms(contextual_hints):
+                params.append(("keyterm", term))
+
+        headers = {
+            "Authorization": f"Token {self._api_key}",
+            "Content-Type": content_type,
+        }
+
+        request_params = tuple(params)
+        try:
+            if self._http_client is not None:
+                response = await self._http_client.post(
+                    self._base_url,
+                    params=request_params,
+                    headers=headers,
+                    content=send_audio,
+                    timeout=self._timeout_seconds,
+                )
+            else:
+                async with httpx.AsyncClient(timeout=self._timeout_seconds) as client:
+                    response = await client.post(
+                        self._base_url,
+                        params=request_params,
+                        headers=headers,
+                        content=send_audio,
+                    )
+        except httpx.TimeoutException as exc:
+            raise SttError(SttErrorCode.TIMEOUT, type(exc).__name__) from exc
+        except httpx.RequestError as exc:
+            raise SttError(SttErrorCode.PROVIDER_ERROR, type(exc).__name__) from exc
+
+        status = response.status_code
+        if status in (401, 403):
+            raise SttError(SttErrorCode.PROVIDER_UNAVAILABLE, f"http_{status}")
+        if status == 429:
+            raise SttError(SttErrorCode.RATE_LIMITED, "http_429")
+        if status == 413:
+            raise SttError(SttErrorCode.AUDIO_TOO_LARGE, "http_413")
+        if status in (400, 415, 422):
+            raise SttError(SttErrorCode.UNSUPPORTED_AUDIO, f"http_{status}")
+        if status >= 400:
+            raise SttError(SttErrorCode.PROVIDER_ERROR, f"http_{status}")
+
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise SttError(SttErrorCode.PROVIDER_ERROR, "invalid_json") from exc
+
+        if not isinstance(payload, dict):
+            raise SttError(SttErrorCode.PROVIDER_ERROR, "invalid_response")
+
+        results = payload.get("results")
+        if not isinstance(results, dict):
+            raise SttError(SttErrorCode.PROVIDER_ERROR, "invalid_response")
+
+        channels = results.get("channels")
+        first_channel = (
+            channels[0]
+            if isinstance(channels, list) and channels and isinstance(channels[0], dict)
+            else None
+        )
+        alternatives = first_channel.get("alternatives") if first_channel is not None else None
+        first_alt = (
+            alternatives[0]
+            if isinstance(alternatives, list)
+            and alternatives
+            and isinstance(alternatives[0], dict)
+            else None
+        )
+        if first_alt is None:
+            raise SttError(SttErrorCode.NO_SPEECH, "empty_transcript")
+
+        raw_transcript = first_alt.get("transcript")
+        text = raw_transcript.strip() if isinstance(raw_transcript, str) else ""
+        if not text:
+            raise SttError(SttErrorCode.NO_SPEECH, "empty_transcript")
+
+        confidence = _to_finite_float(first_alt.get("confidence"))
+        low_confidence = confidence is not None and confidence < _DEEPGRAM_LOW_CONFIDENCE_THRESHOLD
+        return SttProviderDetails(
+            text=text,
+            low_confidence=low_confidence,
+        )
 
     async def transcribe(
         self,
@@ -1310,23 +1518,28 @@ async def _call_fallback_within_budget(
 
 
 class FallbackSttProvider:
-    """Điều phối STT 2 nhánh có định tuyến theo ``purpose`` và ngân sách timeout riêng cho nhánh chính."""
+    """Điều phối STT 2 hoặc 3 nhánh có định tuyến theo ``purpose`` và ngân sách timeout riêng cho từng tầng."""
 
     def __init__(
         self,
         *,
         primary: SttProvider,
         fallback: SttProvider,
+        tertiary: SttProvider | None = None,
         prefer_fallback_purposes: frozenset[str] = frozenset(),
         primary_timeout_seconds: float | None = None,
         total_timeout_seconds: float | None = None,
     ) -> None:
         self._primary = primary
         self._fallback = fallback
+        self._tertiary = tertiary
         self._prefer_fallback_purposes = prefer_fallback_purposes
         self._primary_timeout_seconds = primary_timeout_seconds
         self._total_timeout_seconds = total_timeout_seconds
-        self.name = f"{primary.name}->{fallback.name}"
+        if tertiary is not None:
+            self.name = f"{primary.name}->{fallback.name}->{tertiary.name}"
+        else:
+            self.name = f"{primary.name}->{fallback.name}"
 
     async def transcribe_verbose_with_provider(
         self,
@@ -1339,6 +1552,7 @@ class FallbackSttProvider:
             first, second = self._fallback, self._primary
         else:
             first, second = self._primary, self._fallback
+        third = self._tertiary
 
         started = time.perf_counter()
         first_timeout: float | None = self._primary_timeout_seconds
@@ -1383,8 +1597,66 @@ class FallbackSttProvider:
                 second.name,
             )
 
+        if third is None:
+            details = await _call_fallback_within_budget(
+                second,
+                audio,
+                mime_type,
+                purpose=purpose,
+                contextual_hints=contextual_hints,
+                started=started,
+                total_timeout_seconds=self._total_timeout_seconds,
+            )
+            return details, second.name
+
+        # Chuỗi 3 tầng: chừa phần quỹ thời gian cho Tier 3 nếu Tier 2 bị treo timeout.
+        second_timeout: float | None = None
+        if self._total_timeout_seconds is not None:
+            remaining = self._total_timeout_seconds - (time.perf_counter() - started)
+            if remaining <= 0.0:
+                raise SttError(SttErrorCode.TIMEOUT, "fallback_timeout")
+            second_timeout = remaining * 0.6
+        elif self._primary_timeout_seconds is not None:
+            second_timeout = self._primary_timeout_seconds
+
+        try:
+            second_coro = _call_provider_details(
+                second,
+                audio,
+                mime_type,
+                purpose=purpose,
+                contextual_hints=contextual_hints,
+            )
+            if second_timeout is not None:
+                try:
+                    details = await asyncio.wait_for(second_coro, timeout=second_timeout)
+                except TimeoutError as exc:
+                    raise SttError(SttErrorCode.TIMEOUT, "secondary_timeout") from exc
+            else:
+                details = await second_coro
+            return details, second.name
+        except SttError as exc:
+            if not (exc.code == SttErrorCode.PROVIDER_UNAVAILABLE or exc.retryable):
+                raise
+            logger.warning(
+                "STT tầng 2 (%s) lỗi %s; chuyển sang tầng 3 (%s).",
+                second.name,
+                exc.code,
+                third.name,
+            )
+        except Exception as exc:
+            mapped = map_provider_exception(exc)
+            if not (mapped.code == SttErrorCode.PROVIDER_UNAVAILABLE or mapped.retryable):
+                raise mapped from exc
+            logger.warning(
+                "STT tầng 2 (%s) gặp sự cố %s; chuyển sang tầng 3 (%s).",
+                second.name,
+                mapped.code,
+                third.name,
+            )
+
         details = await _call_fallback_within_budget(
-            second,
+            third,
             audio,
             mime_type,
             purpose=purpose,
@@ -1392,7 +1664,7 @@ class FallbackSttProvider:
             started=started,
             total_timeout_seconds=self._total_timeout_seconds,
         )
-        return details, second.name
+        return details, third.name
 
     async def transcribe_with_provider(
         self,
@@ -1602,7 +1874,8 @@ class VoiceService:
             low_confidence = False
         else:
             low_confidence = bool(
-                (details.no_speech_prob is not None and details.no_speech_prob > 0.7)
+                details.low_confidence
+                or (details.no_speech_prob is not None and details.no_speech_prob > 0.7)
                 or (details.avg_logprob is not None and details.avg_logprob < -1.0)
             )
 
@@ -1652,25 +1925,76 @@ def _build_groq_stt_provider(cfg: Settings) -> GroqWhisperSttProvider:
     )
 
 
+def _build_deepgram_stt_provider(cfg: Settings) -> DeepgramSttProvider:
+    return DeepgramSttProvider(
+        api_key=cfg.DEEPGRAM_API_KEY.strip() if cfg.has_deepgram_key else "",
+        model=cfg.DEEPGRAM_STT_MODEL,
+        language_code=cfg.VOICE_STT_LANGUAGE,
+        punctuate=cfg.DEEPGRAM_STT_PUNCTUATE,
+        smart_format=cfg.DEEPGRAM_STT_SMART_FORMAT,
+        base_url=cfg.DEEPGRAM_STT_BASE_URL,
+        use_keyterms=cfg.DEEPGRAM_STT_USE_KEYTERMS,
+        timeout_seconds=cfg.DEEPGRAM_STT_TIMEOUT_SECONDS,
+    )
+
+
 def build_voice_service(app_settings: Settings | None = None) -> VoiceService:
-    """Tạo VoiceService theo cấu hình ``VOICE_STT_PROVIDER`` (``gemini``, ``groq``, ``auto``, ``fake``)."""
+    """Tạo VoiceService theo cấu hình ``VOICE_STT_PROVIDER`` (``deepgram``, ``gemini``, ``groq``, ``auto``, ``fake``)."""
     cfg = app_settings or settings
     provider: SttProvider
     fallback: SttProvider | None = None
+    dg_primary_timeout = min(cfg.DEEPGRAM_STT_TIMEOUT_SECONDS, cfg.VOICE_STT_PRIMARY_TIMEOUT_SECONDS)
     if cfg.VOICE_STT_PROVIDER == "fake":
         provider = FakeSttProvider()
     elif cfg.VOICE_STT_PROVIDER == "groq":
         provider = _build_groq_stt_provider(cfg)
+    elif cfg.VOICE_STT_PROVIDER == "deepgram":
+        deepgram = _build_deepgram_stt_provider(cfg)
+        has_gemini = cfg.has_gemini_auth
+        has_groq = cfg.has_groq_key
+        if has_gemini and has_groq:
+            provider = FallbackSttProvider(
+                primary=deepgram,
+                fallback=_build_gemini_stt_provider(cfg),
+                tertiary=_build_groq_stt_provider(cfg),
+                primary_timeout_seconds=dg_primary_timeout,
+                total_timeout_seconds=cfg.VOICE_STT_TIMEOUT_SECONDS,
+            )
+        elif has_gemini:
+            provider = FallbackSttProvider(
+                primary=deepgram,
+                fallback=_build_gemini_stt_provider(cfg),
+                primary_timeout_seconds=dg_primary_timeout,
+                total_timeout_seconds=cfg.VOICE_STT_TIMEOUT_SECONDS,
+            )
+        elif has_groq:
+            provider = FallbackSttProvider(
+                primary=deepgram,
+                fallback=_build_groq_stt_provider(cfg),
+                primary_timeout_seconds=dg_primary_timeout,
+                total_timeout_seconds=cfg.VOICE_STT_TIMEOUT_SECONDS,
+            )
+        else:
+            provider = deepgram
     elif cfg.VOICE_STT_PROVIDER == "auto":
-        provider = FallbackSttProvider(
-            primary=_build_gemini_stt_provider(cfg),
-            fallback=_build_groq_stt_provider(cfg),
-            prefer_fallback_purposes=(
-                frozenset({"uf5_checkin"}) if cfg.VOICE_STT_UF5_PREFER_GROQ else frozenset()
-            ),
-            primary_timeout_seconds=cfg.VOICE_STT_PRIMARY_TIMEOUT_SECONDS,
-            total_timeout_seconds=cfg.VOICE_STT_TIMEOUT_SECONDS,
-        )
+        if cfg.has_deepgram_key:
+            provider = FallbackSttProvider(
+                primary=_build_deepgram_stt_provider(cfg),
+                fallback=_build_gemini_stt_provider(cfg),
+                tertiary=_build_groq_stt_provider(cfg),
+                primary_timeout_seconds=dg_primary_timeout,
+                total_timeout_seconds=cfg.VOICE_STT_TIMEOUT_SECONDS,
+            )
+        else:
+            provider = FallbackSttProvider(
+                primary=_build_gemini_stt_provider(cfg),
+                fallback=_build_groq_stt_provider(cfg),
+                prefer_fallback_purposes=(
+                    frozenset({"uf5_checkin"}) if cfg.VOICE_STT_UF5_PREFER_GROQ else frozenset()
+                ),
+                primary_timeout_seconds=cfg.VOICE_STT_PRIMARY_TIMEOUT_SECONDS,
+                total_timeout_seconds=cfg.VOICE_STT_TIMEOUT_SECONDS,
+            )
     else:
         provider = _build_gemini_stt_provider(cfg)
         fallback = _build_groq_stt_provider(cfg) if cfg.has_groq_key else None

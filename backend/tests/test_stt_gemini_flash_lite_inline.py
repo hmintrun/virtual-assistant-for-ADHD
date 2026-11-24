@@ -510,6 +510,7 @@ async def test_purpose_aware_routing_default_and_disabled_flag() -> None:
         cfg = Settings(
             _env_file=None,
             VOICE_STT_PROVIDER="auto",
+            DEEPGRAM_API_KEY="",
             GEMINI_API_KEY="test-gemini-key",
             GROQ_API_KEY="test-groq-key",
             VOICE_STT_UF5_PREFER_GROQ=prefer_groq_for_uf5,

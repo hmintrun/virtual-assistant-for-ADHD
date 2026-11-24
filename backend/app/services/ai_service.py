@@ -111,7 +111,7 @@ _UF1_AUDIO_NO_SPEECH_SENTINEL_RE = re.compile(
     r"^[\s\"'“”`.,!?;:\-–—…()]*\[\s*(?:no[_\s-]*speech|silence|inaudible)\s*\][\s\"'“”`.,!?;:\-–—…()]*$",
     re.IGNORECASE,
 )
-_UF1_HINT_UNSAFE_RE = re.compile(r"[\r\n\t`\"'\[\]{}<>|\\]+")
+_UF1_HINT_UNSAFE_RE = re.compile(r"[\x00-\x1f\x7f\r\n\t`\"'\[\]{}<>|\\#]+")
 _UF1_MAX_HINT_CHARS = 400
 
 
@@ -201,8 +201,8 @@ _UF1_WEEKDAY_RE = re.compile(
     re.IGNORECASE,
 )
 _UF1_DEFAULT_SCHED_RE = re.compile(
-    r"(?:(?:dùng|sử\s+dụng|lấy|áp\s+dụng|theo|giống)\s+(?:lại\s+)?(?:khung\s+)?(?:lịch|giờ(?:\s+rảnh)?)\s+mặc\s+định"
-    r"|(?:lịch|giờ(?:\s+rảnh)?|khung(?:\s+giờ)?)\s+mặc\s+định(?:\s+(?:của\s+mình|đã\s+lưu|nhé|nha|đi))?)",
+    r"(?:(?:dùng|sử\s+dụng|lấy|áp\s+dụng|theo|giống)\s+(?:lại\s+)?(?:khung\s+)?(?:lịch|giờ(?:\s+(?:rảnh|rãnh))?)\s+mặc\s+định"
+    r"|(?:lịch|giờ(?:\s+(?:rảnh|rãnh))?|khung(?:\s+giờ(?:\s+(?:rảnh|rãnh))?)?)\s+mặc\s+định(?:\s+(?:của\s+(?:mình|tôi)|đã\s+lưu|nhé|nha|đi))?)",
     re.IGNORECASE,
 )
 _UF1_DEFAULT_AVAIL_EXCLUDE_RE = re.compile(
@@ -352,8 +352,137 @@ _TIER3_WEEKDAYS_RE = re.compile(
     r"\bthứ\s*(?:2|hai)\s*(?:đến|tới|-|–)\s*thứ\s*(?:6|sáu)\b", re.IGNORECASE
 )
 _TIER3_WEEKEND_RE = re.compile(r"\bcuối\s+tuần\b", re.IGNORECASE)
-_TIER3_BUSY_HINT_RE = re.compile(r"\b(?:bận|trừ|ngoại\s+trừ|nghỉ|họp|không\s+rảnh)\b", re.IGNORECASE)
+_TIER3_BUSY_HINT_RE = re.compile(
+    r"\b(?:bận|kẹt|trừ|ngoại\s+trừ|nghỉ|họp|không\s+rảnh)\b", re.IGNORECASE
+)
 _EXPLICIT_DEADLINE_WORD_RE = re.compile(r"\b(?:hạn(?:\s+chót)?|deadline)\b", re.IGNORECASE)
+_T19_DEADLINE_KEYWORD_RE = re.compile(
+    r"\b(?:hạn(?:\s+chót)?|deadline|nộp|chậm\s+nhất|trước|hoàn\s+thành|kết\s+thúc|xong)\b",
+    re.IGNORECASE,
+)
+_T02_SINGLE_WINDOW_COMPLETION_RE = re.compile(
+    r"\blàm\s+(?:gọn|một\s+lèo|xong(?:\s+luôn)?|dứt\s+điểm)\b[^,.;!?\n]{0,25}\b(?:trong|vào)\s+(?:đúng\s+)?(?:buổi|sáng|trưa|chiều|tối|đêm|khuya|hôm|ngày|thứ|chủ\s+nhật|cn|khung|phiên|\d)",
+    re.IGNORECASE,
+)
+_SCOPE_INDECISION_RE = re.compile(
+    r"\b(?:phân\s+vân|chưa\s+chốt|chưa\s+biết\s+(?:nên|chọn)|không\s+biết\s+nên|hay\s+là|hoặc)\b",
+    re.IGNORECASE,
+)
+_SCOPE_DISJUNCTION_HAY_RE = re.compile(
+    r"\b(?:\d+|một|hai|ba|bốn|tư|năm|sáu|bảy|bẩy|tám|chín|mười)\s+[^\W\d_]+[^,.;!?\n]{0,25}\bhay\b"
+    r"|\bhay\s+(?:làm|viết|soạn|chọn|là|\d+|một|hai|ba|bốn|tư|năm|sáu|bảy|bẩy|tám|chín|mười)\b",
+    re.IGNORECASE,
+)
+_SCOPE_CARDINAL_NUM_PAT = (
+    r"(?:100|[1-9]\d?"
+    r"|một\s+trăm"
+    r"|(?:hai|ba|bốn|năm|sáu|bảy|bẩy|tám|chín)\s+mươi(?:\s+(?:mốt|một|hai|ba|tư|bốn|lăm|năm|sáu|bảy|bẩy|tám|chín))?"
+    r"|mười(?:\s+(?:một|hai|ba|bốn|lăm|năm|sáu|bảy|bẩy|tám|chín))?"
+    r"|một|hai|ba|bốn|năm|sáu|bảy|bẩy|tám|chín)"
+)
+_SCOPE_UNIT_PAT = (
+    r"(?:trang|slide|câu(?:\s+hỏi)?|bài(?:\s+(?:tập|lab|luận|báo\s+cáo|viết|thuyết\s+trình))?"
+    r"|chương|phần|video|màn\s+hình|biểu\s+mẫu|bảng|tập|kệ|hóa\s+đơn"
+    r"|đề(?:\s+thi)?|module|unit\s+test|mục|mẫu|phim|clip|ảnh|tờ|cuốn|quyển)"
+)
+_SCOPE_QUANTITATIVE_RE = re.compile(
+    rf"(?<![\w/:.\-])(?P<num>{_SCOPE_CARDINAL_NUM_PAT})(?![\d/:hHgG])\s+(?P<unit>{_SCOPE_UNIT_PAT})\b"
+    r"(?P<tail>(?:\s+(?!(?:trong|vào|từ|đến|tới|trước|sau|hạn|hẹn|hạng|rảnh|bận|kẹt|nhưng|trừ|ngoại|mà|và|hay|hoặc|cho|với|để|về|ở|tại|lúc|ngày|hôm|mai|mốt|tối|sáng|trưa|chiều|đêm|khuya|thứ|chủ|cn|tuần|tháng|năm|nhé|nha|ạ)\b)[^\W\d_]+){0,6})",
+    re.IGNORECASE,
+)
+_SCOPE_ORDINAL_PREFIX_RE = re.compile(
+    r"\b(?:thứ|lần|bước|chương|phần|bài|mục|câu|hạng|ngày|tháng|năm)\s+$",
+    re.IGNORECASE,
+)
+_VI_CARDINAL_DIGIT_MAP: dict[str, int] = {
+    "một": 1,
+    "mốt": 1,
+    "hai": 2,
+    "ba": 3,
+    "bốn": 4,
+    "tư": 4,
+    "năm": 5,
+    "lăm": 5,
+    "sáu": 6,
+    "bảy": 7,
+    "bẩy": 7,
+    "tám": 8,
+    "chín": 9,
+}
+
+
+def _parse_scope_cardinal_value(raw_num: str) -> int | None:
+    cleaned = " ".join(raw_num.strip().lower().split())
+    if cleaned.isdigit():
+        val = int(cleaned)
+        return val if 1 <= val <= 100 else None
+    if cleaned == "một trăm":
+        return 100
+    if cleaned == "mười":
+        return 10
+    if cleaned.startswith("mười "):
+        ones = _VI_CARDINAL_DIGIT_MAP.get(cleaned.split(" ", 1)[1])
+        return (10 + ones) if ones is not None else None
+    if " mươi" in cleaned:
+        parts = cleaned.split(" mươi", 1)
+        tens = _VI_CARDINAL_DIGIT_MAP.get(parts[0].strip())
+        if tens is None:
+            return None
+        rest = parts[1].strip()
+        if not rest:
+            return tens * 10
+        ones = _VI_CARDINAL_DIGIT_MAP.get(rest)
+        return (tens * 10 + ones) if ones is not None else None
+    return _VI_CARDINAL_DIGIT_MAP.get(cleaned)
+
+
+def _extract_grounded_quantitative_scope(
+    *,
+    title: str | None,
+    content: str | None,
+    user_input: str,
+) -> str | None:
+    """Khôi phục scope định lượng chuẩn ngữ pháp (<số 1..100> <đơn vị>) khi có thật ở cả title/content lẫn user_input."""
+    if not user_input or not user_input.strip():
+        return None
+    norm_input = normalize_vietnamese_transcript(user_input)
+    for txt in (user_input, norm_input, content or "", title or ""):
+        if txt and (_SCOPE_INDECISION_RE.search(txt) or _SCOPE_DISJUNCTION_HAY_RE.search(txt)):
+            return None
+
+    def _find_matches(src: str) -> list[tuple[int, str, str]]:
+        found: list[tuple[int, str, str]] = []
+        if not src or not src.strip():
+            return found
+        for m in _SCOPE_QUANTITATIVE_RE.finditer(src):
+            prefix = src[max(0, m.start() - 20) : m.start()]
+            if _SCOPE_ORDINAL_PREFIX_RE.search(prefix):
+                continue
+            num_val = _parse_scope_cardinal_value(m.group("num"))
+            if num_val is None:
+                continue
+            unit_key = " ".join(m.group("unit").strip().lower().split())
+            phrase = " ".join(m.group(0).split()).strip(" ,.;:!?-–—")
+            if phrase:
+                found.append((num_val, unit_key, phrase))
+        return found
+
+    input_pairs: set[tuple[int, str]] = set()
+    for src_in in (user_input, norm_input):
+        for num_val, unit_key, _ in _find_matches(src_in):
+            input_pairs.add((num_val, unit_key))
+            input_pairs.add((num_val, unit_key.split(" ", 1)[0]))
+    if not input_pairs:
+        return None
+
+    for candidate_src in (content or "", title or ""):
+        for num_val, unit_key, phrase in _find_matches(candidate_src):
+            if (num_val, unit_key) in input_pairs or (
+                num_val,
+                unit_key.split(" ", 1)[0],
+            ) in input_pairs:
+                return phrase
+    return None
 _TIER3_DEADLINE_PREFIX_RE = re.compile(r"\b(?:hạn(?:\s+chót)?|trước|deadline)\b", re.IGNORECASE)
 _TIER3_NON_WEEKDAY_ORDINAL_RE = re.compile(
     r"\b(?:lần|bước|chương|phần|tuần|ngày|buổi|mục|câu|bài|phương\s+án|ý|hạng|tập|vị\s+trí)\s+thứ\s*"
@@ -517,6 +646,163 @@ def _content_word_tokens(text: str) -> set[str]:
     return {_fold_vietnamese_ascii(tok) for tok in raw_tokens if len(tok) >= 2}
 
 
+_VI_DIACRITIC_RE = re.compile(
+    r"[àáạảãâầấậẩẫăằắặẳẵèéẹẻẽêềếệểễìíịỉĩòóọỏõôồốộổỗơờớợởỡùúụủũưừứựửữỳýỵỷỹđ]",
+    re.IGNORECASE,
+)
+_VI_ASCII_COMMON_WORDS: frozenset[str] = frozenset(
+    {
+        "lam",
+        "viet",
+        "hoc",
+        "ranh",
+        "ban",
+        "toi",
+        "sang",
+        "chieu",
+        "trua",
+        "ngay",
+        "mai",
+        "mot",
+        "tuan",
+        "thu",
+        "chu",
+        "nhat",
+        "han",
+        "nop",
+        "xong",
+        "truoc",
+        "sau",
+        "tu",
+        "den",
+        "khong",
+        "duoc",
+        "giup",
+        "minh",
+        "can",
+        "muon",
+        "bao",
+        "cao",
+        "bai",
+        "trang",
+        "gio",
+        "phut",
+        "tieng",
+        "nhung",
+        "hoac",
+        "nha",
+        "nhe",
+    }
+)
+_EN_CLARIFICATION_WORDS: frozenset[str] = frozenset(
+    {
+        "do",
+        "does",
+        "can",
+        "you",
+        "is",
+        "are",
+        "should",
+        "would",
+        "could",
+        "please",
+        "want",
+        "keep",
+        "provide",
+        "specify",
+        "what",
+        "when",
+        "which",
+        "your",
+        "the",
+        "about",
+        "this",
+        "for",
+        "with",
+        "from",
+        "to",
+        "any",
+        "additional",
+        "time",
+        "date",
+        "scope",
+        "task",
+        "due",
+        "window",
+        "schedule",
+        "deadline",
+        "confirm",
+        "clarify",
+    }
+)
+_ASCII_WORD_RE = re.compile(r"[a-zA-Z]+")
+
+
+def _is_predominantly_english(text: str) -> bool:
+    """Nhận diện câu hỏi/thông báo chủ yếu bằng tiếng Anh, tránh dương tính giả với thuật ngữ ngắn."""
+    if not text or not text.strip():
+        return False
+    normalized = unicodedata.normalize("NFC", text).strip()
+    if _VI_DIACRITIC_RE.search(normalized):
+        return False
+    alpha_chars = [ch for ch in normalized if ch.isalpha()]
+    if not alpha_chars:
+        return False
+    ascii_ratio = sum(ch.isascii() for ch in alpha_chars) / len(alpha_chars)
+    if ascii_ratio < 0.85:
+        return False
+    matched_en = {
+        w.lower()
+        for w in _ASCII_WORD_RE.findall(normalized)
+        if w.lower() in _EN_CLARIFICATION_WORDS
+    }
+    return len(matched_en) >= 2
+
+
+def _is_vietnamese_input(text: str) -> bool:
+    """Kiểm tra đầu vào là tiếng Việt (có dấu tiếng Việt hoặc >= 2 từ tiếng Việt phổ biến)."""
+    if not text or not text.strip():
+        return False
+    normalized = unicodedata.normalize("NFC", text).strip()
+    if _VI_DIACRITIC_RE.search(normalized):
+        return True
+    if _is_predominantly_english(normalized):
+        return False
+    matched_vi = {
+        w.lower()
+        for w in _ASCII_WORD_RE.findall(normalized)
+        if w.lower() in _VI_ASCII_COMMON_WORDS
+    }
+    return len(matched_vi) >= 2
+
+
+def _is_degenerate_uf1_extraction(
+    payload: LLMTaskExtractionPayload,
+    user_input: str,
+    previous_draft: LLMTaskExtractionPayload | None = None,
+) -> bool:
+    """Kiểm tra đầu ra UF1 suy biến (rỗng toàn bộ trên câu đủ nghĩa hoặc hỏi lại bằng tiếng Anh)."""
+    _ = previous_draft
+    has_core_field = bool(
+        (payload.title and payload.title.strip())
+        or (payload.content and payload.content.strip())
+        or (payload.scope and payload.scope.strip())
+        or payload.structured_free_windows
+        or any(isinstance(s, str) and s.strip() for s in payload.free_time_slots)
+        or payload.deadline is not None
+        or payload.time_constraint is not None
+    )
+    if len(_content_word_tokens(user_input)) >= 4 and not has_core_field:
+        return True
+    if _is_vietnamese_input(user_input):
+        if any(_is_predominantly_english(q) for q in payload.clarification_questions):
+            return True
+        for issue in payload.clarification_issues:
+            if _is_predominantly_english(issue.message) or _is_predominantly_english(issue.question):
+                return True
+    return False
+
+
 def _strip_time_clauses_from_scope(
     scope: str,
     window_pairs: set[tuple[str, str]] | None = None,
@@ -654,9 +940,20 @@ def _is_deadline_or_busy_only_anchor(anchor: TemporalAnchor, user_input: str = "
 
 
 _ABANDONED_REPAIR_PIVOT_RE = re.compile(
-    r"\b(?:à\s+nhầm|à\s+quên|à\s+không|sửa\s+lại|đính\s+chính|thay\s+vì|thôi\s+đổi|đổi\s+sang|ý\s+(?:mình|tôi|em)\s+là|không\s+phải)\b",
+    r"\b(?:à\s+nhầm|à\s+quên|à\s+không|sửa\s+lại|đính\s+chính|thay\s+vì|thôi\s+đổi|đổi\s+sang|đổi\s+thành|chuyển\s+sang|bỏ\s+.{1,40}?\s+ra|hủy(?:\s+bỏ)?|ý\s+(?:mình|tôi|em)\s+là|không\s+phải)\b",
     re.IGNORECASE,
 )
+_ABANDONED_DEADLINE_CLAUSE_RE = re.compile(
+    r"\b(?:hạn(?:\s+chót)?|deadline|nộp)\b",
+    re.IGNORECASE,
+)
+_H03_SELF_REPAIR_PIVOT_RE = re.compile(
+    r"\b(?:à\s+nhầm|à\s+quên|thôi\s+đổi(?:\s+(?:sang|thành))?|đổi\s+sang|đổi\s+thành|sửa\s+lại\s+là)\b",
+    re.IGNORECASE,
+)
+_H03_THAY_VI_RE = re.compile(r"\bthay\s+vì\b", re.IGNORECASE)
+_H03_AFTER_BOUNDARY_RE = re.compile(r"[,;.\n!?]")
+_H03_BEFORE_SENTENCE_BOUNDARY_RE = re.compile(r"[.\n!?]")
 _I4_PURE_TEMPORAL_FOLDED_TOKENS: frozenset[str] = frozenset(
     {
         "sang",
@@ -742,6 +1039,19 @@ def _filter_abandoned_temporal_anchors(
             ]
             if pre_repair_hits:
                 candidate_hits = pre_repair_hits
+        if len(tokens) <= 2 and len(candidate_hits) > 1:
+            non_deadline_hits = [
+                (ms, me)
+                for ms, me in candidate_hits
+                if not (
+                    _ABANDONED_DEADLINE_CLAUSE_RE.search(
+                        _same_clause_prefix(norm_source, ms, lookback=45)
+                    )
+                    or _ABANDONED_DEADLINE_CLAUSE_RE.search(norm_source[ms:me])
+                )
+            ]
+            if non_deadline_hits:
+                candidate_hits = non_deadline_hits
         abandoned_spans.extend(candidate_hits)
 
     if not abandoned_spans:
@@ -797,6 +1107,259 @@ def _filter_abandoned_temporal_anchors(
             continue
         kept.append(anchor)
     return kept
+
+
+def _window_day_time_key(window: ExtractedFreeWindowSchema) -> tuple[Any, ...]:
+    return (
+        window.date,
+        window.weekday,
+        tuple(sorted(window.weekdays)) if window.weekdays else None,
+        window.start_local,
+        window.end_local,
+    )
+
+
+def _is_window_day_compatible_with_anchor(
+    window: ExtractedFreeWindowSchema,
+    anchor: TemporalAnchor,
+) -> bool:
+    if window.date and anchor.resolved_date and window.date != anchor.resolved_date:
+        return False
+    if window.weekday is not None and anchor.iso_weekday is not None:
+        if window.weekday != anchor.iso_weekday:
+            return False
+    if window.date and anchor.iso_weekday is not None:
+        try:
+            if date.fromisoformat(window.date).isoweekday() != anchor.iso_weekday:
+                return False
+        except ValueError:
+            pass
+    return True
+
+
+def _anchors_same_day_and_time(a_first: TemporalAnchor, a_second: TemporalAnchor) -> bool:
+    same_day = False
+    if a_first.resolved_date and a_second.resolved_date:
+        same_day = a_first.resolved_date == a_second.resolved_date
+    elif a_first.iso_weekday is not None and a_second.iso_weekday is not None:
+        same_day = a_first.iso_weekday == a_second.iso_weekday
+    if not same_day:
+        return False
+    if a_first.start_local and a_second.start_local:
+        if a_first.start_local != a_second.start_local:
+            return False
+        if a_first.end_local and a_second.end_local and a_first.end_local != a_second.end_local:
+            return False
+    return True
+
+
+def _prune_self_repaired_windows(
+    windows: Sequence[ExtractedFreeWindowSchema],
+    user_input: str,
+    *,
+    reference_now: datetime,
+    timezone: str,
+) -> tuple[list[ExtractedFreeWindowSchema], set[int]]:
+    """UF1-H03: Loại xác định cửa sổ rảnh bị tự đính chính qua repair pivot hoặc 'thay vì'."""
+    if not windows or not user_input or not user_input.strip():
+        return list(windows), set()
+
+    raw_pivots = list(_H03_SELF_REPAIR_PIVOT_RE.finditer(user_input))
+    thay_vi_matches = list(_H03_THAY_VI_RE.finditer(user_input))
+    if not raw_pivots and not thay_vi_matches:
+        return list(windows), set()
+
+    pos_indices = [
+        idx
+        for idx, w in enumerate(windows)
+        if not w.is_excluded
+        and w.op in ("add", "replace_day")
+        and w.kind in ("specific_date", "weekly_rule")
+    ]
+    if len(pos_indices) < 2:
+        return list(windows), set()
+
+    split_spans = sorted(
+        [(m.start(), m.end()) for m in (*raw_pivots, *thay_vi_matches)],
+        key=lambda sp: sp[0],
+    )
+    seg_anchors: list[TemporalAnchor] = []
+    cursor = 0
+    for sp_start, sp_end in split_spans:
+        if sp_start > cursor:
+            seg_text = user_input[cursor:sp_start]
+            for a in extract_temporal_anchors(
+                seg_text, reference_now=reference_now, timezone=timezone
+            ):
+                seg_anchors.append(
+                    a.model_copy(
+                        update={
+                            "span_start": a.span_start + cursor,
+                            "span_end": a.span_end + cursor,
+                        }
+                    )
+                )
+        cursor = max(cursor, sp_end)
+    if cursor < len(user_input):
+        seg_text = user_input[cursor:]
+        for a in extract_temporal_anchors(
+            seg_text, reference_now=reference_now, timezone=timezone
+        ):
+            seg_anchors.append(
+                a.model_copy(
+                    update={
+                        "span_start": a.span_start + cursor,
+                        "span_end": a.span_end + cursor,
+                    }
+                )
+            )
+
+    avail_anchors = [
+        a for a in seg_anchors if not _is_deadline_or_busy_only_anchor(a, user_input)
+    ]
+    if len(avail_anchors) < 2:
+        return list(windows), set()
+
+    # Gộp các repair pivot liên tiếp không có TemporalAnchor ở giữa thành 1 cụm duy nhất
+    pivot_clusters: list[tuple[int, int]] = []
+    for match in raw_pivots:
+        p_s, p_e = match.start(), match.end()
+        if not pivot_clusters:
+            pivot_clusters.append((p_s, p_e))
+            continue
+        prev_s, prev_e = pivot_clusters[-1]
+        has_anchor_between = any(
+            a.span_start >= prev_e and a.span_end <= p_s for a in seg_anchors
+        )
+        if not has_anchor_between:
+            pivot_clusters[-1] = (prev_s, max(prev_e, p_e))
+        else:
+            pivot_clusters.append((p_s, p_e))
+
+    def _best_anchor_in(
+        win: ExtractedFreeWindowSchema,
+        candidates: Sequence[TemporalAnchor],
+    ) -> TemporalAnchor | None:
+        best_a: TemporalAnchor | None = None
+        best_score = 0
+        for cand in candidates:
+            if not _is_window_day_compatible_with_anchor(win, cand):
+                continue
+            sc = _anchor_matches_window(win, cand, user_input)
+            if sc > best_score:
+                best_score = sc
+                best_a = cand
+        return best_a if best_score >= 2 else None
+
+    # Đánh dấu các anchor nằm ngay sau 'thay vì' (trong cùng mệnh đề <= 30 ký tự) để không nhầm là lặp dương
+    thay_vi_governed_starts: set[int] = set()
+    for tv_m in thay_vi_matches:
+        tv_end = tv_m.end()
+        after_tv = [a for a in avail_anchors if a.span_start >= tv_end]
+        if not after_tv:
+            continue
+        closest_tv = min(after_tv, key=lambda a: a.span_start)
+        gap_tv = user_input[tv_end : closest_tv.span_start]
+        if len(gap_tv) <= 30 and not _H03_AFTER_BOUNDARY_RE.search(gap_tv):
+            thay_vi_governed_starts.add(closest_tv.span_start)
+
+    pruned_indices: set[int] = set()
+    for pivot_start, pivot_end in pivot_clusters:
+        before_anchors = [a for a in avail_anchors if a.span_end <= pivot_start]
+        after_anchors = [a for a in avail_anchors if a.span_start >= pivot_end]
+        if not before_anchors or not after_anchors:
+            continue
+
+        best_before: tuple[int, TemporalAnchor] | None = None
+        best_after: tuple[int, TemporalAnchor] | None = None
+        for idx in pos_indices:
+            if idx in pruned_indices:
+                continue
+            w = windows[idx]
+            a_before = _best_anchor_in(w, before_anchors)
+            if a_before is not None and (
+                best_before is None or a_before.span_end > best_before[1].span_end
+            ):
+                best_before = (idx, a_before)
+            a_after = _best_anchor_in(w, after_anchors)
+            if a_after is not None and (
+                best_after is None or a_after.span_start < best_after[1].span_start
+            ):
+                best_after = (idx, a_after)
+
+        if best_before is None or best_after is None:
+            continue
+        idx_a, anchor_a = best_before
+        idx_b, anchor_b = best_after
+        if idx_a == idx_b:
+            continue
+        if _window_day_time_key(windows[idx_a]) == _window_day_time_key(windows[idx_b]):
+            continue
+
+        # Ràng buộc gần kề & ranh giới dấu câu cho cụm repair pivot
+        between_after = user_input[pivot_end : anchor_b.span_start]
+        if len(between_after) > 30 or _H03_AFTER_BOUNDARY_RE.search(between_after):
+            continue
+        between_before = user_input[anchor_a.span_end : pivot_start]
+        if len(between_before) > 35 or _H03_BEFORE_SENTENCE_BOUNDARY_RE.search(between_before):
+            continue
+        if any(
+            a_mid.span_start >= anchor_a.span_end and a_mid.span_end <= pivot_start
+            for a_mid in seg_anchors
+        ):
+            continue
+
+        repeats_after = any(
+            a_after.span_start >= pivot_end
+            and a_after.span_start not in thay_vi_governed_starts
+            and _anchors_same_day_and_time(anchor_a, a_after)
+            for a_after in avail_anchors
+        )
+        if repeats_after:
+            continue
+        pruned_indices.add(idx_a)
+
+    # Xử lý riêng 'X thay vì Y' / 'thay vì Y ... X': loại cửa sổ khớp anchor nằm ngay SAU 'thay vì'
+    for tv_m in thay_vi_matches:
+        tv_end = tv_m.end()
+        after_tv = [a for a in avail_anchors if a.span_start >= tv_end]
+        if not after_tv:
+            continue
+        best_y: tuple[int, TemporalAnchor] | None = None
+        for idx in pos_indices:
+            if idx in pruned_indices:
+                continue
+            a_y = _best_anchor_in(windows[idx], after_tv)
+            if a_y is not None and (best_y is None or a_y.span_start < best_y[1].span_start):
+                best_y = (idx, a_y)
+        if best_y is None:
+            continue
+        idx_y, anchor_y = best_y
+        gap_tv = user_input[tv_end : anchor_y.span_start]
+        if len(gap_tv) > 30 or _H03_AFTER_BOUNDARY_RE.search(gap_tv):
+            continue
+        has_other_positive = any(
+            other_idx != idx_y
+            and other_idx not in pruned_indices
+            and _window_day_time_key(windows[other_idx]) != _window_day_time_key(windows[idx_y])
+            for other_idx in pos_indices
+        )
+        if not has_other_positive:
+            continue
+        repeats_after_y = any(
+            a_later.span_start >= anchor_y.span_end
+            and a_later.span_start not in thay_vi_governed_starts
+            and _anchors_same_day_and_time(anchor_y, a_later)
+            for a_later in avail_anchors
+        )
+        if repeats_after_y:
+            continue
+        pruned_indices.add(idx_y)
+
+    if not pruned_indices:
+        return list(windows), set()
+    kept_windows = [w for idx, w in enumerate(windows) if idx not in pruned_indices]
+    return kept_windows, pruned_indices
 
 
 def _pick_deadline_anchor(
@@ -1095,21 +1658,21 @@ class ProviderHealthTracker:
 # ==============================================================================
 
 UF1_EXTRACTION_SYSTEM_PROMPT = """UF1 ProPlan VA(ADHD-I):trích 4 trường từ `user_raw_input`(gộp `previous_draft` nếu có):
-1.`content`&`title`:việc cần làm;BẮT BUỘC sinh `title`<=100 ký tự từ `content`(CẤM `title=null` khi có việc);`goal` nếu nêu.
-2.`scope`:phạm vi/đầu ra(giữ đủ số lượng,đơn vị,ràng buộc).VD:"10 trang Word","8 slide","3 module","4 bài"->nhận làm `scope`,CẤM `null`.Hai đầu ra chưa chọn->hỏi gộp với issue `field_path="scope",blocking=true`;không chốt thay user.
+1.`content`&`title`:việc cần làm;BẮT BUỘC `title`<=100 ký tự(CẤM `null` khi có việc);`goal` nếu nêu.
+2.`scope`:đầu ra/phạm vi(giữ số lượng,đơn vị,ràng buộc;VD:"10 trang Word","8 slide","3 module","4 bài"->CẤM `null`).Hai đầu ra chưa chọn->hỏi gộp `field_path="scope",blocking=true`;không tự chốt.
 3.`free_time_slots`&`structured_free_windows`:
-- `kind`:`'daily'`(mỗi/hằng ngày,tối nào cũng);`'weekly_rule'`(`weekday`/`weekdays`:`[1..5]`T2-T6,`[6,7]`cuối tuần);`'specific_date'`(`date` YYYY-MM-DD);`'date_range'`(`date_from`..`date_to`).
-- ISO Weekday("Thứ N"->N-1,CẤM Thứ Sáu=6):`1=T2..5=T6(Thứ Sáu),6=T7(Thứ Bảy),7=CN`.
-- `op`:`'add'`, `'replace_day'`, `'exclude'`(+`is_excluded=true`;có giờ bận cụ thể VD "bận 15h-16h" BẮT BUỘC điền `start_local`&`end_local`,chỉ `null` khi bận cả ngày),`'reset_override'`.
-- `duration_minutes`:khi có giờ đầu+thời lượng("19h30 rảnh 90p"->`start_local='19:30',duration_minutes=90`) hoặc sau sự kiện("sau họp rảnh 2 tiếng"->`duration_minutes=120,is_ambiguous=true`);`window_timezone`:IANA TZ riêng.
-- Tra ngày từ `relative_calendar_anchor`/`detected_temporal_anchors`;thiếu năm dùng năm `today`(CẤM năm cũ);"cũng giờ đó" kế thừa khung trước;tự đính chính("à nhầm","à quên","sửa lại","bỏ ... ra","thôi đổi"->liệt kê mảnh bị tự hủy vào `abandoned_phrases` trước khi chốt `structured_free_windows`&`time_constraint`;chỉ giữ vế sau).
-- Ràng buộc("tối đa X phút/ngày","ít nhất X phút trống liền","ưu tiên sau Xh","thiếu giờ mới dùng cuối tuần")->`extra_requirements`.
-- `availability_update_mode`:`'merge'`|`'replace'`;`turn_intent`:`'create_task'`|`'update_draft'`|`'clarify_only'`.
-4.`deadline`&`time_constraint`:ISO 8601 có offset(`kind='deadline'|'window'`,chỉ nêu hạn thì `start_at=current_datetime`,`deadline_at`/`finish_by_at`,`input_timezone`).
+- `kind`:`'daily'`|`'weekly_rule'`(`weekday`/`weekdays`:`[1..5]`T2-T6,`[6,7]`cuối tuần)|`'specific_date'`(`YYYY-MM-DD`)|`'date_range'`(`date_from`..`date_to`).
+- ISO Weekday("Thứ N"->N-1,CẤM T6=6):`1=T2..5=T6,6=T7,7=CN`.
+- `op`:`'add'|'replace_day'|'exclude'`(+`is_excluded=true`;giờ bận cụ thể BẮT BUỘC `start_local`&`end_local`,chỉ `null` khi bận cả ngày)|`'reset_override'`.
+- `duration_minutes`:giờ đầu+thời lượng("19h30 rảnh 90p"->`start_local='19:30',duration_minutes=90`) hoặc sau sự kiện("sau họp rảnh 2 tiếng"->`duration_minutes=120,is_ambiguous=true`);`window_timezone`:IANA TZ.
+- Tra ngày từ `relative_calendar_anchor`/`detected_temporal_anchors`;thiếu năm dùng năm `today`;"cũng giờ đó" kế thừa khung trước;tự đính chính("à nhầm","à quên","sửa lại","bỏ ... ra","thôi đổi")->liệt kê mảnh hủy vào `abandoned_phrases`,chỉ giữ vế sau.
+- Ràng buộc("tối đa Xp/ngày","ít nhất Xp trống liền","ưu tiên sau Xh")->`extra_requirements`;`availability_update_mode`:`'merge'|'replace'`;`turn_intent`:`'create_task'|'update_draft'|'clarify_only'`.
+4.`deadline`&`time_constraint`:ISO 8601 có offset(`kind='deadline'|'window'`,chỉ nêu hạn->`start_at=current_datetime`,`deadline_at`/`finish_by_at`,`input_timezone`;làm gọn 1 phiên "làm gọn/một lèo trong [ngày] A-B"->`kind='window',start_at=A,finish_by_at=B`).
 GUARDRAILS:
-- Merge `previous_draft`:giữ trường hợp lệ cũ;`locked_fields`:giữ nguyên trừ khi user nói rõ sửa;`field_review_notes` khi lệch cũ;`resolved_issue_keys`(`code|field_path|question`) khi xong.
-- Zero Hallucination:thiếu để `null`/`[]`;user đòi lịch mặc định & `default_free_windows`!=[]->copy nguyên vào `structured_free_windows`(không đòi/nói giữ nguyên thì không copy);giờ mơ hồ("tối thứ 6","sau 19h30","sau họp...")->`null` đầu/cuối thiếu,`is_ambiguous=true`,`is_complete=false`.
+- Merge `previous_draft`:giữ trường hợp lệ cũ;`locked_fields`:giữ trừ khi user nói sửa;`field_review_notes` khi lệch cũ;`resolved_issue_keys` khi xong.
+- Zero Hallucination:thiếu->`null`/`[]`;user đòi lịch mặc định & `default_free_windows`!=[]->copy vào `structured_free_windows`;giờ mơ hồ("tối T6","sau 19h30","sau họp")->`null` đầu/cuối thiếu,`is_ambiguous=true`,`is_complete=false`.
 - Conflict(`has_conflict=true`):`deadline<=current_datetime`,giờ rảnh sau `deadline` hoặc trùng kín `busy_intervals_from_calendar`.
+- Đồng âm STT:`rãnh/đánh/đảnh/cảnh` ngay trước khung giờ->giờ rảnh(trừ việc thật:`đánh giá/cảnh báo/đánh máy`);`nam/mời` trước đơn vị việc->`5`/`10` nếu rõ ngữ cảnh,ngược lại hỏi lại;sửa nhẹ thuật ngữ CNTT nghe nhầm rõ trong `title/scope`.
 - Single-Round:`is_complete=true` iff đủ 4 trường+không `is_ambiguous`+`has_conflict=false`(`clarification_questions=[]`);ngược lại `is_complete=false`,gộp câu hỏi ấm áp(W3C COGA) vào `clarification_questions`&`clarification_issues` đúng `field_path`."""
 
 UF1_AUDIO_NATIVE_SYSTEM_PROMPT = """UF1 ProPlan VA(ADHD-I) 1-Hop Audio-Native:nghe trực tiếp audio tiếng Việt+kết hợp JSON ngữ cảnh để chép `verbatim_transcript` và trích 4 trường UF1:
@@ -1122,7 +1685,7 @@ UF1_AUDIO_NATIVE_SYSTEM_PROMPT = """UF1 ProPlan VA(ADHD-I) 1-Hop Audio-Native:ng
 - `op`:`'add'`,`'replace_day'`,`'exclude'`(+`is_excluded=true`;có giờ bận cụ thể BẮT BUỘC điền `start_local`&`end_local`,chỉ `null` khi bận cả ngày),`'reset_override'`;`duration_minutes` nếu nêu thời lượng;`window_timezone` nếu nêu TZ riêng.
 - Tra ngày từ `relative_calendar_anchor`;thiếu năm dùng năm `today`;"cũng giờ đó" kế thừa khung trước;tự đính chính->liệt kê mảnh bị tự hủy vào `abandoned_phrases`,chỉ giữ vế sau.
 - Ràng buộc("tối đa X phút/ngày","ít nhất X phút trống liền","ưu tiên sau Xh")->`extra_requirements`;`availability_update_mode`:`'merge'|'replace'`;`turn_intent`:`'create_task'|'update_draft'|'clarify_only'`.
-4.`deadline`&`time_constraint`:ISO 8601 có offset(`kind='deadline'|'window'`,chỉ nêu hạn thì `start_at=current_datetime`,`deadline_at`/`finish_by_at`,`input_timezone`).
+4.`deadline`&`time_constraint`:ISO 8601 có offset(`kind='deadline'|'window'`,chỉ nêu hạn thì `start_at=current_datetime`,`deadline_at`/`finish_by_at`,`input_timezone`;cụm làm gọn 1 phiên VD "làm gọn/một lèo trong [ngày] từ [A] đến [B]"->`time_constraint(kind='window',start_at=A,finish_by_at=B)`).
 GUARDRAILS:
 - Merge `previous_draft`:giữ trường hợp lệ cũ;`locked_fields`:giữ nguyên trừ khi user nói rõ sửa;`field_review_notes` khi lệch cũ;`resolved_issue_keys`(`code|field_path|question`) khi xong.
 - Zero Hallucination:thiếu để `null`/`[]`;user đòi lịch mặc định & `default_free_windows`!=[]->copy nguyên vào `structured_free_windows`;giờ mơ hồ->`null` đầu/cuối thiếu,`is_ambiguous=true`,`is_complete=false`.
@@ -1853,6 +2416,7 @@ class AIService:
         schema_cls: type[SchemaT],
         profile: ExecutionTimingProfile,
         force_minimal_thinking: bool = False,
+        result_validator: Callable[[SchemaT], bool] | None = None,
     ) -> tuple[SchemaT, GenerationTier]:
         """
         UF1 chạy Gemini và có thể hedge sang Groq trong cùng ngân sách.
@@ -1953,7 +2517,10 @@ class AIService:
                     and not groq_only.cancelled()
                     and groq_only.exception() is None
                 ):
-                    return groq_only.result(), "tier_2_groq"
+                    groq_only_res = groq_only.result()
+                    if result_validator is not None and not result_validator(groq_only_res):
+                        raise ValueError("Degenerate structured extraction output")
+                    return groq_only_res, "tier_2_groq"
                 if groq_only.done() and loop.time() < deadline:
                     return groq_only.result(), "tier_2_groq"
                 if not groq_only.done():
@@ -2020,6 +2587,7 @@ class AIService:
             if (
                 is_uf1
                 and not from_hedge
+                and self._settings.AI_UF1_GROQ_FAST_FAIL_SECONDS > 0
                 and loop.time() > min(deadline, t0 + self._settings.AI_UF1_GROQ_FAST_FAIL_SECONDS)
             ):
                 return
@@ -2077,7 +2645,11 @@ class AIService:
                 if primary_task is not None and primary_task.done() and not primary_failed:
                     exc = primary_task.exception()
                     if exc is None:
-                        return primary_task.result(), "tier_1_gemini"
+                        primary_res = primary_task.result()
+                        if result_validator is not None and not result_validator(primary_res):
+                            exc = ValueError("Degenerate structured extraction output")
+                        else:
+                            return primary_res, "tier_1_gemini"
                     primary_failed = True
                     logger.warning(
                         "%s Primary (%s) thất bại (%s).",
@@ -2097,10 +2669,14 @@ class AIService:
                     backup_harvested = True
                     exc_b = backup_task.exception()
                     if exc_b is None:
-                        warm_result = (backup_task.result(), "tier_1_gemini")
-                        if primary_failed or now >= priority_deadline:
-                            return warm_result
-                    else:
+                        backup_res = backup_task.result()
+                        if result_validator is not None and not result_validator(backup_res):
+                            exc_b = ValueError("Degenerate structured extraction output")
+                        else:
+                            warm_result = (backup_res, "tier_1_gemini")
+                            if primary_failed or now >= priority_deadline:
+                                return warm_result
+                    if exc_b is not None:
                         logger.warning(
                             "%s Warm Backup (%s) thất bại (%s).",
                             flow_name,
@@ -2115,18 +2691,22 @@ class AIService:
                     groq_harvested = True
                     exc_g = groq_task.exception()
                     if exc_g is None:
-                        groq_pair: tuple[SchemaT, GenerationTier] = (
-                            groq_task.result(),
-                            "tier_2_groq",
-                        )
-                        all_gemini_failed = primary_failed and (
-                            not can_use_backup or backup_harvested
-                        )
-                        if all_gemini_failed or now >= priority_deadline:
-                            return warm_result or groq_pair
-                        if warm_result is None:
-                            warm_result = groq_pair
-                    else:
+                        groq_res = groq_task.result()
+                        if result_validator is not None and not result_validator(groq_res):
+                            exc_g = ValueError("Degenerate structured extraction output")
+                        else:
+                            groq_pair: tuple[SchemaT, GenerationTier] = (
+                                groq_res,
+                                "tier_2_groq",
+                            )
+                            all_gemini_failed = primary_failed and (
+                                not can_use_backup or backup_harvested
+                            )
+                            if all_gemini_failed or now >= priority_deadline:
+                                return warm_result or groq_pair
+                            if warm_result is None:
+                                warm_result = groq_pair
+                    if exc_g is not None:
                         logger.warning(
                             "%s Tier 2 (Groq) thất bại (%s).",
                             flow_name,
@@ -2325,6 +2905,9 @@ class AIService:
                 user_prompt=user_prompt,
                 schema_cls=LLMTaskExtractionPayload,
                 profile=profile,
+                result_validator=lambda payload: not _is_degenerate_uf1_extraction(
+                    payload, cleaned_input, parsed_draft
+                ),
             )
             result = TaskExtractionResult(
                 **llm_payload.model_dump(),
@@ -2401,6 +2984,8 @@ class AIService:
         if not isinstance(audio, (bytes, bytearray, memoryview)) or len(audio) == 0:
             raise ValueError("audio payload must not be empty.")
         audio_bytes = bytes(audio)
+        if len(audio_bytes) > self._settings.VOICE_MAX_AUDIO_BYTES:
+            raise ValueError("Audio payload exceeds maximum size")
         norm_mime = _normalize_audio_mime_type(mime_type)
 
         client = self._get_gemini_client()
@@ -2460,9 +3045,12 @@ class AIService:
             if len(audio_bytes) <= _UF1_AUDIO_INLINE_MAX_BYTES:
                 audio_part = types.Part.from_bytes(data=audio_bytes, mime_type=norm_mime)
             else:
-                uploaded = await client.aio.files.upload(
-                    file=io.BytesIO(audio_bytes),
-                    config={"mime_type": norm_mime},
+                uploaded = await asyncio.wait_for(
+                    client.aio.files.upload(
+                        file=io.BytesIO(audio_bytes),
+                        config={"mime_type": norm_mime},
+                    ),
+                    timeout=timeout_s,
                 )
                 uploaded_uri = getattr(uploaded, "uri", None)
                 if not uploaded_uri:
@@ -2472,6 +3060,7 @@ class AIService:
                     mime_type=getattr(uploaded, "mime_type", None) or norm_mime,
                 )
 
+            remaining_s = max(0.1, timeout_s - (time.perf_counter() - started))
             response = await asyncio.wait_for(
                 client.aio.models.generate_content(
                     model=target_model,
@@ -2483,7 +3072,7 @@ class AIService:
                         thinking_config=types.ThinkingConfig(thinking_level=thinking_level),
                     ),
                 ),
-                timeout=timeout_s,
+                timeout=remaining_s,
             )
             raw_text = getattr(response, "text", None)
             if not isinstance(raw_text, str) or not raw_text.strip():
@@ -2502,7 +3091,10 @@ class AIService:
             uploaded_name = getattr(uploaded, "name", None) if uploaded is not None else None
             if uploaded_name:
                 try:
-                    await client.aio.files.delete(name=uploaded_name)
+                    await asyncio.wait_for(
+                        client.aio.files.delete(name=uploaded_name),
+                        timeout=min(5.0, timeout_s),
+                    )
                 except Exception as del_exc:  # noqa: BLE001
                     logger.warning(
                         "Không xóa được file audio tạm trên Gemini (%s).",
@@ -2715,6 +3307,13 @@ class AIService:
         questions = list(result.clarification_questions)
         force_incomplete = False
         result_updates: dict[str, Any] = {}
+        english_questions_filtered = False
+        if _is_vietnamese_input(user_input):
+            vi_questions = [q for q in questions if not _is_predominantly_english(q)]
+            if len(vi_questions) != len(questions):
+                questions = vi_questions
+                english_questions_filtered = True
+                result_updates["clarification_questions"] = list(dict.fromkeys(questions))
 
         avail_clock_anchors = [
             a
@@ -2764,10 +3363,38 @@ class AIService:
         )
         conflicting_anchors = [a for a in active_conflict_source if a.weekday_date_conflict]
 
-        if result.structured_free_windows:
+        source_windows = list(result.structured_free_windows)
+        h03_pruned_pre = False
+        # UF1-H03 (pre-I1): loại sớm cửa sổ bị tự đính chính trước khi I1 đồng bộ ngày trên anchor gộp không dấu phẩy
+        if len(source_windows) >= 2 and user_input and user_input.strip():
+            pre_pruned_windows, pre_pruned_indices = _prune_self_repaired_windows(
+                source_windows,
+                user_input,
+                reference_now=anchor_ref_for_filter,
+                timezone=anchor_tz,
+            )
+            if pre_pruned_indices:
+                h03_pruned_pre = True
+                pre_pruned_phrases = {
+                    (source_windows[idx].raw_phrase or "").strip().casefold()
+                    for idx in pre_pruned_indices
+                    if (source_windows[idx].raw_phrase or "").strip()
+                }
+                source_windows = pre_pruned_windows
+                result_updates["structured_free_windows"] = source_windows
+                if pre_pruned_phrases and result.free_time_slots:
+                    filtered_slots = [
+                        s
+                        for s in result.free_time_slots
+                        if s.strip().casefold() not in pre_pruned_phrases
+                    ]
+                    if len(filtered_slots) != len(result.free_time_slots):
+                        result_updates["free_time_slots"] = filtered_slots
+
+        if source_windows:
             fixed_windows: list[ExtractedFreeWindowSchema] = []
-            windows_changed = False
-            for w in result.structured_free_windows:
+            windows_changed = "structured_free_windows" in result_updates
+            for w in source_windows:
                 w_payload = w.model_dump()
                 w_changed = False
                 guardrail_forced_ambiguous = False
@@ -3054,6 +3681,16 @@ class AIService:
                         ):
                             questions.append(hint)
 
+                existing_hint = str(w_payload.get("clarification_hint") or "").strip()
+                if existing_hint:
+                    if not w_payload.get("is_ambiguous"):
+                        w_payload["is_ambiguous"] = True
+                        w_changed = True
+                    guardrail_forced_ambiguous = True
+                    force_incomplete = True
+                    if existing_hint not in questions:
+                        questions.append(existing_hint)
+
                 if w_changed:
                     validated_w = ExtractedFreeWindowSchema.model_validate(w_payload)
                     if guardrail_forced_ambiguous and not validated_w.is_ambiguous:
@@ -3072,9 +3709,34 @@ class AIService:
                 result_updates["structured_free_windows"] = fixed_windows
                 current_windows = fixed_windows
             else:
-                current_windows = list(result.structured_free_windows)
+                current_windows = list(source_windows)
         else:
             current_windows = []
+
+        # UF1-H03 (post-I3): chỉ chạy nếu pre-I1 chưa cắt (VD: cửa sổ ban đầu ở dạng daily được I3b đổi sang specific_date)
+        if not h03_pruned_pre and len(current_windows) >= 2 and user_input and user_input.strip():
+            pruned_windows, pruned_indices = _prune_self_repaired_windows(
+                current_windows,
+                user_input,
+                reference_now=anchor_ref_for_filter,
+                timezone=anchor_tz,
+            )
+            if pruned_indices:
+                pruned_phrases = {
+                    (current_windows[idx].raw_phrase or "").strip().casefold()
+                    for idx in pruned_indices
+                    if (current_windows[idx].raw_phrase or "").strip()
+                }
+                current_windows = pruned_windows
+                result_updates["structured_free_windows"] = current_windows
+                if pruned_phrases and result.free_time_slots:
+                    filtered_slots = [
+                        s
+                        for s in result.free_time_slots
+                        if s.strip().casefold() not in pruned_phrases
+                    ]
+                    if len(filtered_slots) != len(result.free_time_slots):
+                        result_updates["free_time_slots"] = filtered_slots
 
         # I5: Cô lập trường scope nếu rò rỉ khung giờ rảnh (không cắt nhầm timestamp video/audio như 01:30-03:45)
         if result.scope and _I5_SCOPE_TIME_SPAN_RE.search(result.scope):
@@ -3192,8 +3854,190 @@ class AIService:
                     )
                     result_updates["clarification_issues"] = existing_issues
 
+        # Khôi phục scope định lượng chuẩn ngữ pháp khi LLM bỏ quên scope=None dù title/content + user_input có định lượng rõ
+        scope_recovered = False
+        effective_scope_now = result_updates.get("scope", result.scope)
+        has_scope_choice_issue = any(
+            iss.code in {"AI_SCOPE_CHOICE_REQUIRED", "SCOPE_CHOICE_REQUIRED"}
+            for iss in result_updates.get("clarification_issues", result.clarification_issues)
+        )
+        if (
+            (effective_scope_now is None or not str(effective_scope_now).strip())
+            and not has_scope_choice_issue
+            and user_input
+            and user_input.strip()
+        ):
+            recovered_scope = _extract_grounded_quantitative_scope(
+                title=result.title,
+                content=result.content,
+                user_input=user_input,
+            )
+            if recovered_scope:
+                scope_recovered = True
+                result_updates["scope"] = recovered_scope
+                _missing_scope_codes = {
+                    "MISSING_SCOPE",
+                    "AI_MISSING_SCOPE",
+                    "SCOPE_REQUIRED",
+                    "AI_SCOPE_REQUIRED",
+                }
+                _scope_q_kws = (
+                    "phạm vi",
+                    "đầu ra",
+                    "kết quả mong muốn",
+                    "số lượng",
+                    "bao nhiêu trang",
+                    "mấy trang",
+                    "bao nhiêu chương",
+                    "số trang",
+                    "số chương",
+                    "số bài",
+                    "số câu",
+                )
+                questions = [
+                    q for q in questions if not any(kw in q.lower() for kw in _scope_q_kws)
+                ]
+                cur_issues = list(
+                    result_updates.get("clarification_issues", result.clarification_issues)
+                )
+                filtered_scope_issues = [
+                    iss
+                    for iss in cur_issues
+                    if not (
+                        iss.code in _missing_scope_codes
+                        or (
+                            iss.field_path == "scope"
+                            and "choice" not in iss.code.lower()
+                            and "review" not in iss.code.lower()
+                            and "conflict" not in iss.code.lower()
+                        )
+                    )
+                ]
+                result_updates["clarification_issues"] = filtered_scope_issues
+                result_updates["clarification_questions"] = list(dict.fromkeys(questions))
+
         if result_updates:
             result = result.model_copy(update=result_updates)
+
+        # UF1-T02: Suy diễn time_constraint(kind="window") cho câu làm gọn trong 1 phiên cụ thể duy nhất
+        t02_synthesized_future = False
+        if (
+            result.time_constraint is None
+            and result.deadline is None
+            and not result.has_conflict
+            and user_input
+            and _T02_SINGLE_WINDOW_COMPLETION_RE.search(user_input)
+        ):
+            t02_positive_windows = [
+                w
+                for w in current_windows
+                if not w.is_excluded and w.op in ("add", "replace_day")
+            ]
+            if len(t02_positive_windows) == 1:
+                only_w = t02_positive_windows[0]
+                if (
+                    only_w.kind == "specific_date"
+                    and only_w.date
+                    and only_w.start_local
+                    and only_w.end_local
+                    and not only_w.is_ambiguous
+                    and only_w.start_local < only_w.end_local
+                ):
+                    t02_tz_name = (
+                        only_w.window_timezone.strip()
+                        if only_w.window_timezone and only_w.window_timezone.strip()
+                        else anchor_tz
+                    )
+                    try:
+                        t02_tz = ZoneInfo(t02_tz_name)
+                        resolved_t02_tz = t02_tz_name
+                    except ZoneInfoNotFoundError:
+                        try:
+                            t02_tz = ZoneInfo(timezone)
+                            resolved_t02_tz = timezone
+                        except ZoneInfoNotFoundError:
+                            t02_tz = UTC
+                            resolved_t02_tz = "UTC"
+                    try:
+                        w_d = date.fromisoformat(only_w.date)
+                        s_h, s_m = (int(p) for p in only_w.start_local.split(":", 1))
+                        e_h, e_m = (int(p) for p in only_w.end_local.split(":", 1))
+                        win_start_dt: datetime | None = datetime(
+                            w_d.year, w_d.month, w_d.day, s_h, s_m, tzinfo=t02_tz
+                        )
+                        win_end_dt: datetime | None = datetime(
+                            w_d.year, w_d.month, w_d.day, e_h, e_m, tzinfo=t02_tz
+                        )
+                    except (ValueError, TypeError):
+                        win_start_dt = None
+                        win_end_dt = None
+                    if (
+                        win_start_dt is not None
+                        and win_end_dt is not None
+                        and win_start_dt < win_end_dt
+                    ):
+                        synthesized_tc = ExtractedTimeConstraint(
+                            kind="window",
+                            start_at=win_start_dt,
+                            finish_by_at=win_end_dt,
+                            input_timezone=resolved_t02_tz,
+                        )
+                        t02_ref_dt = cls._resolve_current_dt(resolved_t02_tz, current_dt)
+                        t02_updates: dict[str, Any] = {
+                            "time_constraint": synthesized_tc,
+                            "deadline": win_end_dt,
+                        }
+                        if win_end_dt > t02_ref_dt:
+                            t02_synthesized_future = True
+                            _t02_missing_dl_codes = {
+                                "MISSING_TIME_CONSTRAINT",
+                                "AI_MISSING_TIME_CONSTRAINT",
+                                "MISSING_DEADLINE",
+                                "AI_MISSING_DEADLINE",
+                                "AI_TIME_INCOMPLETE",
+                            }
+                            questions = [
+                                q
+                                for q in questions
+                                if not (
+                                    any(
+                                        kw in q.lower()
+                                        for kw in (
+                                            "hạn chót",
+                                            "deadline",
+                                            "khi nào bạn cần hoàn thành",
+                                        )
+                                    )
+                                    and not any(
+                                        keep_kw in q.lower()
+                                        for keep_kw in (
+                                            "đã qua",
+                                            "quá khứ",
+                                            "sau hạn chót",
+                                            "mâu thuẫn",
+                                            "không khớp",
+                                        )
+                                    )
+                                )
+                            ]
+                            filtered_issues = [
+                                iss
+                                for iss in result.clarification_issues
+                                if not (
+                                    iss.code in _t02_missing_dl_codes
+                                    or (
+                                        iss.field_path == "time_constraint"
+                                        and "conflict" not in iss.code.lower()
+                                        and "confirm" not in iss.code.lower()
+                                        and "review" not in iss.code.lower()
+                                    )
+                                )
+                            ]
+                            t02_updates["clarification_questions"] = list(
+                                dict.fromkeys(questions)
+                            )
+                            t02_updates["clarification_issues"] = filtered_issues
+                        result = result.model_copy(update=t02_updates)
 
         tc = result.time_constraint
         tc_deadline = tc.deadline_at if tc is not None else None
@@ -3261,22 +4105,6 @@ class AIService:
                     )
                     end = norm_end
 
-            normalized_deadline = cls._normalize_dt_for_compare(end, current_dt)
-            if normalized_deadline <= current_dt:
-                past_question = (
-                    "Hạn chót bạn nêu đang nằm ở thời điểm đã qua so với hiện tại, "
-                    "bạn xác nhận lại ngày giờ hoàn thành mới giúp mình nhé?"
-                )
-                if not any("đã qua" in q or "quá khứ" in q for q in questions):
-                    questions.append(past_question)
-                return result.model_copy(
-                    update={
-                        "has_conflict": True,
-                        "is_complete": False,
-                        "clarification_questions": list(dict.fromkeys(questions)),
-                    }
-                )
-
             if tc is not None and tc.kind in {"deadline", "window"}:
                 if tc.kind == "window" and tc_finish_by is None and tc_deadline is not None:
                     kind: Literal["deadline", "window"] = "deadline"
@@ -3289,77 +4117,185 @@ class AIService:
             else:
                 kind = "deadline"
 
-            if tc is not None and tc.start_at is not None:
-                norm_start = cls._normalize_dt_for_compare(tc.start_at, tz_ref_dt)
-            elif (
-                previous_time_constraint is not None
-                and previous_time_constraint.start_at is not None
-                and cls._normalize_dt_for_compare(
-                    previous_time_constraint.start_at, tz_ref_dt
-                )
-                < norm_end
-            ):
-                norm_start = cls._normalize_dt_for_compare(
-                    previous_time_constraint.start_at, tz_ref_dt
-                )
-            else:
-                norm_start = tz_ref_dt
-            updated_tc = ExtractedTimeConstraint(
-                kind=kind,
-                start_at=norm_start,
-                deadline_at=norm_end if kind == "deadline" else None,
-                finish_by_at=norm_end if kind == "window" else None,
-                input_timezone=resolved_tz,
+            # UF1-T19: Bác bỏ deadline bị LLM đoán nhầm từ ngày chỉ mang ngữ nghĩa bận/kẹt
+            prev_tc_end = (
+                (previous_time_constraint.deadline_at or previous_time_constraint.finish_by_at)
+                if previous_time_constraint is not None
+                else None
             )
-            final_updates: dict[str, Any] = {
-                "deadline": norm_end,
-                "time_constraint": updated_tc,
-            }
-            positive_windows = [
-                w
-                for w in current_windows
-                if not w.is_excluded and w.op in ("add", "replace_day")
-            ]
-            if positive_windows and all(
-                (w.kind == "specific_date" and bool(w.date))
-                or (w.kind == "date_range" and bool(w.date_from))
-                for w in positive_windows
-            ) and all(
-                not w.window_timezone or w.window_timezone == resolved_tz
-                for w in positive_windows
-            ):
-                earliest_win_dates: list[date] = []
-                for w in positive_windows:
-                    raw_earliest = w.date if w.kind == "specific_date" else w.date_from
-                    if raw_earliest:
-                        try:
-                            earliest_win_dates.append(date.fromisoformat(raw_earliest))
-                        except ValueError:
-                            pass
-                if (
-                    len(earliest_win_dates) == len(positive_windows)
-                    and all(d > norm_end.date() for d in earliest_win_dates)
-                ):
-                    after_dl_q = (
-                        "Khung giờ rảnh bạn nêu đang nằm sau hạn chót hoàn thành, "
-                        "bạn kiểm tra và điều chỉnh lại giờ rảnh hoặc hạn chót giúp mình nhé?"
+            prev_tc_date = (
+                cls._normalize_dt_for_compare(prev_tc_end, tz_ref_dt).date()
+                if prev_tc_end is not None
+                else None
+            )
+            rejected_busy_deadline = False
+            if kind == "deadline" and norm_end.date() != prev_tc_date:
+                dl_day_iso = norm_end.date().isoformat()
+                dl_day_anchors = [
+                    a
+                    for a in anchors
+                    if a.resolved_date == dl_day_iso or a.explicit_date == dl_day_iso
+                ]
+                if dl_day_anchors:
+                    def _is_busy_only_day_anchor(a: TemporalAnchor) -> bool:
+                        prefix_25 = _same_clause_prefix(user_input, a.span_start, lookback=25)
+                        has_busy = bool(
+                            _TIER3_BUSY_HINT_RE.search(a.raw_span)
+                            or _TIER3_BUSY_HINT_RE.search(prefix_25)
+                        )
+                        has_dl_kw = bool(
+                            _T19_DEADLINE_KEYWORD_RE.search(a.raw_span)
+                            or _T19_DEADLINE_KEYWORD_RE.search(prefix_25)
+                        )
+                        return has_busy and not has_dl_kw
+
+                    if all(_is_busy_only_day_anchor(a) for a in dl_day_anchors):
+                        rejected_busy_deadline = True
+                        result = result.model_copy(
+                            update={"deadline": None, "time_constraint": None}
+                        )
+                        force_incomplete = True
+                        t19_dl_q = "Khi nào bạn cần hoàn thành xong công việc này (hạn chót)?"
+                        if not any(
+                            kw in q.lower()
+                            for q in questions
+                            for kw in ("hạn chót", "deadline", "khi nào bạn cần hoàn thành")
+                        ):
+                            questions.append(t19_dl_q)
+
+            if not rejected_busy_deadline:
+                normalized_deadline = cls._normalize_dt_for_compare(end, current_dt)
+                if normalized_deadline <= current_dt:
+                    past_question = (
+                        "Hạn chót bạn nêu đang nằm ở thời điểm đã qua so với hiện tại, "
+                        "bạn xác nhận lại ngày giờ hoàn thành mới giúp mình nhé?"
                     )
-                    if not any("sau hạn chót" in q.lower() or "mâu thuẫn" in q.lower() for q in questions):
-                        questions.append(after_dl_q)
-                    final_updates["has_conflict"] = True
-                    force_incomplete = True
+                    if not any("đã qua" in q or "quá khứ" in q for q in questions):
+                        questions.append(past_question)
+                    return result.model_copy(
+                        update={
+                            "has_conflict": True,
+                            "is_complete": False,
+                            "clarification_questions": list(dict.fromkeys(questions)),
+                        }
+                    )
 
-            if force_incomplete or any(w.is_ambiguous for w in current_windows):
-                final_updates["is_complete"] = False
-                final_updates["clarification_questions"] = list(dict.fromkeys(questions))
-            return result.model_copy(update=final_updates)
+                if tc is not None and tc.start_at is not None:
+                    norm_start = cls._normalize_dt_for_compare(tc.start_at, tz_ref_dt)
+                elif (
+                    previous_time_constraint is not None
+                    and previous_time_constraint.start_at is not None
+                    and cls._normalize_dt_for_compare(
+                        previous_time_constraint.start_at, tz_ref_dt
+                    )
+                    < norm_end
+                ):
+                    norm_start = cls._normalize_dt_for_compare(
+                        previous_time_constraint.start_at, tz_ref_dt
+                    )
+                else:
+                    norm_start = tz_ref_dt
+                updated_tc = ExtractedTimeConstraint(
+                    kind=kind,
+                    start_at=norm_start,
+                    deadline_at=norm_end if kind == "deadline" else None,
+                    finish_by_at=norm_end if kind == "window" else None,
+                    input_timezone=resolved_tz,
+                )
+                final_updates: dict[str, Any] = {
+                    "deadline": norm_end,
+                    "time_constraint": updated_tc,
+                }
+                positive_windows = [
+                    w
+                    for w in current_windows
+                    if not w.is_excluded and w.op in ("add", "replace_day")
+                ]
+                if positive_windows and all(
+                    (w.kind == "specific_date" and bool(w.date))
+                    or (w.kind == "date_range" and bool(w.date_from))
+                    for w in positive_windows
+                ) and all(
+                    not w.window_timezone or w.window_timezone == resolved_tz
+                    for w in positive_windows
+                ):
+                    earliest_win_dates: list[date] = []
+                    for w in positive_windows:
+                        raw_earliest = w.date if w.kind == "specific_date" else w.date_from
+                        if raw_earliest:
+                            try:
+                                earliest_win_dates.append(date.fromisoformat(raw_earliest))
+                            except ValueError:
+                                pass
+                    if (
+                        len(earliest_win_dates) == len(positive_windows)
+                        and all(d > norm_end.date() for d in earliest_win_dates)
+                    ):
+                        after_dl_q = (
+                            "Khung giờ rảnh bạn nêu đang nằm sau hạn chót hoàn thành, "
+                            "bạn kiểm tra và điều chỉnh lại giờ rảnh hoặc hạn chót giúp mình nhé?"
+                        )
+                        if not any(
+                            "sau hạn chót" in q.lower() or "mâu thuẫn" in q.lower()
+                            for q in questions
+                        ):
+                            questions.append(after_dl_q)
+                        final_updates["has_conflict"] = True
+                        force_incomplete = True
 
+                if (
+                    english_questions_filtered
+                    and not questions
+                    and (
+                        force_incomplete
+                        or not result.is_complete
+                        or any(w.is_ambiguous for w in current_windows)
+                    )
+                ):
+                    questions.append(
+                        "Bạn bổ sung hoặc xác nhận lại các thông tin còn thiếu giúp mình nhé?"
+                    )
+                if force_incomplete or any(w.is_ambiguous for w in current_windows):
+                    final_updates["is_complete"] = False
+                    final_updates["clarification_questions"] = list(dict.fromkeys(questions))
+                elif (
+                    (t02_synthesized_future or scope_recovered)
+                    and not result.has_conflict
+                    and not final_updates.get("has_conflict")
+                    and bool(result.title and result.title.strip())
+                    and bool(result.scope and result.scope.strip())
+                    and bool(positive_windows)
+                    and not questions
+                    and not any(iss.blocking for iss in result.clarification_issues)
+                ):
+                    final_updates["is_complete"] = True
+                    final_updates["clarification_questions"] = []
+                elif english_questions_filtered:
+                    final_updates["clarification_questions"] = list(dict.fromkeys(questions))
+                return result.model_copy(update=final_updates)
+
+        if (
+            english_questions_filtered
+            and not questions
+            and (
+                force_incomplete
+                or not result.is_complete
+                or any(w.is_ambiguous for w in current_windows)
+            )
+        ):
+            questions.append(
+                "Bạn bổ sung hoặc xác nhận lại các thông tin còn thiếu giúp mình nhé?"
+            )
         if force_incomplete or any(w.is_ambiguous for w in current_windows):
             return result.model_copy(
                 update={
                     "is_complete": False,
                     "clarification_questions": list(dict.fromkeys(questions)),
                 }
+            )
+        if english_questions_filtered:
+            return result.model_copy(
+                update={"clarification_questions": list(dict.fromkeys(questions))}
             )
         return result
 

@@ -593,16 +593,16 @@ _FIELD_EXPLICIT_EDIT_PATTERNS: dict[str, re.Pattern[str]] = {
         re.IGNORECASE,
     ),
     "availability": re.compile(
-        r"(?:đổi|sửa|chỉnh|cập\s+nhật|thêm|bớt|xóa|bỏ|thay(?:\s+đổi)?|mở\s+thêm)\s+(?:lại\s+)?(?:giờ\s+rảnh|khung\s+giờ|lịch\s+rảnh|lịch\s+học|lịch\s+làm|ngoại\s+lệ)"
-        r"|\b(?:rảnh|bận)\b.*(?:\d{1,2}\s*(?:h|:|g|giờ)|cả\s+ngày|cuối\s+tuần|hằng\s+ngày|mỗi\s+ngày|thứ\s*(?:hai|ba|tư|năm|sáu|bảy|[2-7])|chủ\s*nhật)"
-        r"|(?:dùng|theo|lấy|áp\s+dụng)\s+(?:lại\s+)?(?:lịch|giờ(?:\s+rảnh)?)\s+mặc\s+định",
+        r"(?:đổi|sửa|chỉnh|cập\s+nhật|thêm|bớt|xóa|bỏ|thay(?:\s+đổi)?|mở\s+thêm)\s+(?:lại\s+)?(?:giờ\s+(?:rảnh|rãnh)|khung\s+giờ|lịch\s+(?:rảnh|rãnh)|lịch\s+học|lịch\s+làm|ngoại\s+lệ)"
+        r"|\b(?:rảnh|rãnh|bận)\b.*(?:\d{1,2}\s*(?:h|:|g|giờ)|cả\s+ngày|cuối\s+tuần|hằng\s+ngày|mỗi\s+ngày|thứ\s*(?:hai|ba|tư|năm|sáu|bảy|[2-7])|chủ\s*nhật)"
+        r"|(?:dùng|theo|lấy|áp\s+dụng)\s+(?:lại\s+)?(?:khung\s+)?(?:lịch|giờ(?:\s+(?:rảnh|rãnh))?)\s+mặc\s+định",
         re.IGNORECASE,
     ),
 }
 
 _DEFAULT_AVAIL_REQUEST_RE = re.compile(
-    r"(?:dùng|sử\s+dụng|lấy|áp\s+dụng|theo|giống)\s+(?:lại\s+)?(?:khung\s+)?(?:lịch|giờ(?:\s+rảnh)?)\s+mặc\s+định"
-    r"|(?:lịch|giờ(?:\s+rảnh)?)\s+mặc\s+định\s+(?:của\s+mình|đã\s+lưu|nhé|nha|đi)",
+    r"(?:dùng|sử\s+dụng|lấy|áp\s+dụng|theo|giống)\s+(?:lại\s+)?(?:khung\s+)?(?:lịch|giờ(?:\s+(?:rảnh|rãnh))?)\s+mặc\s+định"
+    r"|(?:(?:khung\s+)?(?:lịch|giờ(?:\s+(?:rảnh|rãnh))?))\s+mặc\s+định\s+(?:của\s+(?:mình|tôi)|đã\s+lưu|nhé|nha|đi)",
     re.IGNORECASE,
 )
 _DEFAULT_AVAIL_EXCLUDE_RE = re.compile(
@@ -697,20 +697,123 @@ _UF1_NEGATED_CLAUSE_PREFIX_RE = re.compile(
     r"\b(?:không|khỏi|bỏ|trừ|chứ\s+không)\b[^.!?,;\n]{0,30}$",
     re.IGNORECASE,
 )
+_UF1_ZONE2_HANG_DEADLINE_TARGET_PAT = (
+    r"(?:chót\b|tối\b|sáng\b|trưa\b|chiều\b|đêm\b|khuya\b|"
+    r"thứ\s*(?:[2-7]|hai|ba|tư|bốn|năm|lăm|sáu|bảy|bẩy)\b|"
+    r"chủ\s+nhật\b|cn\b|cuối\s+tuần\b|mai\b|mốt\b|hôm\s+nay\b|"
+    r"ngày\s+(?:\d{4}-\d{1,2}-\d{1,2}|"
+    r"\d{1,2}(?![:\dhHgG])(?!\s*(?:giờ|tiếng|phút|p|trang|bài|slide|câu|lần)\b)|"
+    r"(?:mai|mốt|hai|ba|tư|bốn|năm|lăm|sáu|bảy|bẩy|tám|chín|mười)\b"
+    r"(?!\s*(?:tiếng|giờ|phút|trang|bài|slide|câu|lần)\b))|"
+    r"\d{1,2}(?:[/:hHg]|\s*giờ\b))"
+)
 _UF1_ZONE2_HOMOPHONE_RE = re.compile(
     r"(?<!cuộc\s)(?<!lịch\s)(?<!buổi\s)(?<!đi\s)(?<!có\s)"
-    r"(?:\bhẹn\b(?!\s+(?:hò|khám|ăn|chơi|nhau)\b)"
-    r"|\bhạng\b(?!\s+(?:mục|nhất|nhì|ba|tư|bốn|năm|sáu|bảy|bẩy|tám|chín|mười|bét|\d+(?![/\-:hHgG]))\b))",
+    r"(?:\bhẹn\b(?!\s+(?:hò|khám|ăn|chơi|nhau|đi\s+(?:chơi|ăn|uống|cà\s+phê))\b)"
+    r"|\bhạng\b(?!\s+(?:mục|nhất|nhì|ba|tư|bốn|năm|sáu|bảy|bẩy|tám|chín|mười|bét|\d+(?![/\-:hHgG]))\b)"
+    r"|\bhảng\b"
+    r"|\bhản\b"
+    r"|\bháng\b"
+    r"|\bhãng\b(?!\s+(?:xe|hàng\s+không|công\s+nghệ|sản\s+xuất|phim|tàu|máy|điện\s+thoại)\b)"
+    r"|\bhán\b"
+    rf"|\bhàng\b(?=\s+{_UF1_ZONE2_HANG_DEADLINE_TARGET_PAT}))",
     re.IGNORECASE,
 )
 _UF1_ZONE2_HOMOPHONE_PREFIX_EXCLUDE_RE = re.compile(
-    r"\b(?:cuộc|lịch|buổi|đi|có|đặt|giờ|lỡ|trễ|hủy|dời|xếp|thứ|đạt)\s+$",
+    r"\b(?:cuộc|lịch|buổi|đi|có|đặt|lỡ|trễ|hủy|dời|xếp|thứ|đạt)\s+$",
     re.IGNORECASE,
 )
+_UF1_ZONE2_GIO_PREFIX_RE = re.compile(r"(?<!\w)giờ\s+$", re.IGNORECASE)
+_UF1_ZONE2_CLOCK_HOUR_BEFORE_GIO_RE = re.compile(
+    r"(?<!\w)(?:\d{1,2}|không|một|hai|ba|bốn|tư|năm|sáu|bảy|bẩy|tám|chín|"
+    r"mười(?:\s+(?:một|hai|ba|bốn|tư|lăm|năm|sáu|bảy|bẩy|tám|chín))?|"
+    r"hai\s+(?:mươi(?:\s+(?:mốt|một|hai|ba|bốn|tư))?|mốt|hai|ba|tư|bốn))\s+$",
+    re.IGNORECASE,
+)
+_UF1_ZONE2_VARIANT_PREFIX_EXCLUDE_RES: dict[str, re.Pattern[str]] = {
+    "hãng": re.compile(
+        r"\b(?:của|cùng|tên|những|các|nhiều|theo|một|vài|bên|phía|từ|do)\s+$",
+        re.IGNORECASE,
+    ),
+    "hán": re.compile(
+        r"\b(?:tiếng|chữ|nhà|học|môn|từ|lớp)\s+$",
+        re.IGNORECASE,
+    ),
+    "hàng": re.compile(
+        r"\b(?:khách|cửa|nhà|đặt|giao|bán|nhập|xuất|đơn|mặt|ngân|xếp|kệ|kho|gian|"
+        r"hóa|tồn|chuyến|lô|mẫu|tiền|mua|ship|nhận|trả|kiểm)\s+$",
+        re.IGNORECASE,
+    ),
+}
+_UF1_ZONE2_HOMOPHONE_CHOT_RE = re.compile(
+    r"\b(?:hẹn|hạng|hảng|hãng|hàng|hản|háng|hán)\s+chót\b",
+    re.IGNORECASE,
+)
+
+
+def _is_zone2_homophone_prefix_excluded(token: str, prefix: str) -> bool:
+    """Kiểm tra tiền tố loại trừ cho biến thể đồng âm Zone 2 (base + guard riêng theo từ)."""
+    if _UF1_ZONE2_HOMOPHONE_PREFIX_EXCLUDE_RE.search(prefix):
+        return True
+    gio_match = _UF1_ZONE2_GIO_PREFIX_RE.search(prefix)
+    if gio_match is not None and not _UF1_ZONE2_CLOCK_HOUR_BEFORE_GIO_RE.search(
+        prefix[: gio_match.start()]
+    ):
+        return True
+    variant_re = _UF1_ZONE2_VARIANT_PREFIX_EXCLUDE_RES.get(token.strip().lower())
+    if variant_re is not None and variant_re.search(prefix):
+        return True
+    return False
+
+
+def _find_zone2_homophone_match(text: str) -> re.Match[str] | None:
+    """Tìm khớp đầu tiên hợp lệ của biến thể đồng âm 'hạn' sau khi áp guard tiền tố/hậu tố."""
+    for hit in _UF1_ZONE2_HOMOPHONE_RE.finditer(text):
+        if not _is_zone2_homophone_prefix_excluded(hit.group(0), text[: hit.start()]):
+            return hit
+    return None
+
+
 _UF1_ZONE2_MEETING_CONTEXT_RE = re.compile(
-    r"\b(?:gặp|với|bác\s+sĩ|nha\s+sĩ|khách(?:\s+hàng)?|(?:gặp|với|hẹn)\s+bạn|nhóm|phỏng\s+vấn|đối\s+tác|thầy|cô|họp)\b",
+    r"\b(?:gặp|với|bác\s+sĩ|nha\s+sĩ|khách(?:\s+hàng)?|(?:gặp|với|hẹn)\s+bạn|"
+    r"đi\s+(?:chơi|ăn|uống|cà\s+phê)|nhóm|phỏng\s+vấn|đối\s+tác|thầy|cô|họp)\b",
     re.IGNORECASE,
 )
+_UF1_ZONE2_MEETING_CLARIFY_RE = re.compile(
+    r"\b(?:buổi\s+hẹn|cuộc\s+hẹn|lịch\s+hẹn|không\s+phải\s+hạn(?:\s+chót)?|chỉ\s+là\s+(?:buổi\s+)?hẹn|hẹn\s+(?:đi\s+(?:chơi|ăn|uống|cà\s+phê)|bạn|hò|khám))\b",
+    re.IGNORECASE,
+)
+
+
+def _is_zone2_meeting_clarification_response(text: str | None) -> bool:
+    """Nhận diện phản hồi Turn 2 bác bỏ đồng âm 'hẹn/hạng' là cuộc hẹn chứ không phải hạn chót."""
+    if not text or not text.strip():
+        return False
+    return bool(
+        _UF1_ZONE2_MEETING_CONTEXT_RE.search(text)
+        or _UF1_ZONE2_MEETING_CLARIFY_RE.search(text)
+    )
+
+
+def _is_spurious_zone2_homophone_window(window: ExtractedFreeWindowSchema | dict[str, Any]) -> bool:
+    """Nhận diện cửa sổ mơ hồ giả sinh từ cụm đồng âm 'hạn' không có giờ cụ thể và không nêu 'rảnh'."""
+    if isinstance(window, dict):
+        is_ambig = bool(window.get("is_ambiguous"))
+        start_loc = window.get("start_local")
+        end_loc = window.get("end_local")
+        is_excl = bool(window.get("is_excluded"))
+        raw_phrase = str(window.get("raw_phrase") or "")
+    else:
+        is_ambig = bool(window.is_ambiguous)
+        start_loc = window.start_local
+        end_loc = window.end_local
+        is_excl = bool(window.is_excluded)
+        raw_phrase = str(window.raw_phrase or "")
+    if not is_ambig or start_loc is not None or end_loc is not None or is_excl:
+        return False
+    if not raw_phrase.strip() or re.search(r"\b(?:rảnh|rãnh)\b", raw_phrase, re.IGNORECASE):
+        return False
+    return _find_zone2_homophone_match(raw_phrase) is not None
 _UF1_FORCE_BLOCKING_AI_CODES: frozenset[str] = frozenset(
     {
         "AI_MISSING_TITLE",
@@ -732,6 +835,61 @@ def _has_unnegated_disjunction(text: str) -> bool:
         if not _UF1_NEGATED_CLAUSE_PREFIX_RE.search(prefix):
             return True
     return False
+
+
+_UF1_EXPLICIT_DEADLINE_MARKER_RE = re.compile(
+    r"\b(?:hạn(?:\s+chót)?|deadline|"
+    r"nộp(?:\s+(?:bài|trước|vào|lúc|ngày|hôm|mai|mốt|thứ|cuối|\d))|chậm\s+nhất|"
+    r"(?:hoàn\s+thành|xong)\s+(?:trước|trong|vào|đến)|"
+    r"trước\s+(?:ngày|thứ|chủ\s+nhật|cn|lúc|\d{1,2}))\b",
+    re.IGNORECASE,
+)
+
+_PART_OF_DAY_WHOLE_DAY_RE = re.compile(
+    r"\b(?:cả\s+ngày|nguyên\s+ngày|suốt\s+ngày|toàn\s+bộ\s+ngày|trọn\s+ngày)\b",
+    re.IGNORECASE,
+)
+_PART_OF_DAY_INTERVAL_RULES: tuple[tuple[re.Pattern[str], time, time], ...] = (
+    (
+        re.compile(r"\b(?:buổi\s+)?sáng(?!(?:\s+(?:tạo|kiến|suốt|lập|chế))\b)", re.IGNORECASE),
+        time(5, 0),
+        time(12, 0),
+    ),
+    (re.compile(r"\b(?:buổi\s+)?trưa\b", re.IGNORECASE), time(11, 30), time(14, 0)),
+    (
+        re.compile(r"\b(?:buổi\s+)?chiều(?!(?:\s+(?:dài|rộng|cao|sâu|hướng))\b)", re.IGNORECASE),
+        time(12, 0),
+        time(18, 0),
+    ),
+    (
+        re.compile(r"\b(?:buổi\s+)?tối(?!(?:\s+(?:đa|thiểu|ưu|hậu))\b)", re.IGNORECASE),
+        time(18, 0),
+        time(23, 59),
+    ),
+    (re.compile(r"\b(?:ban\s+)?(?:đêm|khuya)\b", re.IGNORECASE), time(21, 0), time(23, 59)),
+)
+
+
+def _has_explicit_deadline_marker(text: str) -> bool:
+    """Trả về True nếu câu nói có từ khóa hạn chót tường minh (khác đồng âm ``hẹn``/``hạng``)."""
+    return bool(text and _UF1_EXPLICIT_DEADLINE_MARKER_RE.search(text))
+
+
+def _infer_part_of_day_exclude_intervals(raw_phrase: str | None) -> list[LocalInterval]:
+    """Suy ra khoảng thời gian theo buổi (sáng/trưa/chiều/tối/đêm) cho ngoại lệ ``exclude`` không kèm giờ cụ thể.
+
+    Trả về danh sách rỗng nếu mệnh đề nói bận cả ngày hoặc không nêu buổi cụ thể
+    (khi đó giữ hành vi loại trừ cả ngày như hiện hành).
+    """
+    if not raw_phrase or not raw_phrase.strip():
+        return []
+    if _PART_OF_DAY_WHOLE_DAY_RE.search(raw_phrase):
+        return []
+    matched: list[LocalInterval] = []
+    for pattern, start_t, end_t in _PART_OF_DAY_INTERVAL_RULES:
+        if pattern.search(raw_phrase):
+            matched.append(LocalInterval(start_local=start_t, end_local=end_t))
+    return _merge_intervals_1d(matched) if matched else []
 
 
 def _detect_zone2_deadline_confirmation_issue(
@@ -757,7 +915,11 @@ def _detect_zone2_deadline_confirmation_issue(
 
     clause_sep_re = re.compile(r"[,;.!?\n]+")
     unpunctuated_hen_split_re = re.compile(
-        r"(?<!\w)(?=\bhẹn\s+(?:tối|sáng|trưa|chiều|đêm|khuya|buổi|thứ|chủ\s+nhật|cn|ngày|hôm|mai|mốt|cuối\s+tuần|tuần|\d))",
+        r"(?<!\w)(?=(?:"
+        r"\b(?P<var>hẹn|hạng|hảng|hãng|hản|háng|hán)\s+"
+        r"(?:chót|tối|sáng|trưa|chiều|đêm|khuya|buổi|thứ|chủ\s+nhật|cn|ngày|hôm|mai|mốt|cuối\s+tuần|tuần|\d)"
+        rf"|\b(?P<hang>hàng)\s+{_UF1_ZONE2_HANG_DEADLINE_TARGET_PAT}"
+        r"))",
         re.IGNORECASE,
     )
     cursor = 0
@@ -769,54 +931,67 @@ def _detect_zone2_deadline_confirmation_issue(
     if cursor < len(norm_text):
         punct_clauses.append((cursor, len(norm_text), norm_text[cursor:]))
 
-    clauses: list[tuple[int, int, str]] = []
+    clauses: list[tuple[int, int, str, bool]] = []
     for p_start, _p_end, p_raw in punct_clauses:
         split_offsets: list[int] = [0]
         for hm in unpunctuated_hen_split_re.finditer(p_raw):
             pos = hm.start()
+            token_word = hm.group("var") or hm.group("hang") or ""
             if (
                 pos > 0
-                and not _UF1_ZONE2_HOMOPHONE_PREFIX_EXCLUDE_RE.search(p_raw[:pos])
+                and not _is_zone2_homophone_prefix_excluded(token_word, p_raw[:pos])
                 and not re.search(r"\bnhắc\s+$", p_raw[:pos], re.IGNORECASE)
-                and any(
-                    a.span_start < p_start + pos and a.span_end > p_start
-                    for a in anchors
+                and (
+                    any(
+                        a.span_start < p_start + pos and a.span_end > p_start
+                        for a in anchors
+                    )
+                    or bool(re.search(r"\b(?:rảnh|rãnh)\b", p_raw[:pos], re.IGNORECASE))
                 )
             ):
                 split_offsets.append(pos)
         split_offsets.append(len(p_raw))
+        was_split = len(split_offsets) > 2
         for idx in range(len(split_offsets) - 1):
             s_off = split_offsets[idx]
             e_off = split_offsets[idx + 1]
             if e_off > s_off:
-                clauses.append((p_start + s_off, p_start + e_off, p_raw[s_off:e_off]))
+                clauses.append((p_start + s_off, p_start + e_off, p_raw[s_off:e_off], was_split))
 
-    for c_start, c_end, clause_raw in clauses:
+    for c_start, c_end, clause_raw, was_split in clauses:
         clause_clean = clause_raw.strip()
         if not clause_clean:
             continue
         if _UF1_ZONE2_MEETING_CONTEXT_RE.search(clause_clean):
             continue
-        if re.search(r"\brảnh\b", clause_clean, re.IGNORECASE) and not re.search(
-            r"\b(?:hạn(?:\s+chót)?|deadline|nộp)\b", clause_clean, re.IGNORECASE
+        if re.search(r"\b(?:rảnh|rãnh)\b", clause_clean, re.IGNORECASE) and not (
+            re.search(r"\b(?:hạn(?:\s+chót)?|deadline|nộp)\b", clause_clean, re.IGNORECASE)
+            or _UF1_ZONE2_HOMOPHONE_CHOT_RE.search(clause_clean)
         ):
             continue
 
-        homophone_hit = None
-        for hit in _UF1_ZONE2_HOMOPHONE_RE.finditer(clause_clean):
-            if not _UF1_ZONE2_HOMOPHONE_PREFIX_EXCLUDE_RE.search(clause_clean[: hit.start()]):
-                homophone_hit = hit
-                break
+        homophone_hit = _find_zone2_homophone_match(clause_clean)
         if homophone_hit is None:
             continue
 
+        clause_anchors = (
+            extract_temporal_anchors(
+                clause_clean,
+                reference_now=reference_now,
+                timezone=timezone_name,
+            )
+            if was_split
+            else [
+                a
+                for a in anchors
+                if a.span_start < c_end and a.span_end > c_start
+            ]
+        )
         matched_anchor = next(
             (
                 a
-                for a in anchors
-                if a.span_start < c_end
-                and a.span_end > c_start
-                and (
+                for a in clause_anchors
+                if (
                     a.resolved_date is not None
                     or a.explicit_date is not None
                     or a.iso_weekday is not None
@@ -1366,6 +1541,14 @@ def _merge_free_windows(previous, incoming):
     return result
 
 
+def _window_needs_clarification(window: ExtractedFreeWindowSchema) -> bool:
+    """Trả True nếu khung giờ rảnh bị đánh dấu mơ hồ hoặc còn clarification_hint cần user xác nhận."""
+    return bool(
+        window.is_ambiguous
+        or (isinstance(window.clarification_hint, str) and window.clarification_hint.strip())
+    )
+
+
 def _availability_proposal(
     extracted,
     draft,
@@ -1392,7 +1575,9 @@ def _availability_proposal(
     unresolved: list[dict[str, Any]] = []
     valid_windows: list[ExtractedFreeWindowSchema] = []
     for item in windows:
-        if item.is_ambiguous:
+        if _window_needs_clarification(item):
+            if not item.is_ambiguous:
+                item = item.model_copy(update={"is_ambiguous": True})
             unresolved.append(item.model_dump(mode="json"))
         else:
             valid_windows.append(item)
@@ -1507,11 +1692,23 @@ def _availability_proposal(
             continue
         target_wds = _item_weekdays(item)
         if item.start_local is None or item.end_local is None:
+            part_ivs = _infer_part_of_day_exclude_intervals(item.raw_phrase)
             for w in target_wds:
-                weekly_map.pop(w, None)
-                for d_key in list(daily_generated_dates):
-                    if date.fromisoformat(d_key).isoweekday() == w:
-                        dates[d_key] = []
+                if part_ivs:
+                    if w in weekly_map:
+                        rem = _subtract_intervals_1d(weekly_map[w], part_ivs)
+                        if rem:
+                            weekly_map[w] = rem
+                        else:
+                            weekly_map.pop(w, None)
+                    for d_key in list(daily_generated_dates):
+                        if date.fromisoformat(d_key).isoweekday() == w and d_key in dates:
+                            dates[d_key] = _subtract_intervals_1d(dates[d_key], part_ivs)
+                else:
+                    weekly_map.pop(w, None)
+                    for d_key in list(daily_generated_dates):
+                        if date.fromisoformat(d_key).isoweekday() == w:
+                            dates[d_key] = []
         else:
             try:
                 busy_iv = LocalInterval(
@@ -1614,10 +1811,24 @@ def _availability_proposal(
             for d in _item_dates(item):
                 dates.pop(d.isoformat(), None)
         elif item.op == "exclude" or item.is_excluded:
+            part_ivs = (
+                _infer_part_of_day_exclude_intervals(item.raw_phrase)
+                if (item.start_local is None or item.end_local is None)
+                else []
+            )
             for d in _item_dates(item):
                 d_key = d.isoformat()
                 if item.start_local is None or item.end_local is None:
-                    dates[d_key] = []
+                    if part_ivs:
+                        current_ivs = (
+                            dates[d_key]
+                            if d_key in dates
+                            else list(weekly_map.get(d.isoweekday(), []))
+                        )
+                        if current_ivs:
+                            dates[d_key] = _subtract_intervals_1d(current_ivs, part_ivs)
+                    else:
+                        dates[d_key] = []
                 else:
                     try:
                         busy_iv = LocalInterval(
@@ -1651,13 +1862,14 @@ def _availability_proposal(
         # Người dùng chỉ mới báo giờ bận/loại trừ mà chưa có khung giờ rảnh nền (#2)
         for item in windows:
             if item.is_excluded or item.op == "exclude":
-                item.is_ambiguous = True
-                if not item.clarification_hint:
-                    item.clarification_hint = (
-                        f"Bạn đã báo khung bận '{item.raw_phrase}', nhưng chưa có khung giờ rảnh nền. "
-                        "Bạn thường rảnh vào những khung giờ nào để mình xếp lịch và trừ giờ bận này ra?"
-                    )
-                unresolved.append(item.model_dump(mode="json"))
+                busy_hint = item.clarification_hint or (
+                    f"Bạn đã báo khung bận '{item.raw_phrase}', nhưng chưa có khung giờ rảnh nền. "
+                    "Bạn thường rảnh vào những khung giờ nào để mình xếp lịch và trừ giờ bận này ra?"
+                )
+                unresolved_item = item.model_copy(
+                    update={"is_ambiguous": True, "clarification_hint": busy_hint}
+                )
+                unresolved.append(unresolved_item.model_dump(mode="json"))
 
     proposal = DraftAvailability(
         timezone=timezone_name,
@@ -2929,6 +3141,7 @@ async def _analyze_draft_impl(
                 }
             )
     proposed_availability, availability_state = None, None
+    cleaned_prev_zone2_windows = False
     if "availability" not in frozen_fields:
         avail_extracted = extracted
         if (
@@ -2939,9 +3152,62 @@ async def _analyze_draft_impl(
             and not _UF1_FIELD_MENTION_PATTERNS["availability"].search(edit_text)
         ):
             avail_extracted = extracted.model_copy(update={"availability_update_mode": "merge"})
+
+        has_concrete_free_avail = any(
+            not w.is_excluded
+            and w.op in ("add", "replace_day")
+            and not w.is_ambiguous
+            and w.start_local is not None
+            and w.end_local is not None
+            for w in avail_extracted.structured_free_windows
+        ) or bool(
+            current_draft.summary.availability is not None
+            and (
+                current_draft.summary.availability.weekly_rules
+                or any(ov.intervals for ov in current_draft.summary.availability.date_overrides)
+            )
+        )
+        if has_concrete_free_avail and avail_extracted.structured_free_windows:
+            filtered_incoming_wins = [
+                w
+                for w in avail_extracted.structured_free_windows
+                if not _is_spurious_zone2_homophone_window(w)
+            ]
+            if len(filtered_incoming_wins) != len(avail_extracted.structured_free_windows):
+                avail_extracted = avail_extracted.model_copy(
+                    update={"structured_free_windows": filtered_incoming_wins}
+                )
+
+        draft_for_avail = current_draft
+        raw_prev_avail_wins = current_draft.ai_context.get("availability_windows")
+        if (
+            isinstance(raw_prev_avail_wins, list)
+            and raw_prev_avail_wins
+            and (
+                complete_time is not None
+                or _is_zone2_meeting_clarification_response(latest_text)
+                or has_concrete_free_avail
+            )
+        ):
+            cleaned_prev_wins = [
+                w for w in raw_prev_avail_wins if not _is_spurious_zone2_homophone_window(w)
+            ]
+            if len(cleaned_prev_wins) != len(raw_prev_avail_wins):
+                cleaned_prev_zone2_windows = True
+                cleaned_ctx = dict(current_draft.ai_context)
+                if cleaned_prev_wins:
+                    cleaned_ctx["availability_windows"] = cleaned_prev_wins
+                else:
+                    cleaned_ctx.pop("availability_windows", None)
+                draft_for_avail = current_draft.model_copy(update={"ai_context": cleaned_ctx})
+                if cleaned_prev_wins:
+                    context["availability_windows"] = cleaned_prev_wins
+                else:
+                    context.pop("availability_windows", None)
+
         proposed_availability, availability_state = _availability_proposal(
             avail_extracted,
-            current_draft,
+            draft_for_avail,
             availability,
             timezone_name,
             effective_time=effective_time,
@@ -3063,8 +3329,16 @@ async def _analyze_draft_impl(
         )
     )
 
+    zone2_source_text = latest_text if latest_text.strip() else normalized_input
+    speculative_homophone_tc = (
+        has_tc
+        and "time_constraint" not in locked_fields
+        and current_draft.summary.time_constraint is None
+        and getattr(eff_tc, "kind", None) != "window"
+        and not _has_explicit_deadline_marker(zone2_source_text)
+    )
     if (
-        not has_tc
+        (not has_tc or speculative_homophone_tc)
         and not extracted.has_conflict
         and not any(
             i.field_path == "time_constraint" or i.field_path.startswith("time_constraint.")
@@ -3076,12 +3350,19 @@ async def _analyze_draft_impl(
         except ZoneInfoNotFoundError:
             zone2_tz = UTC
         zone2_issue = _detect_zone2_deadline_confirmation_issue(
-            latest_text if latest_text.strip() else normalized_input,
+            zone2_source_text,
             timezone_name=timezone_name,
             reference_now=datetime.now(zone2_tz),
         )
         if zone2_issue is not None:
             ai_issues.append(zone2_issue)
+            if speculative_homophone_tc:
+                merged_updates.pop("time_constraint", None)
+                context.pop("time_constraint", None)
+                new_field_sources.pop("time_constraint", None)
+                complete_time = None
+                eff_tc = None
+                has_tc = False
 
     availability_resolved_cleanly = (
         availability_state is not None
@@ -3091,7 +3372,7 @@ async def _analyze_draft_impl(
             proposed_availability.weekly_rules
             or any(ov.intervals for ov in proposed_availability.date_overrides)
         )
-    )
+    ) or (cleaned_prev_zone2_windows and not unresolved and has_avail)
     for item in extracted.clarification_issues:
         normalized_code = item.code if item.code.startswith("AI_") else f"AI_{item.code}"
         if normalized_code in {"AI_FALLBACK_REVIEW_REQUIRED", "AI_SCOPE_CHOICE_REQUIRED"}:
@@ -3150,7 +3431,9 @@ async def _analyze_draft_impl(
             item.model_copy(update={"code": normalized_code, "blocking": forced_blocking})
         )
 
-    ambiguous_windows = [w for w in extracted.structured_free_windows if w.is_ambiguous]
+    ambiguous_windows = [
+        w for w in extracted.structured_free_windows if _window_needs_clarification(w)
+    ]
     ambiguous_phrases = [w.raw_phrase for w in ambiguous_windows]
     unhinted_ambiguous_phrases = [
         w.raw_phrase for w in ambiguous_windows if not w.clarification_hint
@@ -3225,6 +3508,39 @@ async def _analyze_draft_impl(
                 "số trang",
                 "số chương",
                 "số bài",
+            )
+        ):
+            continue
+        if (
+            has_scope
+            and not extracted.has_conflict
+            and not any(i.field_path == "scope" for i in ai_issues)
+            and not any(
+                keep_kw in q_low
+                for keep_kw in ("định dạng", "format", "chuẩn", "mẫu nào", "công cụ nào")
+            )
+            and any(
+                kw in q_low
+                for kw in (
+                    "số lượng cụ thể",
+                    "bao nhiêu trang",
+                    "bao nhiêu câu",
+                    "bao nhiêu bài",
+                    "bao nhiêu chương",
+                    "bao nhiêu slide",
+                    "bao nhiêu phần",
+                    "mấy trang",
+                    "mấy bài",
+                    "mấy slide",
+                    "mấy phần",
+                    "số trang",
+                    "số chương",
+                    "số bài",
+                    "số câu",
+                    "chưa rõ phạm vi",
+                    "phạm vi công việc là gì",
+                    "phạm vi hoặc kết quả đầu ra mong muốn",
+                )
             )
         ):
             continue
@@ -3344,9 +3660,19 @@ async def _analyze_draft_impl(
             if issue not in ai_issues:
                 ai_issues.append(issue)
             continue
-        if issue.code == "AI_DEADLINE_CONFIRMATION_NEEDED" and any(
-            i.field_path == "time_constraint" or i.field_path.startswith("time_constraint.")
-            for i in ai_issues
+        if issue.code == "AI_DEADLINE_CONFIRMATION_NEEDED" and (
+            any(
+                i.field_path == "time_constraint" or i.field_path.startswith("time_constraint.")
+                for i in ai_issues
+            )
+            or _is_zone2_meeting_clarification_response(latest_text)
+        ):
+            continue
+        if (
+            issue.code == "AI_AVAILABILITY_INCOMPLETE"
+            and cleaned_prev_zone2_windows
+            and not unresolved
+            and has_avail
         ):
             continue
         if (

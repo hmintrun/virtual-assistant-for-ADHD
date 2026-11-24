@@ -37,8 +37,9 @@ _UUID_PII_RE = re.compile(
     r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b"
 )
 _LONG_DIGIT_SPAN_RE = re.compile(r"\+?\d[\d\s().\-]{6,}\d")
+_PROMPT_INJECTION_UNSAFE_RE = re.compile(r"[\x00-\x1f\x7f#`<>\"\\]+")
 _CLAUSE_SPLIT_RE = re.compile(r"[|,:;!?()\[\]{}\"\n\r\t/\\]+|\s+[-–—]\s+")
-_WORD_TOKEN_RE = re.compile(r"[A-Za-zÀ-ỹĐđ0-9][A-Za-zÀ-ỹĐđ0-9+#._'\-]*")
+_WORD_TOKEN_RE = re.compile(r"[A-Za-zÀ-ỹĐđ0-9][A-Za-zÀ-ỹĐđ0-9+._'\-]*")
 
 # Stopwords ngữ pháp & động từ/thời gian phổ thông tiếng Việt + tiếng Anh (không chứa thuật ngữ chuyên ngành)
 _COMMON_STOPWORDS: frozenset[str] = frozenset(
@@ -299,7 +300,7 @@ _COMMON_STOPWORDS: frozenset[str] = frozenset(
 
 
 def _scrub_pii(raw_text: str) -> str:
-    """Loại bỏ triệt để Email, URL, UUID và chuỗi số >= 8 chữ số (SĐT/mã định danh) trước khi tách từ."""
+    """Loại bỏ triệt để ký tự điều khiển/prompt-injection, Email, URL, UUID và chuỗi số >= 8 chữ số."""
     text = unicodedata.normalize("NFC", raw_text or "")
     text = _EMAIL_PII_RE.sub(" | ", text)
     text = _URL_PII_RE.sub(" | ", text)
@@ -311,7 +312,8 @@ def _scrub_pii(raw_text: str) -> str:
             return " | "
         return span
 
-    return _LONG_DIGIT_SPAN_RE.sub(_replace_long_digits, text)
+    text = _LONG_DIGIT_SPAN_RE.sub(_replace_long_digits, text)
+    return _PROMPT_INJECTION_UNSAFE_RE.sub(" | ", text)
 
 
 def _is_safe_non_pii_phrase(phrase: str) -> bool:
@@ -345,8 +347,8 @@ def _is_technical_or_acronym_token(tok: str) -> bool:
         return True
     if any(ch.isupper() for ch in tok[1:]):
         return True
-    # Ký hiệu kỹ thuật hoặc mã chữ+số ngắn < 8 chữ số (VD: C++, C#, Node.js, OAuth2, CS101, A*)
-    if any(sym in tok for sym in ("+", "#", ".")) and len(alpha_chars) >= 1:
+    # Ký hiệu kỹ thuật hoặc mã chữ+số ngắn < 8 chữ số (VD: C++, Node.js, OAuth2, CS101)
+    if any(sym in tok for sym in ("+", ".")) and len(alpha_chars) >= 1:
         return True
     if any(ch.isdigit() for ch in tok) and sum(ch.isdigit() for ch in tok) <= 4:
         return True
@@ -432,7 +434,8 @@ def extract_salient_vocabulary_hints(
     hints: list[str] = []
 
     for candidate in (*priority_candidates, *content_candidates):
-        cleaned = " ".join(candidate.split()).strip(" ,.;:-–—")
+        cleaned = _PROMPT_INJECTION_UNSAFE_RE.sub(" ", candidate)
+        cleaned = " ".join(cleaned.split()).strip(" ,.;:-–—")
         if len(cleaned) < 3 or len(cleaned) > max_phrase_chars:
             continue
         if cleaned.isdigit() or cleaned.casefold() in _COMMON_STOPWORDS:

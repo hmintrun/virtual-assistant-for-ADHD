@@ -328,13 +328,13 @@ def test_suite1_spotlight_cases_and_zero_fpcr() -> None:
             false_positive_completions += 1
             pytest.fail(f"FPCR violation on {label}: leaked as complete/plannable")
 
-    # --- T02: Cửa sổ tối thứ Năm 19:00-22:00 (thiếu hạn chót nếu LLM quên gắn window finish_by_at) ---
+    # --- T02: Cửa sổ tối thứ Năm 19:00-22:00 ("làm gọn một lèo trong..." -> suy kind='window' + is_complete=True) ---
     t02_norm = normalize_vietnamese_transcript(DEV_CASE_MAP["T02"].raw_transcript)
     t02_anchors = extract_temporal_anchors(t02_norm, reference_now=FROZEN_NOW)
     assert len(t02_anchors) == 1
     assert (t02_anchors[0].iso_weekday, t02_anchors[0].resolved_date) == (4, "2026-11-26")
     assert (t02_anchors[0].start_local, t02_anchors[0].end_local) == ("19:00", "22:00")
-    t02_missing_dl = AIService._enforce_uf1_temporal_guardrails(
+    t02_window_inferred = AIService._enforce_uf1_temporal_guardrails(
         TaskExtractionResult(
             title="Soạn câu hỏi ôn tập hệ điều hành",
             content=t02_norm,
@@ -356,6 +356,35 @@ def test_suite1_spotlight_cases_and_zero_fpcr() -> None:
         current_dt=FROZEN_NOW,
         user_input=t02_norm,
         temporal_anchors=t02_anchors,
+    )
+    assert t02_window_inferred.time_constraint is not None
+    assert t02_window_inferred.time_constraint.kind == "window"
+    assert t02_window_inferred.is_complete is True
+    assert t02_window_inferred.clarification_questions == []
+
+    # Cổng âm thiếu hạn chót thật (không có cụm "làm gọn một lèo trong...") bắt buộc giữ is_complete=False
+    t02_no_window_text = "Soạn 10 câu hỏi ôn tập môn hệ điều hành, rảnh tối thứ năm từ 19:00 đến 22:00."
+    t02_missing_dl = AIService._enforce_uf1_temporal_guardrails(
+        TaskExtractionResult(
+            title="Soạn câu hỏi ôn tập hệ điều hành",
+            content=t02_no_window_text,
+            scope="10 câu hỏi ôn tập",
+            structured_free_windows=[
+                ExtractedFreeWindowSchema(
+                    kind="specific_date",
+                    weekday=4,
+                    date="2026-11-26",
+                    start_local="19:00",
+                    end_local="22:00",
+                    raw_phrase="tối Thứ 5 từ 19:00 đến 22:00",
+                )
+            ],
+            deadline=None,
+            is_complete=True,
+            summary="Soạn 10 câu hỏi.",
+        ),
+        current_dt=FROZEN_NOW,
+        user_input=t02_no_window_text,
     )
     _record_gate(not t02_missing_dl.is_complete, "T02_missing_deadline")
 
@@ -1661,14 +1690,23 @@ async def test_suite4_audio_native_flag_true_enforces_all_5_invariants_and_files
     }
     client_big, _, upload_big, delete_big = _mock_client_returning(silent_json)
     oversized_audio = b"\x00" * (18 * 1024 * 1024 + 64)
-    with patch.object(svc, "_get_gemini_client", return_value=client_big):
+    svc_big = AIService(
+        app_settings=Settings(
+            _env_file=None,
+            UF1_AUDIO_NATIVE_ENABLED=True,
+            GEMINI_API_KEY="AIzaSyFakeUnitTestKey",
+            GEMINI_UF1_MODEL="gemini-3.5-flash-lite",
+            VOICE_MAX_AUDIO_BYTES=20 * 1024 * 1024,
+        )
+    )
+    with patch.object(svc_big, "_get_gemini_client", return_value=client_big):
         with pytest.raises(ValueError, match="empty_transcript"):
-            await svc.extract_task_intent_from_audio(
+            await svc_big.extract_task_intent_from_audio(
                 oversized_audio, "audio/m4a", reference_now=FROZEN_NOW
             )
     upload_big.assert_awaited_once()
     delete_big.assert_awaited_once_with(name="files/f123")
-    assert svc.health.can_attempt("gemini", "gemini-3.5-flash-lite") is True
+    assert svc_big.health.can_attempt("gemini", "gemini-3.5-flash-lite") is True
 
 
 @pytest.mark.asyncio

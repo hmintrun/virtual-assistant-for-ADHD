@@ -1149,6 +1149,7 @@ class TestAIService(unittest.TestCase):
         # Kiểm tra build_voice_service với VOICE_STT_PROVIDER="auto" và "groq"
         auto_cfg = Settings(
             _env_file=None,
+            DEEPGRAM_API_KEY="",
             GEMINI_API_KEY="",
             GROQ_API_KEY="",
             VOICE_STT_PROVIDER="auto",

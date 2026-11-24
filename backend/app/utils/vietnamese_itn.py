@@ -411,6 +411,7 @@ _NUMERIC_COLON_TIME_PAT = (
     rf"(?:"
     rf"(?:2[0-4]|1\d|0?\d):[ \t]*00[ \t]+kém[ \t]+{_MIN_TOKEN_PAT}(?:[ \t]+phút|[ \t]*p)?"
     rf"|(?:1[0-2]|0?[1-9]):[0-5]\d"
+    rf"|(?:{_CLOCK_HOUR_WORDS_PAT})[ \t]+giờ[ \t]+(?:rưỡi|{_CLOCK_MIN_WORDS_PAT})"
     rf")(?!\w)"
 )
 _NUMERIC_COLON_END_PAT = (
@@ -418,6 +419,7 @@ _NUMERIC_COLON_END_PAT = (
     rf"(?:"
     rf"(?:2[0-4]|1\d|0?\d):[ \t]*00[ \t]+kém[ \t]+{_MIN_TOKEN_PAT}(?:[ \t]+phút|[ \t]*p)?"
     rf"|(?:2[0-4]|1\d|0?\d):[0-5]\d"
+    rf"|(?:{_CLOCK_HOUR_WORDS_PAT})[ \t]+giờ[ \t]+(?:rưỡi|{_CLOCK_MIN_WORDS_PAT})"
     rf")(?!\w)"
 )
 _LEADING_PERIOD_NUMERIC_RANGE_RE = re.compile(
@@ -499,6 +501,317 @@ _SPOKEN_MIN_DURATION_RE = re.compile(
 
 _MULTI_HSPACE_RE = re.compile(r"[ \t]{2,}")
 _SPACE_BEFORE_PUNCT_RE = re.compile(r"[ \t]+([,;.:?!])")
+
+# Chuẩn hóa định dạng giờ nói <giờ_chữ>:<phút_chữ> từ STT (VD Deepgram Nova-3: "bảy:không", "tám:ba")
+_SPOKEN_COLON_AMBIGUOUS_SINGLE_MIN_WORDS: frozenset[str] = frozenset(
+    {"một", "hai", "ba", "bốn", "tư", "năm", "sáu", "bảy", "bẩy", "tám", "chín"}
+)
+_SPOKEN_COLON_TIME_RE = re.compile(
+    rf"(?<!\w)(?P<hour>{_CLOCK_HOUR_WORDS_PAT}):(?P<min>{_CLOCK_MIN_WORDS_PAT}|rưỡi)(?!\w)",
+    re.IGNORECASE,
+)
+_SPOKEN_COLON_NON_TIME_PREFIX_RE = re.compile(
+    r"(?<!\w)(?:thứ|lần|bước|phần|chương|mục|câu|bài|hạng|tập|"
+    r"tỉ[ \t]*lệ|tỷ[ \t]*lệ|tỉ[ \t]*số|tỷ[ \t]*số|phân[ \t]*số|"
+    r"điểm|số|mã|cấp|loại|nhóm|tổ|lớp|thắng|thua|hòa)[ \t]+$",
+    re.IGNORECASE,
+)
+_SPOKEN_COLON_TRAILING_PERIOD_RE = re.compile(rf"^[ \t]+{_PERIOD_PAT}", re.IGNORECASE)
+_SPOKEN_COLON_RIGHT_RANGE_RE = re.compile(
+    rf"^(?:[ \t]+{_PERIOD_PAT})?[ \t]*(?:đến|tới|-|–|~)[ \t]*(?:(?:khoảng|tầm|cỡ)[ \t]+)?"
+    rf"(?:{_PERIOD_PAT}[ \t]+)?"
+    rf"(?:(?:{_CLOCK_HOUR_WORDS_PAT}):(?:{_CLOCK_MIN_WORDS_PAT}|rưỡi)(?!\w)|{_TIME_CORE_PAT})",
+    re.IGNORECASE,
+)
+_SPOKEN_COLON_LEFT_RANGE_RE = re.compile(
+    rf"(?:(?P<left_colon>(?<!\w)(?:{_CLOCK_HOUR_WORDS_PAT}):(?:{_CLOCK_MIN_WORDS_PAT}|rưỡi)(?!\w))|{_TIME_CORE_PAT})"
+    rf"(?:[ \t]+{_PERIOD_PAT})?[ \t]*(?:đến|tới|-|–|~)[ \t]*(?:(?:khoảng|tầm|cỡ)[ \t]+)?"
+    rf"(?:{_PERIOD_PAT}[ \t]+)?$",
+    re.IGNORECASE,
+)
+_SPOKEN_COLON_LEAD_CUE_RE = re.compile(
+    r"(?<!\w)(?:từ|lúc|vào|khoảng|tầm|cỡ|trước|sau|sáng|trưa|chiều|tối|đêm|khuya)[ \t]+$",
+    re.IGNORECASE,
+)
+
+
+def _normalize_spoken_colon_clock_times(text: str) -> str:
+    """Chuẩn hóa định dạng ``<giờ_chữ>:<phút_chữ>`` (VD: ``bảy:không``, ``tám:ba``) sang dạng giờ chuẩn.
+
+    Chỉ đổi token phút đơn ``ba`` -> ``ba mươi`` khi đứng trong ngữ cảnh giờ rõ ràng
+    (nối khoảng giờ với ``đến/tới/-`` hoặc đi kèm buổi ``sáng/trưa/chiều/tối/đêm/khuya``)
+    và chặn dương tính giả từ tỷ lệ/tỉ số/chương/bước.
+    """
+    if ":" not in text:
+        return text
+
+    def _repl(match: re.Match[str]) -> str:
+        prefix = text[: match.start()]
+        if _SPOKEN_COLON_NON_TIME_PREFIX_RE.search(prefix):
+            return match.group(0)
+
+        hour_raw = match.group("hour")
+        min_raw = match.group("min")
+        min_norm = " ".join(min_raw.strip().lower().split())
+
+        if min_norm in _SPOKEN_COLON_AMBIGUOUS_SINGLE_MIN_WORDS:
+            if min_norm != "ba":
+                return match.group(0)
+            suffix = text[match.end() :]
+            has_trailing_period = bool(_SPOKEN_COLON_TRAILING_PERIOD_RE.match(suffix))
+            has_right_range = bool(_SPOKEN_COLON_RIGHT_RANGE_RE.match(suffix))
+            left_range_m = _SPOKEN_COLON_LEFT_RANGE_RE.search(prefix)
+            has_left_range = False
+            if left_range_m is not None:
+                if left_range_m.group("left_colon") is not None:
+                    left_colon_start = left_range_m.start("left_colon")
+                    has_left_range = not bool(
+                        _SPOKEN_COLON_NON_TIME_PREFIX_RE.search(prefix[:left_colon_start])
+                    )
+                else:
+                    has_left_range = True
+            last_boundary = 0
+            for bm in _SUBCLAUSE_BOUNDARY_RE.finditer(prefix):
+                last_boundary = bm.end()
+            sub_prefix = prefix[last_boundary:]
+            has_leading_period_ctx = bool(
+                _PERIOD_WORD_RE.search(sub_prefix) and _SPOKEN_COLON_LEAD_CUE_RE.search(sub_prefix)
+            )
+            if not (
+                has_trailing_period
+                or has_right_range
+                or has_left_range
+                or has_leading_period_ctx
+            ):
+                return match.group(0)
+            return f"{hour_raw} giờ ba mươi"
+
+        return f"{hour_raw} giờ {min_raw}"
+
+    return _SPOKEN_COLON_TIME_RE.sub(_repl, text)
+
+
+# Chuẩn hóa ngày/tháng viết bằng chữ tiếng Việt (VD Deepgram smart_format=False:
+# "ngày hai mươi tám tháng mười một" -> "ngày 28 tháng 11", "hảng hai mươi tám tháng mười một" -> "hảng 28 tháng 11")
+_VN_CALENDAR_DAY_MAP: dict[str, int] = {
+    "một": 1,
+    "mốt": 1,
+    "hai": 2,
+    "ba": 3,
+    "bốn": 4,
+    "tư": 4,
+    "năm": 5,
+    "sáu": 6,
+    "bảy": 7,
+    "bẩy": 7,
+    "tám": 8,
+    "chín": 9,
+    "mười": 10,
+    "mười một": 11,
+    "mười hai": 12,
+    "mười ba": 13,
+    "mười bốn": 14,
+    "mười tư": 14,
+    "mười lăm": 15,
+    "mười năm": 15,
+    "mười sáu": 16,
+    "mười bảy": 17,
+    "mười bẩy": 17,
+    "mười tám": 18,
+    "mười chín": 19,
+    "hai mươi": 20,
+    "hai chục": 20,
+    "hai mươi mốt": 21,
+    "hai mốt": 21,
+    "hai mươi một": 21,
+    "hai mươi hai": 22,
+    "hai hai": 22,
+    "hai mươi ba": 23,
+    "hai ba": 23,
+    "hai mươi bốn": 24,
+    "hai mươi tư": 24,
+    "hai tư": 24,
+    "hai bốn": 24,
+    "hai mươi lăm": 25,
+    "hai mươi năm": 25,
+    "hai lăm": 25,
+    "hai mươi sáu": 26,
+    "hai sáu": 26,
+    "hai mươi bảy": 27,
+    "hai mươi bẩy": 27,
+    "hai bảy": 27,
+    "hai bẩy": 27,
+    "hai mươi tám": 28,
+    "hai tám": 28,
+    "hai mươi chín": 29,
+    "hai chín": 29,
+    "ba mươi": 30,
+    "ba chục": 30,
+    "ba mươi mốt": 31,
+    "ba mốt": 31,
+    "ba mươi một": 31,
+}
+_VN_CALENDAR_MONTH_MAP: dict[str, int] = {
+    "một": 1,
+    "giêng": 1,
+    "hai": 2,
+    "ba": 3,
+    "bốn": 4,
+    "tư": 4,
+    "năm": 5,
+    "sáu": 6,
+    "bảy": 7,
+    "bẩy": 7,
+    "tám": 8,
+    "chín": 9,
+    "mười": 10,
+    "mười một": 11,
+    "mười hai": 12,
+    "chạp": 12,
+}
+_CALENDAR_DAY_WORDS_PAT = _alternation_from_keys(_VN_CALENDAR_DAY_MAP)
+_CALENDAR_MONTH_WORDS_PAT = _alternation_from_keys(_VN_CALENDAR_MONTH_MAP)
+_SPOKEN_CALENDAR_DATE_RE = re.compile(
+    r"(?<!\w)(?:(?P<prefix>ngày|mùng|mồng)[ \t]+)?"
+    rf"(?P<day>3[01]|[12]\d|0?[1-9]|{_CALENDAR_DAY_WORDS_PAT})[ \t]+"
+    rf"tháng[ \t]+(?P<month>1[0-2]|0?[1-9]|{_CALENDAR_MONTH_WORDS_PAT})(?!\w)",
+    re.IGNORECASE,
+)
+_BARE_CALENDAR_DATE_PREFIX_RE = re.compile(
+    r"(?<!\w)(?:"
+    r"ngày|mùng|mồng|hạn(?:[ \t]+chót)?|deadline|nộp|chậm[ \t]+nhất|xong|hoàn[ \t]+thành|"
+    r"(?:hẹn|hạng|hảng|hãng|hàng|hản|háng|hán)(?:[ \t]+chót)?|"
+    r"trước|sau|đến|tới|từ|vào|lúc|"
+    r"thứ[ \t]*(?:[2-7]|hai|ba|tư|bốn|năm|sáu|bảy|bẩy)|chủ[ \t]+nhật|cn|"
+    r"sáng|trưa|chiều|tối|đêm|khuya"
+    r")[ \t]*$",
+    re.IGNORECASE,
+)
+_BARE_CALENDAR_DATE_SUFFIX_CUE_RE = re.compile(
+    r"^[ \t]+(?:lúc|vào|năm)\b",
+    re.IGNORECASE,
+)
+_CALENDAR_DATE_NON_DATE_SUFFIX_RE = re.compile(
+    r"^[ \t]+(?:lần|lượt|đợt|kỳ|bài|quyển|cuốn|trang|slide|buổi|tuần|ngày|tiếng|phút|người|cái|"
+    r"mươi|chục|trăm|nghìn|ngàn|triệu|tỷ)\b",
+    re.IGNORECASE,
+)
+_MAX_DAYS_IN_MONTH: dict[int, int] = {
+    1: 31,
+    2: 29,
+    3: 31,
+    4: 30,
+    5: 31,
+    6: 30,
+    7: 31,
+    8: 31,
+    9: 30,
+    10: 31,
+    11: 30,
+    12: 31,
+}
+
+
+def _parse_calendar_token(raw: str, mapping: dict[str, int], *, lo: int, hi: int) -> int | None:
+    cleaned = " ".join(raw.strip().lower().split())
+    if cleaned.isdigit():
+        val = int(cleaned)
+        return val if lo <= val <= hi else None
+    return mapping.get(cleaned)
+
+
+def _normalize_spoken_calendar_dates(text: str) -> str:
+    """Chuẩn hóa cụm ngày/tháng viết bằng chữ sang số (VD: ``ngày hai mươi tám tháng mười một`` -> ``ngày 28 tháng 11``).
+
+    Giữ nguyên các cụm thời lượng/tần suất như ``ba tháng trước``, ``năm tháng nữa``,
+    ``mười hai tháng sau``, ``sáu tháng một lần``.
+    """
+    if "tháng" not in text.lower():
+        return text
+
+    def _repl(match: re.Match[str]) -> str:
+        raw_day = match.group("day")
+        raw_month = match.group("month")
+        if raw_day.strip().isdigit() and raw_month.strip().isdigit():
+            return match.group(0)
+
+        day_val = _parse_calendar_token(raw_day, _VN_CALENDAR_DAY_MAP, lo=1, hi=31)
+        month_val = _parse_calendar_token(raw_month, _VN_CALENDAR_MONTH_MAP, lo=1, hi=12)
+        if day_val is None or month_val is None:
+            return match.group(0)
+        if day_val > _MAX_DAYS_IN_MONTH[month_val]:
+            return match.group(0)
+
+        suffix = text[match.end() :]
+        if _CALENDAR_DATE_NON_DATE_SUFFIX_RE.match(suffix):
+            return match.group(0)
+
+        prefix_word = match.group("prefix")
+        if prefix_word is None:
+            before = text[: match.start()]
+            has_left_ctx = bool(_BARE_CALENDAR_DATE_PREFIX_RE.search(before))
+            has_right_ctx = bool(_BARE_CALENDAR_DATE_SUFFIX_CUE_RE.match(suffix))
+            if not (has_left_ctx or has_right_ctx):
+                return match.group(0)
+            return f"{day_val} tháng {month_val}"
+
+        return f"{prefix_word} {day_val} tháng {month_val}"
+
+    return _SPOKEN_CALENDAR_DATE_RE.sub(_repl, text)
+
+
+_NEW_CLAUSE_AFTER_PERIOD_RE = re.compile(
+    r"^[ \t]+(?:(?:thứ[ \t]*(?:[2-7]|hai|ba|tư|bốn|năm|sáu|bảy|bẩy)|chủ[ \t]+nhật|cn|"
+    r"hôm[ \t]+nay|ngày[ \t]+mai|mai|mốt|cuối[ \t]+tuần|ngày[ \t]+\d{1,2})[ \t]+)+"
+    r"(?:(?:mình|tôi|em|anh|chị|bạn)[ \t]+)?"
+    r"(?:bận|kẹt|họp|học|nghỉ|trừ|ngoại[ \t]+trừ|không[ \t]+rảnh|rảnh|rãnh|từ|lúc|"
+    r"có[ \t]+(?:lịch|việc|buổi|cuộc|họp|học|lớp|ca)|"
+    r"đi[ \t]+(?:học|họp|làm|chơi|công[ \t]+tác|khám|thi))\b",
+    re.IGNORECASE,
+)
+
+
+def _leading_period_in_current_subclause(text_before: str) -> str | None:
+    """Tìm buổi gần nhất đứng trước trong cùng tiểu mệnh đề (không vượt dấu câu/từ chuyển ý)."""
+    last_boundary = 0
+    for bm in _SUBCLAUSE_BOUNDARY_RE.finditer(text_before):
+        last_boundary = bm.end()
+    sub_before = text_before[last_boundary:]
+    active_period: str | None = None
+    for pm in _PERIOD_WORD_RE.finditer(sub_before):
+        cleaned = _clean_period(pm.group(0))
+        if cleaned:
+            active_period = cleaned
+    return active_period
+
+
+def _is_period_starting_new_clause(
+    *,
+    text_before: str,
+    text_after: str,
+    period_name: str,
+    start_core: _ParsedTimeCore | None = None,
+    end_core: _ParsedTimeCore | None = None,
+) -> bool:
+    """Nhận diện buổi (VD: 'tối' trong '...sáng Thứ 4 từ 7h đến 9h tối Thứ 4 bận họp') thực chất mở đầu mệnh đề sau."""
+    if _NEW_CLAUSE_AFTER_PERIOD_RE.match(text_after):
+        return True
+    leading_period = _leading_period_in_current_subclause(text_before)
+    if (
+        leading_period in ("sáng", "trưa")
+        and period_name in ("tối", "đêm", "khuya")
+        and start_core is not None
+        and end_core is not None
+        and 1 <= start_core.hour < end_core.hour <= 12
+        and re.match(
+            r"^[ \t]+(?:thứ\b|chủ[ \t]+nhật\b|cn\b|hôm[ \t]+nay\b|ngày\b|mai\b|mốt\b|"
+            r"mình\b|tôi\b|bận\b|họp\b|học\b)",
+            text_after,
+            re.IGNORECASE,
+        )
+    ):
+        return True
+    return False
 
 
 class _ParsedTimeCore(NamedTuple):
@@ -656,6 +969,40 @@ def _replace_time_range(match: re.Match[str]) -> str:
     start_period = _clean_period(match.group("start_period"))
     end_period = _clean_period(match.group("end_period"))
 
+    if (
+        start_period is None
+        and end_period is not None
+        and _is_period_starting_new_clause(
+            text_before=match.string[: match.start()],
+            text_after=match.string[match.end() :],
+            period_name=end_period,
+            start_core=start_core,
+            end_core=end_core,
+        )
+    ):
+        leading_period = _leading_period_in_current_subclause(match.string[: match.start()])
+        if leading_period is not None:
+            start_str = _resolve_24h_time(start_core, leading_period)
+            end_str = _resolve_24h_time(end_core, leading_period)
+            if (
+                start_str is not None
+                and end_str is not None
+                and _hhmm_to_minutes(end_str) <= _hhmm_to_minutes(start_str)
+            ):
+                if leading_period in ("sáng", "trưa"):
+                    alt_end = _resolve_24h_time(end_core, "chiều")
+                    if alt_end is not None and _hhmm_to_minutes(alt_end) > _hhmm_to_minutes(
+                        start_str
+                    ):
+                        end_str = alt_end
+                elif leading_period in ("tối", "đêm", "khuya") and 1 <= end_core.hour <= 5:
+                    alt_end = _resolve_24h_time(end_core, "đêm")
+                    if alt_end is not None:
+                        end_str = alt_end
+            if start_str is not None and end_str is not None:
+                return f"{start_str}{match.group('sep')}{end_str}, {match.group('end_period').strip()}"
+        return match.group(0)
+
     if start_period is None and end_period is None:
         # Chỉ quy đổi khi cả hai đầu đã là giờ 24h tường minh (>= 13h)
         start_str = _resolve_24h_time(start_core, None)
@@ -720,6 +1067,13 @@ def _replace_time_range(match: re.Match[str]) -> str:
 def _replace_single_time_with_period(match: re.Match[str]) -> str:
     core = _parse_time_core(match.group("core"))
     if core is None:
+        return match.group(0)
+    period_name = _clean_period(match.group("period"))
+    if period_name is not None and _is_period_starting_new_clause(
+        text_before=match.string[: match.start()],
+        text_after=match.string[match.end() :],
+        period_name=period_name,
+    ):
         return match.group(0)
     resolved = _resolve_24h_time(core, match.group("period"))
     if resolved is None:
@@ -914,50 +1268,51 @@ def _propagate_leading_period_in_subclauses(
             continue
 
         covered_ranges: list[tuple[int, int]] = []
-        for rm in _LEADING_PERIOD_NUMERIC_RANGE_RE.finditer(sub_text):
-            abs_s = sub_start + rm.start()
-            abs_e = sub_start + rm.end()
-            abs_start_core_end = abs_s + len(rm.group("start_core"))
-            if any(abs_s < le and abs_start_core_end > ls for ls, le in locked_spans):
-                continue
-            active_period: str | None = None
-            for _, pe, p_name in period_matches:
-                if pe <= abs_s and p_name:
-                    active_period = p_name
-            if not active_period:
-                continue
-            start_core = _parse_time_core(rm.group("start_core"))
-            end_core = _parse_time_core(rm.group("end_core"))
-            if start_core is None or end_core is None:
-                continue
-            if 1 <= start_core.hour <= 11:
-                pass
-            elif start_core.hour == 12 and (
-                active_period == "trưa"
-                or (active_period == "sáng" and 1 <= end_core.hour <= 11)
-            ):
-                pass
-            else:
-                continue
-            start_str = _resolve_24h_time(start_core, active_period)
-            end_str = _resolve_24h_time(end_core, active_period)
-            if (
-                start_str is not None
-                and end_str is not None
-                and _hhmm_to_minutes(end_str) <= _hhmm_to_minutes(start_str)
-            ):
-                if active_period in ("sáng", "trưa"):
-                    alt_end = _resolve_24h_time(end_core, "chiều")
-                    if alt_end is not None and _hhmm_to_minutes(alt_end) > _hhmm_to_minutes(start_str):
-                        end_str = alt_end
-                elif active_period in ("tối", "đêm", "khuya") and 1 <= end_core.hour <= 5:
-                    alt_end = _resolve_24h_time(end_core, "đêm")
-                    if alt_end is not None:
-                        end_str = alt_end
-            if start_str is None or end_str is None:
-                continue
-            edits.append((abs_s, abs_e, f"{start_str}{rm.group('sep')}{end_str}"))
-            covered_ranges.append((abs_s, abs_e))
+        if ":" in sub_text or "giờ" in sub_text.lower():
+            for rm in _LEADING_PERIOD_NUMERIC_RANGE_RE.finditer(sub_text):
+                abs_s = sub_start + rm.start()
+                abs_e = sub_start + rm.end()
+                abs_start_core_end = abs_s + len(rm.group("start_core"))
+                if any(abs_s < le and abs_start_core_end > ls for ls, le in locked_spans):
+                    continue
+                active_period: str | None = None
+                for _, pe, p_name in period_matches:
+                    if pe <= abs_s and p_name:
+                        active_period = p_name
+                if not active_period:
+                    continue
+                start_core = _parse_time_core(rm.group("start_core"))
+                end_core = _parse_time_core(rm.group("end_core"))
+                if start_core is None or end_core is None:
+                    continue
+                if 1 <= start_core.hour <= 11:
+                    pass
+                elif start_core.hour == 12 and (
+                    active_period == "trưa"
+                    or (active_period == "sáng" and 1 <= end_core.hour <= 11)
+                ):
+                    pass
+                else:
+                    continue
+                start_str = _resolve_24h_time(start_core, active_period)
+                end_str = _resolve_24h_time(end_core, active_period)
+                if (
+                    start_str is not None
+                    and end_str is not None
+                    and _hhmm_to_minutes(end_str) <= _hhmm_to_minutes(start_str)
+                ):
+                    if active_period in ("sáng", "trưa"):
+                        alt_end = _resolve_24h_time(end_core, "chiều")
+                        if alt_end is not None and _hhmm_to_minutes(alt_end) > _hhmm_to_minutes(start_str):
+                            end_str = alt_end
+                    elif active_period in ("tối", "đêm", "khuya") and 1 <= end_core.hour <= 5:
+                        alt_end = _resolve_24h_time(end_core, "đêm")
+                        if alt_end is not None:
+                            end_str = alt_end
+                if start_str is None or end_str is None:
+                    continue
+                edits.append((abs_s, abs_e, f"{start_str}{rm.group('sep')}{end_str}"))
+                covered_ranges.append((abs_s, abs_e))
 
         for km in _LEADING_PERIOD_SINGLE_KEM_RE.finditer(sub_text):
             abs_s = sub_start + km.start()
@@ -1062,6 +1417,12 @@ def normalize_vietnamese_transcript(text: str) -> str:
 
     # 2. T3.1: Chuẩn hóa Thứ chữ tiếng Việt ("thứ hai".."thứ bảy" -> "Thứ 2".."Thứ 7")
     out = _SPOKEN_WEEKDAY_RE.sub(_replace_spoken_weekday, out)
+
+    # 2a. Chuẩn hóa giờ dạng <giờ_chữ>:<phút_chữ> từ STT (VD Deepgram Nova-3: "bảy:không", "tám:ba")
+    out = _normalize_spoken_colon_clock_times(out)
+
+    # 2a2. Chuẩn hóa ngày/tháng viết bằng chữ tiếng Việt (VD: "ngày hai mươi tám tháng mười một" -> "ngày 28 tháng 11")
+    out = _normalize_spoken_calendar_dates(out)
 
     # 2b. Gộp nói lắp 3 mốc thời gian tăng dần trước khi quy đổi buổi
     out = _collapse_pre_itn_stutters(out)

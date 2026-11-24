@@ -12,12 +12,15 @@ Triển khai đầy đủ 7 endpoints theo API Sheet (Dòng 64 và Dòng 33–38
 
 from __future__ import annotations
 
+import asyncio
+import logging
 import math
 import zoneinfo
 from datetime import UTC, date, datetime, time, timedelta
 from typing import Any, Literal, cast
 from uuid import UUID, uuid4
 
+from pydantic import ValidationError
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -96,6 +99,8 @@ from app.services.planning.scheduling import (
     _split_intervals_by_local_day,
     parse_extra_requirements,
 )
+
+logger = logging.getLogger(__name__)
 
 STANDARD_INTER_SESSION_GAP_SECONDS = 900
 SourceRevisions = ProposalSourceRevisions
@@ -3392,21 +3397,41 @@ async def _build_normal_proposal_plan(
                         item.after.micro_task_text = enriched.micro_task_text
                 elif len(group) <= 50:
                     total_parts = len(group)
-                    for p_idx, item in enumerate(group):
-                        part_num = p_idx + 1
-                        split_part_idx[item.temp_session_id] = part_num
-                        split_inputs.append(
-                            SplitSessionInputItem(
-                                client_session_key=item.temp_session_id,
-                                client_step_key=step_id_str,
-                                step_title=s_title[:255],
-                                step_expected_output=eff_exp_out[:500],
-                                step_micro_task_prompt=(s_micro[:300] if s_micro else None),
-                                session_index=part_num,
-                                total_sessions_in_step=total_parts,
-                                work_minutes=max(1, min(480, round(item.after.work_seconds / 60))),
+                    split_group_inputs: list[SplitSessionInputItem] = []
+                    try:
+                        for p_idx, item in enumerate(group):
+                            part_num = p_idx + 1
+                            split_part_idx[item.temp_session_id] = part_num
+                            split_group_inputs.append(
+                                SplitSessionInputItem(
+                                    client_session_key=item.temp_session_id,
+                                    client_step_key=step_id_str,
+                                    step_title=s_title[:255],
+                                    step_expected_output=eff_exp_out[:500],
+                                    step_micro_task_prompt=(s_micro[:300] if s_micro else None),
+                                    session_index=part_num,
+                                    total_sessions_in_step=total_parts,
+                                    work_minutes=max(1, min(480, round(item.after.work_seconds / 60))),
+                                )
                             )
-                        )
+                        split_inputs.extend(split_group_inputs)
+                    except (ValidationError, ValueError):
+                        for p_idx, item in enumerate(group):
+                            part_num = p_idx + 1
+                            split_part_idx.pop(item.temp_session_id, None)
+                            enriched = ai_service.build_single_session_enrichment(
+                                client_session_key=item.temp_session_id,
+                                step_title=f"{s_title} (Phần {part_num}/{total_parts})",
+                                step_expected_output=eff_exp_out,
+                                micro_task_text=item.after.micro_task_text or s_micro,
+                            )
+                            item.after.title = enriched.title
+                            item.after.session_goal = enriched.session_goal
+                            item.after.expected_output = enriched.expected_output
+                            if p_idx >= 1 or not (
+                                item.after.micro_task_text and item.after.micro_task_text.strip()
+                            ):
+                                item.after.micro_task_text = enriched.micro_task_text
                 else:
                     total_parts = len(group)
                     for p_idx, item in enumerate(group):
@@ -3436,17 +3461,40 @@ async def _build_normal_proposal_plan(
                 enrichment_items: list[Any] = []
                 for start in range(0, len(split_inputs), 60):
                     chunk = split_inputs[start : start + 60]
-                    enrich_res = await ai_service.enrich_split_sessions(
-                        split_sessions=chunk,
-                        task_title=target_title,
-                    )
-                    enrichment_items.extend(enrich_res.sessions)
+                    try:
+                        enrich_res = await ai_service.enrich_split_sessions(
+                            split_sessions=chunk,
+                            task_title=target_title,
+                        )
+                        enrichment_items.extend(enrich_res.sessions)
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning(
+                            "UF6 expand_next_horizon enrich_split_sessions chunk failed (%s); falling back.",
+                            type(exc).__name__,
+                        )
                 enriched_map = {e.client_session_key: e for e in enrichment_items}
+                split_input_map = {si.client_session_key: si for si in split_inputs}
                 for item in horizon_adds:
+                    if item.temp_session_id not in split_part_idx:
+                        continue
+                    part_num = split_part_idx[item.temp_session_id]
                     enriched = enriched_map.get(item.temp_session_id)
                     if enriched is None:
-                        continue
-                    part_num = split_part_idx.get(item.temp_session_id, 1)
+                        si = split_input_map.get(item.temp_session_id)
+                        if si is not None:
+                            enriched = ai_service._fallback_enrich_split_sessions([si]).sessions[0]
+                        else:
+                            enriched = ai_service.build_single_session_enrichment(
+                                client_session_key=item.temp_session_id,
+                                step_title=f"Bước hiện tại (Phần {part_num}/{part_num})",
+                                step_expected_output="Hoàn thành phiên tập trung.",
+                                micro_task_text=(
+                                    item.after.micro_task_text
+                                    or "Mở tài liệu và bắt đầu 2 phút."
+                                ),
+                            )
                     item.after.title = enriched.title
                     item.after.session_goal = enriched.session_goal
                     item.after.expected_output = enriched.expected_output

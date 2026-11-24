@@ -60,6 +60,7 @@ class Settings(BaseSettings):
     # Khóa API & Chứng thực Cloud cho AI/Voice (ẩn khỏi repr/log theo quy tắc bảo mật O00-O26)
     GEMINI_API_KEY: str = Field(default="", repr=False)
     GROQ_API_KEY: str = Field(default="", repr=False)
+    DEEPGRAM_API_KEY: str = Field(default="", repr=False)
     GOOGLE_CREDENTIALS_PATH: str = Field(
         default="",
         repr=False,
@@ -112,11 +113,18 @@ class Settings(BaseSettings):
     ENABLE_CALENDAR_SYNC_WORKER: bool = True
     TESTING: bool = False
 
-    # Voice STT (V01 & A21) — Gemini 3.5 Transcribe inline qua generate_content (chính) và Groq Whisper.
+    # Voice STT (V01 & A21) — Kiến trúc 3 tầng: Deepgram Nova-3 (Tier 1 khi có key) -> Gemini 3.5 Transcribe -> Groq Whisper.
     # Số đo chọn model: docs/backend/VOICE_STT_BENCHMARK.md.
-    # Mode "auto": ưu tiên Gemini -> Groq; riêng purpose="uf5_checkin" đảo sang Groq -> Gemini khi bật cờ.
+    # Mode "auto": khi có DEEPGRAM_API_KEY dùng deepgram->gemini->groq; khi chưa có key giữ nguyên gemini->groq (uf5_checkin đảo groq->gemini khi bật cờ).
     # Dự phòng khi Backend lỗi/mất mạng nằm ở Mobile (speech_to_text on-device).
-    VOICE_STT_PROVIDER: Literal["gemini", "groq", "auto", "fake"] = "auto"
+    VOICE_STT_PROVIDER: Literal["deepgram", "gemini", "groq", "auto", "fake"] = "auto"
+    DEEPGRAM_STT_MODEL: str = "nova-3"
+    DEEPGRAM_STT_PUNCTUATE: bool = True
+    # Giữ verbatim để tầng T2 ITN/ReALM chuẩn hóa và giữ cụm tự đính chính của người dùng.
+    DEEPGRAM_STT_SMART_FORMAT: bool = False
+    DEEPGRAM_STT_BASE_URL: str = "https://api.deepgram.com/v1/listen"
+    DEEPGRAM_STT_USE_KEYTERMS: bool = False
+    DEEPGRAM_STT_TIMEOUT_SECONDS: float = Field(default=5.0, gt=0.0, le=30.0)
     GEMINI_STT_MODEL: str = "gemini-3.5-transcribe"
     GEMINI_STT_TRANSPORT: Literal["auto", "inline", "transcribe_inline", "transcribe_api"] = "auto"
     GEMINI_STT_MODE: Literal["smart", "verbatim"] = "verbatim"
@@ -287,6 +295,12 @@ class Settings(BaseSettings):
         """Kiểm tra đã cấu hình GROQ_API_KEY hợp lệ (khác rỗng và khác giá trị mẫu)."""
         cleaned = self.GROQ_API_KEY.strip()
         return bool(cleaned and cleaned != "your-groq-api-key-here")
+
+    @property
+    def has_deepgram_key(self) -> bool:
+        """Kiểm tra đã cấu hình DEEPGRAM_API_KEY hợp lệ (khác rỗng và khác giá trị mẫu)."""
+        cleaned = self.DEEPGRAM_API_KEY.strip()
+        return bool(cleaned and cleaned != "your-deepgram-api-key-here")
 
     @property
     def has_google_oauth_credentials(self) -> bool:
