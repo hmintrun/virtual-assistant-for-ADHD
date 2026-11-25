@@ -38,7 +38,7 @@ from app.schemas.settings import (
     SuggestionStatus,
     validate_strict_descending_offsets,
 )
-from app.services import draft_service, reschedule_service
+from app.services import command_service, draft_service, reschedule_service
 from app.services.command_service import durable_command, owner_uuid
 from app.services.scheduler_engine import evaluate_buffer_adaptation
 
@@ -328,18 +328,31 @@ def _validate_preferences_payload(
         )
 
 
-@durable_command("settings_change", SettingsChangeResult, resource_arg="")
-async def apply_settings_change(
+async def _execute_apply_settings_change_phase_b(
     *,
     user_id: str,
     idempotency_key: str,
     payload: SettingsChangeRequest,
     db: AsyncSession,
+    owner: UUID,
+    now: datetime,
+    pref_values: dict[str, Any],
+    avail_changes: Any,
+    avail_impacts_schedule: bool,
+    avail_dump_for_proposal: dict[str, Any] | None,
+    proposal_target_id: str | None,
+    allowed_ids: list[str] | None,
+    precomputed_empathy: tuple[str, Any] | None,
+    pre_revs: Any,
+    pre_present: dict[str, bool] | None,
+    pre_sched_rev: int | None,
+    deferred: bool,
 ) -> SettingsChangeResult:
-    """Xử lý yêu cầu đổi cài đặt hoặc availability theo đúng ranh giới Requested vs Effective."""
-    now = _utc_now()
-    owner = owner_uuid(user_id)
-    preferences = await db.scalar(select(PreferenceRow).where(PreferenceRow.user_id == owner))
+    preferences = await db.scalar(
+        select(PreferenceRow)
+        .where(PreferenceRow.user_id == owner)
+        .execution_options(populate_existing=True)
+    )
     pref_revision = preferences.effective_revision if preferences else 0
     if (
         payload.expected_preferences_revision is not None
@@ -353,89 +366,19 @@ async def apply_settings_change(
             next_action="reload_and_review",
         )
 
-    if isinstance(payload.changes, dict):
-        if (
-            not payload.changes
-            or any(k not in _ALLOWED_CHANGE_GROUPS for k in payload.changes)
-            or any(v is None for v in payload.changes.values())
-        ):
-            raise AppError(
-                status_code=422,
-                code="VALIDATION_ERROR",
-                message="Cần ít nhất một nhóm thay đổi hợp lệ và không chứa null.",
-                next_action="fix_fields",
-            )
-
-    pref_changes = getattr(payload.changes, "preferences", None)
-    if pref_changes is None and isinstance(payload.changes, dict):
-        pref_changes = payload.changes.get("preferences")
-
-    if (payload.target_task_id is not None or payload.target_draft_id is not None) and pref_changes is not None:
-        touches_global_sched = any(
-            (pref_changes.get(k) if isinstance(pref_changes, dict) else getattr(pref_changes, k, None)) is not None
-            for k in _SCHEDULE_IMPACT_PREF_FIELDS
-        )
-        if touches_global_sched:
-            raise AppError(
-                status_code=422,
-                code="VALIDATION_ERROR",
-                message="Không thể đổi cấu hình làm/nghỉ/buffer toàn cục kèm target_task_id; hãy tách thành yêu cầu toàn cục và yêu cầu sửa giờ riêng của công việc.",
-                next_action="fix_fields",
-            )
-
-    pref_values: dict[str, Any] = {}
-    if pref_changes is not None:
-        pref_values = (
-            pref_changes.model_dump(exclude_unset=True)
-            if hasattr(pref_changes, "model_dump")
-            else dict(pref_changes)
-        )
-        if (
-            not pref_values
-            or any(k not in _ALLOWED_PREF_FIELDS for k in pref_values)
-            or any(v is None for v in pref_values.values())
-        ):
-            raise AppError(
-                status_code=422,
-                code="VALIDATION_ERROR",
-                message="Trường cài đặt ưu tiên không hợp lệ hoặc có giá trị null.",
-                next_action="fix_fields",
-            )
-        _validate_preferences_payload(values=pref_values, preferences=preferences)
-
     updated_draft = None
     target_task: TaskRow | None = None
-    avail_impacts_schedule = False
-    avail_changes = getattr(payload.changes, "availability", None)
-    if avail_changes is None and isinstance(payload.changes, dict):
-        avail_changes = payload.changes.get("availability")
-
     if avail_changes is not None:
         if payload.target_task_id is not None:
-            if payload.expected_task_revision is None:
-                raise AppError(
-                    status_code=422,
-                    code="VALIDATION_ERROR",
-                    message="Cần expected_task_revision khi sửa availability cho task.",
-                    next_action="fix_fields",
-                )
-            if isinstance(avail_changes, dict):
-                try:
-                    avail_changes = DraftAvailability.model_validate(avail_changes)
-                except ValidationError as exc:
-                    raise AppError(
-                        status_code=422,
-                        code="VALIDATION_ERROR",
-                        message="Cấu hình giờ rảnh availability không hợp lệ.",
-                        next_action="fix_fields",
-                    ) from exc
             task_uuid = _parse_uuid(payload.target_task_id)
             target_task = await db.scalar(
-                select(TaskRow).where(
+                select(TaskRow)
+                .where(
                     TaskRow.id == task_uuid,
                     TaskRow.user_id == owner,
                     TaskRow.status != "cancelled",
                 )
+                .execution_options(populate_existing=True)
             )
             if target_task is None:
                 raise AppError(
@@ -452,7 +395,6 @@ async def apply_settings_change(
                     current_revisions={"task": target_task.revision},
                     next_action="reload_and_review",
                 )
-            avail_impacts_schedule = True
         else:
             if (
                 payload.target_draft_id is None
@@ -465,20 +407,10 @@ async def apply_settings_change(
                     message="Cần Draft và revision để chỉnh giờ.",
                     next_action="fix_fields",
                 )
-            if isinstance(avail_changes, dict):
-                try:
-                    avail_changes = DraftAvailability.model_validate(avail_changes)
-                except ValidationError as exc:
-                    raise AppError(
-                        status_code=422,
-                        code="VALIDATION_ERROR",
-                        message="Cấu hình giờ rảnh availability không hợp lệ.",
-                        next_action="fix_fields",
-                    ) from exc
-            draft = await draft_service.get_draft_by_id(
+            draft_check = await draft_service.get_draft_by_id(
                 user_id=user_id, draft_id=payload.target_draft_id, db=db
             )
-            if draft.confirmed_task_id is not None:
+            if draft_check.confirmed_task_id is not None:
                 raise AppError(
                     status_code=409,
                     code="PLAN_NOT_CONFIRMABLE",
@@ -519,11 +451,39 @@ async def apply_settings_change(
         if touches_schedule_field:
             pref_impacts_schedule = await _has_future_confirmed_sessions(db, owner)
 
-    avail_dump_for_proposal = _dump_availability_payload(avail_changes)
     if avail_impacts_schedule or pref_impacts_schedule:
+        if precomputed_empathy is None:
+            raise AppError(
+                status_code=409,
+                code="REVISION_CONFLICT",
+                message="Lịch chính thức đã thay đổi trong lúc xử lý cài đặt. Vui lòng thử lại.",
+                current_revisions={"preferences": pref_revision},
+                retryable=True,
+                next_action="reload_and_review",
+            )
+        db_revs_2, present_2, current_sched_rev_2 = (
+            await reschedule_service.compute_settings_change_revisions(
+                db,
+                owner=owner,
+                target_task_id=proposal_target_id,
+                allowed_task_ids=allowed_ids,
+            )
+        )
+        if not deferred and (
+            db_revs_2 != pre_revs
+            or present_2 != pre_present
+            or current_sched_rev_2 != pre_sched_rev
+        ):
+            raise AppError(
+                status_code=409,
+                code="REVISION_CONFLICT",
+                message="Dữ liệu nguồn đã thay đổi trong lúc chuẩn bị đề xuất cài đặt.",
+                current_revisions=db_revs_2.model_dump(),
+                retryable=True,
+                next_action="reload_and_review",
+            )
+
         # Tạo RescheduleProposal trước khi ghi requested_* lên UserPreference vì helper bên dưới sẽ dọn proposal pending cũ.
-        proposal_target_id = payload.target_task_id if avail_impacts_schedule else None
-        allowed_ids = [payload.target_task_id] if payload.target_task_id is not None else None
         proposal = await reschedule_service.create_settings_change_proposal(
             db,
             owner=owner,
@@ -533,6 +493,7 @@ async def apply_settings_change(
             override_preferences=dict(pref_values) if pref_values else None,
             override_availability=avail_dump_for_proposal,
             now=now,
+            precomputed_empathy=precomputed_empathy,
         )
         proposal_uuid = UUID(proposal.proposal_id)
 
@@ -596,7 +557,11 @@ async def apply_settings_change(
     # Nhánh không ảnh hưởng lịch tương lai: áp dụng ngay cho Draft hoặc từ phiên tiếp theo (giữ nguyên settings_snapshot của phiên đang chạy).
     if pref_values:
         preferences_created = False
-        old_offsets = list(preferences.reminder_offsets) if preferences and preferences.reminder_offsets else []
+        old_offsets = (
+            list(preferences.reminder_offsets)
+            if preferences and preferences.reminder_offsets
+            else []
+        )
         if preferences is None:
             preferences_created = True
             preferences = PreferenceRow(
@@ -614,7 +579,10 @@ async def apply_settings_change(
                 and isinstance(preferences.requested_changes, dict)
                 and any(k in preferences.requested_changes for k in pref_values)
             )
-            if any(getattr(preferences, k) != v for k, v in pref_values.items()) or has_pending_override:
+            if (
+                any(getattr(preferences, k) != v for k, v in pref_values.items())
+                or has_pending_override
+            ):
                 for k, v in pref_values.items():
                     setattr(preferences, k, v)
                 await _bump_pref_revision_and_sync_pending_proposal(
@@ -713,6 +681,342 @@ async def apply_settings_change(
             updated_draft.planning_input_revision if updated_draft else None
         ),
     )
+
+
+async def apply_settings_change(
+    *,
+    user_id: str,
+    idempotency_key: str,
+    payload: SettingsChangeRequest,
+    db: AsyncSession,
+) -> SettingsChangeResult:
+    """Xử lý yêu cầu đổi cài đặt hoặc availability theo đúng ranh giới Requested vs Effective (2 pha lock-free AI)."""
+    deferred = bool(db.info.get("defer_command_commit"))
+    digest = ""
+    if not deferred:
+        digest = command_service.command_hash(
+            "settings_change",
+            "",
+            payload.model_dump(mode="json", exclude_unset=True),
+        )
+        saved = await command_service.replay(db, user_id, idempotency_key, digest)
+        if saved is not None:
+            await db.rollback()
+            return SettingsChangeResult.model_validate(saved)
+
+    # Phase A (100% Read-only, Lock-free)
+    now = _utc_now()
+    owner = owner_uuid(user_id)
+    preferences = await db.scalar(select(PreferenceRow).where(PreferenceRow.user_id == owner))
+    pref_revision = preferences.effective_revision if preferences else 0
+    if (
+        payload.expected_preferences_revision is not None
+        and payload.expected_preferences_revision != pref_revision
+    ):
+        if not deferred:
+            await db.rollback()
+        raise AppError(
+            status_code=409,
+            code="REVISION_CONFLICT",
+            message="Cấu hình đã thay đổi.",
+            current_revisions={"preferences": pref_revision},
+            next_action="reload_and_review",
+        )
+
+    if isinstance(payload.changes, dict):
+        if (
+            not payload.changes
+            or any(k not in _ALLOWED_CHANGE_GROUPS for k in payload.changes)
+            or any(v is None for v in payload.changes.values())
+        ):
+            if not deferred:
+                await db.rollback()
+            raise AppError(
+                status_code=422,
+                code="VALIDATION_ERROR",
+                message="Cần ít nhất một nhóm thay đổi hợp lệ và không chứa null.",
+                next_action="fix_fields",
+            )
+
+    pref_changes = getattr(payload.changes, "preferences", None)
+    if pref_changes is None and isinstance(payload.changes, dict):
+        pref_changes = payload.changes.get("preferences")
+
+    if (payload.target_task_id is not None or payload.target_draft_id is not None) and pref_changes is not None:
+        touches_global_sched = any(
+            (pref_changes.get(k) if isinstance(pref_changes, dict) else getattr(pref_changes, k, None)) is not None
+            for k in _SCHEDULE_IMPACT_PREF_FIELDS
+        )
+        if touches_global_sched:
+            if not deferred:
+                await db.rollback()
+            raise AppError(
+                status_code=422,
+                code="VALIDATION_ERROR",
+                message="Không thể đổi cấu hình làm/nghỉ/buffer toàn cục kèm target_task_id; hãy tách thành yêu cầu toàn cục và yêu cầu sửa giờ riêng của công việc.",
+                next_action="fix_fields",
+            )
+
+    pref_values: dict[str, Any] = {}
+    if pref_changes is not None:
+        pref_values = (
+            pref_changes.model_dump(exclude_unset=True)
+            if hasattr(pref_changes, "model_dump")
+            else dict(pref_changes)
+        )
+        if (
+            not pref_values
+            or any(k not in _ALLOWED_PREF_FIELDS for k in pref_values)
+            or any(v is None for v in pref_values.values())
+        ):
+            if not deferred:
+                await db.rollback()
+            raise AppError(
+                status_code=422,
+                code="VALIDATION_ERROR",
+                message="Trường cài đặt ưu tiên không hợp lệ hoặc có giá trị null.",
+                next_action="fix_fields",
+            )
+        try:
+            _validate_preferences_payload(values=pref_values, preferences=preferences)
+        except AppError:
+            if not deferred:
+                await db.rollback()
+            raise
+
+    avail_impacts_schedule = False
+    avail_changes = getattr(payload.changes, "availability", None)
+    if avail_changes is None and isinstance(payload.changes, dict):
+        avail_changes = payload.changes.get("availability")
+
+    if avail_changes is not None:
+        if payload.target_task_id is not None:
+            if payload.expected_task_revision is None:
+                if not deferred:
+                    await db.rollback()
+                raise AppError(
+                    status_code=422,
+                    code="VALIDATION_ERROR",
+                    message="Cần expected_task_revision khi sửa availability cho task.",
+                    next_action="fix_fields",
+                )
+            if isinstance(avail_changes, dict):
+                try:
+                    avail_changes = DraftAvailability.model_validate(avail_changes)
+                except ValidationError as exc:
+                    if not deferred:
+                        await db.rollback()
+                    raise AppError(
+                        status_code=422,
+                        code="VALIDATION_ERROR",
+                        message="Cấu hình giờ rảnh availability không hợp lệ.",
+                        next_action="fix_fields",
+                    ) from exc
+            task_uuid = _parse_uuid(payload.target_task_id)
+            target_task = await db.scalar(
+                select(TaskRow).where(
+                    TaskRow.id == task_uuid,
+                    TaskRow.user_id == owner,
+                    TaskRow.status != "cancelled",
+                )
+            )
+            if target_task is None:
+                if not deferred:
+                    await db.rollback()
+                raise AppError(
+                    status_code=404,
+                    code="RESOURCE_NOT_FOUND",
+                    message="Không tìm thấy công việc mục tiêu.",
+                    next_action="reload",
+                )
+            if target_task.revision != payload.expected_task_revision:
+                task_rev = target_task.revision
+                if not deferred:
+                    await db.rollback()
+                raise AppError(
+                    status_code=409,
+                    code="REVISION_CONFLICT",
+                    message="Task đã thay đổi.",
+                    current_revisions={"task": task_rev},
+                    next_action="reload_and_review",
+                )
+            avail_impacts_schedule = True
+        else:
+            if (
+                payload.target_draft_id is None
+                or payload.expected_summary_revision is None
+                or payload.expected_planning_input_revision is None
+            ):
+                if not deferred:
+                    await db.rollback()
+                raise AppError(
+                    status_code=422,
+                    code="VALIDATION_ERROR",
+                    message="Cần Draft và revision để chỉnh giờ.",
+                    next_action="fix_fields",
+                )
+            if isinstance(avail_changes, dict):
+                try:
+                    avail_changes = DraftAvailability.model_validate(avail_changes)
+                except ValidationError as exc:
+                    if not deferred:
+                        await db.rollback()
+                    raise AppError(
+                        status_code=422,
+                        code="VALIDATION_ERROR",
+                        message="Cấu hình giờ rảnh availability không hợp lệ.",
+                        next_action="fix_fields",
+                    ) from exc
+            try:
+                draft = await draft_service.get_draft_by_id(
+                    user_id=user_id, draft_id=payload.target_draft_id, db=db
+                )
+            except AppError:
+                if not deferred:
+                    await db.rollback()
+                raise
+            if draft.confirmed_task_id is not None:
+                if not deferred:
+                    await db.rollback()
+                raise AppError(
+                    status_code=409,
+                    code="PLAN_NOT_CONFIRMABLE",
+                    message="Draft đã thành Task; cần chỉnh Task qua xem tác động.",
+                    next_action="review_task",
+                )
+            if (
+                payload.expected_summary_revision != draft.summary_revision
+                or payload.expected_planning_input_revision != draft.planning_input_revision
+            ):
+                if not deferred:
+                    await db.rollback()
+                raise AppError(
+                    status_code=409,
+                    code="REVISION_CONFLICT",
+                    message=(
+                        "Dữ liệu đã thay đổi so với phiên bản gửi lên. "
+                        "Tải bản hiện tại và xem lại trước khi gửi yêu cầu mới."
+                    ),
+                    current_revisions={
+                        "summary_revision": draft.summary_revision,
+                        "planning_input_revision": draft.planning_input_revision,
+                    },
+                    next_action="reload_and_review",
+                )
+            avail_dump = _dump_availability_payload(avail_changes)
+            if avail_dump is None:
+                if not deferred:
+                    await db.rollback()
+                raise AppError(
+                    status_code=422,
+                    code="VALIDATION_ERROR",
+                    message="Thiếu availability trong changes khi sửa draft.",
+                    next_action="fix_fields",
+                )
+
+    pref_impacts_schedule = False
+    if pref_values:
+        touches_schedule_field = any(
+            k in _SCHEDULE_IMPACT_PREF_FIELDS
+            and (preferences is None or getattr(preferences, k) != v)
+            for k, v in pref_values.items()
+        )
+        if touches_schedule_field:
+            pref_impacts_schedule = await _has_future_confirmed_sessions(db, owner)
+
+    avail_dump_for_proposal = _dump_availability_payload(avail_changes)
+    proposal_target_id = payload.target_task_id if avail_impacts_schedule else None
+    allowed_ids = [payload.target_task_id] if payload.target_task_id is not None else None
+
+    precomputed_empathy: tuple[str, Any] | None = None
+    pre_revs = None
+    pre_present: dict[str, bool] | None = None
+    pre_sched_rev: int | None = None
+    if avail_impacts_schedule or pref_impacts_schedule:
+        pre_revs, pre_present, pre_sched_rev, pre_feasibility = (
+            await reschedule_service.preview_settings_change_context(
+                db,
+                owner=owner,
+                target_task_id=proposal_target_id,
+                allowed_task_ids=allowed_ids,
+                request_text="Đề xuất điều chỉnh lịch do thay đổi cài đặt UF7",
+                override_preferences=dict(pref_values) if pref_values else None,
+                override_availability=avail_dump_for_proposal,
+                now=now,
+            )
+        )
+        if not deferred:
+            await db.rollback()
+        precomputed_empathy = await reschedule_service.generate_settings_change_empathy(
+            pre_feasibility
+        )
+    elif not deferred:
+        await db.rollback()
+
+    if deferred:
+        return await _execute_apply_settings_change_phase_b(
+            user_id=user_id,
+            idempotency_key=idempotency_key,
+            payload=payload,
+            db=db,
+            owner=owner,
+            now=now,
+            pref_values=pref_values,
+            avail_changes=avail_changes,
+            avail_impacts_schedule=avail_impacts_schedule,
+            avail_dump_for_proposal=avail_dump_for_proposal,
+            proposal_target_id=proposal_target_id,
+            allowed_ids=allowed_ids,
+            precomputed_empathy=precomputed_empathy,
+            pre_revs=pre_revs,
+            pre_present=pre_present,
+            pre_sched_rev=pre_sched_rev,
+            deferred=True,
+        )
+
+    # Phase B (Short locked atomic write)
+    db.info["defer_command_commit"] = True
+    try:
+        await command_service.lock_owner(db, user_id)
+        saved = await command_service.replay(db, user_id, idempotency_key, digest)
+        if saved is not None:
+            await db.rollback()
+            return SettingsChangeResult.model_validate(saved)
+
+        result = await _execute_apply_settings_change_phase_b(
+            user_id=user_id,
+            idempotency_key=idempotency_key,
+            payload=payload,
+            db=db,
+            owner=owner,
+            now=now,
+            pref_values=pref_values,
+            avail_changes=avail_changes,
+            avail_impacts_schedule=avail_impacts_schedule,
+            avail_dump_for_proposal=avail_dump_for_proposal,
+            proposal_target_id=proposal_target_id,
+            allowed_ids=allowed_ids,
+            precomputed_empathy=precomputed_empathy,
+            pre_revs=pre_revs,
+            pre_present=pre_present,
+            pre_sched_rev=pre_sched_rev,
+            deferred=False,
+        )
+        command_service.record(db, user_id, idempotency_key, digest, "settings_change", result)
+        await db.commit()
+        return result
+    except (IntegrityError, AppError):
+        await db.rollback()
+        saved = await command_service.replay(db, user_id, idempotency_key, digest)
+        if saved is not None:
+            return SettingsChangeResult.model_validate(saved)
+        raise
+    except Exception:
+        await db.rollback()
+        raise
+    finally:
+        db.info.pop("defer_command_commit", None)
+        db.info.pop("command_result_meta", None)
 
 
 @durable_command("cancel_settings_change", CancelSettingsChangeResult, resource_arg="change_request_id")
@@ -1128,26 +1432,26 @@ def _validate_accepted_suggestion_value(
     )
 
 
-@durable_command("respond_to_suggestion", SuggestionResponseResult, resource_arg="suggestion_id")
-async def respond_to_suggestion(
+async def _execute_respond_to_suggestion_phase_b(
     *,
-    user_id: str,
-    idempotency_key: str,
-    suggestion_id: str,
+    owner: UUID,
+    sugg_uuid: UUID,
     payload: SuggestionResponseRequest,
     db: AsyncSession,
+    now: datetime,
+    precomputed_empathy: tuple[str, Any] | None,
+    pre_revs: Any,
+    pre_present: dict[str, bool] | None,
+    pre_sched_rev: int | None,
+    deferred: bool,
 ) -> SuggestionResponseResult:
-    """Phản hồi gợi ý trợ lý (accept/edit/reject) và nối UF6 khi ảnh hưởng lịch tương lai (R08)."""
-    del idempotency_key
-    now = _utc_now()
-    owner = owner_uuid(user_id)
-    sugg_uuid = _parse_uuid(suggestion_id)
-
     suggestion = await db.scalar(
-        select(SuggestionRow).where(
+        select(SuggestionRow)
+        .where(
             SuggestionRow.id == sugg_uuid,
             SuggestionRow.user_id == owner,
         )
+        .execution_options(populate_existing=True)
     )
     if suggestion is None:
         raise AppError(
@@ -1175,7 +1479,11 @@ async def respond_to_suggestion(
             next_action="reload_and_review",
         )
 
-    preferences = await db.scalar(select(PreferenceRow).where(PreferenceRow.user_id == owner))
+    preferences = await db.scalar(
+        select(PreferenceRow)
+        .where(PreferenceRow.user_id == owner)
+        .execution_options(populate_existing=True)
+    )
     current_pref_rev = preferences.effective_revision if preferences else 0
     if (
         payload.expected_preference_revision is not None
@@ -1226,12 +1534,12 @@ async def respond_to_suggestion(
     pref_delta: dict[str, Any] = {pref_field: accepted_value}
 
     pref_row = await _ensure_preference_row(db, owner, now=now)
-    suggestion.status = "accepted"
-    suggestion.revision += 1
-    suggestion.updated_at = now
-
     has_future_sessions = await _has_future_confirmed_sessions(db, owner)
+
     if not has_future_sessions or kind == "reminder_offset":
+        suggestion.status = "accepted"
+        suggestion.revision += 1
+        suggestion.updated_at = now
         setattr(pref_row, pref_field, accepted_value)
         await _bump_pref_revision_and_sync_pending_proposal(
             db,
@@ -1317,13 +1625,47 @@ async def respond_to_suggestion(
             pending_proposal_id=None,
         )
 
-    # R08: Khi đã có phiên tương lai, luôn đẩy qua UF6 pending_review để user xem và duyệt lịch.
+    # R08: Khi đã có phiên tương lai, kiểm tra precomputed_empathy và source revisions trước khi tạo proposal.
+    if precomputed_empathy is None:
+        raise AppError(
+            status_code=409,
+            code="REVISION_CONFLICT",
+            message="Lịch chính thức đã thay đổi trong lúc xử lý gợi ý. Vui lòng thử lại.",
+            current_revisions={"preferences": pref_row.effective_revision},
+            retryable=True,
+            next_action="reload_and_review",
+        )
+    db_revs_2, present_2, current_sched_rev_2 = (
+        await reschedule_service.compute_settings_change_revisions(
+            db,
+            owner=owner,
+        )
+    )
+    if not deferred and (
+        db_revs_2 != pre_revs
+        or present_2 != pre_present
+        or current_sched_rev_2 != pre_sched_rev
+    ):
+        raise AppError(
+            status_code=409,
+            code="REVISION_CONFLICT",
+            message="Dữ liệu nguồn đã thay đổi trong lúc chuẩn bị đề xuất gợi ý.",
+            current_revisions=db_revs_2.model_dump(),
+            retryable=True,
+            next_action="reload_and_review",
+        )
+
+    suggestion.status = "accepted"
+    suggestion.revision += 1
+    suggestion.updated_at = now
+
     proposal = await reschedule_service.create_settings_change_proposal(
         db,
         owner=owner,
         request_text=f"Cập nhật {kind} từ gợi ý trợ lý",
         override_preferences=dict(pref_delta),
         now=now,
+        precomputed_empathy=precomputed_empathy,
     )
     proposal_uuid = UUID(proposal.proposal_id)
     req_rev = pref_row.effective_revision + 1
@@ -1359,3 +1701,183 @@ async def respond_to_suggestion(
         change_request_id=str(change.id),
         pending_proposal_id=proposal.proposal_id,
     )
+
+
+async def respond_to_suggestion(
+    *,
+    user_id: str,
+    idempotency_key: str,
+    suggestion_id: str,
+    payload: SuggestionResponseRequest,
+    db: AsyncSession,
+) -> SuggestionResponseResult:
+    """Phản hồi gợi ý trợ lý (accept/edit/reject) và nối UF6 khi ảnh hưởng lịch tương lai (2 pha lock-free AI)."""
+    deferred = bool(db.info.get("defer_command_commit"))
+    digest = ""
+    if not deferred:
+        digest = command_service.command_hash(
+            "respond_to_suggestion",
+            str(suggestion_id),
+            payload.model_dump(mode="json", exclude_unset=True),
+        )
+        saved = await command_service.replay(db, user_id, idempotency_key, digest)
+        if saved is not None:
+            await db.rollback()
+            return SuggestionResponseResult.model_validate(saved)
+
+    # Phase A (100% Read-only, Lock-free)
+    now = _utc_now()
+    owner = owner_uuid(user_id)
+    try:
+        sugg_uuid = _parse_uuid(suggestion_id)
+    except AppError:
+        if not deferred:
+            await db.rollback()
+        raise
+
+    suggestion = await db.scalar(
+        select(SuggestionRow).where(
+            SuggestionRow.id == sugg_uuid,
+            SuggestionRow.user_id == owner,
+        )
+    )
+    if suggestion is None:
+        if not deferred:
+            await db.rollback()
+        raise AppError(
+            status_code=404,
+            code="RESOURCE_NOT_FOUND",
+            message="Không tìm thấy tài nguyên trong phạm vi bạn được phép truy cập.",
+            next_action="reload",
+        )
+
+    sugg_rev = suggestion.revision
+    if suggestion.status != "pending":
+        if not deferred:
+            await db.rollback()
+        raise AppError(
+            status_code=409,
+            code="SUGGESTION_CHANGED",
+            message="Gợi ý đã được xử lý hoặc thay thế.",
+            current_revisions={"suggestion_revision": sugg_rev},
+            next_action="reload",
+        )
+
+    if payload.expected_suggestion_revision != sugg_rev:
+        if not deferred:
+            await db.rollback()
+        raise AppError(
+            status_code=409,
+            code="REVISION_CONFLICT",
+            message="Phiên bản nguồn đã đổi. Tải bản hiện tại trước khi sửa.",
+            current_revisions={"suggestion_revision": sugg_rev},
+            next_action="reload_and_review",
+        )
+
+    preferences = await db.scalar(select(PreferenceRow).where(PreferenceRow.user_id == owner))
+    current_pref_rev = preferences.effective_revision if preferences else 0
+    if (
+        payload.expected_preference_revision is not None
+        and payload.expected_preference_revision != current_pref_rev
+    ):
+        if not deferred:
+            await db.rollback()
+        raise AppError(
+            status_code=409,
+            code="REVISION_CONFLICT",
+            message="Phiên bản cài đặt đã thay đổi.",
+            current_revisions={"preferences": current_pref_rev},
+            next_action="reload_and_review",
+        )
+
+    kind: SuggestionKind = (
+        "reminder_offset" if suggestion.kind == "reminder_offset" else "buffer_multiplier"
+    )
+    accepted_value: Any = None
+    if payload.action != "reject":
+        raw_target = payload.edited_value if payload.action == "edit" else suggestion.suggested_value
+        try:
+            accepted_value = _validate_accepted_suggestion_value(kind=kind, raw_value=raw_target)
+        except AppError:
+            if not deferred:
+                await db.rollback()
+            raise
+
+    precomputed_empathy: tuple[str, Any] | None = None
+    pre_revs = None
+    pre_present: dict[str, bool] | None = None
+    pre_sched_rev: int | None = None
+    if (
+        payload.action in ("accept", "edit")
+        and kind == "buffer_multiplier"
+        and await _has_future_confirmed_sessions(db, owner)
+    ):
+        pre_revs, pre_present, pre_sched_rev, pre_feasibility = (
+            await reschedule_service.preview_settings_change_context(
+                db,
+                owner=owner,
+                request_text=f"Cập nhật {kind} từ gợi ý trợ lý",
+                override_preferences={"buffer_multiplier": accepted_value},
+                now=now,
+            )
+        )
+        if not deferred:
+            await db.rollback()
+        precomputed_empathy = await reschedule_service.generate_settings_change_empathy(
+            pre_feasibility
+        )
+    elif not deferred:
+        await db.rollback()
+
+    if deferred:
+        return await _execute_respond_to_suggestion_phase_b(
+            owner=owner,
+            sugg_uuid=sugg_uuid,
+            payload=payload,
+            db=db,
+            now=now,
+            precomputed_empathy=precomputed_empathy,
+            pre_revs=pre_revs,
+            pre_present=pre_present,
+            pre_sched_rev=pre_sched_rev,
+            deferred=True,
+        )
+
+    # Phase B (Short locked atomic write)
+    db.info["defer_command_commit"] = True
+    try:
+        await command_service.lock_owner(db, user_id)
+        saved = await command_service.replay(db, user_id, idempotency_key, digest)
+        if saved is not None:
+            await db.rollback()
+            return SuggestionResponseResult.model_validate(saved)
+
+        result = await _execute_respond_to_suggestion_phase_b(
+            owner=owner,
+            sugg_uuid=sugg_uuid,
+            payload=payload,
+            db=db,
+            now=now,
+            precomputed_empathy=precomputed_empathy,
+            pre_revs=pre_revs,
+            pre_present=pre_present,
+            pre_sched_rev=pre_sched_rev,
+            deferred=False,
+        )
+        command_service.record(
+            db, user_id, idempotency_key, digest, "respond_to_suggestion", result
+        )
+        await db.commit()
+        return result
+    except (IntegrityError, AppError):
+        await db.rollback()
+        saved = await command_service.replay(db, user_id, idempotency_key, digest)
+        if saved is not None:
+            return SuggestionResponseResult.model_validate(saved)
+        raise
+    except Exception:
+        await db.rollback()
+        raise
+    finally:
+        db.info.pop("defer_command_commit", None)
+        db.info.pop("command_result_meta", None)

@@ -26,7 +26,12 @@ from sqlalchemy.exc import IntegrityError
 from app.api.deps import CurrentUserDep, DbSessionDep
 from app.core.config import settings
 from app.core.errors import AppError
-from app.models.calendar import CalendarConnection, CalendarPreview, CalendarSyncJob
+from app.models.calendar import (
+    CalendarConnection,
+    CalendarEventLink,
+    CalendarPreview,
+    CalendarSyncJob,
+)
 from app.schemas.calendar import (
     CalendarAuthorizationRequest,
     CalendarAuthorizationResponse,
@@ -701,6 +706,13 @@ async def confirm_event_change_preview(
         ).scalar_one_or_none()
         if not conn or conn.user_id != uid:
             raise _not_found("Không tìm thấy kết nối lịch tương ứng.")
+        if conn.connection_state == "disconnected":
+            raise AppError(
+                status_code=409,
+                code="CALENDAR_DISCONNECTED",
+                message="Kết nối Google Calendar đã bị ngắt. Vui lòng kết nối lại trước khi đồng bộ.",
+                next_action="reconnect_google_calendar",
+            )
         if (
             preview.base_connection_revision is None
             or conn.revision != preview.base_connection_revision
@@ -740,12 +752,31 @@ async def confirm_event_change_preview(
             return SuccessEnvelope(data=data, meta=build_response_meta())
 
         op = preview_data.get("operation", "create")
+        matched_link_id: UUID | None = None
+        google_event_id = preview_data.get("google_event_id")
+        google_calendar_id = preview_data.get("google_calendar_id")
+        if (
+            isinstance(google_event_id, str)
+            and google_event_id
+            and isinstance(google_calendar_id, str)
+            and google_calendar_id
+        ):
+            matched_link_id = await db.scalar(
+                select(CalendarEventLink.id).where(
+                    CalendarEventLink.user_id == uid,
+                    CalendarEventLink.connection_id == conn_id,
+                    CalendarEventLink.google_calendar_id == google_calendar_id,
+                    CalendarEventLink.google_event_id == google_event_id,
+                    CalendarEventLink.is_current.is_(True),
+                )
+            )
 
         job = CalendarSyncJob(
             user_id=uid,
             connection_id=conn_id,
+            event_link_id=matched_link_id,
             target_kind="event",
-            target_ref=preview_data.get("google_event_id") or str(preview.id),
+            target_ref=google_event_id or str(preview.id),
             operation=op,
             idempotency_key=idempotency_key,
             payload_snapshot=preview_data.get("payload", {}),
@@ -880,6 +911,22 @@ async def retry_sync_job(
     job = await db.get(CalendarSyncJob, job_id)
     if not job or job.user_id != uid:
         raise _not_found("Không tìm thấy sync job.")
+
+    if job.job_state == "cancelled":
+        raise AppError(
+            status_code=409,
+            code="JOB_CANCELLED",
+            message="Tác vụ đồng bộ đã bị hủy do ngắt kết nối lịch và không thể thử lại.",
+            next_action="create_preview",
+        )
+    conn = await db.get(CalendarConnection, job.connection_id)
+    if conn is None or conn.connection_state == "disconnected":
+        raise AppError(
+            status_code=409,
+            code="CALENDAR_DISCONNECTED",
+            message="Kết nối Google Calendar đã bị ngắt. Vui lòng kết nối lại trước khi thử lại đồng bộ.",
+            next_action="reconnect_google_calendar",
+        )
 
     job.job_state = "queued"
     job.attempt_count = 0

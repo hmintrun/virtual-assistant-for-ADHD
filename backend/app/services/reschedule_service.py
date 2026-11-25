@@ -395,14 +395,33 @@ async def _load_google_busy_items(
     from_time: datetime,
     to_time: datetime,
 ) -> tuple[list[TimelineGoogleBusyItem], Literal["ok", "stale", "unavailable"], datetime | None]:
-    """Đọc các khoảng bận Google Calendar từ PlanningContext gần nhất của user."""
-    ctx = await db.scalar(
+    """Đọc các khoảng bận Google Calendar từ PlanningContext valid gần nhất của user."""
+    conn_states = (
+        await db.scalars(
+            select(CalendarConnection.connection_state).where(
+                CalendarConnection.user_id == owner
+            )
+        )
+    ).all()
+    if conn_states and all(state == "disconnected" for state in conn_states):
+        return [], "ok", None
+
+    latest_ctx = await db.scalar(
         select(PlanningContext)
         .where(PlanningContext.user_id == owner)
-        .order_by(PlanningContext.created_at.desc())
+        .order_by(PlanningContext.created_at.desc(), PlanningContext.id.desc())
         .limit(1)
     )
-    if ctx is None:
+    valid_ctx = await db.scalar(
+        select(PlanningContext)
+        .where(
+            PlanningContext.user_id == owner,
+            PlanningContext.sync_state.in_(("valid", "ok", "synced")),
+        )
+        .order_by(PlanningContext.created_at.desc(), PlanningContext.id.desc())
+        .limit(1)
+    )
+    if latest_ctx is None and valid_ctx is None:
         conn = await db.scalar(
             select(CalendarConnection)
             .where(CalendarConnection.user_id == owner)
@@ -413,73 +432,85 @@ async def _load_google_busy_items(
         return [], "ok", fetched_at
 
     cal_status: Literal["ok", "stale", "unavailable"] = "ok"
-    if ctx.coverage_state == "degraded" or ctx.sync_state in ("error", "failed"):
-        cal_status = "unavailable"
-    elif ctx.sync_state == "stale":
-        cal_status = "stale"
+    if latest_ctx is not None:
+        if latest_ctx.coverage_state == "degraded" or latest_ctx.sync_state in ("error", "failed"):
+            cal_status = "unavailable"
+        elif latest_ctx.sync_state == "stale":
+            cal_status = "stale"
 
     busy_items: list[TimelineGoogleBusyItem] = []
     seen_ids: set[str] = set()
 
-    # Đọc từ event_snapshots hoặc busy_intervals trong PlanningContext
-    raw_snapshots = ctx.event_snapshots if isinstance(ctx.event_snapshots, list) else []
-    for idx, item in enumerate(raw_snapshots):
-        if not isinstance(item, dict):
-            continue
-        start_dt = _parse_iso_dt(item.get("start") or item.get("start_at"))
-        end_dt = _parse_iso_dt(item.get("end") or item.get("end_at"))
-        if start_dt is None or end_dt is None:
-            continue
-        if end_dt <= from_time or start_dt >= to_time:
-            continue
-        ev_id = str(item.get("event_id") or item.get("google_event_id") or item.get("id") or f"gcal_event_{idx + 1}")
-        if ev_id in seen_ids:
-            continue
-        seen_ids.add(ev_id)
-        busy_items.append(
-            TimelineGoogleBusyItem(
-                kind="google_busy",
-                event_id=ev_id,
-                title=str(item.get("title") or item.get("summary") or "Busy"),
-                start=start_dt,
-                end=end_dt,
-                is_locked=bool(item.get("is_locked", True)),
-                is_movable=bool(item.get("is_movable", False)),
+    if valid_ctx is not None:
+        # Đọc từ event_snapshots hoặc busy_intervals trong PlanningContext hợp lệ gần nhất
+        raw_snapshots = valid_ctx.event_snapshots if isinstance(valid_ctx.event_snapshots, list) else []
+        for idx, item in enumerate(raw_snapshots):
+            if not isinstance(item, dict):
+                continue
+            start_dt = _parse_iso_dt(item.get("start") or item.get("start_at"))
+            end_dt = _parse_iso_dt(item.get("end") or item.get("end_at"))
+            if start_dt is None or end_dt is None:
+                continue
+            if end_dt <= from_time or start_dt >= to_time:
+                continue
+            ev_id = str(
+                item.get("event_id")
+                or item.get("google_event_id")
+                or item.get("id")
+                or f"gcal_event_{idx + 1}"
             )
-        )
-
-    raw_busy = ctx.busy_intervals if isinstance(ctx.busy_intervals, list) else []
-    for idx, item in enumerate(raw_busy):
-        if not isinstance(item, dict):
-            continue
-        start_dt = _parse_iso_dt(item.get("start") or item.get("start_at"))
-        end_dt = _parse_iso_dt(item.get("end") or item.get("end_at"))
-        if start_dt is None or end_dt is None:
-            continue
-        if end_dt <= from_time or start_dt >= to_time:
-            continue
-        ev_id = str(
-            item.get("event_id")
-            or item.get("source_event_id")
-            or item.get("id")
-            or f"gcal_busy_{idx + 1}"
-        )
-        if ev_id in seen_ids:
-            continue
-        seen_ids.add(ev_id)
-        busy_items.append(
-            TimelineGoogleBusyItem(
-                kind="google_busy",
-                event_id=ev_id,
-                title=str(item.get("title") or item.get("summary") or "Busy"),
-                start=start_dt,
-                end=end_dt,
-                is_locked=True,
-                is_movable=False,
+            if ev_id in seen_ids:
+                continue
+            seen_ids.add(ev_id)
+            busy_items.append(
+                TimelineGoogleBusyItem(
+                    kind="google_busy",
+                    event_id=ev_id,
+                    title=str(item.get("title") or item.get("summary") or "Busy"),
+                    start=start_dt,
+                    end=end_dt,
+                    is_locked=bool(item.get("is_locked", True)),
+                    is_movable=bool(item.get("is_movable", False)),
+                )
             )
-        )
 
-    return busy_items, cal_status, ctx.fetched_at
+        raw_busy = valid_ctx.busy_intervals if isinstance(valid_ctx.busy_intervals, list) else []
+        for idx, item in enumerate(raw_busy):
+            if not isinstance(item, dict):
+                continue
+            start_dt = _parse_iso_dt(item.get("start") or item.get("start_at"))
+            end_dt = _parse_iso_dt(item.get("end") or item.get("end_at"))
+            if start_dt is None or end_dt is None:
+                continue
+            if end_dt <= from_time or start_dt >= to_time:
+                continue
+            ev_id = str(
+                item.get("event_id")
+                or item.get("source_event_id")
+                or item.get("id")
+                or f"gcal_busy_{idx + 1}"
+            )
+            if ev_id in seen_ids:
+                continue
+            seen_ids.add(ev_id)
+            busy_items.append(
+                TimelineGoogleBusyItem(
+                    kind="google_busy",
+                    event_id=ev_id,
+                    title=str(item.get("title") or item.get("summary") or "Busy"),
+                    start=start_dt,
+                    end=end_dt,
+                    is_locked=True,
+                    is_movable=False,
+                )
+            )
+
+    fetched_at = (
+        valid_ctx.fetched_at
+        if valid_ctx is not None
+        else (latest_ctx.fetched_at if latest_ctx is not None else None)
+    )
+    return busy_items, cal_status, fetched_at
 
 
 def _parse_local_time_hhmm(raw: Any) -> time | None:
@@ -3963,6 +3994,104 @@ async def _supersede_existing_pending_proposal(
     return existing_pending.id
 
 
+async def _resolve_settings_allowed_tasks(
+    db: AsyncSession,
+    owner: UUID,
+    *,
+    target_task_id: str | None = None,
+    allowed_task_ids: list[str] | None = None,
+) -> list[str]:
+    if allowed_task_ids is not None:
+        return list(dict.fromkeys(allowed_task_ids))
+    if target_task_id is not None:
+        return [target_task_id]
+    active_task_ids = (
+        await db.scalars(
+            select(TaskRow.id)
+            .where(
+                TaskRow.user_id == owner,
+                TaskRow.status.not_in(("completed", "cancelled")),
+            )
+            .order_by(TaskRow.created_at.asc())
+        )
+    ).all()
+    return [str(tid) for tid in active_task_ids]
+
+
+async def compute_settings_change_revisions(
+    db: AsyncSession,
+    *,
+    owner: UUID,
+    target_task_id: str | None = None,
+    allowed_task_ids: list[str] | None = None,
+) -> tuple[SourceRevisions, dict[str, bool], int]:
+    """Đọc source revisions và schedule revision hiện tại phục vụ đối soát Phase B UF7->UF6."""
+    current_sched_rev = await _get_current_schedule_revision(db, owner)
+    effective_allowed = await _resolve_settings_allowed_tasks(
+        db,
+        owner,
+        target_task_id=target_task_id,
+        allowed_task_ids=allowed_task_ids,
+    )
+    db_revs, present = await _compute_db_source_revisions(
+        db,
+        owner,
+        target_task_id=target_task_id,
+        allowed_task_ids=effective_allowed,
+        fallback_revisions=None,
+    )
+    return db_revs, present, current_sched_rev
+
+
+async def preview_settings_change_context(
+    db: AsyncSession,
+    *,
+    owner: UUID,
+    target_task_id: str | None = None,
+    allowed_task_ids: list[str] | None = None,
+    request_text: str | None = None,
+    override_preferences: dict[str, Any] | None = None,
+    override_availability: dict[str, Any] | None = None,
+    now: datetime | None = None,
+) -> tuple[SourceRevisions, dict[str, bool], int, FeasibilityData]:
+    """Tính trước ngữ cảnh và độ khả thi cho UF7->UF6 hoàn toàn read-only, không khóa DB và không gọi AI."""
+    calc_now = _current_utc_now(now)
+    current_sched_rev = await _get_current_schedule_revision(db, owner)
+    effective_allowed = await _resolve_settings_allowed_tasks(
+        db,
+        owner,
+        target_task_id=target_task_id,
+        allowed_task_ids=allowed_task_ids,
+    )
+    db_revs, present = await _compute_db_source_revisions(
+        db,
+        owner,
+        target_task_id=target_task_id,
+        allowed_task_ids=effective_allowed,
+        fallback_revisions=None,
+    )
+    _, _, _, feasibility, _ = await _build_normal_proposal_plan(
+        db,
+        owner,
+        trigger_reason="settings_change",
+        target_task_id=target_task_id,
+        allowed_task_ids=effective_allowed,
+        request_text=request_text,
+        calc_now=calc_now,
+        override_preferences=override_preferences,
+        override_availability=override_availability,
+        allow_ai_rollback=False,
+    )
+    return db_revs, present, current_sched_rev, feasibility
+
+
+async def generate_settings_change_empathy(
+    feasibility: FeasibilityData,
+) -> tuple[str, GenerationTier]:
+    """Sinh lời giải thích Guilt-free UF6 cho settings_change ngoài DB transaction/lock."""
+    return await _generate_uf6_explanation_and_tier("settings_change", feasibility)
+
+
 async def create_settings_change_proposal(
     db: AsyncSession,
     *,
@@ -3978,23 +4107,12 @@ async def create_settings_change_proposal(
     """Helper nội bộ (không bọc @durable_command) tạo RescheduleProposal cho UF7 settings_change."""
     calc_now = _current_utc_now(now)
     current_sched_rev = await _get_current_schedule_revision(db, owner)
-
-    if allowed_task_ids is not None:
-        effective_allowed = list(dict.fromkeys(allowed_task_ids))
-    elif target_task_id is not None:
-        effective_allowed = [target_task_id]
-    else:
-        active_task_ids = (
-            await db.scalars(
-                select(TaskRow.id)
-                .where(
-                    TaskRow.user_id == owner,
-                    TaskRow.status.not_in(("completed", "cancelled")),
-                )
-                .order_by(TaskRow.created_at.asc())
-            )
-        ).all()
-        effective_allowed = [str(tid) for tid in active_task_ids]
+    effective_allowed = await _resolve_settings_allowed_tasks(
+        db,
+        owner,
+        target_task_id=target_task_id,
+        allowed_task_ids=allowed_task_ids,
+    )
 
     db_revs, _ = await _compute_db_source_revisions(
         db,

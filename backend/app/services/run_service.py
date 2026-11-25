@@ -1601,6 +1601,9 @@ async def record_actual_correction(
     run.actual_source = "self_report"
     run.updated_at = datetime.now(UTC)
     await db.flush()
+    from app.services import streak_service
+
+    await streak_service.sync_streak_for_run(db, user_uuid=user_uuid, run=run)
 
     return ActualCorrectionData(
         run_id=str(run.id),

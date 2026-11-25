@@ -11,6 +11,7 @@ from app.api.v1 import (
     reschedule,
     schedule,
     settings,
+    streak,
     system,
     tasks,
     thoughts,
@@ -32,3 +33,4 @@ api_router.include_router(focus.router)
 api_router.include_router(thoughts.router)
 api_router.include_router(checkin.router)
 api_router.include_router(reschedule.router)
+api_router.include_router(streak.router)

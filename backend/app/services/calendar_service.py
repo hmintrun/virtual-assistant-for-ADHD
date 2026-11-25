@@ -14,7 +14,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import NAMESPACE_DNS, UUID, uuid4, uuid5
 
-from sqlalchemy import delete, or_, select
+from sqlalchemy import delete, or_, select, update
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -53,6 +53,7 @@ class _RefCountedLock:
 
 
 _OWNER_CALENDAR_LOCKS: dict[tuple[int, str], _RefCountedLock] = {}
+_CONNECTION_SYNC_LOCKS: dict[tuple[int, str], _RefCountedLock] = {}
 
 
 @asynccontextmanager
@@ -80,6 +81,15 @@ async def get_owner_calendar_lock(owner_id: str) -> AsyncGenerator[None]:
     loop = asyncio.get_running_loop()
     key = (id(loop), str(owner_id))
     async with _acquire_refcounted_lock(_OWNER_CALENDAR_LOCKS, key):
+        yield
+
+
+@asynccontextmanager
+async def get_connection_sync_lock(connection_id: UUID | str) -> AsyncGenerator[None]:
+    """Tuần tự hóa đồng bộ theo cặp (event_loop_id, connection_id) và tự dọn entry khi hết người chờ."""
+    loop = asyncio.get_running_loop()
+    key = (id(loop), str(_resolve_uuid(connection_id)))
+    async with _acquire_refcounted_lock(_CONNECTION_SYNC_LOCKS, key):
         yield
 
 
@@ -909,15 +919,58 @@ class CalendarService:
     async def disconnect(
         self, user_id: str | UUID, connection_id: str | UUID
     ) -> CalendarConnection:
-        """Ngắt kết nối tài khoản Calendar."""
-        conn = await self.get_connection_by_id(user_id, connection_id)
-        if not conn:
-            raise CalendarClientError("Không tìm thấy kết nối lịch tương ứng.", status_code=404)
+        """Ngắt kết nối tài khoản Calendar, hủy toàn bộ sync job còn mở và bảo toàn Task/Step/Session."""
+        uid = _resolve_uuid(user_id)
+        cid = _resolve_uuid(connection_id)
+        await self.db.rollback()
+        async with get_connection_sync_lock(cid):
+            conn = (
+                await self.db.execute(
+                    select(CalendarConnection)
+                    .where(CalendarConnection.user_id == uid, CalendarConnection.id == cid)
+                    .execution_options(populate_existing=True)
+                )
+            ).scalar_one_or_none()
+            if not conn:
+                raise CalendarClientError("Không tìm thấy kết nối lịch tương ứng.", status_code=404)
 
-        conn.connection_state = "disconnected"
-        await self.db.commit()
-        await self.db.refresh(conn)
-        return conn
+            now_utc = datetime.now(UTC)
+            await self.db.execute(
+                update(CalendarConnection)
+                .where(CalendarConnection.id == cid, CalendarConnection.user_id == uid)
+                .values(
+                    connection_state="disconnected",
+                    updated_at=now_utc,
+                    revision=CalendarConnection.revision + 1,
+                )
+                .execution_options(synchronize_session="fetch")
+            )
+            await self.db.execute(
+                update(CalendarSyncJob)
+                .where(
+                    CalendarSyncJob.user_id == uid,
+                    CalendarSyncJob.connection_id == cid,
+                    CalendarSyncJob.job_state.in_(("queued", "retry", "conflict", "running")),
+                )
+                .values(
+                    job_state="cancelled",
+                    last_error_code="DISCONNECTED",
+                    next_retry_at=None,
+                    lease_expires_at=None,
+                    updated_at=now_utc,
+                    revision=CalendarSyncJob.revision + 1,
+                )
+                .execution_options(synchronize_session="fetch")
+            )
+            await self.db.commit()
+            fresh_conn = (
+                await self.db.execute(
+                    select(CalendarConnection)
+                    .where(CalendarConnection.user_id == uid, CalendarConnection.id == cid)
+                    .execution_options(populate_existing=True)
+                )
+            ).scalar_one()
+            return fresh_conn
 
     async def reconcile_external_link_changes(
         self, user_id: str | UUID, connection_id: str | UUID

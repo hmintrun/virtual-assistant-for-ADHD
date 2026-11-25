@@ -332,7 +332,15 @@ async def test_new_task_keeps_official_sessions_and_gap(api):
     old = (await client.get(f"/api/v1/tasks/{task_id}")).json()["data"]
     two = await candidate(client, await confirmed_draft(client, "two"), "two-plan")
     assert (await confirm(client, two, "two-save")).status_code == 201
-    assert (await client.get(f"/api/v1/tasks/{task_id}")).json()["data"] == old
+    new = (await client.get(f"/api/v1/tasks/{task_id}")).json()["data"]
+    assert new["source_revisions"]["schedule"] == old["source_revisions"]["schedule"] + 1
+    assert new == {
+        **old,
+        "source_revisions": {
+            **old["source_revisions"],
+            "schedule": old["source_revisions"]["schedule"] + 1,
+        },
+    }
     for a in one["sessions"]:
         for b in two["sessions"]:
             a_start, a_end = [

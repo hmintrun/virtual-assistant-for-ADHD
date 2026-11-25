@@ -22,7 +22,12 @@ def shift_elapsed_sessions(
     min_gap_seconds: int = 900,
     step_to_task_map: dict[str, str] | None = None,
 ) -> tuple[list[dict], list[str], bool, int]:
-    """Tịnh tiến các phiên đã trôi qua hoặc cần dời sang các ô rảnh trong tương lai (A17).
+    """Hàm tham chiếu thuật toán A17 dùng cho unit test và tương thích ngược `scheduler_engine`.
+
+    Runtime UF6 hiện sử dụng `reschedule_service._build_normal_proposal_plan`; giữ nguyên hàm này
+    để bảo toàn tương thích ngược và các bộ unit test tham chiếu trực tiếp.
+
+    Tịnh tiến các phiên đã trôi qua hoặc cần dời sang các ô rảnh trong tương lai (A17).
 
     Args:
         sessions: Danh sách các Session hiện tại của người dùng.

@@ -5215,6 +5215,130 @@
           }
         }
       }
+    },
+    "/api/v1/streak": {
+      "get": {
+        "tags": [
+          "Focus Streak - UF6"
+        ],
+        "summary": "Đọc trạng thái Focus Streak, Khiên bảo vệ và lịch sử 35 ngày (UF6)",
+        "operationId": "get_streak_api_v1_streak_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SuccessEnvelope_StreakData_"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Chưa đăng nhập hoặc thiếu Bearer Token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Dịch vụ chuỗi tập trung chưa sẵn sàng",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "AppBearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/streak/repair": {
+      "post": {
+        "tags": [
+          "Focus Streak - UF6"
+        ],
+        "summary": "Kích hoạt Nối lại nhịp 24h (24h Repair) cho ngày vừa lỡ (UF6)",
+        "operationId": "repair_streak_api_v1_streak_repair_post",
+        "security": [
+          {
+            "AppBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "title": "Idempotency-Key"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SuccessEnvelope_StreakData_"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Chưa đăng nhập hoặc thiếu Bearer Token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Không có cửa sổ 24h Repair hợp lệ hoặc trùng Idempotency-Key",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Thiếu hoặc sai header Idempotency-Key",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Dịch vụ chuỗi tập trung chưa sẵn sàng",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -8279,6 +8403,35 @@
             "type": "boolean",
             "title": "Is Active",
             "default": true
+          },
+          "current_streak_days": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Current Streak Days",
+            "default": 0
+          },
+          "streak_frozen": {
+            "type": "boolean",
+            "title": "Streak Frozen",
+            "default": false
+          },
+          "streak_freeze_tokens": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Streak Freeze Tokens",
+            "default": 2
+          },
+          "last_streak_date": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Streak Date"
           }
         },
         "additionalProperties": false,
@@ -12669,6 +12822,159 @@
         ],
         "title": "Step"
       },
+      "StreakData": {
+        "properties": {
+          "current_streak_days": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Current Streak Days"
+          },
+          "effective_display_streak": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Effective Display Streak"
+          },
+          "unlocked": {
+            "type": "boolean",
+            "title": "Unlocked"
+          },
+          "streak_frozen": {
+            "type": "boolean",
+            "title": "Streak Frozen"
+          },
+          "streak_freeze_tokens": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Streak Freeze Tokens"
+          },
+          "max_freeze_tokens": {
+            "type": "integer",
+            "minimum": 1.0,
+            "title": "Max Freeze Tokens",
+            "default": 2
+          },
+          "last_streak_date": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Streak Date"
+          },
+          "repair_pending": {
+            "type": "boolean",
+            "title": "Repair Pending",
+            "default": false
+          },
+          "repair_window_ends_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Repair Window Ends At"
+          },
+          "repairs_used_this_month": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Repairs Used This Month",
+            "default": 0
+          },
+          "repairs_left_this_month": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Repairs Left This Month",
+            "default": 2
+          },
+          "max_repairs_per_month": {
+            "type": "integer",
+            "minimum": 1.0,
+            "title": "Max Repairs Per Month",
+            "default": 2
+          },
+          "longest_streak_days": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Longest Streak Days",
+            "default": 0
+          },
+          "today_completed": {
+            "type": "boolean",
+            "title": "Today Completed",
+            "default": false
+          },
+          "today_focus_minutes": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Today Focus Minutes",
+            "default": 0
+          },
+          "timezone": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Timezone"
+          },
+          "day_records": {
+            "items": {
+              "$ref": "#/components/schemas/StreakDayRecordData"
+            },
+            "type": "array",
+            "title": "Day Records"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "current_streak_days",
+          "effective_display_streak",
+          "unlocked",
+          "streak_frozen",
+          "streak_freeze_tokens",
+          "timezone"
+        ],
+        "title": "StreakData",
+        "description": "Trạng thái Focus Streak đầy đủ trả về từ GET /api/v1/streak và POST /api/v1/streak/repair."
+      },
+      "StreakDayRecordData": {
+        "properties": {
+          "date": {
+            "type": "string",
+            "format": "date",
+            "title": "Date"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "done",
+              "freeze",
+              "repair"
+            ],
+            "title": "Kind"
+          },
+          "minutes": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Minutes"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "date",
+          "kind",
+          "minutes"
+        ],
+        "title": "StreakDayRecordData",
+        "description": "Một ngày hoạt động trong cửa sổ lịch sử 35 ngày gần nhất của Focus Streak."
+      },
       "SuccessEnvelope_ActualCorrectionData_": {
         "properties": {
           "data": {
@@ -13246,6 +13552,23 @@
           "meta"
         ],
         "title": "SuccessEnvelope[SettingsChangeResult]"
+      },
+      "SuccessEnvelope_StreakData_": {
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/StreakData"
+          },
+          "meta": {
+            "$ref": "#/components/schemas/ResponseMeta"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "data",
+          "meta"
+        ],
+        "title": "SuccessEnvelope[StreakData]"
       },
       "SuccessEnvelope_SuggestionResponseResult_": {
         "properties": {
@@ -14198,6 +14521,16 @@
           },
           "source_summary": {
             "$ref": "#/components/schemas/TaskSummary"
+          },
+          "source_revisions": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ProposalSourceRevisions"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "additionalProperties": false,

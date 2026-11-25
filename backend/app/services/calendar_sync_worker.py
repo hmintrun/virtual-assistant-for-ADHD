@@ -12,8 +12,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import AsyncGenerator
-from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
@@ -25,25 +23,14 @@ from sqlalchemy.orm import aliased
 
 from app.models.calendar import CalendarConnection, CalendarEventLink, CalendarSyncJob
 from app.services.calendar_service import (
+    _CONNECTION_SYNC_LOCKS,
     CalendarService,
-    _acquire_refcounted_lock,
-    _RefCountedLock,
     _resolve_uuid,
+    get_connection_sync_lock,
 )
 from app.services.google_calendar_client import CalendarAuthError, CalendarConflictError
 
 logger = logging.getLogger(__name__)
-
-_CONNECTION_SYNC_LOCKS: dict[tuple[int, str], _RefCountedLock] = {}
-
-
-@asynccontextmanager
-async def get_connection_sync_lock(connection_id: UUID | str) -> AsyncGenerator[None]:
-    """Tuần tự hóa đồng bộ theo cặp (event_loop_id, connection_id) và tự dọn entry khi hết người chờ."""
-    loop = asyncio.get_running_loop()
-    key = (id(loop), str(_resolve_uuid(connection_id)))
-    async with _acquire_refcounted_lock(_CONNECTION_SYNC_LOCKS, key):
-        yield
 
 
 def _busy_connection_ids_for_current_loop() -> list[UUID]:

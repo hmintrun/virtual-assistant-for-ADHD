@@ -25,7 +25,7 @@ from app.schemas.execution import (
     CheckInListResult,
     CheckInResponseRequest,
 )
-from app.services import command_service, run_service
+from app.services import command_service, run_service, streak_service
 from app.services.plan_service import build_calendar_event_text
 from app.services.reschedule_service import _next_session_google_event_id
 
@@ -1458,4 +1458,6 @@ async def respond_to_checkin(
         )
 
     await db.flush()
+    if checkin.kind == "final":
+        await streak_service.sync_streak_for_run(db, user_uuid=user_uuid, run=run)
     return run_service._checkin_to_schema(checkin)

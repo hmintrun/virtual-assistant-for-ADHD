@@ -14,7 +14,7 @@ from typing import Any, Literal
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel, ValidationError
-from sqlalchemy import and_, exists, func, or_, select, update
+from sqlalchemy import and_, case, exists, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -3292,6 +3292,11 @@ async def get_task_by_id(*, user_id: str, task_id: str, db: AsyncSession) -> Tas
     from app.services.task_state_service import get_task_planning_states
 
     state = (await get_task_planning_states(db, owner, [row.id]))[row.id]
+    from app.services import reschedule_service
+
+    source_revs, _ = await reschedule_service._compute_db_source_revisions(
+        db, owner, target_task_id=str(row.id)
+    )
     steps = [
         Step.model_validate(
             dict(
@@ -3332,6 +3337,7 @@ async def get_task_by_id(*, user_id: str, task_id: str, db: AsyncSession) -> Tas
             steps=steps,
             sessions=[_session_schema(item, link_ids.get(item.id)) for item in session_rows],
             source_summary=row.source_summary,
+            source_revisions=source_revs,
         )
     )
 
@@ -3347,6 +3353,68 @@ def _page(
         start = positions[0] + 1
     result = items[start : start + limit]
     return result, str(getattr(result[-1], key)) if result and start + limit < len(items) else None
+
+
+async def _compute_list_tasks_base_revisions(
+    db: AsyncSession,
+    owner: UUID,
+) -> tuple[int, int, int, int]:
+    """Đọc 4 revision nguồn dùng chung cho toàn trang list_tasks trong 1 query duy nhất."""
+    row = (
+        await db.execute(
+            select(
+                select(VersionRow.version_number)
+                .where(VersionRow.user_id == owner)
+                .order_by(VersionRow.version_number.desc())
+                .limit(1)
+                .scalar_subquery()
+                .label("ver_rev"),
+                select(SessionRow.schedule_revision)
+                .where(SessionRow.user_id == owner)
+                .order_by(SessionRow.schedule_revision.desc())
+                .limit(1)
+                .scalar_subquery()
+                .label("sess_rev"),
+                select(
+                    case(
+                        (AvailabilityRow.confirmed_at.is_not(None), AvailabilityRow.revision),
+                        else_=0,
+                    )
+                )
+                .where(AvailabilityRow.user_id == owner)
+                .order_by(AvailabilityRow.revision.desc())
+                .limit(1)
+                .scalar_subquery()
+                .label("avail_rev"),
+                select(PreferenceRow.effective_revision)
+                .where(PreferenceRow.user_id == owner)
+                .limit(1)
+                .scalar_subquery()
+                .label("settings_rev"),
+                select(PlanningContext.revision)
+                .where(PlanningContext.user_id == owner)
+                .order_by(PlanningContext.created_at.desc())
+                .limit(1)
+                .scalar_subquery()
+                .label("ctx_rev"),
+                select(CalendarConnection.revision)
+                .where(CalendarConnection.user_id == owner)
+                .order_by(CalendarConnection.created_at.desc())
+                .limit(1)
+                .scalar_subquery()
+                .label("conn_rev"),
+            )
+        )
+    ).one()
+    schedule_rev = max(int(row.ver_rev or 0), int(row.sess_rev or 0))
+    avail_rev = int(row.avail_rev or 0)
+    settings_rev = int(row.settings_rev) if row.settings_rev is not None else 1
+    calendar_rev = (
+        int(row.ctx_rev)
+        if row.ctx_rev is not None
+        else (int(row.conn_rev) if row.conn_rev is not None else 0)
+    )
+    return schedule_rev, avail_rev, settings_rev, calendar_rev
 
 
 async def list_tasks(
@@ -3437,10 +3505,14 @@ async def list_tasks(
     )
     link_ids = {item.session_id: str(item.id) for item in all_links}
 
-    # Batch 5: Task planning states
+    # Batch 5: Task planning states & shared source revisions (1 query, 0 N+1)
+    from app.schemas.reschedule import ProposalSourceRevisions
     from app.services.task_state_service import get_task_planning_states
 
     task_states = await get_task_planning_states(db, owner, task_ids)
+    sched_rev, avail_rev, settings_rev, cal_rev = await _compute_list_tasks_base_revisions(
+        db, owner
+    )
 
     # Construct Task DTOs in-memory without extra DB queries
     tasks: list[Task] = []
@@ -3452,6 +3524,13 @@ async def list_tasks(
         step_rows = steps_by_task.get(row.id, [])
         session_rows = sessions_by_task.get(row.id, [])
         state = task_states[row.id]
+        task_source_revs = ProposalSourceRevisions(
+            task=int(row.revision),
+            schedule=sched_rev,
+            availability=avail_rev,
+            settings=settings_rev,
+            calendar=cal_rev,
+        )
 
         steps = [
             Step.model_validate(
@@ -3496,6 +3575,7 @@ async def list_tasks(
                         _session_schema(item, link_ids.get(item.id)) for item in session_rows
                     ],
                     source_summary=row.source_summary,
+                    source_revisions=task_source_revs,
                 )
             )
         )
@@ -3743,6 +3823,7 @@ async def _calendar_state(db: AsyncSession, owner: UUID, version: int) -> str:
             select(CalendarSyncJob.job_state).where(
                 CalendarSyncJob.user_id == owner,
                 CalendarSyncJob.target_schedule_revision == version,
+                CalendarSyncJob.job_state != "cancelled",
             )
         )
     ).all()

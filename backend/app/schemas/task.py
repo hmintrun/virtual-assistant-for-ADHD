@@ -19,6 +19,7 @@ from app.schemas.common import (
     TimeConstraint,
 )
 from app.schemas.draft import TaskSummary
+from app.schemas.reschedule import ProposalSourceRevisions
 
 GenerationTier = Literal["tier_1_gemini", "tier_2_groq", "tier_3_rule_based"]
 CognitiveLoad = Literal["light", "medium", "heavy"]
@@ -229,6 +230,7 @@ class Task(ApiModel):
     steps: list[Step]
     sessions: list[Session]
     source_summary: TaskSummary
+    source_revisions: ProposalSourceRevisions | None = None
 
 
 class TaskListData(ApiModel):
