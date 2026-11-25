@@ -144,7 +144,17 @@ def fixture_sets():
                  "job_state": "conflict", "attempt_count": 1, "last_error_code": "ETAG_CONFLICT_412"})),
     ]
     thought_request = {"client_thought_id": "client-thought-1", "source_run_id": RUN, "input_type": "audio",
-                       "capture_state": "raw_saved", "attempt_count": 1, "text_content": None}
+                       "capture_state": "saved", "attempt_count": 1, "text_content": None}
+    telemetry_request = {
+        "event_id": "evt-uf4-fail-1",
+        "event_type": "uf4_audio_capture_failed",
+        "error_code": "MIC_PERMISSION_DENIED",
+        "attempt_count": 1,
+        "source_run_id": RUN,
+        "occurred_at": META["server_time"],
+        "app_version": "1.0.0",
+        "platform_os": "android",
+    }
     run_data = {
         "run_id": RUN, "session_id": SESSION, "device_id": "device-1", "started_at": META["server_time"],
         "run_state": "running", "active_phase": "work", "settings_snapshot": {
@@ -175,7 +185,18 @@ def fixture_sets():
              request={"expected_schedule_revision": 8, "device_id": "device-1", "requested_start_at": "2026-11-20T03:05:01Z"},
              request_headers={"Idempotency-Key": "w4-start-clock-skew"}),
         case("thought_capture", "POST", "/api/v1/thoughts", 201,
-             success(thought.ThoughtData, {**thought_request, "thought_id": THOUGHT, "thought_revision": 1}), request=thought_request),
+             success(thought.ThoughtData, {**thought_request, "thought_id": THOUGHT, "thought_revision": 1, "created_at": META["server_time"]}), request=thought_request),
+        case("thought_capture_telemetry", "POST", "/api/v1/devices/device-1/telemetry", 201,
+             success(execution.DeviceTelemetryData, {
+                 "audit_event_id": "77777777-7777-4777-8777-777777777777",
+                 "device_id": "device-1",
+                 "event_id": telemetry_request["event_id"],
+                 "event_type": telemetry_request["event_type"],
+                 "error_code": telemetry_request["error_code"],
+                 "received_at": META["server_time"],
+             }),
+             request=telemetry_request,
+             request_headers={"Idempotency-Key": "w4-telemetry-1"}),
         case("thought_delete", "DELETE", f"/api/v1/thoughts/{THOUGHT}", 200,
              success(thought.ThoughtDeleteResult, {"thought_id": THOUGHT, "deleted": True, "local_cleanup_required": True}),
              request={"expected_thought_revision": 1}),

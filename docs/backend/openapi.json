@@ -3798,6 +3798,74 @@
         }
       }
     },
+    "/api/v1/devices/{device_id}/telemetry": {
+      "post": {
+        "tags": [
+          "Focus & Devices - UF3"
+        ],
+        "summary": "Report Device Telemetry",
+        "operationId": "report_device_telemetry_api_v1_devices__device_id__telemetry_post",
+        "security": [
+          {
+            "AppBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "device_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "title": "Device Id"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "title": "Idempotency-Key"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DeviceTelemetryRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SuccessEnvelope_DeviceTelemetryData_"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/reminders": {
       "get": {
         "tags": [
@@ -8457,6 +8525,140 @@
         "title": "DeviceStateReportRequest",
         "description": "Dòng21: trạng thái phải do thiết bị báo, không tự suy quyền hoặc DND."
       },
+      "DeviceTelemetryData": {
+        "properties": {
+          "audit_event_id": {
+            "type": "string",
+            "title": "Audit Event Id"
+          },
+          "device_id": {
+            "type": "string",
+            "title": "Device Id"
+          },
+          "event_id": {
+            "type": "string",
+            "title": "Event Id"
+          },
+          "event_type": {
+            "type": "string",
+            "enum": [
+              "uf4_audio_capture_failed",
+              "uf3_alarm_drift",
+              "uf5_dnd_restore_failed"
+            ],
+            "title": "Event Type"
+          },
+          "error_code": {
+            "type": "string",
+            "title": "Error Code"
+          },
+          "received_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Received At"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "audit_event_id",
+          "device_id",
+          "event_id",
+          "event_type",
+          "error_code",
+          "received_at"
+        ],
+        "title": "DeviceTelemetryData",
+        "description": "Phản hồi sau khi ghi nhận telemetry vào AuditEvent."
+      },
+      "DeviceTelemetryRequest": {
+        "properties": {
+          "event_id": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Event Id"
+          },
+          "event_type": {
+            "type": "string",
+            "enum": [
+              "uf4_audio_capture_failed",
+              "uf3_alarm_drift",
+              "uf5_dnd_restore_failed"
+            ],
+            "title": "Event Type"
+          },
+          "error_code": {
+            "type": "string",
+            "pattern": "^[A-Z0-9_]{2,64}$",
+            "title": "Error Code"
+          },
+          "attempt_count": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "maximum": 5.0,
+                "minimum": 1.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Attempt Count"
+          },
+          "source_run_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Run Id"
+          },
+          "occurred_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Occurred At"
+          },
+          "app_version": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 32
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "App Version"
+          },
+          "platform_os": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 32
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Platform Os"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "event_id",
+          "event_type",
+          "error_code",
+          "occurred_at"
+        ],
+        "title": "DeviceTelemetryRequest",
+        "description": "Báo cáo telemetry lỗi không chứa dữ liệu nhạy cảm/PII từ thiết bị (BE-UF4-01)."
+      },
       "DraftAnalyzeRequest": {
         "properties": {
           "expected_summary_revision": {
@@ -12790,6 +12992,23 @@
         ],
         "title": "SuccessEnvelope[DeviceStateData]"
       },
+      "SuccessEnvelope_DeviceTelemetryData_": {
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/DeviceTelemetryData"
+          },
+          "meta": {
+            "$ref": "#/components/schemas/ResponseMeta"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "data",
+          "meta"
+        ],
+        "title": "SuccessEnvelope[DeviceTelemetryData]"
+      },
       "SuccessEnvelope_DraftListData_": {
         "properties": {
           "data": {
@@ -14391,6 +14610,18 @@
               }
             ],
             "title": "Retention Expires At"
+          },
+          "created_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Created At"
           }
         },
         "additionalProperties": false,

@@ -12,12 +12,14 @@ from app.core.errors import AppError
 from app.models.device import DeviceState
 from app.models.planning import ScheduleVersion
 from app.models.session import Session
-from app.models.system import Reminder
+from app.models.system import AuditEvent, Reminder
 from app.models.user import UserPreference
 from app.repositories import device_repository, run_repository
 from app.schemas.execution import (
     DeviceStateData,
     DeviceStateReportRequest,
+    DeviceTelemetryData,
+    DeviceTelemetryRequest,
     ReminderData,
     ReminderListResult,
     ReminderReceiptRequest,
@@ -366,3 +368,120 @@ async def record_reminder_receipt(
     row.device_id = payload.device_id
     await db.flush()
     return _reminder_data(row)
+
+
+async def _resolve_existing_telemetry(
+    db: AsyncSession,
+    owner: UUID,
+    device_id: str,
+    payload: DeviceTelemetryRequest,
+    normalized_source_run_id: str | None,
+) -> DeviceTelemetryData | None:
+    """Kiểm tra (user_id, event_id) đã tồn tại trong AuditEvent để trả về idempotent hoặc 409 xung đột."""
+    existing = await db.scalar(
+        select(AuditEvent)
+        .where(AuditEvent.user_id == owner, AuditEvent.event_id == payload.event_id)
+        .execution_options(populate_existing=True)
+    )
+    if existing is None:
+        return None
+    ref = existing.resource_ref or {}
+    existing_occ = (
+        existing.occurred_at
+        if existing.occurred_at.tzinfo is not None
+        else existing.occurred_at.replace(tzinfo=UTC)
+    )
+    if (
+        existing.event_type == payload.event_type
+        and ref.get("device_id") == device_id
+        and ref.get("error_code") == payload.error_code
+        and ref.get("attempt_count") == payload.attempt_count
+        and ref.get("source_run_id") == normalized_source_run_id
+        and ref.get("app_version") == payload.app_version
+        and ref.get("platform_os") == payload.platform_os
+        and existing_occ.astimezone(UTC) == payload.occurred_at.astimezone(UTC)
+    ):
+        return DeviceTelemetryData(
+            audit_event_id=str(existing.id),
+            device_id=device_id,
+            event_id=existing.event_id,
+            event_type=existing.event_type,
+            error_code=ref["error_code"],
+            received_at=existing.received_at,
+        )
+    raise _error(
+        "CLIENT_EVENT_CONFLICT",
+        "Mã sự kiện đã được dùng cho thông tin khác.",
+        status=409,
+        next_action="use_new_event_id",
+    )
+
+
+@command_service.durable_command(
+    "record_device_telemetry", DeviceTelemetryData, resource_arg="device_id"
+)
+async def record_device_telemetry(
+    db: AsyncSession,
+    *,
+    user_id: str,
+    device_id: str,
+    idempotency_key: str,
+    payload: DeviceTelemetryRequest,
+) -> DeviceTelemetryData:
+    """Ghi nhận telemetry lỗi thiết bị (Zero-PII, Zero-AI) vào AuditEvent."""
+    owner = command_service.owner_uuid(user_id)
+    server_now = _now()
+    if payload.occurred_at.astimezone(UTC) > server_now + timedelta(seconds=300):
+        raise _error(
+            "VALIDATION_ERROR",
+            "Thời điểm sự kiện vượt quá giới hạn sai lệch đồng hồ cho phép.",
+        )
+    normalized_source_run_id: str | None = None
+    if payload.source_run_id is not None:
+        source_uuid = _uuid(payload.source_run_id)
+        if await run_repository.get_run(db, owner, source_uuid) is None:
+            raise _error("RESOURCE_NOT_FOUND", "Không tìm thấy phiên nguồn.", status=404)
+        normalized_source_run_id = str(source_uuid)
+
+    matched = await _resolve_existing_telemetry(
+        db, owner, device_id, payload, normalized_source_run_id
+    )
+    if matched is not None:
+        return matched
+
+    row = AuditEvent(
+        user_id=owner,
+        event_id=payload.event_id,
+        event_type=payload.event_type,
+        resource_ref={
+            "device_id": device_id,
+            "error_code": payload.error_code,
+            "attempt_count": payload.attempt_count,
+            "source_run_id": normalized_source_run_id,
+            "app_version": payload.app_version,
+            "platform_os": payload.platform_os,
+        },
+        occurred_at=payload.occurred_at.astimezone(UTC),
+        received_at=server_now,
+        command_id=idempotency_key,
+    )
+    try:
+        async with db.begin_nested():
+            db.add(row)
+            await db.flush()
+    except IntegrityError:
+        matched = await _resolve_existing_telemetry(
+            db, owner, device_id, payload, normalized_source_run_id
+        )
+        if matched is not None:
+            return matched
+        raise
+
+    return DeviceTelemetryData(
+        audit_event_id=str(row.id),
+        device_id=device_id,
+        event_id=row.event_id,
+        event_type=payload.event_type,
+        error_code=payload.error_code,
+        received_at=row.received_at,
+    )

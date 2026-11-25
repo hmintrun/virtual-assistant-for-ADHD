@@ -2440,14 +2440,15 @@ Chưa có xác nhận các thành viên đã nhận fixture; người thực hi�
             "client_thought_id": "client-thought-1",
             "source_run_id": "44444444-4444-4444-8444-444444444444",
             "input_type": "audio",
-            "capture_state": "raw_saved",
+            "capture_state": "saved",
             "attempt_count": 1,
             "text_content": null,
             "thought_id": "66666666-6666-4666-8666-666666666666",
             "thought_revision": 1,
             "linked_draft_id": null,
             "converted_task_id": null,
-            "retention_expires_at": null
+            "retention_expires_at": null,
+            "created_at": "2026-11-20T03:00:00Z"
           },
           "meta": {
             "request_id": "w4-example",
@@ -2459,9 +2460,45 @@ Chưa có xác nhận các thành viên đã nhận fixture; người thực hi�
         "client_thought_id": "client-thought-1",
         "source_run_id": "44444444-4444-4444-8444-444444444444",
         "input_type": "audio",
-        "capture_state": "raw_saved",
+        "capture_state": "saved",
         "attempt_count": 1,
         "text_content": null
+      }
+    },
+    {
+      "name": "thought_capture_telemetry",
+      "scope": "runtime",
+      "method": "POST",
+      "path": "/api/v1/devices/device-1/telemetry",
+      "response": {
+        "status": 201,
+        "body": {
+          "data": {
+            "audit_event_id": "77777777-7777-4777-8777-777777777777",
+            "device_id": "device-1",
+            "event_id": "evt-uf4-fail-1",
+            "event_type": "uf4_audio_capture_failed",
+            "error_code": "MIC_PERMISSION_DENIED",
+            "received_at": "2026-11-20T03:00:00Z"
+          },
+          "meta": {
+            "request_id": "w4-example",
+            "server_time": "2026-11-20T03:00:00Z"
+          }
+        }
+      },
+      "request": {
+        "event_id": "evt-uf4-fail-1",
+        "event_type": "uf4_audio_capture_failed",
+        "error_code": "MIC_PERMISSION_DENIED",
+        "attempt_count": 1,
+        "source_run_id": "44444444-4444-4444-8444-444444444444",
+        "occurred_at": "2026-11-20T03:00:00Z",
+        "app_version": "1.0.0",
+        "platform_os": "android"
+      },
+      "request_headers": {
+        "Idempotency-Key": "w4-telemetry-1"
       }
     },
     {

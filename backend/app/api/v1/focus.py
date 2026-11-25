@@ -15,6 +15,8 @@ from app.schemas.execution import (
     ActualCorrectionRequest,
     DeviceStateData,
     DeviceStateReportRequest,
+    DeviceTelemetryData,
+    DeviceTelemetryRequest,
     ReminderData,
     ReminderListResult,
     ReminderReceiptRequest,
@@ -192,6 +194,29 @@ async def report_device_state(
     idempotency_key: IdempotencyKey,
 ) -> SuccessEnvelope[DeviceStateData]:
     data = await service_handler("device_service", "save_device_state_report")(
+        db=db,
+        user_id=current_user.user_id,
+        device_id=device_id,
+        payload=payload,
+        idempotency_key=idempotency_key,
+    )
+    return success(request, data)
+
+
+@router.post(
+    "/devices/{device_id}/telemetry",
+    status_code=201,
+    response_model=SuccessEnvelope[DeviceTelemetryData],
+)
+async def report_device_telemetry(
+    request: Request,
+    device_id: Annotated[str, Path(min_length=1)],
+    payload: DeviceTelemetryRequest,
+    current_user: CurrentUserDep,
+    db: DbSessionDep,
+    idempotency_key: IdempotencyKey,
+) -> SuccessEnvelope[DeviceTelemetryData]:
+    data = await service_handler("device_service", "record_device_telemetry")(
         db=db,
         user_id=current_user.user_id,
         device_id=device_id,
