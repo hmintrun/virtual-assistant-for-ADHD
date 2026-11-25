@@ -272,6 +272,28 @@ async def get_preferences(
                 raise
         if created and commit_if_created:
             await db.commit()
+    pending_change_req = await db.scalar(
+        select(SettingChangeRequest)
+        .outerjoin(
+            RescheduleProposal,
+            RescheduleProposal.id == SettingChangeRequest.pending_proposal_id,
+        )
+        .where(
+            SettingChangeRequest.user_id == owner_uuid,
+            SettingChangeRequest.application_state.in_(
+                ("pending_review", "pending_proposal")
+            ),
+            (SettingChangeRequest.pending_proposal_id.is_(None))
+            | (RescheduleProposal.status == "pending"),
+        )
+        .order_by(
+            SettingChangeRequest.revision.desc(),
+            SettingChangeRequest.created_at.desc(),
+            SettingChangeRequest.id.desc(),
+        )
+        .limit(1)
+        .execution_options(populate_existing=True)
+    )
     return UserPreference(
         revision=row.revision,
         effective_revision=row.effective_revision,
@@ -284,6 +306,12 @@ async def get_preferences(
         reminder_style=row.reminder_style,
         requested_changes=row.requested_changes,
         pending_proposal_id=str(row.pending_proposal_id) if row.pending_proposal_id else None,
+        pending_change_request_id=(
+            str(pending_change_req.id) if pending_change_req is not None else None
+        ),
+        pending_change_request_revision=(
+            int(pending_change_req.revision) if pending_change_req is not None else None
+        ),
     )
 
 

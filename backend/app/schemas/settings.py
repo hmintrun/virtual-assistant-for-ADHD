@@ -15,6 +15,17 @@ from app.schemas.availability import (
 from app.schemas.common import ApiModel
 
 ReminderOffsets = Annotated[list[Annotated[int, Field(ge=0)]], Field(min_length=1, max_length=3)]
+CANONICAL_REMINDER_STYLES: tuple[str, ...] = ("gentle", "upbeat", "encouraging")
+LEGACY_REMINDER_STYLES: tuple[str, ...] = (
+    "firm",
+    "minimal",
+    "gentle_sound",
+    "balanced",
+    "default",
+)
+SUPPORTED_REMINDER_STYLES: frozenset[str] = frozenset(
+    (*CANONICAL_REMINDER_STYLES, *LEGACY_REMINDER_STYLES)
+)
 SuggestionKind = Literal["reminder_offset", "buffer_multiplier"]
 SuggestionStatus = Literal["pending", "accepted", "rejected", "superseded"]
 SuggestionAction = Literal["reject", "accept", "edit"]
@@ -75,6 +86,20 @@ class PreferenceChanges(ApiModel):
     def validate_offsets(cls, v: ReminderOffsets | None) -> ReminderOffsets | None:
         return validate_strict_descending_offsets(v)
 
+    @field_validator("reminder_style", mode="before")
+    @classmethod
+    def validate_reminder_style(cls, v: Any) -> str | None:
+        if v is None:
+            return None
+        if not isinstance(v, str):
+            raise ValueError("reminder_style phải là chuỗi ký tự hợp lệ")
+        cleaned = v.strip()
+        if not (1 <= len(cleaned) <= 32):
+            raise ValueError("reminder_style phải có độ dài từ 1 đến 32 ký tự")
+        if cleaned not in SUPPORTED_REMINDER_STYLES:
+            raise ValueError("reminder_style chưa được hỗ trợ")
+        return cleaned
+
 
 class UserPreference(ApiModel):
     """Cấu hình trợ lý có hiệu lực và yêu cầu đang chờ duyệt (Dòng 39 - GET /api/v1/preferences)."""
@@ -90,12 +115,17 @@ class UserPreference(ApiModel):
     reminder_style: str = Field(min_length=1)
     requested_changes: dict[str, Any] | None = None
     pending_proposal_id: str | None = None
+    pending_change_request_id: str | None = None
+    pending_change_request_revision: int | None = Field(default=None, ge=1)
 
 
 # Giữ bí danh tương thích với tên cũ
 LocalTimeInterval = LocalInterval
 
 __all__ = [
+    "CANONICAL_REMINDER_STYLES",
+    "LEGACY_REMINDER_STYLES",
+    "SUPPORTED_REMINDER_STYLES",
     "AdaptationSuggestionData",
     "AnnoyanceFeedback",
     "Availability",

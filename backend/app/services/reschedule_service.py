@@ -37,8 +37,8 @@ from app.models.execution import RunEvent, SessionRun
 from app.models.planning import ScheduleVersion as ScheduleVersionRow
 from app.models.schedule_proposal import RescheduleProposal
 from app.models.session import Session as SessionRow
+from app.models.settings import AdaptationSuggestion, SettingChangeRequest
 from app.models.settings import Availability as AvailabilityRow
-from app.models.settings import SettingChangeRequest
 from app.models.step import Step as StepRow
 from app.models.system import Reminder
 from app.models.task import Task as TaskRow
@@ -1331,8 +1331,12 @@ def _pack_proposed_changes(
     request_text: str | None = None,
     override_preferences: dict[str, Any] | None = None,
     override_availability: dict[str, Any] | None = None,
+    suggestion_id: str | None = None,
 ) -> dict[str, Any]:
     raw = changes.model_dump(mode="json")
+    clean_suggestion_id = (
+        suggestion_id.strip() if isinstance(suggestion_id, str) and suggestion_id.strip() else None
+    )
     raw["_meta"] = {
         "calculated_at": calculated_at.isoformat() if calculated_at else None,
         "continuation_request": continuation_request.model_dump(mode="json")
@@ -1346,8 +1350,17 @@ def _pack_proposed_changes(
         "request_text": request_text,
         "override_preferences": dict(override_preferences) if override_preferences else None,
         "override_availability": dict(override_availability) if override_availability else None,
+        "suggestion_id": clean_suggestion_id,
     }
     return raw
+
+
+def _unpack_suggestion_id(raw_changes: dict[str, Any] | None) -> str | None:
+    meta = (raw_changes or {}).get("_meta") or {}
+    raw_id = meta.get("suggestion_id")
+    if isinstance(raw_id, str) and raw_id.strip():
+        return raw_id.strip()
+    return None
 
 
 def _unpack_settings_overrides(
@@ -3936,6 +3949,68 @@ async def create_proposal(
         db.info.pop("command_result_meta", None)
 
 
+_TERMINAL_OR_ARCHIVED_STATUSES = ("completed", "skipped", "cancelled", "archived")
+
+
+async def sync_active_steps_buffer_multiplier(
+    db: AsyncSession,
+    *,
+    owner: UUID,
+    new_buffer: float,
+    now: datetime,
+) -> int:
+    """Đồng bộ Step.buffer_multiplier cho các bước chưa hoàn tất (không chạm step có phiên/run đang chạy)."""
+    if not (1.0 <= new_buffer <= 2.0):
+        return 0
+
+    active_step_ids: set[UUID] = set(
+        (
+            await db.scalars(
+                select(SessionRow.step_id).where(
+                    SessionRow.user_id == owner,
+                    SessionRow.status == "in_progress",
+                )
+            )
+        ).all()
+    )
+    active_run_step_ids = (
+        await db.scalars(
+            select(SessionRow.step_id)
+            .join(SessionRun, SessionRun.session_id == SessionRow.id)
+            .where(
+                SessionRow.user_id == owner,
+                SessionRun.user_id == owner,
+                SessionRun.run_state.in_(("running", "paused", "awaiting_checkin")),
+            )
+        )
+    ).all()
+    active_step_ids.update(active_run_step_ids)
+
+    eligible_steps = (
+        await db.scalars(
+            select(StepRow)
+            .join(TaskRow, TaskRow.id == StepRow.task_id)
+            .where(
+                StepRow.user_id == owner,
+                TaskRow.user_id == owner,
+                TaskRow.status.not_in(_TERMINAL_OR_ARCHIVED_STATUSES),
+                StepRow.status.not_in(_TERMINAL_OR_ARCHIVED_STATUSES),
+            )
+        )
+    ).all()
+
+    updated_count = 0
+    for st_row in eligible_steps:
+        if st_row.id in active_step_ids:
+            continue
+        if abs(float(st_row.buffer_multiplier) - new_buffer) > 1e-9:
+            st_row.buffer_multiplier = new_buffer
+            st_row.revision += 1
+            st_row.updated_at = now
+            updated_count += 1
+    return updated_count
+
+
 async def _cancel_linked_setting_requests(
     db: AsyncSession,
     owner: UUID,
@@ -4101,6 +4176,7 @@ async def create_settings_change_proposal(
     request_text: str | None = None,
     override_preferences: dict[str, Any] | None = None,
     override_availability: dict[str, Any] | None = None,
+    suggestion_id: str | None = None,
     now: datetime | None = None,
     precomputed_empathy: tuple[str, GenerationTier] | None = None,
 ) -> ProposalData:
@@ -4150,6 +4226,7 @@ async def create_settings_change_proposal(
         request_text=request_text,
         override_preferences=override_preferences,
         override_availability=override_availability,
+        suggestion_id=suggestion_id,
     )
     if precomputed_empathy is not None:
         explanation, gen_tier = precomputed_empathy
@@ -4312,6 +4389,7 @@ async def rebuild_proposal(
     row_source_revisions_dict = dict(row.source_revisions or {})
     row_proposed_changes_dict = dict(row.proposed_changes or {})
 
+    old_suggestion_id = _unpack_suggestion_id(row_proposed_changes_dict)
     _, _, cont_req, _, _, _, old_req_text = _unpack_proposal_meta(row_proposed_changes_dict)
     effective_req_text = (
         payload.request_text if payload.request_text is not None else old_req_text
@@ -4368,6 +4446,7 @@ async def rebuild_proposal(
             start_window=start_window,
             approval_envelope=approval_envelope,
             request_text=effective_req_text,
+            suggestion_id=old_suggestion_id,
         )
         new_target_uuid = target_uuid
         gen_tier: GenerationTier = "python_fallback"
@@ -4403,6 +4482,7 @@ async def rebuild_proposal(
             request_text=effective_req_text,
             override_preferences=override_prefs,
             override_availability=override_avail,
+            suggestion_id=old_suggestion_id,
         )
         if not deferred:
             # Giải phóng toàn bộ transaction/lock DB trước khi gọi AI empathy
@@ -5154,11 +5234,21 @@ async def approve_proposal(
     )
 
     # 1. Áp dụng steps_to_add (nếu có)
-    eff_buf = (
+    pending_req_prefs = (
+        pref_row.requested_changes
+        if pref_row is not None
+        and pref_row.pending_proposal_id == row.id
+        and isinstance(pref_row.requested_changes, dict)
+        else {}
+    )
+    raw_pending_buf = pending_req_prefs.get("buffer_multiplier")
+    has_pending_buffer_change = raw_pending_buf is not None
+    old_buffer = (
         float(pref_row.buffer_multiplier)
         if pref_row is not None and pref_row.buffer_multiplier
         else 1.2
     )
+    eff_buf = float(raw_pending_buf) if has_pending_buffer_change else old_buffer
     for st_item in changes.steps_to_add:
         st_uuid = UUID(st_item.step_id)
         existing_st = await db.scalar(
@@ -5571,12 +5661,19 @@ async def approve_proposal(
             )
         )
     ).all()
+    linked_sugg_ids: set[UUID] = set()
     for s_req in setting_reqs:
         s_req.application_state = "applied"
         if pref_row is not None:
             s_req.effective_revision = pref_row.effective_revision
         s_req.requested_revision = None
         if isinstance(s_req.requested_changes, dict):
+            raw_sid = s_req.requested_changes.get("suggestion_id")
+            if raw_sid:
+                try:
+                    linked_sugg_ids.add(UUID(str(raw_sid)))
+                except ValueError:
+                    pass
             req_avail = s_req.requested_changes.get("availability")
             req_task_id = s_req.requested_changes.get("target_task_id")
             if req_avail is not None and req_task_id:
@@ -5600,6 +5697,46 @@ async def approve_proposal(
                 except ValueError:
                     pass
         s_req.updated_at = approve_now
+
+    meta_sid = _unpack_suggestion_id(
+        row.proposed_changes if isinstance(row.proposed_changes, dict) else None
+    )
+    if meta_sid:
+        try:
+            linked_sugg_ids.add(UUID(meta_sid))
+        except ValueError:
+            pass
+
+    for sugg_uuid in linked_sugg_ids:
+        sugg_row = await db.scalar(
+            select(AdaptationSuggestion).where(
+                AdaptationSuggestion.id == sugg_uuid,
+                AdaptationSuggestion.user_id == owner,
+            )
+        )
+        if sugg_row is not None and sugg_row.status == "pending":
+            sugg_row.status = "accepted"
+            sugg_row.revision += 1
+            sugg_row.updated_at = approve_now
+
+    if has_pending_buffer_change:
+        await sync_active_steps_buffer_multiplier(
+            db, owner=owner, new_buffer=eff_buf, now=approve_now
+        )
+        other_pending_stmt = select(AdaptationSuggestion).where(
+            AdaptationSuggestion.user_id == owner,
+            AdaptationSuggestion.kind == "buffer_multiplier",
+            AdaptationSuggestion.status == "pending",
+        )
+        if linked_sugg_ids:
+            other_pending_stmt = other_pending_stmt.where(
+                AdaptationSuggestion.id.notin_(linked_sugg_ids)
+            )
+        other_pending_suggs = (await db.scalars(other_pending_stmt)).all()
+        for other_sugg in other_pending_suggs:
+            other_sugg.status = "superseded"
+            other_sugg.revision += 1
+            other_sugg.updated_at = approve_now
 
     await db.flush()
 

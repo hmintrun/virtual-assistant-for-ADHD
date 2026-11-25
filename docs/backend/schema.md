@@ -1639,7 +1639,9 @@ Chưa có xác nhận các thành viên đã nhận fixture; người thực hi�
             "buffer_multiplier": 1.2,
             "reminder_style": "gentle",
             "requested_changes": null,
-            "pending_proposal_id": null
+            "pending_proposal_id": null,
+            "pending_change_request_id": null,
+            "pending_change_request_revision": null
           },
           "meta": {
             "request_id": "w4-example",

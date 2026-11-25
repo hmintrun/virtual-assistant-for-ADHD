@@ -15951,6 +15951,29 @@
               }
             ],
             "title": "Pending Proposal Id"
+          },
+          "pending_change_request_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pending Change Request Id"
+          },
+          "pending_change_request_revision": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 1.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pending Change Request Revision"
           }
         },
         "additionalProperties": false,

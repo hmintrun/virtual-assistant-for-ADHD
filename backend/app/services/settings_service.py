@@ -27,6 +27,7 @@ from app.models.user import UserPreference as PreferenceRow
 from app.schemas.availability import DraftAvailability
 from app.schemas.draft import UpdateDraftRequest
 from app.schemas.settings import (
+    SUPPORTED_REMINDER_STYLES,
     AdaptationSuggestionData,
     CancelSettingsChangeRequest,
     CancelSettingsChangeResult,
@@ -299,6 +300,7 @@ def _validate_preferences_payload(
         "reminder_style",
         preferences.reminder_style if preferences else "",
     )
+    cleaned_style = style.strip() if isinstance(style, str) else ""
     valid_offsets = True
     try:
         validate_strict_descending_offsets(offsets)
@@ -318,7 +320,9 @@ def _validate_preferences_payload(
         or not (1.0 <= buffer <= 2.0)
         or not math.isfinite(buffer)
         or not valid_offsets
-        or not str(style).strip()
+        or not isinstance(style, str)
+        or not (1 <= len(cleaned_style) <= 32)
+        or cleaned_style not in SUPPORTED_REMINDER_STYLES
     ):
         raise AppError(
             status_code=422,
@@ -326,6 +330,8 @@ def _validate_preferences_payload(
             message="Cấu hình không hợp lệ.",
             next_action="fix_fields",
         )
+    if "reminder_style" in values and isinstance(values["reminder_style"], str):
+        values["reminder_style"] = cleaned_style
 
 
 async def _execute_apply_settings_change_phase_b(
@@ -557,6 +563,7 @@ async def _execute_apply_settings_change_phase_b(
     # Nhánh không ảnh hưởng lịch tương lai: áp dụng ngay cho Draft hoặc từ phiên tiếp theo (giữ nguyên settings_snapshot của phiên đang chạy).
     if pref_values:
         preferences_created = False
+        old_buffer = float(preferences.buffer_multiplier) if preferences is not None else None
         old_offsets = (
             list(preferences.reminder_offsets)
             if preferences and preferences.reminder_offsets
@@ -592,6 +599,26 @@ async def _execute_apply_settings_change_phase_b(
                     now=now,
                     updated_keys=pref_values.keys(),
                 )
+
+        if "buffer_multiplier" in pref_values:
+            new_buf = float(preferences.buffer_multiplier)
+            await reschedule_service.sync_active_steps_buffer_multiplier(
+                db, owner=owner, new_buffer=new_buf, now=now
+            )
+            if preferences_created or old_buffer is None or abs(old_buffer - new_buf) > 1e-9:
+                old_buf_suggs = (
+                    await db.scalars(
+                        select(SuggestionRow).where(
+                            SuggestionRow.user_id == owner,
+                            SuggestionRow.kind == "buffer_multiplier",
+                            SuggestionRow.status == "pending",
+                        )
+                    )
+                ).all()
+                for old_sugg in old_buf_suggs:
+                    old_sugg.status = "superseded"
+                    old_sugg.revision += 1
+                    old_sugg.updated_at = now
 
         new_offsets = pref_values.get("reminder_offsets")
         offsets_actually_changed = (
@@ -1233,6 +1260,33 @@ async def collect_buffer_step_samples(
     return [item[1] for item in ordered_entries]
 
 
+async def _get_in_flight_suggestion_ids(db: AsyncSession, owner: UUID) -> set[UUID]:
+    rows = (
+        await db.scalars(
+            select(SettingChangeRow.requested_changes)
+            .outerjoin(ProposalRow, ProposalRow.id == SettingChangeRow.pending_proposal_id)
+            .where(
+                SettingChangeRow.user_id == owner,
+                SettingChangeRow.application_state.in_(("pending_review", "pending_proposal")),
+                (SettingChangeRow.pending_proposal_id.is_(None))
+                | (ProposalRow.status == "pending"),
+            )
+        )
+    ).all()
+    in_flight: set[UUID] = set()
+    for req_changes in rows:
+        if not isinstance(req_changes, dict):
+            continue
+        raw_sid = req_changes.get("suggestion_id")
+        if not raw_sid:
+            continue
+        try:
+            in_flight.add(UUID(str(raw_sid)))
+        except ValueError:
+            continue
+    return in_flight
+
+
 async def get_current_suggestion(
     db: AsyncSession,
     *,
@@ -1251,9 +1305,17 @@ async def get_current_suggestion(
     )
     if kind is not None:
         pending_stmt = pending_stmt.where(SuggestionRow.kind == kind)
-    pending_row = await db.scalar(pending_stmt.order_by(SuggestionRow.created_at.desc()).limit(1))
-    if pending_row is not None:
-        return _suggestion_to_schema(pending_row)
+    ordered_pending_stmt = pending_stmt.order_by(
+        SuggestionRow.created_at.desc(),
+        SuggestionRow.id.desc(),
+    )
+    pending_rows = (await db.scalars(ordered_pending_stmt)).all()
+    if pending_rows:
+        in_flight_ids = await _get_in_flight_suggestion_ids(db, owner)
+        for row in pending_rows:
+            if row.id not in in_flight_ids:
+                return _suggestion_to_schema(row)
+        return None
 
     if kind not in (None, "buffer_multiplier"):
         return None
@@ -1297,15 +1359,21 @@ async def get_current_suggestion(
             .execution_options(populate_existing=True)
         )
     # Kiểm tra lại sau khi khóa hàng PreferenceRow để tránh tạo trùng pending suggestion đồng thời.
-    pending_row = await db.scalar(
-        pending_stmt.order_by(SuggestionRow.created_at.desc())
-        .limit(1)
-        .execution_options(populate_existing=True)
-    )
-    if pending_row is not None:
+    pending_rows = (
+        await db.scalars(
+            ordered_pending_stmt.execution_options(populate_existing=True)
+        )
+    ).all()
+    if pending_rows:
+        in_flight_ids = await _get_in_flight_suggestion_ids(db, owner)
+        for row in pending_rows:
+            if row.id not in in_flight_ids:
+                if pref_created and commit_if_created:
+                    await db.commit()
+                return _suggestion_to_schema(row)
         if pref_created and commit_if_created:
             await db.commit()
-        return _suggestion_to_schema(pending_row)
+        return None
     if preferences is not None:
         cooldown_until = _as_utc(preferences.suggestion_cooldown_until)
         if cooldown_until is not None and cooldown_until > calc_now:
@@ -1461,11 +1529,16 @@ async def _execute_respond_to_suggestion_phase_b(
             next_action="reload",
         )
 
-    if suggestion.status != "pending":
+    in_flight_ids = await _get_in_flight_suggestion_ids(db, owner)
+    if suggestion.status != "pending" or suggestion.id in in_flight_ids:
         raise AppError(
             status_code=409,
             code="SUGGESTION_CHANGED",
-            message="Gợi ý đã được xử lý hoặc thay thế.",
+            message=(
+                "Gợi ý đang có đề xuất điều chỉnh lịch chờ duyệt."
+                if suggestion.id in in_flight_ids and suggestion.status == "pending"
+                else "Gợi ý đã được xử lý hoặc thay thế."
+            ),
             current_revisions={"suggestion_revision": suggestion.revision},
             next_action="reload",
         )
@@ -1548,6 +1621,13 @@ async def _execute_respond_to_suggestion_phase_b(
             now=now,
             updated_keys=(pref_field,),
         )
+        if kind == "buffer_multiplier" and isinstance(accepted_value, (int, float)):
+            await reschedule_service.sync_active_steps_buffer_multiplier(
+                db,
+                owner=owner,
+                new_buffer=float(accepted_value),
+                now=now,
+            )
 
         if kind == "reminder_offset" and isinstance(accepted_value, list):
             future_sessions = list(
@@ -1655,15 +1735,13 @@ async def _execute_respond_to_suggestion_phase_b(
             next_action="reload_and_review",
         )
 
-    suggestion.status = "accepted"
-    suggestion.revision += 1
-    suggestion.updated_at = now
-
+    # Trì hoãn chuyển SuggestionRow.status = "accepted" tới lúc approve_proposal trên UF6 (BE-UF7-02).
     proposal = await reschedule_service.create_settings_change_proposal(
         db,
         owner=owner,
         request_text=f"Cập nhật {kind} từ gợi ý trợ lý",
         override_preferences=dict(pref_delta),
+        suggestion_id=str(suggestion.id),
         now=now,
         precomputed_empathy=precomputed_empathy,
     )
@@ -1681,7 +1759,12 @@ async def _execute_respond_to_suggestion_phase_b(
         effective_revision=pref_row.effective_revision,
         requested_availability_revision=None,
         effective_availability_revision=None,
-        requested_changes={"preferences": pref_delta, "suggestion_id": str(suggestion.id)},
+        requested_changes={
+            "preferences": pref_delta,
+            "suggestion_id": str(suggestion.id),
+            "suggestion_action": payload.action,
+            "suggestion_revision": suggestion.revision,
+        },
         pending_proposal_id=proposal_uuid,
         created_at=now,
         updated_at=now,
@@ -1751,14 +1834,21 @@ async def respond_to_suggestion(
             next_action="reload",
         )
 
+    in_flight_ids = await _get_in_flight_suggestion_ids(db, owner)
     sugg_rev = suggestion.revision
-    if suggestion.status != "pending":
+    sugg_status = suggestion.status
+    is_in_flight = suggestion.id in in_flight_ids
+    if sugg_status != "pending" or is_in_flight:
         if not deferred:
             await db.rollback()
         raise AppError(
             status_code=409,
             code="SUGGESTION_CHANGED",
-            message="Gợi ý đã được xử lý hoặc thay thế.",
+            message=(
+                "Gợi ý đang có đề xuất điều chỉnh lịch chờ duyệt."
+                if is_in_flight and sugg_status == "pending"
+                else "Gợi ý đã được xử lý hoặc thay thế."
+            ),
             current_revisions={"suggestion_revision": sugg_rev},
             next_action="reload",
         )
