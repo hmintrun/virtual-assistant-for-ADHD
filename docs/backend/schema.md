@@ -1231,7 +1231,7 @@ Mục này bổ sung đầy đủ contract các endpoint đã có trong code (`b
 
 #### a) Bổ sung bảng lỗi `POST /api/v1/voice/transcriptions` (STT)
 
-Endpoint Dòng 8 trong Sheet (`multipart/form-data`: `purpose` ∈ `{"uf1_input", "thought_to_draft", "uf5_checkin"}`, `device_id`, `file`, `thought_id` bắt buộc khi `purpose="thought_to_draft"`; header `Idempotency-Key`) trả về `200 SuccessEnvelope[TranscriptionData]` (`text`, `input_source: "voice" | "thought"`, `thought_id: string | null`). Các mã lỗi ánh xạ từ `_STT_ERROR_MAP` (`backend/app/api/v1/voice.py`):
+Endpoint Dòng 8 trong Sheet (`multipart/form-data`: `purpose` ∈ `{"uf1_input", "thought_to_draft", "uf5_checkin"}`, `device_id`, `file`, `thought_id` bắt buộc khi `purpose="thought_to_draft"`; header `Idempotency-Key`) trả về `200 SuccessEnvelope[TranscriptionData]` (`text`, `low_confidence: boolean`, `input_source: "voice" | "thought"`, `thought_id: string | null`). Các mã lỗi ánh xạ từ `_STT_ERROR_MAP` (`backend/app/api/v1/voice.py`):
 
 | HTTP | `error.code` | `retryable` | `error.next_action` | Điều kiện |
 | --- | --- | --- | --- | --- |
@@ -1244,7 +1244,7 @@ Endpoint Dòng 8 trong Sheet (`multipart/form-data`: `purpose` ∈ `{"uf1_input"
 | `409` | `IDEMPOTENCY_KEY_REUSED` | `false` | `use_original_payload_or_new_command` | Trùng `Idempotency-Key` với nội dung audio/metadata khác. |
 | `503` | `STT_UNAVAILABLE` | `false` | `use_on_device_stt_or_type` | Provider STT chưa cấu hình key hoặc bị từ chối quyền. |
 | `503` | `STT_RATE_LIMITED` | `true` | `use_on_device_stt_or_type` | Provider STT bị HTTP 429. |
-| `503` | `STT_PROVIDER_ERROR` | `true` | `use_on_device_stt_or_type` | Lỗi mạng / 5xx từ STT provider (Deepgram / Gemini / Groq Whisper). |
+| `503` | `STT_PROVIDER_ERROR` | `true` | `use_on_device_stt_or_type` | Lỗi mạng / 5xx từ STT provider (Gemini / ElevenLabs / Deepgram). |
 | `504` | `STT_TIMEOUT` | `true` | `use_on_device_stt_or_type` | Quá thời gian chờ STT. |
 
 #### b) `POST /api/v1/voice/tts` `[Đã có trong code]`

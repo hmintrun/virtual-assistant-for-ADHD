@@ -4,6 +4,9 @@
 > (tách từ `feat/upgrade-STT-and-AI-extract-in-UF1` của vqh).
 > Script đo và audio nằm ở thư mục `speech-lab/`, **ngoài repo** (theo AGENTS.md §5.4: không commit file ghi âm).
 
+> [!NOTE]
+> Các mục **§1–§9** dưới đây là **tài liệu lịch sử** (giai đoạn còn thử nghiệm Groq Whisper STT / Deepgram dẫn đầu). Kiến trúc STT hiện hành đã được cập nhật và thay thế hoàn toàn bởi **§10 (25/11/2026)** ở cuối tài liệu: **Gemini 3.5 Transcribe (7s) → ElevenLabs Scribe v2 (5s) → Deepgram Nova-3 (5s)**, bỏ hoàn toàn Groq Whisper khỏi luồng STT.
+
 ## 1. Kết luận ngắn
 
 | Vai trò | Lựa chọn | Thời gian | Đúng từ khoá (3 clip dài) |
@@ -187,6 +190,9 @@ Chạy lại: `BACKEND=backend backend/.venv/bin/python -I speech-lab/run_tts_he
 
 ## 9. Nâng cấp STT 3 tầng: Deepgram Nova-3 + Gemini Transcribe + Groq Whisper (25/11/2026)
 
+> [!NOTE]
+> **Mục lịch sử (đã thay thế bởi §10):** Cấu hình mặc định đã chuyển sang chuỗi **Gemini 3.5 Transcribe → ElevenLabs Scribe v2 → Deepgram Nova-3** (không còn `GroqWhisperSttProvider` và không còn `VOICE_STT_UF5_PREFER_GROQ`). Số liệu benchmark Deepgram Nova-3 tại đây vẫn giữ để đối chiếu với §10.
+
 Để khắc phục giới hạn **`25 RPD / 2 RPM`** của Free Tier `gemini-3.5-transcribe` khi test/demo đồng thời giữ chất lượng tiếng Việt cho UF1, `voice_service.py` và `config.py` bổ sung `DeepgramSttProvider` (`nova-3`) cùng chuỗi dự phòng **3 tầng** trong `VOICE_STT_PROVIDER=auto`:
 
 - **Khi `.env` có `DEEPGRAM_API_KEY` (`has_deepgram_key=True`):**
@@ -206,3 +212,24 @@ Chạy lại: `BACKEND=backend backend/.venv/bin/python -I speech-lab/run_tts_he
 | **Hỗ trợ từ T2 ITN/AST + Prompt T3 + Zone 2** | **100% đồng bộ:** `T2` xử lý `<giờ_chữ>:<phút_chữ>` + ngày/tháng chữ + tách buổi; `Zone 2` mở rộng `hảng/hãng/hàng/hản/háng/hán` + `<variant> chót` giúp đạt **`FPCR = 0/49 (0.0%)`** | Dùng chung lưới Zone 2 (`hẹn/hạng/...`) |
 
 - **Lưu ý A/B `keyterm`:** Thử nghiệm 16 ca cho thấy truyền danh sách `keyterm` pha tiếng Anh kèm `language=vi` gây lặp từ/nuốt chữ trên `nova-3` nên mặc định **`DEEPGRAM_STT_USE_KEYTERMS=false`** và **`DEEPGRAM_STT_SMART_FORMAT=false`**.
+
+
+## 10. Chuyển STT 3 tầng sang Gemini 3.5 Transcribe (7s) → ElevenLabs Scribe v2 (5s) → Deepgram Nova-3 (5s) & Bỏ Groq Whisper STT (25/11/2026)
+
+Để ưu tiên độ chính xác chép lời tiếng Việt ở nhánh chính đồng thời có dự phòng ổn định khi Gemini chạm giới hạn `429` và loại bỏ hoàn toàn tình trạng ảo giác ở clip im lặng của Groq Whisper, `voice_service.py` và `config.py` được chuyển sang **Cách B**:
+
+- **Loại bỏ `GroqWhisperSttProvider` khỏi luồng STT** (giữ nguyên Groq `qwen/qwen3.8-27b` và `openai/gpt-oss-20b` cho **LLM Tier 2** trong `ai_service.py`).
+- **Chuỗi `VOICE_STT_PROVIDER=auto` (tổng ngân sách `12.0s`):**
+  1. **Tier 1 (Primary):** **`gemini-3.5-transcribe` inline** (`verbatim`, `VOICE_STT_PRIMARY_TIMEOUT_SECONDS=7.0`).
+  2. **Tier 2 (Fallback 1):** **`ElevenLabs Scribe v2`** (`model_id=scribe_v2`, `language_code=vi`, `tag_audio_events=false`, `diarize=false`, gửi thẳng file `.aac` nguyên bản không cần remux, `ELEVENLABS_STT_TIMEOUT_SECONDS=5.0`).
+  3. **Tier 3 (Fallback 2):** **`Deepgram Nova-3`** (`model=nova-3`, `language=vi`, `punctuate=true`, `smart_format=false`, `use_keyterms=false`, tự động remux ADTS `.aac → .m4a` trong RAM, `DEEPGRAM_STT_TIMEOUT_SECONDS=5.0`).
+- **Tối ưu check-in ngắn (`uf5_checkin`):** khi `VOICE_STT_UF5_PREFER_ELEVENLABS=true` và có đủ key, đổi thứ tự sang **`ElevenLabs → Gemini → Deepgram`** để phản hồi nhanh (`P50 ≈ 1.0s`).
+
+### Benchmark đối chứng 49 file `.aac` thật (`_temp/user_voices_32/ELEVENLABS_SCRIBE_V2_49_BENCHMARK_REPORT.md`)
+
+| Chỉ số đo (49 file `.aac` thật) | ElevenLabs Scribe v2 (`vi`, `.aac` thẳng) | Deepgram Nova-3 (`no keyterms`, E2E) |
+| :--- | :---: | :---: |
+| **Câu có lời thành công** | **47/47** (`http_errors=0`, `429_retries=0`) | **47/47** |
+| **Chặn clip im lặng (`T29`, `T30`)** | **2/2** (`text=''`, 0 ảo giác) | **2/2** (`conf=0.0`, 0 ảo giác) |
+| **Độ trễ `avg / P50 / P95 / max`** | **`1013.0 / 996.6 / 1477.0 / 2726.2 ms`** | `944 / 487 / 2277 / - ms` *(trực tiếp)* / `1964 ms` *(UF1 E2E)* / `1828 ms` *(UF1→UF2 E2E)* |
+| **Độ lệch từ so với Gemini Transcribe** | **`20.67%`** | `33.31%` |
