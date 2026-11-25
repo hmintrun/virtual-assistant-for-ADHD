@@ -3767,6 +3767,9 @@ async def get_schedule(
     except ValidationError as exc:
         raise _invalid("Cần cặp from/to có múi giờ và bắt đầu trước kết thúc.", "from") from exc
     owner = draft_service.resolve_user_uuid(user_id)
+    from app.services import run_service
+
+    await run_service.reconcile_expired_checkins(db, user_id, commit_if_read=True)
     rows = (
         await db.scalars(
             select(SessionRow)
@@ -3777,6 +3780,7 @@ async def get_schedule(
                 SessionRow.status != "cancelled",
             )
             .order_by(SessionRow.scheduled_start, SessionRow.id)
+            .execution_options(populate_existing=True)
         )
     ).all()
     page, next_cursor = _page(list(rows), limit, cursor, "id")

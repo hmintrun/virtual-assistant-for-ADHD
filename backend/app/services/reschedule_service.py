@@ -1399,6 +1399,7 @@ async def _validate_continuation_chain_at_time(
             pass
 
     source_session_id: UUID | None = None
+    src_run_bounds: tuple[datetime, datetime] | None = None
     if cont_add.source_run_id:
         try:
             src_run_uuid = UUID(str(cont_add.source_run_id))
@@ -1410,6 +1411,11 @@ async def _validate_continuation_chain_at_time(
             )
             if src_run is not None:
                 source_session_id = src_run.session_id
+                if src_run.ended_at is not None:
+                    src_run_bounds = (
+                        _ensure_aware(src_run.started_at),
+                        _ensure_aware(src_run.ended_at),
+                    )
         except ValueError:
             pass
 
@@ -1463,6 +1469,8 @@ async def _validate_continuation_chain_at_time(
                     _ensure_aware(r.started_at),
                     _ensure_aware(r.ended_at),
                 )
+    if source_session_id is not None and src_run_bounds is not None:
+        ended_run_bounds[source_session_id] = src_run_bounds
 
     allowed_set = {str(x) for x in (proposal.allowed_task_ids or [])}
     gap_ex_map: dict[tuple[str, str], int] = {}
@@ -2234,6 +2242,9 @@ async def _build_continuation_plan(
             step_id=str(source_step.id),
             start=cont_start,
             end=cont_end,
+            title=source_session.title or source_step.title,
+            session_goal=source_session.session_goal,
+            expected_output=source_session.expected_output,
             work_seconds=work_secs,
             rest_seconds=0,
             duration_seconds=work_secs,
@@ -5172,6 +5183,7 @@ async def approve_proposal(
         s_row.scheduled_end = new_end
         s_row.schedule_revision = next_version
         if s_row.status == "scheduled":
+            s_row.start_state = "waiting"
             s_row.start_decision_due_at = new_start + timedelta(seconds=START_GRACE_SECONDS)
         s_row.updated_at = approve_now
         moved_rows.append(s_row)
@@ -5270,6 +5282,9 @@ async def approve_proposal(
                 step_id=str(continuation_session_row.step_id),
                 scheduled_start=_ensure_aware(continuation_session_row.scheduled_start),
                 scheduled_end=_ensure_aware(continuation_session_row.scheduled_end),
+                title=continuation_session_row.title,
+                session_goal=continuation_session_row.session_goal,
+                expected_output=continuation_session_row.expected_output,
                 micro_task_text=continuation_session_row.micro_task_text,
                 micro_task_seconds=continuation_session_row.micro_task_seconds,
                 work_seconds=continuation_session_row.work_seconds,
@@ -5335,7 +5350,7 @@ async def approve_proposal(
         )
         await db.flush()
         cont_run_schema = await run_service._run_to_schema(
-            db, cont_run_row, settings_snapshot=snap_model
+            db, cont_run_row, settings_snapshot=snap_model, paused_seconds=0
         )
 
     # 7. Tạo ScheduleVersion mới

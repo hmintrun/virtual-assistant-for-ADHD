@@ -11762,6 +11762,18 @@
               }
             ],
             "title": "Continuation Of Run Id"
+          },
+          "planned_ends_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Planned Ends At"
           }
         },
         "additionalProperties": false,
@@ -11827,6 +11839,39 @@
             "type": "string",
             "format": "date-time",
             "title": "Scheduled End"
+          },
+          "title": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Title"
+          },
+          "session_goal": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Session Goal"
+          },
+          "expected_output": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expected Output"
           },
           "micro_task_text": {
             "anyOf": [

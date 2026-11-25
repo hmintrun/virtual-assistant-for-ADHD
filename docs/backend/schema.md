@@ -2235,6 +2235,9 @@ Chưa có xác nhận các thành viên đã nhận fixture; người thực hi�
                 "step_id": "step-1",
                 "scheduled_start": "2026-11-20T03:00:00Z",
                 "scheduled_end": "2026-11-20T03:30:00Z",
+                "title": null,
+                "session_goal": null,
+                "expected_output": null,
                 "micro_task_text": null,
                 "micro_task_seconds": null,
                 "work_seconds": 1500,
@@ -2263,7 +2266,8 @@ Chưa có xác nhận các thành viên đã nhận fixture; người thực hi�
             "dnd_release_at": null,
             "total_planned_seconds": null,
             "segments": [],
-            "continuation_of_run_id": null
+            "continuation_of_run_id": null,
+            "planned_ends_at": null
           },
           "meta": {
             "request_id": "w4-example",
@@ -2311,6 +2315,9 @@ Chưa có xác nhận các thành viên đã nhận fixture; người thực hi�
                 "step_id": "step-1",
                 "scheduled_start": "2026-11-20T03:00:00Z",
                 "scheduled_end": "2026-11-20T03:30:00Z",
+                "title": null,
+                "session_goal": null,
+                "expected_output": null,
                 "micro_task_text": null,
                 "micro_task_seconds": null,
                 "work_seconds": 1500,
@@ -2339,7 +2346,8 @@ Chưa có xác nhận các thành viên đã nhận fixture; người thực hi�
             "dnd_release_at": null,
             "total_planned_seconds": null,
             "segments": [],
-            "continuation_of_run_id": null
+            "continuation_of_run_id": null,
+            "planned_ends_at": null
           },
           "meta": {
             "request_id": "w4-example",
