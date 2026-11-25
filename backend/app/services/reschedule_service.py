@@ -21,7 +21,7 @@ from typing import Any, Literal, cast
 from uuid import UUID, uuid4
 
 from pydantic import ValidationError
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -103,6 +103,7 @@ from app.services.planning.scheduling import (
 logger = logging.getLogger(__name__)
 
 STANDARD_INTER_SESSION_GAP_SECONDS = 900
+TERMINAL_PARENT_STATUSES = ("completed", "skipped", "cancelled")
 SourceRevisions = ProposalSourceRevisions
 FeasibilityData = ProposalFeasibilityData
 GenerationTier = ProposalGenerationTier
@@ -173,6 +174,29 @@ def _current_utc_now(now: datetime | None = None) -> datetime:
 
 def _ensure_aware(dt: datetime) -> datetime:
     return dt if dt.utcoffset() is not None else dt.replace(tzinfo=UTC)
+
+
+def _scheduled_parent_active_clause():
+    """Chỉ giữ phiên scheduled có Step và Task chưa kết thúc (giữ nguyên phiên đã chạy)."""
+    return or_(
+        SessionRow.status != "scheduled",
+        and_(
+            StepRow.status.notin_(TERMINAL_PARENT_STATUSES),
+            TaskRow.status.notin_(TERMINAL_PARENT_STATUSES),
+        ),
+    )
+
+
+def _is_scheduled_session_parent_active(
+    step: StepRow | None,
+    task: TaskRow | None,
+) -> bool:
+    """Kiểm tra in-memory Step và Task của phiên scheduled đều chưa kết thúc."""
+    if step is not None and step.status in TERMINAL_PARENT_STATUSES:
+        return False
+    if task is not None and task.status in TERMINAL_PARENT_STATUSES:
+        return False
+    return True
 
 
 def _parse_iso_dt(value: Any) -> datetime | None:
@@ -1055,12 +1079,15 @@ async def get_upcoming_schedule_context(
     upcoming_rows = (
         await db.scalars(
             select(SessionRow)
+            .join(StepRow, StepRow.id == SessionRow.step_id)
+            .join(TaskRow, TaskRow.id == StepRow.task_id)
             .where(
                 SessionRow.user_id == owner,
                 SessionRow.id != run.session_id,
                 SessionRow.status.in_(("scheduled", "in_progress")),
                 SessionRow.scheduled_end > window_from,
                 SessionRow.scheduled_start < window_to,
+                _scheduled_parent_active_clause(),
             )
             .order_by(SessionRow.scheduled_start.asc())
         )
@@ -1153,12 +1180,15 @@ async def get_upcoming_schedule_context(
         calc_rows = (
             await db.scalars(
                 select(SessionRow)
+                .join(StepRow, StepRow.id == SessionRow.step_id)
+                .join(TaskRow, TaskRow.id == StepRow.task_id)
                 .where(
                     SessionRow.user_id == owner,
                     SessionRow.id != run.session_id,
                     SessionRow.status.in_(("scheduled", "in_progress")),
                     SessionRow.scheduled_end > calc_window_from,
                     SessionRow.scheduled_start < calc_window_to,
+                    _scheduled_parent_active_clause(),
                 )
                 .order_by(SessionRow.scheduled_start.asc())
             )
@@ -1425,11 +1455,17 @@ async def _validate_continuation_chain_at_time(
     query_end = max_chain_end + timedelta(hours=24)
 
     excluded_ids = moved_ids | cancelled_ids
-    live_stmt = select(SessionRow).where(
-        SessionRow.user_id == owner,
-        SessionRow.status.notin_(("cancelled", "skipped")),
-        SessionRow.scheduled_end > query_start,
-        SessionRow.scheduled_start < query_end,
+    live_stmt = (
+        select(SessionRow)
+        .join(StepRow, StepRow.id == SessionRow.step_id)
+        .join(TaskRow, TaskRow.id == StepRow.task_id)
+        .where(
+            SessionRow.user_id == owner,
+            SessionRow.status.notin_(("cancelled", "skipped")),
+            SessionRow.scheduled_end > query_start,
+            SessionRow.scheduled_start < query_end,
+            _scheduled_parent_active_clause(),
+        )
     )
     if excluded_ids:
         live_stmt = live_stmt.where(SessionRow.id.notin_(excluded_ids))
@@ -1860,12 +1896,16 @@ async def _build_continuation_plan(
     upcoming_sessions = (
         await db.scalars(
             select(SessionRow)
+            .join(StepRow, StepRow.id == SessionRow.step_id)
+            .join(TaskRow, TaskRow.id == StepRow.task_id)
             .where(
                 SessionRow.user_id == owner,
                 SessionRow.id != source_session.id,
                 SessionRow.status == "scheduled",
                 SessionRow.scheduled_end > cont_start,
                 SessionRow.scheduled_start < horizon_end,
+                StepRow.status.notin_(TERMINAL_PARENT_STATUSES),
+                TaskRow.status.notin_(TERMINAL_PARENT_STATUSES),
             )
             .order_by(SessionRow.scheduled_start.asc())
         )
@@ -2603,6 +2643,15 @@ async def _build_normal_proposal_plan(
             ).all()
             for t in t_rows:
                 tasks_map[t.id] = t
+
+    all_scheduled = [
+        sess
+        for sess in all_scheduled
+        if _is_scheduled_session_parent_active(
+            steps_map.get(sess.step_id),
+            tasks_map.get(step_to_task[sess.step_id]) if sess.step_id in step_to_task else None,
+        )
+    ]
 
     horizon_days = 21 if trigger_reason != "expand_next_horizon" else 14
     horizon_end = calc_now + timedelta(days=horizon_days)

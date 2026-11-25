@@ -14,7 +14,7 @@ from typing import Any, Literal
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel, ValidationError
-from sqlalchemy import exists, func, or_, select, update
+from sqlalchemy import and_, exists, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -3773,11 +3773,20 @@ async def get_schedule(
     rows = (
         await db.scalars(
             select(SessionRow)
+            .join(StepRow, StepRow.id == SessionRow.step_id)
+            .join(TaskRow, TaskRow.id == StepRow.task_id)
             .where(
                 SessionRow.user_id == owner,
                 SessionRow.scheduled_start < to_at,
                 SessionRow.scheduled_end > from_at,
                 SessionRow.status != "cancelled",
+                or_(
+                    SessionRow.status != "scheduled",
+                    and_(
+                        StepRow.status.notin_(("completed", "skipped", "cancelled")),
+                        TaskRow.status.notin_(("completed", "skipped", "cancelled")),
+                    ),
+                ),
             )
             .order_by(SessionRow.scheduled_start, SessionRow.id)
             .execution_options(populate_existing=True)
