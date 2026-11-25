@@ -710,6 +710,26 @@ async def _execute_apply_settings_change_phase_b(
     )
 
 
+async def _replay_on_phase_a_conflict[ReplayModelT: (SettingsChangeResult, SuggestionResponseResult)](
+    db: AsyncSession,
+    *,
+    deferred: bool,
+    user_id: str,
+    idempotency_key: str,
+    digest: str,
+    model_cls: type[ReplayModelT],
+) -> ReplayModelT | None:
+    """Thử replay command receipt khi Phase A phát hiện xung đột revision/state do request đồng thời commit trước."""
+    if deferred:
+        return None
+    await db.rollback()
+    saved = await command_service.replay(db, user_id, idempotency_key, digest)
+    if saved is not None:
+        await db.rollback()
+        return model_cls.model_validate(saved)
+    return None
+
+
 async def apply_settings_change(
     *,
     user_id: str,
@@ -740,8 +760,16 @@ async def apply_settings_change(
         payload.expected_preferences_revision is not None
         and payload.expected_preferences_revision != pref_revision
     ):
-        if not deferred:
-            await db.rollback()
+        replayed = await _replay_on_phase_a_conflict(
+            db,
+            deferred=deferred,
+            user_id=user_id,
+            idempotency_key=idempotency_key,
+            digest=digest,
+            model_cls=SettingsChangeResult,
+        )
+        if replayed is not None:
+            return replayed
         raise AppError(
             status_code=409,
             code="REVISION_CONFLICT",
@@ -858,8 +886,16 @@ async def apply_settings_change(
                 )
             if target_task.revision != payload.expected_task_revision:
                 task_rev = target_task.revision
-                if not deferred:
-                    await db.rollback()
+                replayed = await _replay_on_phase_a_conflict(
+                    db,
+                    deferred=deferred,
+                    user_id=user_id,
+                    idempotency_key=idempotency_key,
+                    digest=digest,
+                    model_cls=SettingsChangeResult,
+                )
+                if replayed is not None:
+                    return replayed
                 raise AppError(
                     status_code=409,
                     code="REVISION_CONFLICT",
@@ -903,8 +939,16 @@ async def apply_settings_change(
                     await db.rollback()
                 raise
             if draft.confirmed_task_id is not None:
-                if not deferred:
-                    await db.rollback()
+                replayed = await _replay_on_phase_a_conflict(
+                    db,
+                    deferred=deferred,
+                    user_id=user_id,
+                    idempotency_key=idempotency_key,
+                    digest=digest,
+                    model_cls=SettingsChangeResult,
+                )
+                if replayed is not None:
+                    return replayed
                 raise AppError(
                     status_code=409,
                     code="PLAN_NOT_CONFIRMABLE",
@@ -915,8 +959,18 @@ async def apply_settings_change(
                 payload.expected_summary_revision != draft.summary_revision
                 or payload.expected_planning_input_revision != draft.planning_input_revision
             ):
-                if not deferred:
-                    await db.rollback()
+                draft_sum_rev = draft.summary_revision
+                draft_plan_rev = draft.planning_input_revision
+                replayed = await _replay_on_phase_a_conflict(
+                    db,
+                    deferred=deferred,
+                    user_id=user_id,
+                    idempotency_key=idempotency_key,
+                    digest=digest,
+                    model_cls=SettingsChangeResult,
+                )
+                if replayed is not None:
+                    return replayed
                 raise AppError(
                     status_code=409,
                     code="REVISION_CONFLICT",
@@ -925,8 +979,8 @@ async def apply_settings_change(
                         "Tải bản hiện tại và xem lại trước khi gửi yêu cầu mới."
                     ),
                     current_revisions={
-                        "summary_revision": draft.summary_revision,
-                        "planning_input_revision": draft.planning_input_revision,
+                        "summary_revision": draft_sum_rev,
+                        "planning_input_revision": draft_plan_rev,
                     },
                     next_action="reload_and_review",
                 )
@@ -1628,6 +1682,20 @@ async def _execute_respond_to_suggestion_phase_b(
                 new_buffer=float(accepted_value),
                 now=now,
             )
+            other_buf_suggs = (
+                await db.scalars(
+                    select(SuggestionRow).where(
+                        SuggestionRow.user_id == owner,
+                        SuggestionRow.kind == "buffer_multiplier",
+                        SuggestionRow.status == "pending",
+                        SuggestionRow.id != suggestion.id,
+                    )
+                )
+            ).all()
+            for other_sugg in other_buf_suggs:
+                other_sugg.status = "superseded"
+                other_sugg.revision += 1
+                other_sugg.updated_at = now
 
         if kind == "reminder_offset" and isinstance(accepted_value, list):
             future_sessions = list(
@@ -1839,8 +1907,16 @@ async def respond_to_suggestion(
     sugg_status = suggestion.status
     is_in_flight = suggestion.id in in_flight_ids
     if sugg_status != "pending" or is_in_flight:
-        if not deferred:
-            await db.rollback()
+        replayed = await _replay_on_phase_a_conflict(
+            db,
+            deferred=deferred,
+            user_id=user_id,
+            idempotency_key=idempotency_key,
+            digest=digest,
+            model_cls=SuggestionResponseResult,
+        )
+        if replayed is not None:
+            return replayed
         raise AppError(
             status_code=409,
             code="SUGGESTION_CHANGED",
@@ -1854,8 +1930,16 @@ async def respond_to_suggestion(
         )
 
     if payload.expected_suggestion_revision != sugg_rev:
-        if not deferred:
-            await db.rollback()
+        replayed = await _replay_on_phase_a_conflict(
+            db,
+            deferred=deferred,
+            user_id=user_id,
+            idempotency_key=idempotency_key,
+            digest=digest,
+            model_cls=SuggestionResponseResult,
+        )
+        if replayed is not None:
+            return replayed
         raise AppError(
             status_code=409,
             code="REVISION_CONFLICT",
@@ -1870,8 +1954,16 @@ async def respond_to_suggestion(
         payload.expected_preference_revision is not None
         and payload.expected_preference_revision != current_pref_rev
     ):
-        if not deferred:
-            await db.rollback()
+        replayed = await _replay_on_phase_a_conflict(
+            db,
+            deferred=deferred,
+            user_id=user_id,
+            idempotency_key=idempotency_key,
+            digest=digest,
+            model_cls=SuggestionResponseResult,
+        )
+        if replayed is not None:
+            return replayed
         raise AppError(
             status_code=409,
             code="REVISION_CONFLICT",

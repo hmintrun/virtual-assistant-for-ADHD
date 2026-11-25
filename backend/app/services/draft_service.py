@@ -8,6 +8,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import ValidationError
 from sqlalchemy import delete, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import AppError
@@ -360,25 +361,62 @@ async def _persist_draft_to_db(
             "source_thought_id": source_thought_id,
         }
         if expected is not None:
+            where_clauses = [
+                PlanningDraftModel.id == did,
+                PlanningDraftModel.user_id == uid,
+                PlanningDraftModel.summary_revision == expected.summary_revision,
+                PlanningDraftModel.planning_input_revision == expected.planning_input_revision,
+                PlanningDraftModel.summary_confirmed_revision.is_(None)
+                if expected.summary_confirmed_revision is None
+                else PlanningDraftModel.summary_confirmed_revision
+                == expected.summary_confirmed_revision,
+                PlanningDraftModel.stage == expected.stage,
+            ]
+            if draft.stage != "confirmed":
+                where_clauses.append(PlanningDraftModel.stage != "confirmed")
             written_id = await db.scalar(
                 update(PlanningDraftModel)
-                .where(
-                    PlanningDraftModel.id == did,
-                    PlanningDraftModel.user_id == uid,
-                    PlanningDraftModel.summary_revision == expected.summary_revision,
-                    PlanningDraftModel.planning_input_revision == expected.planning_input_revision,
-                    PlanningDraftModel.summary_confirmed_revision.is_(None)
-                    if expected.summary_confirmed_revision is None
-                    else PlanningDraftModel.summary_confirmed_revision
-                    == expected.summary_confirmed_revision,
-                    PlanningDraftModel.stage == expected.stage,
-                )
+                .where(*where_clauses)
                 .values(**values, revision=PlanningDraftModel.revision + 1)
                 .returning(PlanningDraftModel.id)
                 .execution_options(synchronize_session=False)
             )
             if written_id is None:
                 await db.rollback()
+                latest_row = await db.scalar(
+                    select(PlanningDraftModel)
+                    .where(
+                        PlanningDraftModel.id == did,
+                        PlanningDraftModel.user_id == uid,
+                    )
+                    .execution_options(populate_existing=True)
+                )
+                latest_stage = latest_row.stage if latest_row is not None else None
+                latest_sum_rev = (
+                    latest_row.summary_revision if latest_row is not None else draft.summary_revision
+                )
+                latest_plan_rev = (
+                    latest_row.planning_input_revision
+                    if latest_row is not None
+                    else draft.planning_input_revision
+                )
+                latest_confirmed_task_id = (
+                    _row_to_schema(latest_row, fallback_draft_id=draft.draft_id).confirmed_task_id
+                    if latest_row is not None
+                    else None
+                )
+                await db.rollback()
+                if latest_stage == "confirmed" or latest_confirmed_task_id is not None:
+                    raise AppError(
+                        status_code=409,
+                        code="INVALID_STATE_TRANSITION",
+                        message="Bản nháp đã chốt thành công việc chính thức, không thể chỉnh sửa hoặc phân tích lại.",
+                        current_revisions={
+                            "summary_revision": latest_sum_rev,
+                            "planning_input_revision": latest_plan_rev,
+                        },
+                        next_action="review_task",
+                    )
                 raise AppError(
                     status_code=409,
                     code="REVISION_CONFLICT",
@@ -2129,7 +2167,7 @@ async def list_drafts(
             await db.execute(
                 select(PlanningDraftModel)
                 .where(PlanningDraftModel.user_id == uid)
-                .order_by(PlanningDraftModel.created_at)
+                .order_by(PlanningDraftModel.created_at.asc(), PlanningDraftModel.id.asc())
             )
         )
         .scalars()
@@ -2194,6 +2232,20 @@ async def get_draft_by_id(
     return _row_to_schema(row, fallback_draft_id=draft_id)
 
 
+def _assert_draft_not_confirmed(draft: PlanningDraft) -> None:
+    if draft.stage == "confirmed" or draft.confirmed_task_id is not None:
+        raise AppError(
+            status_code=409,
+            code="INVALID_STATE_TRANSITION",
+            message="Bản nháp đã chốt thành công việc chính thức, không thể chỉnh sửa hoặc phân tích lại.",
+            current_revisions={
+                "summary_revision": draft.summary_revision,
+                "planning_input_revision": draft.planning_input_revision,
+            },
+            next_action="review_task",
+        )
+
+
 async def delete_draft(
     *,
     user_id: str,
@@ -2211,6 +2263,11 @@ async def delete_draft(
     await ensure_dev_seed_in_db(db)
     did = resolve_draft_uuid(draft_id)
     uid = resolve_user_uuid(user_id)
+    deferred = bool(db.info.get("defer_command_commit"))
+    if not deferred and db.in_transaction():
+        await db.rollback()
+    await lock_owner(db, user_id)
+
     row = (
         await db.execute(
             select(PlanningDraftModel)
@@ -2222,6 +2279,8 @@ async def delete_draft(
         )
     ).scalar_one_or_none()
     if row is None:
+        if not deferred:
+            await db.rollback()
         raise AppError(
             status_code=404,
             code="RESOURCE_NOT_FOUND",
@@ -2242,6 +2301,8 @@ async def delete_draft(
         or draft_schema.confirmed_task_id is not None
         or has_task
     ):
+        if not deferred:
+            await db.rollback()
         raise AppError(
             status_code=409,
             code="INVALID_STATE_TRANSITION",
@@ -2249,20 +2310,32 @@ async def delete_draft(
             next_action="reload_and_review",
         )
 
-    await db.execute(
-        delete(PlanningContextModel).where(
-            PlanningContextModel.user_id == uid,
-            PlanningContextModel.source_draft_id == row.id,
+    try:
+        await db.execute(
+            delete(PlanningContextModel).where(
+                PlanningContextModel.user_id == uid,
+                PlanningContextModel.source_draft_id == row.id,
+            )
         )
-    )
-    await db.execute(
-        delete(PlanCandidateModel).where(
-            PlanCandidateModel.user_id == uid,
-            PlanCandidateModel.draft_id == row.id,
+        await db.execute(
+            delete(PlanCandidateModel).where(
+                PlanCandidateModel.user_id == uid,
+                PlanCandidateModel.draft_id == row.id,
+            )
         )
-    )
-    await db.delete(row)
-    await db.commit()
+        await db.delete(row)
+        if not deferred:
+            await db.commit()
+        else:
+            await db.flush()
+    except IntegrityError as exc:
+        await db.rollback()
+        raise AppError(
+            status_code=409,
+            code="INVALID_STATE_TRANSITION",
+            message="Bản nháp đang được xử lý hoặc đã chốt thành công việc chính thức, không thể xóa.",
+            next_action="reload_and_review",
+        ) from exc
     return {"draft_id": draft_schema.draft_id, "deleted": True}
 
 
@@ -2277,6 +2350,7 @@ async def patch_draft(
 ) -> PlanningDraft:
     """Dòng 6 (PATCH /api/v1/drafts/{draft_id}): Sửa đúng trường gửi lên, kiểm revision và cập nhật trạng thái."""
     draft = await get_draft_by_id(user_id=user_id, draft_id=draft_id, db=db)
+    _assert_draft_not_confirmed(draft)
 
     # Kiểm tra xung đột revision (409 REVISION_CONFLICT)
     summary_rev_mismatch = (
@@ -2485,6 +2559,7 @@ async def confirm_draft_summary(
 ) -> ConfirmSummaryResult:
     """Dòng 7 (POST /api/v1/drafts/{draft_id}/confirm-summary): Xác nhận bảng tóm tắt UF1 (A02.2, T04)."""
     draft = await get_draft_by_id(user_id=user_id, draft_id=draft_id, db=db)
+    _assert_draft_not_confirmed(draft)
 
     # 1. Kiểm tra phiên bản bảng tóm tắt người dùng đang xem (409 REVISION_CONFLICT)
     if payload.expected_summary_revision != draft.summary_revision:
@@ -2604,6 +2679,7 @@ async def _analyze_draft_impl(
     """Thực thi nội bộ cho POST /api/v1/drafts/{draft_id}/analyze có gắn durable_command (I01, A01/A02.1, T03, T18)."""
     # Pha 1: Đọc snapshot hiện tại và kiểm tra cả 2 revision trước khi gọi AI
     snapshot_draft = await get_draft_by_id(user_id=user_id, draft_id=draft_id, db=db)
+    _assert_draft_not_confirmed(snapshot_draft)
     if (
         payload.expected_summary_revision != snapshot_draft.summary_revision
         or payload.expected_planning_input_revision != snapshot_draft.planning_input_revision
@@ -2803,6 +2879,7 @@ async def _analyze_draft_impl(
 
     # Pha 3: Kiểm tra lại revision hiện tại của Draft trước khi merge (T03: Chống kết quả AI cũ đè dữ liệu mới)
     current_draft = await get_draft_by_id(user_id=user_id, draft_id=draft_id, db=db)
+    _assert_draft_not_confirmed(current_draft)
     if (
         current_draft.summary_revision != snapshot_draft.summary_revision
         or current_draft.planning_input_revision != snapshot_draft.planning_input_revision

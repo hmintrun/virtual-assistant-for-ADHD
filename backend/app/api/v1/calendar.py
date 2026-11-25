@@ -52,7 +52,12 @@ from app.schemas.calendar import (
 )
 from app.schemas.common import FieldError, SuccessEnvelope, build_response_meta
 from app.services import command_service
-from app.services.calendar_service import CalendarService, _resolve_uuid, get_owner_calendar_lock
+from app.services.calendar_service import (
+    CalendarService,
+    _ensure_utc,
+    _resolve_uuid,
+    get_owner_calendar_lock,
+)
 from app.services.calendar_sync_worker import (
     get_connection_sync_lock,
     process_calendar_sync_jobs,
@@ -349,6 +354,8 @@ async def create_configuration_preview(
             write_calendar_id=payload.write_calendar_id,
             existing_event_action=payload.existing_event_action,
         )
+    except CalendarAuthError as exc:
+        raise _calendar_auth_error(exc) from exc
     except CalendarClientError as exc:
         raise _calendar_client_error(exc) from exc
 
@@ -384,6 +391,8 @@ async def confirm_configuration_preview(
             preview_id=preview_id,
             expected_preview_revision=payload.expected_preview_revision,
         )
+    except CalendarAuthError as exc:
+        raise _calendar_auth_error(exc) from exc
     except CalendarClientError as exc:
         raise _calendar_client_error(exc) from exc
 
@@ -421,6 +430,8 @@ async def update_selection(
             read_calendar_ids=payload.read_calendar_ids,
             write_calendar_id=payload.write_calendar_id,
         )
+    except CalendarAuthError as exc:
+        raise _calendar_auth_error(exc) from exc
     except CalendarClientError as exc:
         raise _calendar_client_error(exc) from exc
 
@@ -441,6 +452,8 @@ async def disconnect_connection(
     service = CalendarService(db)
     try:
         conn = await service.disconnect(user_id=current_user.user_id, connection_id=connection_id)
+    except CalendarAuthError as exc:
+        raise _calendar_auth_error(exc) from exc
     except CalendarClientError as exc:
         raise _calendar_client_error(exc) from exc
 
@@ -476,11 +489,18 @@ async def get_connection_events(
     conn = await service.get_connection_by_id(current_user.user_id, connection_id)
     if not conn:
         raise _not_found("Không tìm thấy kết nối lịch.")
+    conn_id = conn.id
     try:
         access_token = await service.get_valid_access_token(conn)
         q_start = from_at or datetime.now(UTC)
         q_end = to_at or (q_start + timedelta(days=14))
-        raw_events = await service.client.list_events(access_token, google_calendar_id, q_start, q_end)
+        try:
+            raw_events = await service.client.list_events(
+                access_token, google_calendar_id, q_start, q_end
+            )
+        except CalendarAuthError:
+            await service.mark_connection_needs_reconnect(conn_id)
+            raise
     except CalendarAuthError as exc:
         raise _calendar_auth_error(exc) from exc
     except CalendarClientError as exc:
@@ -510,9 +530,14 @@ async def get_connection_event_detail(
     conn = await service.get_connection_by_id(current_user.user_id, connection_id)
     if not conn:
         raise _not_found("Không tìm thấy kết nối lịch.")
+    conn_id = conn.id
     try:
         access_token = await service.get_valid_access_token(conn)
-        raw = await service.client.get_event(access_token, google_calendar_id, event_id)
+        try:
+            raw = await service.client.get_event(access_token, google_calendar_id, event_id)
+        except CalendarAuthError:
+            await service.mark_connection_needs_reconnect(conn_id)
+            raise
     except CalendarAuthError as exc:
         raise _calendar_auth_error(exc) from exc
     except CalendarClientError as exc:
@@ -771,6 +796,10 @@ async def confirm_event_change_preview(
                 )
             )
 
+        job_payload_snapshot = dict(preview_data.get("payload") or {})
+        if isinstance(google_calendar_id, str) and google_calendar_id.strip():
+            job_payload_snapshot["_google_calendar_id"] = google_calendar_id.strip()
+
         job = CalendarSyncJob(
             user_id=uid,
             connection_id=conn_id,
@@ -779,7 +808,7 @@ async def confirm_event_change_preview(
             target_ref=google_event_id or str(preview.id),
             operation=op,
             idempotency_key=idempotency_key,
-            payload_snapshot=preview_data.get("payload", {}),
+            payload_snapshot=job_payload_snapshot,
             expected_google_etag=preview_data.get("expected_google_etag"),
             job_state="queued",
             attempt_count=0,
@@ -908,37 +937,93 @@ async def retry_sync_job(
     db: DbSessionDep,
 ) -> SuccessEnvelope[CalendarSyncJobRead]:
     uid = _resolve_uuid(current_user.user_id)
-    job = await db.get(CalendarSyncJob, job_id)
-    if not job or job.user_id != uid:
+    job_probe = await db.get(CalendarSyncJob, job_id)
+    if not job_probe or job_probe.user_id != uid:
         raise _not_found("Không tìm thấy sync job.")
+    job_connection_id = job_probe.connection_id
 
-    if job.job_state == "cancelled":
-        raise AppError(
-            status_code=409,
-            code="JOB_CANCELLED",
-            message="Tác vụ đồng bộ đã bị hủy do ngắt kết nối lịch và không thể thử lại.",
-            next_action="create_preview",
-        )
-    conn = await db.get(CalendarConnection, job.connection_id)
-    if conn is None or conn.connection_state == "disconnected":
-        raise AppError(
-            status_code=409,
-            code="CALENDAR_DISCONNECTED",
-            message="Kết nối Google Calendar đã bị ngắt. Vui lòng kết nối lại trước khi thử lại đồng bộ.",
-            next_action="reconnect_google_calendar",
-        )
+    if db.in_transaction():
+        await db.rollback()
 
-    job.job_state = "queued"
-    job.attempt_count = 0
-    job.next_retry_at = None
-    job.last_error_code = None
-    job.lease_expires_at = None
-    await db.commit()
-    await db.refresh(job)
-    job_connection_id = job.connection_id
-
-    # Thử xử lý ngay lập tức trong lock theo connection_id để tránh xung đột với background loop
+    # Kiểm tra CAS, lease và chạy worker hoàn toàn bên trong get_connection_sync_lock
     async with get_connection_sync_lock(job_connection_id):
+        if db.in_transaction():
+            await db.rollback()
+        job = (
+            await db.execute(
+                select(CalendarSyncJob)
+                .where(CalendarSyncJob.id == job_id, CalendarSyncJob.user_id == uid)
+                .execution_options(populate_existing=True)
+            )
+        ).scalar_one_or_none()
+        if not job:
+            raise _not_found("Không tìm thấy sync job.")
+
+        if (
+            payload.expected_job_revision is not None
+            and job.revision != payload.expected_job_revision
+        ):
+            raise AppError(
+                status_code=409,
+                code="REVISION_CONFLICT",
+                message="Phiên bản tác vụ đồng bộ đã thay đổi.",
+                current_revisions={"job_revision": job.revision},
+                next_action="reload_and_review",
+            )
+
+        if job.job_state == "cancelled":
+            raise AppError(
+                status_code=409,
+                code="JOB_CANCELLED",
+                message="Tác vụ đồng bộ đã bị hủy do ngắt kết nối lịch và không thể thử lại.",
+                next_action="create_preview",
+            )
+        if job.job_state == "completed":
+            raise AppError(
+                status_code=409,
+                code="INVALID_STATE_TRANSITION",
+                message="Tác vụ đồng bộ đã hoàn tất, không thể thử lại.",
+                next_action="reload",
+            )
+
+        now_utc = datetime.now(UTC)
+        if job.job_state == "running" or (
+            job.lease_expires_at is not None and _ensure_utc(job.lease_expires_at) > now_utc
+        ):
+            raise AppError(
+                status_code=409,
+                code="INVALID_STATE_TRANSITION",
+                message="Tác vụ đồng bộ đang được xử lý.",
+                retryable=True,
+                next_action="reload",
+            )
+
+        conn = (
+            await db.execute(
+                select(CalendarConnection)
+                .where(
+                    CalendarConnection.id == job.connection_id,
+                    CalendarConnection.user_id == uid,
+                )
+                .execution_options(populate_existing=True)
+            )
+        ).scalar_one_or_none()
+        if conn is None or conn.connection_state == "disconnected":
+            raise AppError(
+                status_code=409,
+                code="CALENDAR_DISCONNECTED",
+                message="Kết nối Google Calendar đã bị ngắt. Vui lòng kết nối lại trước khi thử lại đồng bộ.",
+                next_action="reconnect_google_calendar",
+            )
+
+        job.job_state = "queued"
+        job.attempt_count = 0
+        job.next_retry_at = None
+        job.last_error_code = None
+        job.lease_expires_at = None
+        job.updated_at = now_utc
+        await db.commit()
+
         await process_calendar_sync_jobs(
             db,
             user_id=current_user.user_id,
@@ -946,17 +1031,23 @@ async def retry_sync_job(
             limit=5,
             connection_lock_held=True,
         )
-    await db.refresh(job)
+        fresh_job = (
+            await db.execute(
+                select(CalendarSyncJob)
+                .where(CalendarSyncJob.id == job_id, CalendarSyncJob.user_id == uid)
+                .execution_options(populate_existing=True)
+            )
+        ).scalar_one()
 
     data = CalendarSyncJobRead(
-        job_id=str(job.id),
-        connection_id=str(job.connection_id),
-        target_kind=job.target_kind,
-        target_ref=job.target_ref,
-        operation=job.operation,
-        job_state=job.job_state,
-        attempt_count=job.attempt_count,
-        next_retry_at=job.next_retry_at,
-        last_error_code=job.last_error_code,
+        job_id=str(fresh_job.id),
+        connection_id=str(fresh_job.connection_id),
+        target_kind=fresh_job.target_kind,
+        target_ref=fresh_job.target_ref,
+        operation=fresh_job.operation,
+        job_state=fresh_job.job_state,
+        attempt_count=fresh_job.attempt_count,
+        next_retry_at=fresh_job.next_retry_at,
+        last_error_code=fresh_job.last_error_code,
     )
     return SuccessEnvelope(data=data, meta=build_response_meta())

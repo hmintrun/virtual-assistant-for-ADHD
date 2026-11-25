@@ -17,11 +17,11 @@ import logging
 import math
 import zoneinfo
 from datetime import UTC, date, datetime, time, timedelta
-from typing import Any, Literal, cast
+from typing import Any, Literal, NoReturn, cast
 from uuid import UUID, uuid4
 
 from pydantic import ValidationError
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -3112,6 +3112,9 @@ async def _build_normal_proposal_plan(
                 "missed_start",
                 "user_reschedule",
             ) and (target_uuid is None or t_uuid == target_uuid)
+            is_pull_forward = trigger_reason == "early_completion_pull_forward" and (
+                target_uuid is None or t_uuid == target_uuid
+            )
             min_valid_start = (
                 task_cursors[t_uuid]
                 if trigger_reason == "expand_next_horizon" and t_uuid in task_cursors
@@ -3119,6 +3122,48 @@ async def _build_normal_proposal_plan(
             )
             needs_move = (not existing_valid) or (s_start < min_valid_start) or is_targeted_reschedule
             if not needs_move:
+                if is_pull_forward and s_start > task_cursor:
+                    earlier_slot = _find_free_slot_with_constraints(
+                        task_free,
+                        fixed_intervals,
+                        task_cursor,
+                        dur,
+                        work_seconds=sess.work_seconds,
+                        constraints=constraints,
+                        daily_work_used=t_daily_used,
+                        local_tz=local_tz,
+                    )
+                    if earlier_slot is not None and earlier_slot[0] < s_start:
+                        candidate_start, candidate_end = earlier_slot
+                        shift_secs = int((candidate_start - s_start).total_seconds())
+                        moves.append(
+                            ProposedSessionMoveItem(
+                                session_id=str(sess.id),
+                                task_id=s_task_id or None,
+                                step_id=str(sess.step_id),
+                                from_start=s_start,
+                                from_end=s_end,
+                                to_start=candidate_start,
+                                to_end=candidate_end,
+                                before=ProposalTimeRange(start=s_start, end=s_end),
+                                after=ProposalTimeRange(
+                                    start=candidate_start, end=candidate_end
+                                ),
+                                shift_seconds=shift_secs,
+                                reason=trigger_reason,
+                            )
+                        )
+                        if s_task_id and s_task_id not in affected_tasks:
+                            affected_tasks.append(s_task_id)
+                        fixed_intervals.append(
+                            (candidate_start, candidate_end, f"session:{sess.id}")
+                        )
+                        _record_daily_work(t_uuid, candidate_start, sess.work_seconds)
+                        task_cursors[t_uuid] = max(
+                            task_cursor,
+                            candidate_end + timedelta(seconds=STANDARD_INTER_SESSION_GAP_SECONDS),
+                        )
+                        continue
                 fixed_intervals.append((s_start, s_end, f"session:{sess.id}"))
                 _record_daily_work(t_uuid, s_start, sess.work_seconds)
                 task_cursors[t_uuid] = max(
@@ -4265,6 +4310,39 @@ async def create_settings_change_proposal(
     return await _proposal_row_to_schema(db, owner, new_proposal, calc_now)
 
 
+async def _mark_proposal_notification_sent_atomic(
+    db: AsyncSession,
+    *,
+    proposal_id: UUID,
+    owner: UUID,
+    sent_at: datetime,
+) -> None:
+    """Cập nhật pending_notification_state='sent' bằng Core SQL atomic, tránh StaleDataError/SQLite lock."""
+    in_command_tx = bool(db.info.get("defer_command_commit"))
+    if not in_command_tx and db.in_transaction():
+        await db.rollback()
+    await db.execute(
+        update(RescheduleProposal)
+        .where(
+            RescheduleProposal.id == proposal_id,
+            RescheduleProposal.user_id == owner,
+            RescheduleProposal.status == "pending",
+            RescheduleProposal.pending_notification_state.in_(("pending", "not_sent")),
+        )
+        .values(
+            pending_notification_state="sent",
+            pending_notification_sent_at=sent_at,
+            updated_at=sent_at,
+            revision=RescheduleProposal.revision + 1,
+        )
+        .execution_options(synchronize_session=False)
+    )
+    if not in_command_tx:
+        await db.commit()
+    else:
+        await db.flush()
+
+
 async def get_current_proposal(
     db: AsyncSession,
     *,
@@ -4283,10 +4361,23 @@ async def get_current_proposal(
     if row is None:
         return None
     if row.pending_notification_state in ("pending", "not_sent"):
-        row.pending_notification_state = "sent"
-        row.pending_notification_sent_at = calc_now
-        await db.flush()
-        await db.commit()
+        proposal_uuid = row.id
+        await _mark_proposal_notification_sent_atomic(
+            db,
+            proposal_id=proposal_uuid,
+            owner=owner,
+            sent_at=calc_now,
+        )
+        row = await db.scalar(
+            select(RescheduleProposal)
+            .where(
+                RescheduleProposal.id == proposal_uuid,
+                RescheduleProposal.user_id == owner,
+            )
+            .execution_options(populate_existing=True)
+        )
+        if row is None:
+            return None
     return await _proposal_row_to_schema(db, owner, row, calc_now)
 
 
@@ -4315,10 +4406,28 @@ async def get_proposal_detail(
             next_action="reload",
         )
     if row.status == "pending" and row.pending_notification_state in ("pending", "not_sent"):
-        row.pending_notification_state = "sent"
-        row.pending_notification_sent_at = calc_now
-        await db.flush()
-        await db.commit()
+        proposal_uuid = row.id
+        await _mark_proposal_notification_sent_atomic(
+            db,
+            proposal_id=proposal_uuid,
+            owner=owner,
+            sent_at=calc_now,
+        )
+        row = await db.scalar(
+            select(RescheduleProposal)
+            .where(
+                RescheduleProposal.id == proposal_uuid,
+                RescheduleProposal.user_id == owner,
+            )
+            .execution_options(populate_existing=True)
+        )
+        if row is None:
+            raise AppError(
+                status_code=404,
+                code="RESOURCE_NOT_FOUND",
+                message="Không tìm thấy đề xuất điều chỉnh lịch.",
+                next_action="reload",
+            )
     return await _proposal_row_to_schema(db, owner, row, calc_now)
 
 
@@ -5212,6 +5321,144 @@ async def approve_proposal(
             )
         await _check_continuation_chain_limit(db, owner, source_run)
 
+    # Pre-Mutation Integrity Guard (H1-01): xác minh trạng thái live của toàn bộ đích trước khi ghi DB
+    terminal_step_task_statuses = ("completed", "skipped", "cancelled")
+
+    def _raise_stale_target() -> NoReturn:
+        raise AppError(
+            status_code=409,
+            code="SOURCE_CHANGED",
+            message="Một số phiên, bước hoặc công việc mục tiêu đã thay đổi trạng thái kể từ khi tạo đề xuất. Vui lòng tính toán lại.",
+            current_revisions={
+                "schedule": current_sched_rev,
+                "proposal_revision": row.proposal_revision,
+            },
+            next_action="rebuild_and_review",
+        )
+
+    def _parse_uuid_or_stale(raw_id: str | None) -> UUID:
+        try:
+            return UUID(str(raw_id))
+        except (ValueError, TypeError, AttributeError):
+            _raise_stale_target()
+
+    added_step_ids: set[UUID] = set()
+    if changes.steps_to_add:
+        step_task_uuids: set[UUID] = set()
+        for st_item in changes.steps_to_add:
+            added_step_ids.add(_parse_uuid_or_stale(st_item.step_id))
+            step_task_uuids.add(_parse_uuid_or_stale(st_item.task_id))
+        step_tasks_by_id = {
+            t.id: t
+            for t in (
+                await db.scalars(
+                    select(TaskRow)
+                    .where(TaskRow.user_id == owner, TaskRow.id.in_(step_task_uuids))
+                    .execution_options(populate_existing=True)
+                )
+            ).all()
+        }
+        for t_uuid in step_task_uuids:
+            t_obj = step_tasks_by_id.get(t_uuid)
+            if t_obj is None or t_obj.status in terminal_step_task_statuses:
+                _raise_stale_target()
+
+    target_session_uuids = {
+        _parse_uuid_or_stale(item.session_id)
+        for item in [*changes.sessions_to_cancel, *changes.sessions_to_move]
+    }
+    if target_session_uuids:
+        sess_by_id = {
+            s.id: s
+            for s in (
+                await db.scalars(
+                    select(SessionRow)
+                    .where(
+                        SessionRow.user_id == owner,
+                        SessionRow.id.in_(target_session_uuids),
+                    )
+                    .execution_options(populate_existing=True)
+                )
+            ).all()
+        }
+        if len(sess_by_id) != len(target_session_uuids) or any(
+            s.status != "scheduled" for s in sess_by_id.values()
+        ):
+            _raise_stale_target()
+
+        target_step_uuids = {s.step_id for s in sess_by_id.values()}
+        step_by_id = {
+            st.id: st
+            for st in (
+                await db.scalars(
+                    select(StepRow)
+                    .where(StepRow.user_id == owner, StepRow.id.in_(target_step_uuids))
+                    .execution_options(populate_existing=True)
+                )
+            ).all()
+        }
+        if len(step_by_id) != len(target_step_uuids) or any(
+            st.status in terminal_step_task_statuses for st in step_by_id.values()
+        ):
+            _raise_stale_target()
+
+        target_task_uuids = {st.task_id for st in step_by_id.values()}
+        task_by_id = {
+            t.id: t
+            for t in (
+                await db.scalars(
+                    select(TaskRow)
+                    .where(TaskRow.user_id == owner, TaskRow.id.in_(target_task_uuids))
+                    .execution_options(populate_existing=True)
+                )
+            ).all()
+        }
+        if len(task_by_id) != len(target_task_uuids) or any(
+            t.status in terminal_step_task_statuses for t in task_by_id.values()
+        ):
+            _raise_stale_target()
+
+    if changes.sessions_to_add:
+        add_target_step_uuids: set[UUID] = set()
+        for a_item in changes.sessions_to_add:
+            step_uuid = _parse_uuid_or_stale(a_item.after.step_id)
+            if step_uuid not in added_step_ids:
+                add_target_step_uuids.add(step_uuid)
+        if add_target_step_uuids:
+            add_steps_by_id = {
+                st.id: st
+                for st in (
+                    await db.scalars(
+                        select(StepRow)
+                        .where(
+                            StepRow.user_id == owner,
+                            StepRow.id.in_(add_target_step_uuids),
+                        )
+                        .execution_options(populate_existing=True)
+                    )
+                ).all()
+            }
+            if len(add_steps_by_id) != len(add_target_step_uuids) or any(
+                st.status in terminal_step_task_statuses for st in add_steps_by_id.values()
+            ):
+                _raise_stale_target()
+
+            add_task_uuids = {st.task_id for st in add_steps_by_id.values()}
+            add_tasks_by_id = {
+                t.id: t
+                for t in (
+                    await db.scalars(
+                        select(TaskRow)
+                        .where(TaskRow.user_id == owner, TaskRow.id.in_(add_task_uuids))
+                        .execution_options(populate_existing=True)
+                    )
+                ).all()
+            }
+            if len(add_tasks_by_id) != len(add_task_uuids) or any(
+                t.status in terminal_step_task_statuses for t in add_tasks_by_id.values()
+            ):
+                _raise_stale_target()
+
     next_version = row.base_schedule_revision + 1
     pref_row = await db.scalar(
         select(UserPreferenceRow).where(UserPreferenceRow.user_id == owner)
@@ -5649,6 +5896,63 @@ async def approve_proposal(
         pref_row.requested_changes = None
         pref_row.pending_proposal_id = None
         pref_row.updated_at = approve_now
+
+    # H1-07: Khi duyệt đổi reminder_offsets qua UF7->UF6, tái tạo Reminder cho các phiên tương lai chưa được động tới
+    if pending_req_offsets is not None and pref_row is not None:
+        handled_session_ids = (
+            {s.id for s in added_rows}
+            | {s.id for s in moved_rows}
+            | {s.id for s in cancelled_rows}
+        )
+        untouched_stmt = select(SessionRow).where(
+            SessionRow.user_id == owner,
+            SessionRow.status == "scheduled",
+            SessionRow.scheduled_start > approve_now,
+        )
+        if handled_session_ids:
+            untouched_stmt = untouched_stmt.where(SessionRow.id.notin_(handled_session_ids))
+        untouched_sessions = list((await db.scalars(untouched_stmt)).all())
+        if untouched_sessions:
+            existing_rems = list(
+                (
+                    await db.scalars(
+                        select(Reminder).where(
+                            Reminder.user_id == owner,
+                            Reminder.session_id.in_([s.id for s in untouched_sessions]),
+                            Reminder.delivery_state.in_(("scheduled", "snoozed")),
+                        )
+                    )
+                ).all()
+            )
+            for rem in existing_rems:
+                rem.delivery_state = "cancelled"
+                rem.updated_at = approve_now
+            for s in untouched_sessions:
+                s_start_aware = _ensure_aware(s.scheduled_start)
+                for offset in reminder_offsets:
+                    fire_at = s_start_aware - timedelta(seconds=offset)
+                    if fire_at < approve_now:
+                        continue
+                    key = (
+                        f"session:{s.id}:version:{s.schedule_revision}"
+                        f":reminder:{offset}:pref:{pref_row.effective_revision}"
+                    )
+                    try:
+                        async with db.begin_nested():
+                            db.add(
+                                Reminder(
+                                    user_id=owner,
+                                    session_id=s.id,
+                                    schedule_revision=s.schedule_revision,
+                                    kind="pre_session",
+                                    fire_at=fire_at,
+                                    dedupe_key=key,
+                                    delivery_state="scheduled",
+                                )
+                            )
+                            await db.flush()
+                    except IntegrityError:
+                        pass
 
     setting_reqs = (
         await db.scalars(

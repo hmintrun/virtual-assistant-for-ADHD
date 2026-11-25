@@ -17,7 +17,7 @@ async def list_tasks(
     db: DbSessionDep,
     limit: Annotated[
         int,
-        Query(gt=0, description="Số công việc tối đa trả về trong một trang (ví dụ: 20)"),
+        Query(gt=0, le=100, description="Số công việc tối đa trả về trong một trang (ví dụ: 20)"),
     ] = 20,
     cursor: Annotated[
         str | None,

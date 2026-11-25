@@ -468,8 +468,21 @@ async def _record_completed_activity_date(
         return
 
     if user.last_streak_date == activity_date:
+        was_frozen = bool(user.streak_frozen)
         user.streak_frozen = False
         user.updated_at = activity_utc
+        if was_frozen:
+            snap_prev_streak = user.current_streak_days
+            snap_prev_last_date: str | None = activity_date.isoformat()
+            snap_prev_frozen = True
+        else:
+            snap_prev_streak = max(0, user.current_streak_days - 1)
+            snap_prev_last_date = (
+                (activity_date - timedelta(days=1)).isoformat()
+                if user.current_streak_days > 1
+                else None
+            )
+            snap_prev_frozen = False
         await _upsert_audit_event(
             db,
             owner=user.id,
@@ -477,13 +490,9 @@ async def _record_completed_activity_date(
             event_id=done_event_id,
             resource_ref={
                 "date": activity_date.isoformat(),
-                "prev_streak": max(0, user.current_streak_days - 1),
-                "prev_last_date": (
-                    (activity_date - timedelta(days=1)).isoformat()
-                    if user.current_streak_days > 1
-                    else None
-                ),
-                "prev_frozen": False,
+                "prev_streak": snap_prev_streak,
+                "prev_last_date": snap_prev_last_date,
+                "prev_frozen": snap_prev_frozen,
                 "earned_freeze": False,
                 "backfilled": False,
                 "timezone": tz_name,

@@ -8,6 +8,7 @@ from typing import Any, cast
 from uuid import UUID
 
 from sqlalchemy import func, or_, select, update
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import AppError
@@ -363,39 +364,50 @@ async def reconcile_expired_checkins(
     )
 
     overdue_session_ids: list[UUID] = []
-    waiting_sessions = list(
-        await db.scalars(
-            select(SessionRow).where(
+    waiting_rows = (
+        await db.execute(
+            select(
+                SessionRow.id,
+                SessionRow.scheduled_start,
+                SessionRow.start_decision_due_at,
+            ).where(
                 SessionRow.user_id == user_uuid,
                 SessionRow.status == "scheduled",
                 SessionRow.start_state == "waiting",
             )
         )
-    )
-    if waiting_sessions:
+    ).all()
+    if waiting_rows:
         started_session_ids = set(
             await db.scalars(
                 select(SessionRun.session_id).where(
                     SessionRun.user_id == user_uuid,
-                    SessionRun.session_id.in_([s.id for s in waiting_sessions]),
+                    SessionRun.session_id.in_([row.id for row in waiting_rows]),
                 )
             )
         )
-        for s in waiting_sessions:
-            if s.id in started_session_ids:
+        for row in waiting_rows:
+            if row.id in started_session_ids:
                 continue
-            due_at = s.start_decision_due_at or (
-                s.scheduled_start + timedelta(seconds=START_GRACE_SECONDS)
+            due_at = row.start_decision_due_at or (
+                row.scheduled_start + timedelta(seconds=START_GRACE_SECONDS)
             )
             if due_at.astimezone(UTC) <= ref_now:
-                overdue_session_ids.append(s.id)
+                overdue_session_ids.append(row.id)
 
     if not expired_checkin_ids and not overdue_session_ids:
         return False
 
     in_command_tx = bool(db.info.get("defer_command_commit"))
     if not in_command_tx:
-        await command_service.lock_owner(db, user_id)
+        if db.in_transaction() and not db.identity_map:
+            await db.rollback()
+        try:
+            await command_service.lock_owner(db, user_id)
+        except OperationalError:
+            if db.in_transaction():
+                await db.rollback()
+            await command_service.lock_owner(db, user_id)
 
     changed = False
     if expired_checkin_ids:
@@ -677,6 +689,7 @@ async def _validate_start_feasibility(
                 )
             )
         )
+        connected_conn_ids: set[str] = {str(c.id) for c in connected_calendars}
         non_primary_write_pairs: set[tuple[str, str]] = set()
         for c in connected_calendars:
             wcal = (c.write_calendar_id or "").strip()
@@ -699,34 +712,46 @@ async def _validate_start_feasibility(
                 and ctx.source_draft_id != task.source_draft_id
             ):
                 continue
-            for busy in (ctx.busy_intervals or []) + (ctx.manual_busy_intervals or []):
-                if not isinstance(busy, dict):
-                    continue
-                source = busy.get("source") or {}
-                if isinstance(source, dict):
-                    if source.get("session_id") == str(session.id):
+            interval_groups = (
+                (ctx.busy_intervals or [], False),
+                (ctx.manual_busy_intervals or [], True),
+            )
+            for intervals, is_manual in interval_groups:
+                for busy in intervals:
+                    if not isinstance(busy, dict):
                         continue
-                    source_kind = source.get("kind")
-                    raw_gcal_id = source.get("google_calendar_id")
-                    if (
-                        source_kind in (None, "calendar_event")
-                        and isinstance(raw_gcal_id, str)
-                        and raw_gcal_id.strip()
-                    ):
-                        gcal_id = raw_gcal_id.strip()
+                    source = busy.get("source") or {}
+                    if isinstance(source, dict):
+                        if source.get("session_id") == str(session.id):
+                            continue
+                        source_kind = source.get("kind")
                         raw_conn_id = source.get("connection_id")
                         conn_id = str(raw_conn_id).strip() if raw_conn_id is not None else None
-                        if (conn_id and (conn_id, gcal_id) in non_primary_write_pairs) or (
-                            not conn_id and gcal_id in non_primary_write_cal_ids
+                        if (
+                            not is_manual
+                            and source_kind in (None, "calendar_event")
+                            and conn_id
+                            and conn_id not in connected_conn_ids
                         ):
                             continue
-                b_start = _parse_iso_datetime(busy.get("start_at"))
-                b_end = _parse_iso_datetime(busy.get("end_at"))
-                if b_start is not None and b_end is not None:
-                    if b_start.astimezone(UTC) < req_end and b_end.astimezone(UTC) > req_start:
-                        raise _require_replan(
-                            "Thời điểm thực hiện trùng với sự kiện bận trên lịch. Cần xếp lại lịch."
-                        )
+                        raw_gcal_id = source.get("google_calendar_id")
+                        if (
+                            source_kind in (None, "calendar_event")
+                            and isinstance(raw_gcal_id, str)
+                            and raw_gcal_id.strip()
+                        ):
+                            gcal_id = raw_gcal_id.strip()
+                            if (conn_id and (conn_id, gcal_id) in non_primary_write_pairs) or (
+                                not conn_id and gcal_id in non_primary_write_cal_ids
+                            ):
+                                continue
+                    b_start = _parse_iso_datetime(busy.get("start_at"))
+                    b_end = _parse_iso_datetime(busy.get("end_at"))
+                    if b_start is not None and b_end is not None:
+                        if b_start.astimezone(UTC) < req_end and b_end.astimezone(UTC) > req_start:
+                            raise _require_replan(
+                                "Thời điểm thực hiện trùng với sự kiện bận trên lịch. Cần xếp lại lịch."
+                            )
             break
 
     # 5. Kiểm tra chồng lấn (Collision) & khoảng cách tối thiểu >= 900s trên TẤT CẢ các Task của user

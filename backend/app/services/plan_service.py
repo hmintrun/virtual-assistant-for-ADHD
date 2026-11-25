@@ -3674,6 +3674,8 @@ async def delete_task(
         all_session_uuids = [sess.id for sess in session_rows]
 
         now = datetime.now(UTC)
+        # Focus Mode guard nhất quán với approve_proposal: running/paused khóa toàn user
+        # để bảo vệ ScheduleVersion; awaiting_checkin chỉ khóa trong phạm vi task đang xóa.
         live_run_id = await db.scalar(
             select(SessionRun.id)
             .where(

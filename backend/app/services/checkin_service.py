@@ -912,6 +912,20 @@ async def _cancel_surplus_scheduled_sessions(
             .execution_options(populate_existing=True)
         )
     )
+    conn_ids = {link.connection_id for link in links}
+    connected_conn_ids = (
+        set(
+            await db.scalars(
+                select(CalendarConnection.id).where(
+                    CalendarConnection.user_id == user_uuid,
+                    CalendarConnection.id.in_(conn_ids),
+                    CalendarConnection.connection_state == "connected",
+                )
+            )
+        )
+        if conn_ids
+        else set()
+    )
     for link in links:
         queued_jobs = list(
             await db.scalars(
@@ -964,6 +978,9 @@ async def _cancel_surplus_scheduled_sessions(
             link.sync_state = "deleted"
             link.updated_at = now_utc
             link.revision += 1
+        elif link.connection_id not in connected_conn_ids:
+            # Kết nối lịch đã ngắt -> không enqueue delete job và giữ nguyên sync_state
+            enqueued_delete_job_id = None
         else:
             link.sync_state = "pending"
             link.updated_at = now_utc

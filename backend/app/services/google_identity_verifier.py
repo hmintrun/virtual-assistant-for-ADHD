@@ -17,6 +17,8 @@ from app.schemas.auth import VerifiedGoogleIdentity
 CERTS_URL = "https://www.googleapis.com/oauth2/v1/certs"
 _certs: dict[str, str] = {}
 _certs_expiry = 0.0
+_last_force_refresh_at: float | None = None
+FORCE_REFRESH_COOLDOWN_SECONDS = 60.0
 
 
 def invalid_google_token() -> AppError:
@@ -29,10 +31,20 @@ def invalid_google_token() -> AppError:
     )
 
 
-async def _get_certificates() -> dict[str, str]:
-    global _certs, _certs_expiry
-    if _certs and time.monotonic() < _certs_expiry:
-        return _certs
+async def _get_certificates(*, force_refresh: bool = False) -> dict[str, str]:
+    global _certs, _certs_expiry, _last_force_refresh_at
+    now = time.monotonic()
+    if not force_refresh:
+        if _certs and now < _certs_expiry:
+            return _certs
+    else:
+        if (
+            _certs
+            and _last_force_refresh_at is not None
+            and (now - _last_force_refresh_at) < FORCE_REFRESH_COOLDOWN_SECONDS
+        ):
+            return _certs
+        _last_force_refresh_at = now
     try:
         async with httpx.AsyncClient(timeout=settings.GOOGLE_AUTH_TIMEOUT_SECONDS) as client:
             response = await client.get(CERTS_URL)
@@ -105,8 +117,10 @@ async def verify_google_identity(id_token: str) -> VerifiedGoogleIdentity:
             retryable=True,
         )
     try:
-        if jwt.decode_header(id_token).get("alg") != "RS256":
+        header = jwt.decode_header(id_token)
+        if header.get("alg") != "RS256":
             raise invalid_google_token()
+        kid = header.get("kid")
     except (ValueError, TypeError, GoogleAuthError):
         raise invalid_google_token() from None
     certs = await _get_certificates()
@@ -120,4 +134,21 @@ async def verify_google_identity(id_token: str) -> VerifiedGoogleIdentity:
         )
         return _verified_profile(claims)
     except (ValueError, TypeError, GoogleAuthError):
+        if not (isinstance(kid, str) and kid in certs):
+            try:
+                fresh_certs = await _get_certificates(force_refresh=True)
+            except TypeError:
+                fresh_certs = certs
+            if fresh_certs != certs:
+                try:
+                    claims = await asyncio.to_thread(
+                        jwt.decode,
+                        id_token,
+                        certs=fresh_certs,
+                        audience=settings.GOOGLE_SIGN_IN_AUDIENCES,
+                        clock_skew_in_seconds=settings.AUTH_CLOCK_SKEW_SECONDS,
+                    )
+                    return _verified_profile(claims)
+                except (ValueError, TypeError, GoogleAuthError):
+                    raise invalid_google_token() from None
         raise invalid_google_token() from None
