@@ -112,27 +112,35 @@ def test_settings_deepgram_key_validation_and_repr_hides_secret() -> None:
 
 
 def test_build_voice_service_auto_and_explicit_deepgram_chains() -> None:
-    # auto without Deepgram key preserves legacy 2-tier gemini->groq
-    cfg_no_dg = Settings(
+    # auto without ElevenLabs or Deepgram key falls back cleanly to gemini
+    cfg_gem_only = Settings(
         _env_file=None,
         VOICE_STT_PROVIDER="auto",
+        ELEVENLABS_API_KEY="",
         DEEPGRAM_API_KEY="your-deepgram-api-key-here",
         GEMINI_API_KEY="gem-key",
-        GROQ_API_KEY="groq-key",
     )
-    svc_no_dg = build_voice_service(cfg_no_dg)
-    assert svc_no_dg.provider_name == "gemini->groq"
+    assert build_voice_service(cfg_gem_only).provider_name == "gemini"
 
-    # auto with Deepgram key enables 3-tier deepgram->gemini->groq
+    # auto with Gemini + ElevenLabs + Deepgram builds 3-tier gemini->elevenlabs->deepgram
+    cfg_auto_3t = Settings(
+        _env_file=None,
+        VOICE_STT_PROVIDER="auto",
+        GEMINI_API_KEY="gem-key",
+        ELEVENLABS_API_KEY="el-real-key",
+        DEEPGRAM_API_KEY="dg-real-key",
+    )
+    assert build_voice_service(cfg_auto_3t).provider_name == "gemini->elevenlabs->deepgram"
+
+    # auto with Gemini + Deepgram (no ElevenLabs) builds 2-tier gemini->deepgram
     cfg_auto_dg = Settings(
         _env_file=None,
         VOICE_STT_PROVIDER="auto",
+        ELEVENLABS_API_KEY="",
         DEEPGRAM_API_KEY="dg-real-key",
         GEMINI_API_KEY="gem-key",
-        GROQ_API_KEY="groq-key",
     )
-    svc_auto_dg = build_voice_service(cfg_auto_dg)
-    assert svc_auto_dg.provider_name == "deepgram->gemini->groq"
+    assert build_voice_service(cfg_auto_dg).provider_name == "gemini->deepgram"
 
     # explicit deepgram adapts fallback chain based on available keys
     cfg_dg_both = Settings(
@@ -140,28 +148,28 @@ def test_build_voice_service_auto_and_explicit_deepgram_chains() -> None:
         VOICE_STT_PROVIDER="deepgram",
         DEEPGRAM_API_KEY="dg-real-key",
         GEMINI_API_KEY="gem-key",
-        GROQ_API_KEY="groq-key",
+        ELEVENLABS_API_KEY="el-real-key",
     )
-    assert build_voice_service(cfg_dg_both).provider_name == "deepgram->gemini->groq"
+    assert build_voice_service(cfg_dg_both).provider_name == "deepgram->gemini->elevenlabs"
 
     cfg_dg_gem = Settings(
         _env_file=None,
         VOICE_STT_PROVIDER="deepgram",
         DEEPGRAM_API_KEY="dg-real-key",
         GEMINI_API_KEY="gem-key",
-        GROQ_API_KEY="your-groq-api-key-here",
+        ELEVENLABS_API_KEY="",
     )
     assert build_voice_service(cfg_dg_gem).provider_name == "deepgram->gemini"
 
-    cfg_dg_groq = Settings(
+    cfg_dg_el = Settings(
         _env_file=None,
         VOICE_STT_PROVIDER="deepgram",
         DEEPGRAM_API_KEY="dg-real-key",
         GEMINI_API_KEY="your-gemini-api-key-here",
         GOOGLE_CREDENTIALS_PATH="",
-        GROQ_API_KEY="groq-key",
+        ELEVENLABS_API_KEY="el-real-key",
     )
-    assert build_voice_service(cfg_dg_groq).provider_name == "deepgram->groq"
+    assert build_voice_service(cfg_dg_el).provider_name == "deepgram->elevenlabs"
 
     cfg_dg_only = Settings(
         _env_file=None,
@@ -169,60 +177,60 @@ def test_build_voice_service_auto_and_explicit_deepgram_chains() -> None:
         DEEPGRAM_API_KEY="dg-real-key",
         GEMINI_API_KEY="your-gemini-api-key-here",
         GOOGLE_CREDENTIALS_PATH="",
-        GROQ_API_KEY="your-groq-api-key-here",
+        ELEVENLABS_API_KEY="your-elevenlabs-api-key-here",
     )
     assert build_voice_service(cfg_dg_only).provider_name == "deepgram"
 
 
 @pytest.mark.asyncio
-async def test_auto_uf5_checkin_routing_with_and_without_deepgram_key() -> None:
-    # (a) Without Deepgram key: auto preserves prefer_fallback_purposes -> Groq runs first for uf5_checkin
-    cfg_no_dg = Settings(
+async def test_auto_uf5_checkin_routing_with_and_without_elevenlabs_deepgram() -> None:
+    # (a) With Gemini + ElevenLabs: auto swaps uf5_checkin to ElevenLabs first
+    cfg_gem_el = Settings(
         _env_file=None,
         VOICE_STT_PROVIDER="auto",
         DEEPGRAM_API_KEY="",
         GEMINI_API_KEY="gem-key",
-        GROQ_API_KEY="groq-key",
-        VOICE_STT_UF5_PREFER_GROQ=True,
+        ELEVENLABS_API_KEY="el-key",
+        VOICE_STT_UF5_PREFER_ELEVENLABS=True,
     )
-    svc_no_dg = build_voice_service(cfg_no_dg)
-    assert isinstance(svc_no_dg._provider, FallbackSttProvider)
+    svc_2t = build_voice_service(cfg_gem_el)
+    assert isinstance(svc_2t._provider, FallbackSttProvider)
     gem_mock_2t = AsyncMock(return_value="Gemini text")
-    groq_mock_2t = AsyncMock(return_value="Xong rồi")
-    cast(Any, svc_no_dg._provider._primary).transcribe = gem_mock_2t
-    cast(Any, svc_no_dg._provider._fallback).transcribe = groq_mock_2t
+    el_mock_2t = AsyncMock(return_value="Xong rồi")
+    cast(Any, svc_2t._provider._primary).transcribe = gem_mock_2t
+    cast(Any, svc_2t._provider._fallback).transcribe = el_mock_2t
 
-    res_2t = await svc_no_dg.transcribe(b"RIFF-uf5", content_type="audio/wav", purpose="uf5_checkin")
-    assert res_2t.provider == "groq"
+    res_2t = await svc_2t.transcribe(b"RIFF-uf5", content_type="audio/wav", purpose="uf5_checkin")
+    assert res_2t.provider == "elevenlabs"
     assert res_2t.text == "Xong rồi"
-    groq_mock_2t.assert_awaited_once()
+    el_mock_2t.assert_awaited_once()
     gem_mock_2t.assert_not_awaited()
 
-    # (b) With Deepgram key: auto routes uf5_checkin through 3-tier chain starting at Deepgram
-    cfg_with_dg = Settings(
+    # (b) Full 3-tier gemini->elevenlabs->deepgram: uf5_checkin prefers ElevenLabs first without hitting Deepgram
+    cfg_3t = Settings(
         _env_file=None,
         VOICE_STT_PROVIDER="auto",
         DEEPGRAM_API_KEY="dg-real-key",
         GEMINI_API_KEY="gem-key",
-        GROQ_API_KEY="groq-key",
-        VOICE_STT_UF5_PREFER_GROQ=True,
+        ELEVENLABS_API_KEY="el-real-key",
+        VOICE_STT_UF5_PREFER_ELEVENLABS=True,
     )
-    svc_3t = build_voice_service(cfg_with_dg)
-    assert svc_3t.provider_name == "deepgram->gemini->groq"
+    svc_3t = build_voice_service(cfg_3t)
+    assert svc_3t.provider_name == "gemini->elevenlabs->deepgram"
     assert isinstance(svc_3t._provider, FallbackSttProvider)
-    dg_mock_3t = AsyncMock(return_value="Xong phiên này rồi")
     gem_mock_3t = AsyncMock(return_value="Gemini text")
-    groq_mock_3t = AsyncMock(return_value="Groq text")
-    cast(Any, svc_3t._provider._primary).transcribe = dg_mock_3t
-    cast(Any, svc_3t._provider._fallback).transcribe = gem_mock_3t
-    cast(Any, svc_3t._provider._tertiary).transcribe = groq_mock_3t
+    el_mock_3t = AsyncMock(return_value="Xong phiên này rồi")
+    dg_mock_3t = AsyncMock(return_value="Deepgram text")
+    cast(Any, svc_3t._provider._primary).transcribe = gem_mock_3t
+    cast(Any, svc_3t._provider._fallback).transcribe = el_mock_3t
+    cast(Any, svc_3t._provider._tertiary).transcribe = dg_mock_3t
 
     res_3t = await svc_3t.transcribe(b"RIFF-uf5", content_type="audio/wav", purpose="uf5_checkin")
-    assert res_3t.provider == "deepgram"
+    assert res_3t.provider == "elevenlabs"
     assert res_3t.text == "Xong phiên này rồi"
-    dg_mock_3t.assert_awaited_once()
+    el_mock_3t.assert_awaited_once()
     gem_mock_3t.assert_not_awaited()
-    groq_mock_3t.assert_not_awaited()
+    dg_mock_3t.assert_not_awaited()
 
 
 # ==============================================================================
@@ -439,7 +447,7 @@ async def test_deepgram_provider_missing_key_timeout_and_network_errors() -> Non
 
 
 # ==============================================================================
-# 3. 3-Tier FallbackSttProvider (deepgram -> gemini -> groq)
+# 3. 3-Tier FallbackSttProvider (gemini -> elevenlabs -> deepgram)
 # ==============================================================================
 
 
@@ -489,9 +497,9 @@ class _StubSttProvider:
 @pytest.mark.asyncio
 async def test_three_tier_fallback_t1_to_t2_to_t3_and_timeout_headroom() -> None:
     # 1) T1 fails (429) -> T2 fails (503) -> T3 succeeds
-    t1 = _StubSttProvider("deepgram", error=SttError(SttErrorCode.RATE_LIMITED, "http_429"))
-    t2 = _StubSttProvider("gemini", error=SttError(SttErrorCode.PROVIDER_ERROR, "http_503"))
-    t3 = _StubSttProvider("groq", result=SttProviderDetails(text="Kết quả từ Groq", no_speech_prob=0.1, avg_logprob=-0.2))
+    t1 = _StubSttProvider("gemini", error=SttError(SttErrorCode.RATE_LIMITED, "http_429"))
+    t2 = _StubSttProvider("elevenlabs", error=SttError(SttErrorCode.PROVIDER_ERROR, "http_503"))
+    t3 = _StubSttProvider("deepgram", result=SttProviderDetails(text="Kết quả từ Deepgram", low_confidence=False))
     fb = FallbackSttProvider(
         primary=t1,
         fallback=t2,
@@ -499,17 +507,17 @@ async def test_three_tier_fallback_t1_to_t2_to_t3_and_timeout_headroom() -> None
         primary_timeout_seconds=1.0,
         total_timeout_seconds=3.0,
     )
-    assert fb.name == "deepgram->gemini->groq"
+    assert fb.name == "gemini->elevenlabs->deepgram"
     svc = VoiceService(fb, timeout_seconds=3.0, max_audio_bytes=1024 * 1024)
     res = await svc.transcribe(b"audio-bytes", content_type="audio/m4a", filename="a.m4a")
-    assert res.text == "Kết quả từ Groq"
-    assert res.provider == "groq"
+    assert res.text == "Kết quả từ Deepgram"
+    assert res.provider == "deepgram"
     assert (t1.calls, t2.calls, t3.calls) == (1, 1, 1)
 
     # 2) T1 hangs past primary_timeout AND T2 hangs past reserved slice -> T3 still finishes in total budget
-    t1_hang = _StubSttProvider("deepgram", result="too late", delay=2.0)
-    t2_hang = _StubSttProvider("gemini", result="too late 2", delay=2.0)
-    t3_fast = _StubSttProvider("groq", result="Cứu hộ tầng 3 kịp thời", delay=0.01)
+    t1_hang = _StubSttProvider("gemini", result="too late", delay=2.0)
+    t2_hang = _StubSttProvider("elevenlabs", result="too late 2", delay=2.0)
+    t3_fast = _StubSttProvider("deepgram", result="Cứu hộ tầng 3 kịp thời", delay=0.01)
     fb_timeout = FallbackSttProvider(
         primary=t1_hang,
         fallback=t2_hang,
@@ -520,7 +528,7 @@ async def test_three_tier_fallback_t1_to_t2_to_t3_and_timeout_headroom() -> None
     svc_to = VoiceService(fb_timeout, timeout_seconds=0.60, max_audio_bytes=1024 * 1024)
     res_to = await svc_to.transcribe(b"audio-bytes", content_type="audio/m4a", filename="b.m4a")
     assert res_to.text == "Cứu hộ tầng 3 kịp thời"
-    assert res_to.provider == "groq"
+    assert res_to.provider == "deepgram"
     assert (t1_hang.calls, t2_hang.calls, t3_fast.calls) == (1, 1, 1)
 
 
@@ -532,9 +540,9 @@ async def test_three_tier_fallback_t1_to_t2_to_t3_and_timeout_headroom() -> None
 async def test_three_tier_fallback_does_not_call_t2_or_t3_on_non_retryable_t1_error(
     non_retryable_code: SttErrorCode,
 ) -> None:
-    t1 = _StubSttProvider("deepgram", error=SttError(non_retryable_code, "terminal"))
-    t2 = _StubSttProvider("gemini", result="should not run")
-    t3 = _StubSttProvider("groq", result="should not run")
+    t1 = _StubSttProvider("gemini", error=SttError(non_retryable_code, "terminal"))
+    t2 = _StubSttProvider("elevenlabs", result="should not run")
+    t3 = _StubSttProvider("deepgram", result="should not run")
     fb = FallbackSttProvider(primary=t1, fallback=t2, tertiary=t3)
     svc = VoiceService(fb, timeout_seconds=5.0, max_audio_bytes=1024 * 1024)
 

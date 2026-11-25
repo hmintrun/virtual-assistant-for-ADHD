@@ -52,14 +52,14 @@ from app.services.user_vocabulary_service import (
     get_user_vocabulary_service,
 )
 from app.services.voice_service import (
-    _DEFAULT_STT_PROMPT,
     _GEMINI_STT_PROMPT_SMART,
     _GEMINI_STT_USER_PROMPT,
+    DeepgramSttProvider,
     FallbackSttProvider,
     GeminiSttProvider,
-    GroqWhisperSttProvider,
     VoiceService,
     _format_contextual_hints,
+    _sanitize_deepgram_keyterms,
     get_voice_service,
 )
 
@@ -350,31 +350,18 @@ async def test_voice_providers_format_contextual_hints_and_preserve_transcribe_i
     formatted = _format_contextual_hints(long_hints)
     assert 0 < len(formatted) <= 400
 
-    # 1. GroqWhisperSttProvider nối contextual_hints vào prompt khi khác rỗng, giữ nguyên khi rỗng
-    groq_create = AsyncMock(
-        return_value={
-            "text": "Ôn tập giải thuật Karatsuba",
-            "segments": [{"no_speech_prob": 0.05, "avg_logprob": -0.2}],
-        }
-    )
-    groq = GroqWhisperSttProvider(
-        api_key="test-groq-key",
-        model="whisper-large-v3",
-        language_code="vi-VN",
-    )
-    cast(Any, groq)._client = SimpleNamespace(
-        audio=SimpleNamespace(transcriptions=SimpleNamespace(create=groq_create))
-    )
-    await groq.transcribe(b"RIFF-audio", "audio/wav", contextual_hints=["Karatsuba", "FastAPI"])
-    assert groq_create.await_args is not None
-    sent_prompt = groq_create.await_args.kwargs["prompt"]
-    assert sent_prompt.startswith(_DEFAULT_STT_PROMPT)
-    assert "Karatsuba, FastAPI" in sent_prompt
+    # 1. DeepgramSttProvider chuẩn hóa keyterms khi bật use_keyterms=True và bỏ qua khi use_keyterms=False
+    dg_terms = _sanitize_deepgram_keyterms(["Karatsuba", "FastAPI", "Karatsuba", "  ###  "])
+    assert dg_terms == ["Karatsuba", "FastAPI"]
+    assert len(_sanitize_deepgram_keyterms(long_hints)) <= 50
 
-    groq_create.reset_mock()
-    await groq.transcribe(b"RIFF-audio", "audio/wav", contextual_hints=[])
-    assert groq_create.await_args is not None
-    assert groq_create.await_args.kwargs["prompt"] == _DEFAULT_STT_PROMPT
+    dg_provider = DeepgramSttProvider(
+        api_key="dg-test-key",
+        model="nova-3",
+        language_code="vi-VN",
+        use_keyterms=True,
+    )
+    assert dg_provider._use_keyterms is True
 
     # 2. GeminiSttProvider inline (Flash-Lite) nối vào system_instruction; transcribe_inline giữ nguyên AudioTranscriptionConfig
     gen_inline = AsyncMock(return_value=SimpleNamespace(text="Ôn tập Karatsuba"))

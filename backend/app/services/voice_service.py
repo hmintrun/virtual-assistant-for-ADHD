@@ -1,8 +1,10 @@
 """Dịch vụ giọng nói Backend (Role Voice — V01 & A21): chuyển audio người dùng chủ động gửi thành chữ.
 
-Nhà cung cấp chính: Gemini 3.5 Transcribe gửi audio inline qua ``generate_content`` (chế độ
-``verbatim``, đo ~2–2,9s cho câu 12–43s — xem docs/backend/VOICE_STT_BENCHMARK.md) với định tuyến theo
-mục đích (riêng ``uf5_checkin`` ưu tiên Groq Whisper cho câu trả lời ngắn) và dự phòng hai chiều.
+Kiến trúc STT 3 tầng (không dùng Groq Whisper):
+1. Tier 1: Gemini 3.5 Transcribe gửi audio inline qua ``generate_content`` (``verbatim``).
+2. Tier 2: ElevenLabs Scribe v2 (`scribe_v2`) qua REST API ``/v1/speech-to-text``.
+3. Tier 3: Deepgram Nova-3 (`nova-3`) qua REST API ``/v1/listen``.
+Riêng ``uf5_checkin`` có thể ưu tiên ElevenLabs trước Gemini khi bật ``VOICE_STT_UF5_PREFER_ELEVENLABS``.
 Dự phòng khi Backend lỗi/mất mạng nằm ở Mobile (``speech_to_text`` on-device), không nằm trong file này.
 
 Quy tắc bắt buộc (AGENTS.md §2 UF4, doc Backend UF4/A21):
@@ -28,6 +30,7 @@ import time
 import unicodedata
 from array import array
 from collections import OrderedDict
+from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 from functools import lru_cache
@@ -39,7 +42,6 @@ import httpx
 from google import genai
 from google.genai import types
 from google.oauth2 import service_account
-from groq import AsyncGroq
 
 from app.core.config import Settings, settings
 
@@ -81,11 +83,12 @@ _MIME_TO_EXTENSION: dict[str, str] = {
 
 
 def _iso_language_code(language_code: str) -> str:
-    """Chuyển BCP-47 (vd ``vi-VN``) sang ISO-639-1 (``vi``) cho Groq Whisper."""
+    """Chuyển BCP-47 (vd ``vi-VN``) sang ISO-639-1 (``vi``) cho REST STT providers."""
     cleaned = (language_code or "").strip().lower()
     if not cleaned:
         return "vi"
-    return cleaned.split("-", 1)[0].split("_", 1)[0]
+    code = cleaned.split("-", 1)[0].split("_", 1)[0]
+    return code or "vi"
 
 
 _ADTS_SAMPLE_RATES: tuple[int, ...] = (
@@ -193,7 +196,6 @@ def _mp4_full_box(box_type: bytes, version: int, flags: int, payload: bytes) -> 
 
 _MAX_ADTS_FRAMES = 60_000
 _ADTS_THREAD_OFFLOAD_BYTES = 256 * 1024
-_GROQ_MAX_EFFECTIVE_PROMPT_CHARS = 480
 
 
 def _remux_adts_aac_to_m4a(audio: bytes) -> bytes:
@@ -357,8 +359,8 @@ def _remux_adts_aac_to_m4a(audio: bytes) -> bytes:
     return ftyp_box + moov_box + mdat_box
 
 
-def _ensure_groq_compatible_audio(audio: bytes, mime_type: str) -> tuple[bytes, str]:
-    """Chuyển đổi ADTS ``.aac`` sang ``.m4a`` trong RAM để Groq Whisper giải mã chuẩn xác."""
+def _ensure_container_compatible_audio(audio: bytes, mime_type: str) -> tuple[bytes, str]:
+    """Chuyển đổi ADTS ``.aac`` sang ``.m4a`` trong RAM để Deepgram giải mã ổn định."""
     if mime_type == "audio/aac" or _is_adts_aac(audio):
         try:
             remuxed = _remux_adts_aac_to_m4a(audio)
@@ -414,7 +416,7 @@ class SttResult:
 
 @dataclass(frozen=True, slots=True)
 class SttProviderDetails:
-    """Chi tiết kết quả từ provider STT (kèm chỉ số âm học từ verbose_json / Deepgram nếu có)."""
+    """Chi tiết kết quả từ provider STT (kèm chỉ số âm học từ provider hoặc Deepgram nếu có)."""
 
     text: str
     no_speech_prob: float | None = None
@@ -466,7 +468,9 @@ def map_provider_exception(exc: Exception) -> SttError:
         return SttError(SttErrorCode.RATE_LIMITED, "http_429")
     if status in (401, 403):
         return SttError(SttErrorCode.PROVIDER_UNAVAILABLE, f"http_{status}")
-    if status in (400, 413, 415, 422):
+    if status == 413:
+        return SttError(SttErrorCode.AUDIO_TOO_LARGE, "http_413")
+    if status in (400, 415, 422):
         return SttError(SttErrorCode.UNSUPPORTED_AUDIO, f"http_{status}")
     if status is not None:
         return SttError(SttErrorCode.PROVIDER_ERROR, f"http_{status}")
@@ -1051,90 +1055,6 @@ def _is_segment_silent(no_speech_prob: float | None, avg_logprob: float | None) 
     )
 
 
-def _extract_segment_metrics(
-    response: Any,
-) -> tuple[float | None, float | None, bool | None]:
-    """Rút trích chỉ số âm học theo từng segment từ verbose_json.
-
-    - Đánh giá im lặng trên từng segment (``no_speech_prob > 0.85`` và ``avg_logprob < -1.2``).
-    - ``all_segments_silent = True`` chỉ khi TẤT CẢ segment có chỉ số đều im lặng.
-    - Khi có ít nhất 1 segment không im lặng, ``(max_no_speech_prob, min_avg_logprob)`` chỉ
-      tính trên các segment không im lặng để khoảng lặng cuối câu không làm hỏng câu nói rõ.
-    """
-    segments = (
-        response.get("segments")
-        if isinstance(response, dict)
-        else getattr(response, "segments", None)
-    )
-    all_no_speech_probs: list[float] = []
-    all_avg_logprobs: list[float] = []
-    non_silent_no_speech_probs: list[float] = []
-    non_silent_avg_logprobs: list[float] = []
-    metric_segment_count = 0
-    silent_segment_count = 0
-
-    if isinstance(segments, (list, tuple)):
-        for seg in segments:
-            raw_no_speech = (
-                seg.get("no_speech_prob")
-                if isinstance(seg, dict)
-                else getattr(seg, "no_speech_prob", None)
-            )
-            raw_avg_logprob = (
-                seg.get("avg_logprob")
-                if isinstance(seg, dict)
-                else getattr(seg, "avg_logprob", None)
-            )
-            val_no_speech = _to_finite_float(raw_no_speech)
-            val_avg_logprob = _to_finite_float(raw_avg_logprob)
-            if val_no_speech is None and val_avg_logprob is None:
-                continue
-
-            metric_segment_count += 1
-            if val_no_speech is not None:
-                all_no_speech_probs.append(val_no_speech)
-            if val_avg_logprob is not None:
-                all_avg_logprobs.append(val_avg_logprob)
-
-            if _is_segment_silent(val_no_speech, val_avg_logprob):
-                silent_segment_count += 1
-            else:
-                if val_no_speech is not None:
-                    non_silent_no_speech_probs.append(val_no_speech)
-                if val_avg_logprob is not None:
-                    non_silent_avg_logprobs.append(val_avg_logprob)
-
-    if metric_segment_count > 0:
-        all_segments_silent = silent_segment_count == metric_segment_count
-        if all_segments_silent:
-            max_no_speech = max(all_no_speech_probs) if all_no_speech_probs else None
-            min_avg_logprob = min(all_avg_logprobs) if all_avg_logprobs else None
-        else:
-            max_no_speech = (
-                max(non_silent_no_speech_probs) if non_silent_no_speech_probs else None
-            )
-            min_avg_logprob = (
-                min(non_silent_avg_logprobs) if non_silent_avg_logprobs else None
-            )
-        return max_no_speech, min_avg_logprob, all_segments_silent
-
-    top_no_speech = (
-        response.get("no_speech_prob")
-        if isinstance(response, dict)
-        else getattr(response, "no_speech_prob", None)
-    )
-    top_avg_logprob = (
-        response.get("avg_logprob")
-        if isinstance(response, dict)
-        else getattr(response, "avg_logprob", None)
-    )
-    return (
-        _to_finite_float(top_no_speech),
-        _to_finite_float(top_avg_logprob),
-        None,
-    )
-
-
 def _build_optional_stt_kwargs(
     func: Any,
     *,
@@ -1184,51 +1104,55 @@ async def _call_provider_details(
     return SttProviderDetails(text=str(raw_details))
 
 
-class GroqWhisperSttProvider:
-    """Groq Whisper (mặc định ``whisper-large-v3``) dùng làm nhánh STT tốc độ cao / dự phòng."""
+def _parse_rest_stt_json_response(response: httpx.Response) -> dict[str, Any]:
+    """Chuẩn hóa status HTTP và giải mã JSON dict từ các nhà cung cấp STT REST (không lộ secret)."""
+    status = response.status_code
+    if status in (401, 403):
+        raise SttError(SttErrorCode.PROVIDER_UNAVAILABLE, f"http_{status}")
+    if status == 429:
+        raise SttError(SttErrorCode.RATE_LIMITED, "http_429")
+    if status == 413:
+        raise SttError(SttErrorCode.AUDIO_TOO_LARGE, "http_413")
+    if status in (400, 415, 422):
+        raise SttError(SttErrorCode.UNSUPPORTED_AUDIO, f"http_{status}")
+    if status >= 400:
+        raise SttError(SttErrorCode.PROVIDER_ERROR, f"http_{status}")
 
-    name = "groq"
+    try:
+        payload = response.json()
+    except ValueError as exc:
+        raise SttError(SttErrorCode.PROVIDER_ERROR, "invalid_json") from exc
+
+    if not isinstance(payload, dict):
+        raise SttError(SttErrorCode.PROVIDER_ERROR, "invalid_response")
+    return payload
+
+
+class ElevenLabsSttProvider:
+    """ElevenLabs Scribe v2 STT qua REST API ``/v1/speech-to-text`` (Tier 2 tốc độ cao & chặn im lặng)."""
+
+    name = "elevenlabs"
 
     def __init__(
         self,
         *,
         api_key: str,
-        model: str,
-        language_code: str,
-        timeout_seconds: float = 20.0,
-        prompt: str | None = _DEFAULT_STT_PROMPT,
+        model: str = "scribe_v2",
+        language_code: str = "vi-VN",
+        base_url: str = "https://api.elevenlabs.io/v1/speech-to-text",
+        tag_audio_events: bool = False,
+        diarize: bool = False,
+        timeout_seconds: float = 5.0,
+        http_client: httpx.AsyncClient | None = None,
     ) -> None:
-        self._api_key = api_key
+        self._api_key = (api_key or "").strip()
         self._model = model
         self._language = _iso_language_code(language_code)
+        self._base_url = base_url.strip() or "https://api.elevenlabs.io/v1/speech-to-text"
+        self._tag_audio_events = tag_audio_events
+        self._diarize = diarize
         self._timeout_seconds = timeout_seconds
-        self._prompt: str | None = (prompt or "").strip() or None
-        self._client: AsyncGroq | None = None
-
-    def _get_client(self) -> AsyncGroq:
-        if not self._api_key:
-            raise SttError(SttErrorCode.PROVIDER_UNAVAILABLE, "missing_groq_api_key")
-        if self._client is None:
-            self._client = AsyncGroq(
-                api_key=self._api_key,
-                timeout=self._timeout_seconds,
-                max_retries=0,
-            )
-        return self._client
-
-    def _effective_prompt(self, contextual_hints: list[str] | None = None) -> str | None:
-        base_prompt = self._prompt
-        if base_prompt is not None:
-            prefix = f"{base_prompt} Từ vựng cá nhân: "
-            remaining = _GROQ_MAX_EFFECTIVE_PROMPT_CHARS - len(prefix)
-            hint_str = _format_contextual_hints(contextual_hints, max_chars=max(0, remaining))
-            if not hint_str:
-                return base_prompt[:_GROQ_MAX_EFFECTIVE_PROMPT_CHARS]
-            return f"{prefix}{hint_str}"
-        hint_str = _format_contextual_hints(
-            contextual_hints, max_chars=_GROQ_MAX_EFFECTIVE_PROMPT_CHARS
-        )
-        return hint_str or None
+        self._http_client = http_client
 
     async def transcribe_verbose(
         self,
@@ -1237,50 +1161,49 @@ class GroqWhisperSttProvider:
         *,
         contextual_hints: list[str] | None = None,
     ) -> SttProviderDetails:
-        client = self._get_client()
-        if len(audio) > _ADTS_THREAD_OFFLOAD_BYTES and (
-            mime_type == "audio/aac" or _is_adts_aac(audio)
-        ):
-            send_audio, send_mime = await asyncio.to_thread(
-                _ensure_groq_compatible_audio, audio, mime_type
-            )
-        else:
-            send_audio, send_mime = _ensure_groq_compatible_audio(audio, mime_type)
-        ext = _MIME_TO_EXTENSION.get(send_mime, ".m4a")
-        effective_prompt = self._effective_prompt(contextual_hints)
+        _ = contextual_hints
+        if not self._api_key:
+            raise SttError(SttErrorCode.PROVIDER_UNAVAILABLE, "missing_elevenlabs_api_key")
+
+        ext = _MIME_TO_EXTENSION.get(mime_type, ".m4a")
+        headers = {"xi-api-key": self._api_key}
+        form_data = {
+            "model_id": self._model,
+            "language_code": self._language,
+            "tag_audio_events": "true" if self._tag_audio_events else "false",
+            "diarize": "true" if self._diarize else "false",
+        }
+        files = {"file": (f"audio{ext}", audio, mime_type)}
+
         try:
-            if effective_prompt is not None:
-                response = await client.audio.transcriptions.create(
-                    model=self._model,
-                    file=(f"audio{ext}", send_audio, send_mime),
-                    language=self._language,
-                    prompt=effective_prompt,
-                    response_format="verbose_json",
-                    temperature=0.0,
+            if self._http_client is not None:
+                response = await self._http_client.post(
+                    self._base_url,
+                    headers=headers,
+                    data=form_data,
+                    files=files,
+                    timeout=self._timeout_seconds,
                 )
             else:
-                response = await client.audio.transcriptions.create(
-                    model=self._model,
-                    file=(f"audio{ext}", send_audio, send_mime),
-                    language=self._language,
-                    response_format="verbose_json",
-                    temperature=0.0,
-                )
-            raw_text = (
-                response.get("text")
-                if isinstance(response, dict)
-                else getattr(response, "text", None)
-            )
-            text = (raw_text or "").strip()
-            no_speech_prob, avg_logprob, all_segments_silent = _extract_segment_metrics(response)
-            return SttProviderDetails(
-                text=text,
-                no_speech_prob=no_speech_prob,
-                avg_logprob=avg_logprob,
-                all_segments_silent=all_segments_silent,
-            )
-        except Exception as exc:
-            raise map_provider_exception(exc) from exc
+                async with httpx.AsyncClient(timeout=self._timeout_seconds) as client:
+                    response = await client.post(
+                        self._base_url,
+                        headers=headers,
+                        data=form_data,
+                        files=files,
+                    )
+        except httpx.TimeoutException as exc:
+            raise SttError(SttErrorCode.TIMEOUT, type(exc).__name__) from exc
+        except httpx.RequestError as exc:
+            raise SttError(SttErrorCode.PROVIDER_ERROR, type(exc).__name__) from exc
+
+        payload = _parse_rest_stt_json_response(response)
+        if "text" not in payload or not isinstance(payload["text"], str):
+            raise SttError(SttErrorCode.PROVIDER_ERROR, "invalid_response")
+        text = payload["text"].strip()
+        if not text:
+            raise SttError(SttErrorCode.NO_SPEECH, "empty_transcript")
+        return SttProviderDetails(text=text, low_confidence=False)
 
     async def transcribe(
         self,
@@ -1327,7 +1250,7 @@ def _sanitize_deepgram_keyterms(contextual_hints: list[str] | None) -> list[str]
 
 
 class DeepgramSttProvider:
-    """Deepgram Nova-3 STT qua REST API ``/v1/listen`` (Tier 1 tốc độ cao, giữ verbatim)."""
+    """Deepgram Nova-3 STT qua REST API ``/v1/listen`` (Tier 3 tốc độ cao, giữ verbatim)."""
 
     name = "deepgram"
 
@@ -1368,10 +1291,10 @@ class DeepgramSttProvider:
             mime_type == "audio/aac" or _is_adts_aac(audio)
         ):
             send_audio, send_mime = await asyncio.to_thread(
-                _ensure_groq_compatible_audio, audio, mime_type
+                _ensure_container_compatible_audio, audio, mime_type
             )
         else:
-            send_audio, send_mime = _ensure_groq_compatible_audio(audio, mime_type)
+            send_audio, send_mime = _ensure_container_compatible_audio(audio, mime_type)
 
         content_type = "audio/mp4" if send_mime == "audio/m4a" else send_mime
         params: list[tuple[str, str]] = [
@@ -1412,25 +1335,7 @@ class DeepgramSttProvider:
         except httpx.RequestError as exc:
             raise SttError(SttErrorCode.PROVIDER_ERROR, type(exc).__name__) from exc
 
-        status = response.status_code
-        if status in (401, 403):
-            raise SttError(SttErrorCode.PROVIDER_UNAVAILABLE, f"http_{status}")
-        if status == 429:
-            raise SttError(SttErrorCode.RATE_LIMITED, "http_429")
-        if status == 413:
-            raise SttError(SttErrorCode.AUDIO_TOO_LARGE, "http_413")
-        if status in (400, 415, 422):
-            raise SttError(SttErrorCode.UNSUPPORTED_AUDIO, f"http_{status}")
-        if status >= 400:
-            raise SttError(SttErrorCode.PROVIDER_ERROR, f"http_{status}")
-
-        try:
-            payload = response.json()
-        except ValueError as exc:
-            raise SttError(SttErrorCode.PROVIDER_ERROR, "invalid_json") from exc
-
-        if not isinstance(payload, dict):
-            raise SttError(SttErrorCode.PROVIDER_ERROR, "invalid_response")
+        payload = _parse_rest_stt_json_response(response)
 
         results = payload.get("results")
         if not isinstance(results, dict):
@@ -1480,6 +1385,101 @@ class DeepgramSttProvider:
         return details.text
 
 
+def _has_provider_name_dispatch(provider: Any) -> bool:
+    """Kiểm tra provider có hỗ trợ API trả kèm tên tầng thực tế mà không bị mock đè trên instance."""
+    inst_dict = getattr(provider, "__dict__", {}) or {}
+    if "transcribe" in inst_dict or "transcribe_verbose" in inst_dict:
+        return False
+    tvwp = getattr(provider, "transcribe_verbose_with_provider", None)
+    if callable(tvwp) and "transcribe_with_provider" not in inst_dict:
+        return True
+    twp = getattr(provider, "transcribe_with_provider", None)
+    return callable(twp)
+
+
+async def _call_provider_details_mapped(
+    provider: Any,
+    audio: bytes,
+    mime_type: str,
+    *,
+    purpose: str | None = None,
+    contextual_hints: list[str] | None = None,
+) -> SttProviderDetails:
+    """Gọi provider và ánh xạ mọi ngoại lệ (kể cả raw ``TimeoutError`` từ SDK) sang ``SttError``."""
+    try:
+        return await _call_provider_details(
+            provider,
+            audio,
+            mime_type,
+            purpose=purpose,
+            contextual_hints=contextual_hints,
+        )
+    except SttError:
+        raise
+    except Exception as exc:
+        raise map_provider_exception(exc) from exc
+
+
+async def _call_provider_details_with_name(
+    provider: Any,
+    audio: bytes,
+    mime_type: str,
+    *,
+    purpose: str | None = None,
+    contextual_hints: list[str] | None = None,
+) -> tuple[SttProviderDetails, str]:
+    """Gọi provider trả ``(SttProviderDetails, active_provider_name)`` (bảo toàn tên tầng thực tế)."""
+    try:
+        inst_dict = getattr(provider, "__dict__", {}) or {}
+        transcribe_verbose_with_provider = getattr(
+            provider, "transcribe_verbose_with_provider", None
+        )
+        transcribe_with_provider = getattr(provider, "transcribe_with_provider", None)
+        if (
+            callable(transcribe_verbose_with_provider)
+            and "transcribe_with_provider" not in inst_dict
+            and "transcribe" not in inst_dict
+            and "transcribe_verbose" not in inst_dict
+        ):
+            extra_vwp = _build_optional_stt_kwargs(
+                transcribe_verbose_with_provider,
+                purpose=purpose,
+                contextual_hints=contextual_hints,
+            )
+            return await transcribe_verbose_with_provider(audio, mime_type, **extra_vwp)
+        if (
+            callable(transcribe_with_provider)
+            and "transcribe" not in inst_dict
+            and "transcribe_verbose" not in inst_dict
+        ):
+            extra_wp = _build_optional_stt_kwargs(
+                transcribe_with_provider,
+                purpose=purpose,
+                contextual_hints=contextual_hints,
+            )
+            raw_text, resolved_provider = await transcribe_with_provider(
+                audio, mime_type, **extra_wp
+            )
+            details = (
+                raw_text
+                if isinstance(raw_text, SttProviderDetails)
+                else SttProviderDetails(text=raw_text)
+            )
+            return details, resolved_provider
+        details = await _call_provider_details(
+            provider,
+            audio,
+            mime_type,
+            purpose=purpose,
+            contextual_hints=contextual_hints,
+        )
+        return details, provider.name
+    except SttError:
+        raise
+    except Exception as exc:
+        raise map_provider_exception(exc) from exc
+
+
 async def _call_fallback_within_budget(
     provider: SttProvider,
     audio: bytes,
@@ -1489,10 +1489,10 @@ async def _call_fallback_within_budget(
     contextual_hints: list[str] | None = None,
     started: float,
     total_timeout_seconds: float | None,
-) -> SttProviderDetails:
+) -> tuple[SttProviderDetails, str]:
     """Chạy nhánh STT dự phòng trong đúng phần ngân sách thời gian còn lại (không nới sàn 1.0s)."""
     if total_timeout_seconds is None:
-        return await _call_provider_details(
+        return await _call_provider_details_with_name(
             provider,
             audio,
             mime_type,
@@ -1504,7 +1504,7 @@ async def _call_fallback_within_budget(
         raise SttError(SttErrorCode.TIMEOUT, "fallback_timeout")
     try:
         return await asyncio.wait_for(
-            _call_provider_details(
+            _call_provider_details_with_name(
                 provider,
                 audio,
                 mime_type,
@@ -1527,6 +1527,7 @@ class FallbackSttProvider:
         fallback: SttProvider,
         tertiary: SttProvider | None = None,
         prefer_fallback_purposes: frozenset[str] = frozenset(),
+        prefer_fallback_primary_timeout_seconds: float | None = None,
         primary_timeout_seconds: float | None = None,
         total_timeout_seconds: float | None = None,
     ) -> None:
@@ -1534,6 +1535,7 @@ class FallbackSttProvider:
         self._fallback = fallback
         self._tertiary = tertiary
         self._prefer_fallback_purposes = prefer_fallback_purposes
+        self._prefer_fallback_primary_timeout_seconds = prefer_fallback_primary_timeout_seconds
         self._primary_timeout_seconds = primary_timeout_seconds
         self._total_timeout_seconds = total_timeout_seconds
         if tertiary is not None:
@@ -1550,19 +1552,24 @@ class FallbackSttProvider:
     ) -> tuple[SttProviderDetails, str]:
         if purpose is not None and purpose in self._prefer_fallback_purposes:
             first, second = self._fallback, self._primary
+            first_timeout: float | None = (
+                self._prefer_fallback_primary_timeout_seconds
+                if self._prefer_fallback_primary_timeout_seconds is not None
+                else self._primary_timeout_seconds
+            )
         else:
             first, second = self._primary, self._fallback
+            first_timeout = self._primary_timeout_seconds
         third = self._tertiary
 
         started = time.perf_counter()
-        first_timeout: float | None = self._primary_timeout_seconds
         if first_timeout is not None and self._total_timeout_seconds is not None:
             first_timeout = min(first_timeout, self._total_timeout_seconds)
         elif first_timeout is None and self._total_timeout_seconds is not None:
             first_timeout = self._total_timeout_seconds
 
         try:
-            first_coro = _call_provider_details(
+            first_coro = _call_provider_details_mapped(
                 first,
                 audio,
                 mime_type,
@@ -1573,12 +1580,20 @@ class FallbackSttProvider:
                 try:
                     details = await asyncio.wait_for(first_coro, timeout=first_timeout)
                 except TimeoutError as exc:
+                    if (
+                        self._total_timeout_seconds is not None
+                        and first_timeout >= self._total_timeout_seconds
+                    ):
+                        raise SttError(SttErrorCode.TIMEOUT, "fallback_timeout") from exc
                     raise SttError(SttErrorCode.TIMEOUT, "primary_timeout") from exc
             else:
                 details = await first_coro
             return details, first.name
         except SttError as exc:
-            if not (exc.code == SttErrorCode.PROVIDER_UNAVAILABLE or exc.retryable):
+            if (
+                exc.code == SttErrorCode.TIMEOUT
+                and exc.detail == "fallback_timeout"
+            ) or not (exc.code == SttErrorCode.PROVIDER_UNAVAILABLE or exc.retryable):
                 raise
             logger.warning(
                 "STT nhánh chính (%s) lỗi %s; chuyển sang dự phòng (%s).",
@@ -1598,7 +1613,7 @@ class FallbackSttProvider:
             )
 
         if third is None:
-            details = await _call_fallback_within_budget(
+            return await _call_fallback_within_budget(
                 second,
                 audio,
                 mime_type,
@@ -1607,7 +1622,6 @@ class FallbackSttProvider:
                 started=started,
                 total_timeout_seconds=self._total_timeout_seconds,
             )
-            return details, second.name
 
         # Chuỗi 3 tầng: chừa phần quỹ thời gian cho Tier 3 nếu Tier 2 bị treo timeout.
         second_timeout: float | None = None
@@ -1620,7 +1634,7 @@ class FallbackSttProvider:
             second_timeout = self._primary_timeout_seconds
 
         try:
-            second_coro = _call_provider_details(
+            second_coro = _call_provider_details_mapped(
                 second,
                 audio,
                 mime_type,
@@ -1655,7 +1669,7 @@ class FallbackSttProvider:
                 third.name,
             )
 
-        details = await _call_fallback_within_budget(
+        return await _call_fallback_within_budget(
             third,
             audio,
             mime_type,
@@ -1664,7 +1678,6 @@ class FallbackSttProvider:
             started=started,
             total_timeout_seconds=self._total_timeout_seconds,
         )
-        return details, third.name
 
     async def transcribe_with_provider(
         self,
@@ -1749,41 +1762,16 @@ class VoiceService:
             self._timeout_seconds + 0.5 if use_fallback_headroom else self._timeout_seconds
         )
         try:
-            inst_dict = getattr(self._provider, "__dict__", {}) or {}
-            transcribe_verbose_with_provider = getattr(
-                self._provider, "transcribe_verbose_with_provider", None
-            )
-            transcribe_with_provider = getattr(self._provider, "transcribe_with_provider", None)
-            if (
-                callable(transcribe_verbose_with_provider)
-                and "transcribe_with_provider" not in inst_dict
-                and "transcribe" not in inst_dict
-            ):
-                extra_vwp = _build_optional_stt_kwargs(
-                    transcribe_verbose_with_provider,
-                    purpose=purpose,
-                    contextual_hints=contextual_hints,
-                )
-                coro = transcribe_verbose_with_provider(audio, mime_type, **extra_vwp)
+            if _has_provider_name_dispatch(self._provider):
                 details, active_provider = await asyncio.wait_for(
-                    coro,
+                    _call_provider_details_with_name(
+                        self._provider,
+                        audio,
+                        mime_type,
+                        purpose=purpose,
+                        contextual_hints=contextual_hints,
+                    ),
                     timeout=outer_timeout,
-                )
-            elif callable(transcribe_with_provider) and "transcribe" not in inst_dict:
-                extra_wp = _build_optional_stt_kwargs(
-                    transcribe_with_provider,
-                    purpose=purpose,
-                    contextual_hints=contextual_hints,
-                )
-                coro = transcribe_with_provider(audio, mime_type, **extra_wp)
-                raw_text, active_provider = await asyncio.wait_for(
-                    coro,
-                    timeout=outer_timeout,
-                )
-                details = (
-                    raw_text
-                    if isinstance(raw_text, SttProviderDetails)
-                    else SttProviderDetails(text=raw_text)
                 )
             else:
                 primary_timeout = (
@@ -1796,7 +1784,7 @@ class VoiceService:
                 )
                 try:
                     details = await asyncio.wait_for(
-                        _call_provider_details(
+                        _call_provider_details_mapped(
                             self._provider,
                             audio,
                             mime_type,
@@ -1810,6 +1798,13 @@ class VoiceService:
                     if isinstance(primary_exc, SttError):
                         mapped_primary = primary_exc
                     elif isinstance(primary_exc, TimeoutError):
+                        if (
+                            self._fallback_provider is not None
+                            and primary_timeout >= self._timeout_seconds
+                        ):
+                            raise SttError(
+                                SttErrorCode.TIMEOUT, "fallback_timeout"
+                            ) from primary_exc
                         mapped_primary = SttError(SttErrorCode.TIMEOUT, "primary_timeout")
                     else:
                         mapped_primary = map_provider_exception(primary_exc)
@@ -1823,7 +1818,7 @@ class VoiceService:
                             mapped_primary.code,
                             self._fallback_provider.name,
                         )
-                        details = await _call_fallback_within_budget(
+                        details, active_provider = await _call_fallback_within_budget(
                             self._fallback_provider,
                             audio,
                             mime_type,
@@ -1832,7 +1827,6 @@ class VoiceService:
                             started=started,
                             total_timeout_seconds=self._timeout_seconds,
                         )
-                        active_provider = self._fallback_provider.name
                     else:
                         raise mapped_primary from primary_exc
         except SttError as exc:
@@ -1916,12 +1910,15 @@ def _build_gemini_stt_provider(cfg: Settings) -> GeminiSttProvider:
     )
 
 
-def _build_groq_stt_provider(cfg: Settings) -> GroqWhisperSttProvider:
-    return GroqWhisperSttProvider(
-        api_key=cfg.GROQ_API_KEY.strip() if cfg.has_groq_key else "",
-        model=cfg.GROQ_STT_MODEL,
+def _build_elevenlabs_stt_provider(cfg: Settings) -> ElevenLabsSttProvider:
+    return ElevenLabsSttProvider(
+        api_key=cfg.ELEVENLABS_API_KEY.strip() if cfg.has_elevenlabs_key else "",
+        model=cfg.ELEVENLABS_STT_MODEL,
         language_code=cfg.VOICE_STT_LANGUAGE,
-        timeout_seconds=cfg.VOICE_STT_TIMEOUT_SECONDS,
+        base_url=cfg.ELEVENLABS_STT_BASE_URL,
+        tag_audio_events=cfg.ELEVENLABS_STT_TAG_AUDIO_EVENTS,
+        diarize=cfg.ELEVENLABS_STT_DIARIZE,
+        timeout_seconds=cfg.ELEVENLABS_STT_TIMEOUT_SECONDS,
     )
 
 
@@ -1938,66 +1935,123 @@ def _build_deepgram_stt_provider(cfg: Settings) -> DeepgramSttProvider:
     )
 
 
+def _compose_stt_chain(
+    providers: Sequence[SttProvider],
+    *,
+    primary_timeout: float,
+    total_timeout: float,
+    prefer_fallback_purposes: frozenset[str] = frozenset(),
+    prefer_fallback_primary_timeout: float | None = None,
+) -> SttProvider:
+    """Ghép 1–3 SttProvider thành một provider đơn hoặc ``FallbackSttProvider``."""
+    if not providers:
+        raise ValueError("providers must not be empty")
+    if len(providers) == 1:
+        return providers[0]
+    if len(providers) == 2:
+        return FallbackSttProvider(
+            primary=providers[0],
+            fallback=providers[1],
+            prefer_fallback_purposes=prefer_fallback_purposes,
+            prefer_fallback_primary_timeout_seconds=prefer_fallback_primary_timeout,
+            primary_timeout_seconds=primary_timeout,
+            total_timeout_seconds=total_timeout,
+        )
+    return FallbackSttProvider(
+        primary=providers[0],
+        fallback=providers[1],
+        tertiary=providers[2],
+        prefer_fallback_purposes=prefer_fallback_purposes,
+        prefer_fallback_primary_timeout_seconds=prefer_fallback_primary_timeout,
+        primary_timeout_seconds=primary_timeout,
+        total_timeout_seconds=total_timeout,
+    )
+
+
 def build_voice_service(app_settings: Settings | None = None) -> VoiceService:
-    """Tạo VoiceService theo cấu hình ``VOICE_STT_PROVIDER`` (``deepgram``, ``gemini``, ``groq``, ``auto``, ``fake``)."""
+    """Tạo VoiceService theo ``VOICE_STT_PROVIDER`` (``gemini``, ``elevenlabs``, ``deepgram``, ``auto``, ``fake``)."""
     cfg = app_settings or settings
     provider: SttProvider
     fallback: SttProvider | None = None
-    dg_primary_timeout = min(cfg.DEEPGRAM_STT_TIMEOUT_SECONDS, cfg.VOICE_STT_PRIMARY_TIMEOUT_SECONDS)
+    el_primary_timeout = min(
+        cfg.ELEVENLABS_STT_TIMEOUT_SECONDS, cfg.VOICE_STT_PRIMARY_TIMEOUT_SECONDS
+    )
+    dg_primary_timeout = min(
+        cfg.DEEPGRAM_STT_TIMEOUT_SECONDS, cfg.VOICE_STT_PRIMARY_TIMEOUT_SECONDS
+    )
+
     if cfg.VOICE_STT_PROVIDER == "fake":
         provider = FakeSttProvider()
-    elif cfg.VOICE_STT_PROVIDER == "groq":
-        provider = _build_groq_stt_provider(cfg)
-    elif cfg.VOICE_STT_PROVIDER == "deepgram":
-        deepgram = _build_deepgram_stt_provider(cfg)
-        has_gemini = cfg.has_gemini_auth
-        has_groq = cfg.has_groq_key
-        if has_gemini and has_groq:
-            provider = FallbackSttProvider(
-                primary=deepgram,
-                fallback=_build_gemini_stt_provider(cfg),
-                tertiary=_build_groq_stt_provider(cfg),
-                primary_timeout_seconds=dg_primary_timeout,
-                total_timeout_seconds=cfg.VOICE_STT_TIMEOUT_SECONDS,
-            )
-        elif has_gemini:
-            provider = FallbackSttProvider(
-                primary=deepgram,
-                fallback=_build_gemini_stt_provider(cfg),
-                primary_timeout_seconds=dg_primary_timeout,
-                total_timeout_seconds=cfg.VOICE_STT_TIMEOUT_SECONDS,
-            )
-        elif has_groq:
-            provider = FallbackSttProvider(
-                primary=deepgram,
-                fallback=_build_groq_stt_provider(cfg),
-                primary_timeout_seconds=dg_primary_timeout,
-                total_timeout_seconds=cfg.VOICE_STT_TIMEOUT_SECONDS,
-            )
-        else:
-            provider = deepgram
-    elif cfg.VOICE_STT_PROVIDER == "auto":
+    elif cfg.VOICE_STT_PROVIDER == "elevenlabs":
+        chain: list[SttProvider] = [_build_elevenlabs_stt_provider(cfg)]
+        if cfg.has_gemini_auth:
+            chain.append(_build_gemini_stt_provider(cfg))
         if cfg.has_deepgram_key:
-            provider = FallbackSttProvider(
-                primary=_build_deepgram_stt_provider(cfg),
-                fallback=_build_gemini_stt_provider(cfg),
-                tertiary=_build_groq_stt_provider(cfg),
-                primary_timeout_seconds=dg_primary_timeout,
-                total_timeout_seconds=cfg.VOICE_STT_TIMEOUT_SECONDS,
-            )
+            chain.append(_build_deepgram_stt_provider(cfg))
+        provider = _compose_stt_chain(
+            chain,
+            primary_timeout=el_primary_timeout,
+            total_timeout=cfg.VOICE_STT_TIMEOUT_SECONDS,
+        )
+    elif cfg.VOICE_STT_PROVIDER == "deepgram":
+        chain = [_build_deepgram_stt_provider(cfg)]
+        if cfg.has_gemini_auth:
+            chain.append(_build_gemini_stt_provider(cfg))
+        if cfg.has_elevenlabs_key:
+            chain.append(_build_elevenlabs_stt_provider(cfg))
+        provider = _compose_stt_chain(
+            chain,
+            primary_timeout=dg_primary_timeout,
+            total_timeout=cfg.VOICE_STT_TIMEOUT_SECONDS,
+        )
+    elif cfg.VOICE_STT_PROVIDER == "auto":
+        chain = []
+        if cfg.has_gemini_auth or (
+            not cfg.has_elevenlabs_key and not cfg.has_deepgram_key
+        ):
+            chain.append(_build_gemini_stt_provider(cfg))
+        if cfg.has_elevenlabs_key:
+            chain.append(_build_elevenlabs_stt_provider(cfg))
+        if cfg.has_deepgram_key:
+            chain.append(_build_deepgram_stt_provider(cfg))
+
+        lead_name = chain[0].name
+        if lead_name == "elevenlabs":
+            auto_primary_timeout = el_primary_timeout
+        elif lead_name == "deepgram":
+            auto_primary_timeout = dg_primary_timeout
         else:
-            provider = FallbackSttProvider(
-                primary=_build_gemini_stt_provider(cfg),
-                fallback=_build_groq_stt_provider(cfg),
-                prefer_fallback_purposes=(
-                    frozenset({"uf5_checkin"}) if cfg.VOICE_STT_UF5_PREFER_GROQ else frozenset()
-                ),
-                primary_timeout_seconds=cfg.VOICE_STT_PRIMARY_TIMEOUT_SECONDS,
-                total_timeout_seconds=cfg.VOICE_STT_TIMEOUT_SECONDS,
+            auto_primary_timeout = cfg.VOICE_STT_PRIMARY_TIMEOUT_SECONDS
+
+        prefer_purposes = (
+            frozenset({"uf5_checkin"})
+            if (
+                cfg.VOICE_STT_UF5_PREFER_ELEVENLABS
+                and len(chain) >= 2
+                and chain[0].name == "gemini"
+                and chain[1].name == "elevenlabs"
             )
+            else frozenset()
+        )
+        provider = _compose_stt_chain(
+            chain,
+            primary_timeout=auto_primary_timeout,
+            total_timeout=cfg.VOICE_STT_TIMEOUT_SECONDS,
+            prefer_fallback_purposes=prefer_purposes,
+            prefer_fallback_primary_timeout=el_primary_timeout if prefer_purposes else None,
+        )
     else:
-        provider = _build_gemini_stt_provider(cfg)
-        fallback = _build_groq_stt_provider(cfg) if cfg.has_groq_key else None
+        chain = [_build_gemini_stt_provider(cfg)]
+        if cfg.has_elevenlabs_key:
+            chain.append(_build_elevenlabs_stt_provider(cfg))
+        if cfg.has_deepgram_key:
+            chain.append(_build_deepgram_stt_provider(cfg))
+        provider = _compose_stt_chain(
+            chain,
+            primary_timeout=cfg.VOICE_STT_PRIMARY_TIMEOUT_SECONDS,
+            total_timeout=cfg.VOICE_STT_TIMEOUT_SECONDS,
+        )
+
     return VoiceService(
         provider,
         timeout_seconds=cfg.VOICE_STT_TIMEOUT_SECONDS,

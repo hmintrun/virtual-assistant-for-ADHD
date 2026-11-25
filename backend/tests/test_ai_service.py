@@ -9,13 +9,14 @@ import tempfile
 import unittest
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any, get_args
 from unittest.mock import AsyncMock, patch
 from zoneinfo import ZoneInfo
 
+import httpx
 from fastapi.testclient import TestClient
 from google.genai import types
+from pydantic import ValidationError
 
 from app.api.deps import get_current_user
 from app.api.v1 import voice as voice_router
@@ -49,12 +50,13 @@ from app.services.ai_service import AIService, ai_service
 from app.services.draft_service import ensure_dev_seed_in_db
 from app.services.voice_service import (
     EdgeTtsProvider,
+    ElevenLabsSttProvider,
     FakeSttProvider,
     FakeTtsProvider,
     FallbackSttProvider,
-    GroqWhisperSttProvider,
     SttError,
     SttErrorCode,
+    SttResult,
     TtsError,
     TtsErrorCode,
     TtsService,
@@ -132,20 +134,38 @@ class TestAIService(unittest.TestCase):
         self.assertEqual(report.deficit_minutes, 30)
 
     def test_settings_secret_redaction(self) -> None:
-        """Đảm bảo API Keys, đường dẫn credentials và SECRET_KEY không bao giờ lộ qua repr()."""
+        """Đảm bảo API Keys, đường dẫn credentials và SECRET_KEY không bao giờ lộ qua repr()/str()/ValidationError."""
         custom_settings = Settings(
+            _env_file=None,
             SECRET_KEY="top-secret-jwt-value",
             GEMINI_API_KEY="AIzaSyDummyGeminiSecret",
             GROQ_API_KEY="gsk_DummyGroqSecret",
+            ELEVENLABS_API_KEY="sk_el_DummyElevenLabsSecret",
+            DEEPGRAM_API_KEY="dg_DummyDeepgramSecret",
             GOOGLE_CREDENTIALS_PATH="secret_sa_key.json",
         )
-        rendered = repr(custom_settings)
-        self.assertNotIn("top-secret-jwt-value", rendered)
-        self.assertNotIn("AIzaSyDummyGeminiSecret", rendered)
-        self.assertNotIn("gsk_DummyGroqSecret", rendered)
-        self.assertNotIn("secret_sa_key.json", rendered)
+        for rendered in (repr(custom_settings), str(custom_settings)):
+            self.assertNotIn("top-secret-jwt-value", rendered)
+            self.assertNotIn("AIzaSyDummyGeminiSecret", rendered)
+            self.assertNotIn("gsk_DummyGroqSecret", rendered)
+            self.assertNotIn("sk_el_DummyElevenLabsSecret", rendered)
+            self.assertNotIn("dg_DummyDeepgramSecret", rendered)
+            self.assertNotIn("secret_sa_key.json", rendered)
         self.assertTrue(custom_settings.has_gemini_key)
         self.assertTrue(custom_settings.has_groq_key)
+        self.assertTrue(custom_settings.has_elevenlabs_key)
+        self.assertTrue(custom_settings.has_deepgram_key)
+
+        with self.assertRaises(ValidationError) as err_ctx:
+            Settings(
+                _env_file=None,
+                ELEVENLABS_API_KEY="sk_el_DummyElevenLabsSecret",
+                DEEPGRAM_API_KEY="dg_DummyDeepgramSecret",
+                VOICE_STT_TIMEOUT_SECONDS=-1,
+            )
+        err_text = str(err_ctx.exception)
+        self.assertNotIn("sk_el_DummyElevenLabsSecret", err_text)
+        self.assertNotIn("dg_DummyDeepgramSecret", err_text)
 
     def test_tier3_fallback_uf1(self) -> None:
         """Kiểm tra Fallback Tầng 3 cho UF1: Gom câu hỏi làm rõ nếu chưa đủ thông tin."""
@@ -233,6 +253,7 @@ class TestAIService(unittest.TestCase):
     def test_timeout_graceful_degradation(self) -> None:
         """Flash-Lite treo quá hạn UF1 thì dùng Tier 3, không khởi chạy provider khác."""
         fast_timeout_settings = Settings(
+            _env_file=None,
             GEMINI_API_KEY="AIzaSyTestKey",
             GOOGLE_CREDENTIALS_PATH="",
             AI_UF1_TIMEOUT_SECONDS=0.06,
@@ -273,6 +294,7 @@ class TestAIService(unittest.TestCase):
         async def run_case(*, gemini_available: bool) -> None:
             service = AIService(
                 Settings(
+                    _env_file=None,
                     AI_UF1_TIMEOUT_SECONDS=0.06,
                 )
             )
@@ -415,6 +437,7 @@ class TestAIService(unittest.TestCase):
     def test_fast_fail_cascades_immediately_to_groq(self) -> None:
         """UF1 chuyển từ Flash-Lite sang Qwen khi nhánh chính lỗi sớm."""
         cfg = Settings(
+            _env_file=None,
             GEMINI_API_KEY="AIzaSyTestKey",
             GROQ_API_KEY="gsk_TestKey",
             GOOGLE_CREDENTIALS_PATH="",
@@ -455,7 +478,7 @@ class TestAIService(unittest.TestCase):
         self.assertFalse(groq.call_args.kwargs["allow_secondary"])
 
     def test_uf1_late_failure_skips_groq(self) -> None:
-        service = AIService(Settings(AI_UF1_GROQ_FAST_FAIL_SECONDS=0.01))
+        service = AIService(Settings(_env_file=None, AI_UF1_GROQ_FAST_FAIL_SECONDS=0.01))
 
         async def late_failure(**_: Any) -> None:
             await asyncio.sleep(0.04)
@@ -475,6 +498,7 @@ class TestAIService(unittest.TestCase):
     def test_groq_secondary_fallback_when_primary_groq_rate_limited(self) -> None:
         """Khi qwen/qwen3.8-27b chạm trần 429 TPM, tự động nhảy sang openai/gpt-oss-20b."""
         cfg = Settings(
+            _env_file=None,
             GEMINI_API_KEY="",
             GROQ_API_KEY="gsk_TestKey",
             GOOGLE_CREDENTIALS_PATH="",
@@ -586,6 +610,7 @@ class TestAIService(unittest.TestCase):
     def test_uf1_python_catches_past_deadline_and_merges_previous_draft(self) -> None:
         """Kiểm tra hợp nhất previous_draft ở UF1 và lớp Python tự bắt lỗi deadline trong quá khứ."""
         cfg = Settings(
+            _env_file=None,
             GEMINI_API_KEY="AIzaSyTestKey",
             GROQ_API_KEY="",
             GOOGLE_CREDENTIALS_PATH="",
@@ -682,6 +707,7 @@ class TestAIService(unittest.TestCase):
         self.assertEqual(decomp.steps[0].title, "Tóm tắt công thức chương 1-3")
 
         cfg = Settings(
+            _env_file=None,
             GEMINI_API_KEY="AIzaSyTestKey",
             GROQ_API_KEY="",
             GOOGLE_CREDENTIALS_PATH="",
@@ -748,6 +774,7 @@ class TestAIService(unittest.TestCase):
     def test_uf6_grounded_copy_anti_injection_deficit_and_fallback(self) -> None:
         """UF6: Không gửi task_title thô lên LLM, chỉ chọn nguyên văn từ allowed_notes/allowed_tip, hỗ trợ deficit_minutes và rơi về Tier 3 nếu LLM bịa."""
         cfg = Settings(
+            _env_file=None,
             GEMINI_API_KEY="AIzaSyTestKey",
             GROQ_API_KEY="",
             GOOGLE_CREDENTIALS_PATH="",
@@ -1088,48 +1115,47 @@ class TestAIService(unittest.TestCase):
         validated = TimeConstraint.model_validate(res.time_constraint.model_dump())
         self.assertEqual(validated.deadline_at, future_deadline)
 
-    def test_groq_whisper_and_fallback_stt_provider(self) -> None:
-        """Kiểm tra GroqWhisperSttProvider và FallbackSttProvider chuyển nhánh khi Groq lỗi."""
-        captured_calls: list[dict[str, Any]] = []
+    def test_elevenlabs_and_fallback_stt_provider(self) -> None:
+        """Kiểm tra ElevenLabsSttProvider và FallbackSttProvider chuyển nhánh khi nhánh chính lỗi."""
+        captured_requests: list[httpx.Request] = []
 
-        class _FakeTranscriptions:
-            async def create(self, **kwargs: Any) -> Any:
-                captured_calls.append(kwargs)
-                return SimpleNamespace(text="  Hoàn thiện phần kết luận báo cáo  ")
+        def _ok_handler(request: httpx.Request) -> httpx.Response:
+            captured_requests.append(request)
+            return httpx.Response(200, json={"text": "  Hoàn thiện phần kết luận báo cáo  "})
 
-        fake_client = SimpleNamespace(
-            audio=SimpleNamespace(transcriptions=_FakeTranscriptions())
-        )
-        groq_provider = GroqWhisperSttProvider(
-            api_key="gsk_test_key",
-            model="whisper-large-v3-turbo",
-            language_code="vi-VN",
-        )
-        with patch.object(groq_provider, "_get_client", return_value=fake_client):
-            svc = VoiceService(groq_provider, timeout_seconds=5.0, max_audio_bytes=1024 * 1024)
-            res = asyncio.run(svc.transcribe(b"RIFF-audio", content_type="audio/wav"))
+        transport = httpx.MockTransport(_ok_handler)
+        async def _run_ok() -> SttResult:
+            async with httpx.AsyncClient(transport=transport) as http_client:
+                el_provider = ElevenLabsSttProvider(
+                    api_key="el_test_key",
+                    model="scribe_v2",
+                    language_code="vi-VN",
+                    http_client=http_client,
+                )
+                svc = VoiceService(el_provider, timeout_seconds=5.0, max_audio_bytes=1024 * 1024)
+                return await svc.transcribe(b"RIFF-audio", content_type="audio/wav")
 
+        res = asyncio.run(_run_ok())
         self.assertEqual(res.text, "Hoàn thiện phần kết luận báo cáo")
-        self.assertEqual(res.provider, "groq")
-        self.assertEqual(captured_calls[0]["language"], "vi")
-        self.assertEqual(captured_calls[0]["model"], "whisper-large-v3-turbo")
+        self.assertEqual(res.provider, "elevenlabs")
+        self.assertEqual(captured_requests[0].headers["xi-api-key"], "el_test_key")
 
-        # Thiếu Groq API key -> PROVIDER_UNAVAILABLE
-        no_key_provider = GroqWhisperSttProvider(
+        # Thiếu ElevenLabs API key -> PROVIDER_UNAVAILABLE
+        no_key_provider = ElevenLabsSttProvider(
             api_key="",
-            model="whisper-large-v3-turbo",
+            model="scribe_v2",
             language_code="vi-VN",
         )
         with self.assertRaises(SttError) as ctx:
             asyncio.run(no_key_provider.transcribe(b"RIFF", "audio/wav"))
         self.assertEqual(ctx.exception.code, SttErrorCode.PROVIDER_UNAVAILABLE)
 
-        # FallbackSttProvider: Groq unavailable -> tự chuyển sang Gemini/fallback
-        class _FailGroq:
-            name = "groq"
+        # FallbackSttProvider: ElevenLabs unavailable -> tự chuyển sang Deepgram/Gemini dự phòng
+        class _FailElevenLabs:
+            name = "elevenlabs"
 
             async def transcribe(self, audio: bytes, mime_type: str) -> str:
-                raise SttError(SttErrorCode.PROVIDER_UNAVAILABLE, "groq_down")
+                raise SttError(SttErrorCode.PROVIDER_UNAVAILABLE, "elevenlabs_down")
 
         class _OkGemini:
             name = "gemini"
@@ -1138,7 +1164,7 @@ class TestAIService(unittest.TestCase):
                 return "Chép lời từ Gemini dự phòng"
 
         fb_svc = VoiceService(
-            FallbackSttProvider(primary=_FailGroq(), fallback=_OkGemini()),
+            FallbackSttProvider(primary=_FailElevenLabs(), fallback=_OkGemini()),
             timeout_seconds=5.0,
             max_audio_bytes=1024 * 1024,
         )
@@ -1146,16 +1172,16 @@ class TestAIService(unittest.TestCase):
         self.assertEqual(fb_res.text, "Chép lời từ Gemini dự phòng")
         self.assertEqual(fb_res.provider, "gemini")
 
-        # Kiểm tra build_voice_service với VOICE_STT_PROVIDER="auto" và "groq"
+        # Kiểm tra build_voice_service với VOICE_STT_PROVIDER="auto" (gemini->elevenlabs->deepgram)
         auto_cfg = Settings(
             _env_file=None,
-            DEEPGRAM_API_KEY="",
-            GEMINI_API_KEY="",
-            GROQ_API_KEY="",
+            ELEVENLABS_API_KEY="el_key",
+            DEEPGRAM_API_KEY="dg_key",
+            GEMINI_API_KEY="gem_key",
             VOICE_STT_PROVIDER="auto",
         )
         auto_svc = build_voice_service(auto_cfg)
-        self.assertEqual(auto_svc.provider_name, "gemini->groq")
+        self.assertEqual(auto_svc.provider_name, "gemini->elevenlabs->deepgram")
 
     def test_tts_service_fake_edge_mock_cache_and_validation(self) -> None:
         """Kiểm tra TtsService: FakeTtsProvider, EdgeTtsProvider mock, LRU cache và validate input."""
@@ -1609,40 +1635,19 @@ class TestAIService(unittest.TestCase):
         self.assertEqual(empty_attempts, 2)
         self.assertEqual(err_ctx.exception.code, TtsErrorCode.EMPTY_AUDIO)
 
-    def test_groq_stt_prompt_hint_and_gemini_to_groq_fallback(self) -> None:
-        """RISK-05: GroqWhisperSttProvider truyền prompt gợi ý từ vựng và VoiceService(gemini) tự dự phòng sang Groq."""
-        captured_calls: list[dict[str, Any]] = []
-
-        class _FakeTranscriptions:
-            async def create(self, **kwargs: Any) -> Any:
-                captured_calls.append(kwargs)
-                return SimpleNamespace(text="Tạo phiên Focus Session 25 phút")
-
-        fake_client = SimpleNamespace(
-            audio=SimpleNamespace(transcriptions=_FakeTranscriptions())
-        )
-        groq_provider = GroqWhisperSttProvider(
-            api_key="gsk_test_key",
-            model="whisper-large-v3-turbo",
-            language_code="vi-VN",
-        )
-        with patch.object(groq_provider, "_get_client", return_value=fake_client):
-            text = asyncio.run(groq_provider.transcribe(b"RIFF-audio", "audio/wav"))
-        self.assertEqual(text, "Tạo phiên Focus Session 25 phút")
-        self.assertIn("prompt", captured_calls[0])
-        self.assertIn("ProPlan VA", captured_calls[0]["prompt"])
-        self.assertIn("Focus Session", captured_calls[0]["prompt"])
-
-        # Kiểm tra build_voice_service với VOICE_STT_PROVIDER="gemini" + GROQ_API_KEY
+    def test_gemini_to_elevenlabs_stt_fallback(self) -> None:
+        """RISK-05: VoiceService(gemini) tự dự phòng sang ElevenLabs khi gặp lỗi tạm thời."""
         gem_cfg = Settings(
             _env_file=None,
             GEMINI_API_KEY="AIzaSyTestKey",
-            GROQ_API_KEY="gsk_TestKey",
+            ELEVENLABS_API_KEY="el_TestKey",
+            DEEPGRAM_API_KEY="",
             VOICE_STT_PROVIDER="gemini",
         )
         gem_svc = build_voice_service(gem_cfg)
-        self.assertEqual(gem_svc.provider_name, "gemini")
-        self.assertIsNotNone(gem_svc._fallback_provider)
+        self.assertEqual(gem_svc.provider_name, "gemini->elevenlabs")
+        self.assertIsNone(gem_svc._fallback_provider)
+        assert isinstance(gem_svc._provider, FallbackSttProvider)
 
         for err_code in (
             SttErrorCode.RATE_LIMITED,
@@ -1651,40 +1656,40 @@ class TestAIService(unittest.TestCase):
         ):
             with (
                 patch.object(
-                    gem_svc._provider,
+                    gem_svc._provider._primary,
                     "transcribe",
                     AsyncMock(side_effect=SttError(err_code, "gemini_transient_err")),
                 ),
                 patch.object(
-                    gem_svc._fallback_provider,
+                    gem_svc._provider._fallback,
                     "transcribe",
-                    AsyncMock(return_value="Chép lời từ Groq dự phòng"),
-                ) as mock_groq_fb,
+                    AsyncMock(return_value="Chép lời từ ElevenLabs dự phòng"),
+                ) as mock_el_fb,
             ):
                 res = asyncio.run(gem_svc.transcribe(b"RIFF-audio", content_type="audio/wav"))
-                self.assertEqual(res.provider, "groq")
-                self.assertEqual(res.text, "Chép lời từ Groq dự phòng")
-                mock_groq_fb.assert_awaited_once()
+                self.assertEqual(res.provider, "elevenlabs")
+                self.assertEqual(res.text, "Chép lời từ ElevenLabs dự phòng")
+                mock_el_fb.assert_awaited_once()
 
         # Lỗi đầu vào UNSUPPORTED_AUDIO không được gọi fallback
         with (
             patch.object(
-                gem_svc._provider,
+                gem_svc._provider._primary,
                 "transcribe",
                 AsyncMock(
                     side_effect=SttError(SttErrorCode.UNSUPPORTED_AUDIO, "corrupt_header")
                 ),
             ),
             patch.object(
-                gem_svc._fallback_provider,
+                gem_svc._provider._fallback,
                 "transcribe",
                 AsyncMock(return_value="Không được gọi"),
-            ) as mock_groq_no_fb,
+            ) as mock_el_no_fb,
         ):
             with self.assertRaises(SttError) as bad_ctx:
                 asyncio.run(gem_svc.transcribe(b"RIFF-audio", content_type="audio/wav"))
             self.assertEqual(bad_ctx.exception.code, SttErrorCode.UNSUPPORTED_AUDIO)
-            mock_groq_no_fb.assert_not_awaited()
+            mock_el_no_fb.assert_not_awaited()
 
     def test_circuit_breaker_opens_on_auth_error_skips_slow_wait_and_recovers(self) -> None:
         """Khi Gemini lỗi auth (403/PermissionError), cầu dao mở ngay để request sau nhảy thẳng Groq <0.05s và hồi phục sau cooldown."""
