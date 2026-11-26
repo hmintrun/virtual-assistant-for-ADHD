@@ -46,7 +46,8 @@ jobs:
         run: uv run ty check app
 
       - name: Check Alembic single head
-        run: uv run python -c "from alembic.config import Config; from alembic.script import ScriptDirectory; heads = ScriptDirectory.from_config(Config('alembic.ini')).get_heads(); print('Alembic heads:', heads); assert len(heads) == 1, f'Expected 1 Alembic head, found {len(heads)}: {heads}'"
+        run: |
+          uv run python -c "from alembic.config import Config; from alembic.script import ScriptDirectory; heads = ScriptDirectory.from_config(Config('alembic.ini')).get_heads(); print('Alembic heads:', heads); assert len(heads) == 1, f'Expected 1 Alembic head, found {len(heads)}: {heads}'"
 
       - name: Verify W4 API contracts
         run: uv run python -m scripts.export_w4_contracts --check
