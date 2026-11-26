@@ -1,3 +1,4 @@
+import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
@@ -9,20 +10,25 @@ import 'package:proplan_va/core/api_client.dart';
 import 'package:proplan_va/core/theme.dart';
 import 'package:proplan_va/models/focus_session_model.dart';
 import 'package:proplan_va/models/planning_models.dart';
+import 'package:proplan_va/models/task_model.dart';
 import 'package:proplan_va/providers/focus_provider.dart';
 import 'package:proplan_va/providers/streak_provider.dart';
 import 'package:proplan_va/providers/task_provider.dart';
 import 'package:proplan_va/providers/theme_provider.dart';
+import 'package:proplan_va/repositories/local_run_repository.dart';
 import 'package:proplan_va/screens/candidate_review_screen.dart';
 import 'package:proplan_va/screens/focus_review_screens.dart';
 import 'package:proplan_va/screens/focus_screen.dart';
 import 'package:proplan_va/screens/home_screen.dart';
 import 'package:proplan_va/screens/main_shell_screen.dart';
+import 'package:proplan_va/screens/uf2_screens.dart';
 import 'package:proplan_va/services/adaptation_api.dart';
 import 'package:proplan_va/services/auth_service.dart';
 import 'package:proplan_va/services/calendar_api.dart';
 import 'package:proplan_va/services/planning_api.dart';
+import 'package:proplan_va/services/voice_playback_service.dart';
 import 'package:proplan_va/widgets/melbel_ui.dart';
+import 'package:proplan_va/widgets/streak_widgets.dart';
 import 'package:proplan_va/widgets/task_delete_sheet.dart';
 
 class _RecordingApiClient extends ApiClient {
@@ -678,4 +684,305 @@ void main() {
         api.calls.lastWhere((call) => call['path'] == '/streak/repair');
     expect(repairCall['idempotencyKey'], isNotNull);
   });
+
+  testWidgets(
+      'W4 regression: ThoughtInboxScreen renders both unsaved local draft and server drafts',
+      (tester) async {
+    tester.view.physicalSize = const Size(390, 844);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    final api = _RecordingApiClient(
+      draftItems: [
+        {
+          'draft_id': 'srv_d1',
+          'stage': 'collecting',
+          'summary': {'title': 'Bản nháp cũ trên server'},
+          'summary_revision': 1,
+          'planning_input_revision': 1,
+          'input_source': 'text',
+        },
+      ],
+    );
+    final focus = FocusProvider(
+      api: api,
+      ownerId: 'qa_w4_reg',
+      repository: InMemoryRunRepository(),
+    );
+    final task = TaskProvider(
+      planningApi: PlanningApi(client: api, ownerId: 'qa_w4_reg'),
+      ownerId: 'qa_w4_reg',
+    );
+    task.setTitle('Dọn góc học tập cuối tuần');
+    addTearDown(focus.dispose);
+    addTearDown(task.dispose);
+
+    await tester.pumpWidget(
+      MultiProvider(
+        providers: [
+          ChangeNotifierProvider<FocusProvider>.value(value: focus),
+          ChangeNotifierProvider<TaskProvider>.value(value: task),
+        ],
+        child: MaterialApp(
+          theme: MelbelTheme.themeFor(isDark: false),
+          home: const ThoughtInboxScreen(),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('Công việc nháp'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Dọn góc học tập cuối tuần'), findsOneWidget);
+    expect(find.text('Bản nháp cũ trên server'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
+  test(
+      'W5 regression: completed check-in under 120s does not record false local streak credit',
+      () async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    SharedPreferences.setMockInitialValues({'focus_device_id': 'qa_w5_device'});
+    FlutterSecureStorage.setMockInitialValues({});
+    final recordedSeconds = <int>[];
+    final dio = Dio()
+      ..interceptors.add(InterceptorsWrapper(onRequest: (request, handler) {
+        final run = {
+          'run_id': 'run_early',
+          'device_id': 'dev_test',
+          'run_revision': 1,
+        };
+        final checkIn = {
+          'checkin_id': 'ck_early',
+          'response_revision': 0,
+          'response_state': 'open',
+        };
+        final data = switch (request.path) {
+          '/sessions/s_early/start' => run,
+          '/runs/run_early/end' => {...run, 'check_in': checkIn},
+          '/runs/run_early/check-ins' => {
+              'items': [checkIn],
+            },
+          '/check-ins/ck_early/response' => {
+              ...checkIn,
+              'response_state': 'answered',
+              'session_outcome': 'completed',
+            },
+          _ => <String, dynamic>{},
+        };
+        handler.resolve(Response(
+          requestOptions: request,
+          statusCode: 200,
+          data: {'data': data},
+        ));
+      }));
+
+    final api = ApiClient(dio: dio, bindSession: false);
+    final focus = FocusProvider(
+      api: api,
+      ownerId: 'qa_w5_reg',
+      repository: InMemoryRunRepository(),
+      voicePlayback: VoicePlaybackService(
+        api: api,
+        audioSink: _NoopVoiceAudioSink(),
+        deviceSpeaker: _NoopDeviceSpeaker(),
+        cache: MemoryTtsAudioCache(),
+      ),
+      onFocusRecorded: recordedSeconds.add,
+    );
+    addTearDown(focus.dispose);
+
+    final start = DateTime.now();
+    await focus.startSession(FocusSessionInfo(
+      sessionId: 's_early',
+      taskTitle: 'Đọc sách',
+      stepTitle: 'Mở trang đầu',
+      scheduledStart: start,
+      scheduledEnd: start.add(const Duration(minutes: 25)),
+      workSeconds: 1500,
+      restSeconds: 300,
+      microTaskText: 'Lấy sách',
+      segments: const [],
+    ));
+    await focus.startRun();
+    await focus.endEarly();
+    await focus.answerCheckIn('completed');
+
+    expect(recordedSeconds, isEmpty);
+  });
+
+  testWidgets(
+      'Android narrow width regression: MelbelStreakIntroCard renders without overflow at 360dp',
+      (tester) async {
+    tester.view.physicalSize = const Size(360, 640);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    final streak = StreakProvider(
+      ownerId: 'qa_intro_width',
+      api: _RecordingApiClient(),
+    );
+    addTearDown(streak.dispose);
+
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: MelbelTheme.themeFor(isDark: false),
+        home: Scaffold(
+          body: Padding(
+            padding: const EdgeInsets.all(20),
+            child: MelbelStreakIntroCard(
+              streak: streak,
+              onLearnMore: () {},
+              onDismiss: () {},
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Xem giới thiệu'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
+  test(
+      'W5/Lịch regression: ingestCompletedSessions does not fabricate 1/3 after backend sync',
+      () async {
+    SharedPreferences.setMockInitialValues({});
+    FlutterSecureStorage.setMockInitialValues({});
+    final now = DateTime.now();
+    final api = _RecordingApiClient(
+      streakResponse: {
+        'current_streak_days': 0,
+        'effective_display_streak': 0,
+        'unlocked': false,
+        'today_completed': false,
+        'today_focus_minutes': 0,
+        'day_records': <Map<String, dynamic>>[],
+      },
+    );
+    final streak = StreakProvider(ownerId: 'qa_lich_sync', api: api);
+    addTearDown(streak.dispose);
+
+    // Pre-existing local streak record before syncing must be purged cleanly.
+    await streak.recordFocusActivity(seconds: 120);
+    expect(streak.effectiveDisplayStreak, 1);
+    expect(streak.dayStatus(now), StreakDayKind.done);
+
+    expect(await streak.syncFromBackend(), isTrue);
+    expect(streak.effectiveDisplayStreak, 0);
+    expect(streak.dayStatus(now), isNull);
+
+    // Switching to Lịch calls ingestCompletedSessions on historical sessions.
+    await streak.ingestCompletedSessions([
+      {
+        'session_id': 'sess_short_early',
+        'status': 'completed',
+        'scheduled_start': now.toUtc().toIso8601String(),
+        'work_seconds': 900,
+      },
+    ]);
+
+    expect(streak.effectiveDisplayStreak, 0);
+    expect(streak.dayStatus(now), isNull);
+    expect(streak.dayMinutes(now), 0);
+  });
+
+  testWidgets(
+      'UF2 regression: PlanLockedScreen avoids "ngay bây giờ" when session starts >15m ahead',
+      (tester) async {
+    tester.view.physicalSize = const Size(390, 844);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    final now = DateTime.now();
+    final futureStart = now.add(const Duration(minutes: 45));
+    final api = _RecordingApiClient();
+    final lockedTask = _LockedTaskProvider(
+      api: api,
+      mockConfirmedTask: TaskModel(
+        taskId: 'task_future_1',
+        title: 'Đọc nhanh ghi chú',
+        steps: const [
+          StepModel(
+            stepId: 'step_1',
+            taskId: 'task_future_1',
+            planningPartId: 'part_1',
+            title: 'Đọc lướt',
+            expectedOutput: 'Ghi 2 ý chính',
+            orderIndex: 0,
+            estimatedBaseSeconds: 720,
+          ),
+        ],
+        sessions: [
+          SessionModel(
+            sessionId: 'sess_future_1',
+            stepId: 'step_1',
+            scheduledStart: futureStart,
+            scheduledEnd: futureStart.add(const Duration(minutes: 12)),
+            microTaskText: 'Mở trang ghi chú',
+            workSeconds: 720,
+            restSeconds: 0,
+            durationSeconds: 720,
+          ),
+        ],
+      ),
+    );
+    lockedTask.setTitle('Đọc nhanh ghi chú');
+    addTearDown(lockedTask.dispose);
+
+    await tester.pumpWidget(
+      ChangeNotifierProvider<TaskProvider>.value(
+        value: lockedTask,
+        child: MaterialApp(
+          theme: MelbelTheme.themeFor(isDark: false),
+          home: const PlanLockedScreen(),
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+
+    expect(find.text('Về trang chủ, nhắc trước 15 phút'), findsOneWidget);
+    expect(find.text('Xem phiên sắp tới'), findsOneWidget);
+    expect(find.textContaining('ngay bây giờ'), findsNothing);
+    expect(tester.takeException(), isNull);
+  });
+}
+
+class _LockedTaskProvider extends TaskProvider {
+  _LockedTaskProvider({
+    required _RecordingApiClient api,
+    required TaskModel mockConfirmedTask,
+  })  : _mockConfirmedTask = mockConfirmedTask,
+        super(
+          planningApi: PlanningApi(client: api, ownerId: 'qa_locked'),
+          ownerId: 'qa_locked',
+        );
+
+  final TaskModel _mockConfirmedTask;
+
+  @override
+  TaskModel? get confirmedTask => _mockConfirmedTask;
+}
+
+class _NoopVoiceAudioSink implements VoiceAudioSink {
+  @override
+  Future<void> playBytes(Uint8List bytes, {String? mimeType}) async {}
+
+  @override
+  Future<void> stop() async {}
+}
+
+class _NoopDeviceSpeaker implements DeviceSpeaker {
+  @override
+  Future<bool> speak(String text) async => false;
+
+  @override
+  Future<void> stop() async {}
 }

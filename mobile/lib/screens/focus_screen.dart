@@ -1906,10 +1906,93 @@ class _ThoughtInboxScreenState extends State<ThoughtInboxScreen> {
             if (next) unawaited(_loadServerDrafts());
           },
         ),
-        if (_showDraft && _loadingDrafts && openDrafts.isEmpty)
+        if (_showDraft &&
+            _loadingDrafts &&
+            !hasUnsavedLocalDraft &&
+            openDrafts.isEmpty)
           const ClipRRect(
             borderRadius: BorderRadius.all(Radius.circular(999)),
             child: LinearProgressIndicator(minHeight: 4),
+          ),
+        if (_showDraft && hasUnsavedLocalDraft)
+          Padding(
+            padding: const EdgeInsets.only(bottom: 10),
+            child: MelbelCard(
+              borderRadius: 24,
+              padding: EdgeInsets.zero,
+              child: ListTile(
+                contentPadding:
+                    const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+                leading: Container(
+                  width: 40,
+                  height: 40,
+                  decoration: BoxDecoration(
+                    color: context.melbel.sageSoft,
+                    borderRadius: BorderRadius.circular(14),
+                  ),
+                  child: Icon(
+                    Icons.edit_note_rounded,
+                    color: context.melbel.sage,
+                  ),
+                ),
+                title: Text(
+                  task.title,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: Theme.of(context)
+                      .textTheme
+                      .titleSmall
+                      ?.copyWith(fontWeight: FontWeight.w700),
+                ),
+                subtitle: Text(
+                  'Đang soạn thảo · ${task.formatDeadline(task.deadline)}',
+                ),
+                trailing: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    IconButton(
+                      tooltip: 'Xóa bản nháp',
+                      constraints: const BoxConstraints(
+                        minWidth: 48,
+                        minHeight: 48,
+                      ),
+                      padding: EdgeInsets.zero,
+                      onPressed: task.isApiBusy
+                          ? null
+                          : () async {
+                              try {
+                                await task.deleteCurrentDraft();
+                                if (!context.mounted) return;
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  const SnackBar(
+                                    content:
+                                        Text('Đã xóa bản nháp công việc.'),
+                                    behavior: SnackBarBehavior.floating,
+                                  ),
+                                );
+                              } catch (error) {
+                                if (!context.mounted) return;
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  SnackBar(content: Text('$error')),
+                                );
+                              }
+                            },
+                      icon: const Icon(Icons.delete_outline_rounded),
+                    ),
+                    const Icon(Icons.chevron_right_rounded),
+                  ],
+                ),
+                onTap: () => Navigator.of(context)
+                    .push(
+                      MaterialPageRoute<void>(
+                        builder: (_) => const TaskEntryScreen(),
+                      ),
+                    )
+                    .whenComplete(() {
+                  if (mounted) unawaited(_loadServerDrafts());
+                }),
+              ),
+            ),
           ),
         if (_showDraft && openDrafts.isNotEmpty) ...[
           for (final draft in openDrafts)
@@ -1967,68 +2050,11 @@ class _ThoughtInboxScreenState extends State<ThoughtInboxScreen> {
                 ),
               ),
             ),
-        ] else if (_showDraft && hasUnsavedLocalDraft) ...[
-          MelbelCard(
-            borderRadius: 24,
-            padding: EdgeInsets.zero,
-            child: ListTile(
-              contentPadding:
-                  const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
-              leading: Container(
-                width: 40,
-                height: 40,
-                decoration: BoxDecoration(
-                  color: context.melbel.sageSoft,
-                  borderRadius: BorderRadius.circular(14),
-                ),
-                child: Icon(
-                  Icons.edit_note_rounded,
-                  color: context.melbel.sage,
-                ),
-              ),
-              title: Text(
-                task.title,
-                style: Theme.of(context)
-                    .textTheme
-                    .titleSmall
-                    ?.copyWith(fontWeight: FontWeight.w700),
-              ),
-              subtitle: Text(task.formatDeadline(task.deadline)),
-              trailing: const Icon(Icons.chevron_right_rounded),
-              onTap: () => Navigator.of(context).push(
-                MaterialPageRoute<void>(
-                  builder: (_) => const TaskEntryScreen(),
-                ),
-              ),
-            ),
-          ),
-          Align(
-            alignment: Alignment.centerRight,
-            child: TextButton.icon(
-              onPressed: task.isApiBusy
-                  ? null
-                  : () async {
-                      try {
-                        await task.deleteCurrentDraft();
-                        if (!context.mounted) return;
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          const SnackBar(
-                            content: Text('Đã xóa bản nháp công việc.'),
-                            behavior: SnackBarBehavior.floating,
-                          ),
-                        );
-                      } catch (error) {
-                        if (!context.mounted) return;
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          SnackBar(content: Text('$error')),
-                        );
-                      }
-                    },
-              icon: const Icon(Icons.delete_outline_rounded),
-              label: const Text('Xóa bản nháp'),
-            ),
-          ),
-        ] else if (_showDraft && !_loadingDrafts)
+        ],
+        if (_showDraft &&
+            !hasUnsavedLocalDraft &&
+            openDrafts.isEmpty &&
+            !_loadingDrafts)
           MelbelCard(
             borderRadius: 24,
             tone: MelbelCardTone.muted,

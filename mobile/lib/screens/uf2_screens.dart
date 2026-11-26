@@ -1388,6 +1388,8 @@ class PlanLockedScreen extends StatelessWidget {
     final firstMicroTask = firstSession?.microTaskText.trim() ?? '';
     final localizations = MaterialLocalizations.of(context);
     final firstStart = firstSession?.scheduledStart.toLocal();
+    final canStartNow = firstStart == null ||
+        !firstStart.isAfter(DateTime.now().add(const Duration(minutes: 15)));
     final deadlineAt =
         task.draft?.summary['time_constraint']?['deadline_at'] as String?;
     final confirmedDeadline = deadlineAt == null
@@ -1427,22 +1429,36 @@ class PlanLockedScreen extends StatelessWidget {
             mainAxisSize: MainAxisSize.min,
             children: [
               PrimaryCta(
-                label: firstMinutes > 0
-                    ? 'Bắt đầu đếm giờ ${firstMinutes}p ngay bây giờ'
-                    : 'Bắt đầu phiên đầu tiên',
-                icon: Icons.play_arrow_rounded,
-                onPressed: confirmedSessions.isEmpty
-                    ? null
-                    : () => _startFirstSession(context),
+                label: !canStartNow
+                    ? 'Về trang chủ, nhắc trước 15 phút'
+                    : firstMinutes > 0
+                        ? 'Bắt đầu đếm giờ ${firstMinutes}p ngay bây giờ'
+                        : 'Bắt đầu phiên đầu tiên',
+                icon: canStartNow
+                    ? Icons.play_arrow_rounded
+                    : Icons.notifications_active_outlined,
+                onPressed: !canStartNow
+                    ? () => MainShellScreen.returnHome(context)
+                    : confirmedSessions.isEmpty
+                        ? null
+                        : () => _startFirstSession(context),
               ),
               const SizedBox(height: 10),
               SecondaryCta(
-                label: 'Để sau, nhắc tôi trước 15 phút',
-                icon: Icons.notifications_active_outlined,
+                label: canStartNow
+                    ? 'Để sau, nhắc tôi trước 15 phút'
+                    : 'Xem phiên sắp tới',
+                icon: canStartNow
+                    ? Icons.notifications_active_outlined
+                    : Icons.schedule_rounded,
                 height: 50,
-                onPressed: () {
-                  MainShellScreen.returnHome(context);
-                },
+                onPressed: !canStartNow
+                    ? (confirmedSessions.isEmpty
+                        ? null
+                        : () => _startFirstSession(context))
+                    : () {
+                        MainShellScreen.returnHome(context);
+                      },
               ),
             ],
           ),

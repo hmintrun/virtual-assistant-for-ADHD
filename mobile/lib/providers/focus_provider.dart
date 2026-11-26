@@ -1085,9 +1085,6 @@ class FocusProvider extends ChangeNotifier {
     }
     _stage = FocusStage.ended;
     await _restoreFocusMode(preserveCheckIn: awaitCheckIn);
-    if (_actualWorkSeconds >= 120) {
-      _onFocusRecorded?.call(_actualWorkSeconds);
-    }
     final endedAt = awaitCheckIn ? _runEndsAt ?? _clock.now() : _clock.now();
     _lastRunEndsAt = awaitCheckIn ? endedAt : null;
     _runEndsAt = null;
@@ -1361,8 +1358,10 @@ class FocusProvider extends ChangeNotifier {
       _runCommandBusy = false;
       _notify();
     }
-    if (_runError == null && outcome == 'completed') {
-      _onFocusRecorded?.call(_actualWorkSeconds >= 120 ? _actualWorkSeconds : 120);
+    if (_runError == null &&
+        outcome == 'completed' &&
+        _actualWorkSeconds >= 120) {
+      _onFocusRecorded?.call(_actualWorkSeconds);
     }
     if (_runError != null) await refreshRunCheckIn();
   }

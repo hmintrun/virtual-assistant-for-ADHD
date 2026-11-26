@@ -218,7 +218,7 @@ class _AccountScreenState extends State<AccountScreen> {
           showTitleRays: true,
         ),
         body: ListView(
-          padding: MelbelLayout.pageInsets(context, top: 12, bottom: 24),
+          padding: MelbelLayout.pageInsets(context, top: 12, bottom: 36),
           children: [
             Container(
               clipBehavior: Clip.antiAlias,
@@ -815,7 +815,7 @@ class _CalendarVoiceQuestionScreenState
           showTitleRays: true,
         ),
         body: ListView(
-          padding: MelbelLayout.pageInsets(context, top: 12, bottom: 24),
+          padding: MelbelLayout.pageInsets(context, top: 12, bottom: 36),
           children: [
             MelbelCard(
               borderRadius: 28,

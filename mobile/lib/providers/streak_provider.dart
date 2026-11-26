@@ -560,6 +560,7 @@ class StreakProvider extends ChangeNotifier {
   /// calendar ribbon and month stats stay aligned with server history.
   Future<void> ingestCompletedSessions(
       List<Map<String, dynamic>> sessions) async {
+    if (_syncedFromBackend || _syncing) return;
     var changed = false;
     for (final row in sessions) {
       if (row['status'] != 'completed') continue;
@@ -768,14 +769,22 @@ class StreakProvider extends ChangeNotifier {
 
     final rawRecords = data['day_records'];
     if (rawRecords is List) {
+      final windowStart = DateTime(today.year, today.month, today.day - 34);
+      final serverDates = <String>{};
       for (final item in rawRecords.whereType<Map>()) {
         final date = item['date'] as String?;
         if (date == null || date.length != 10) continue;
         final parsed = StreakDayRecord.fromJson(item);
         if (parsed != null) {
+          serverDates.add(date);
           _dayRecords[date] = parsed;
         }
       }
+      _dayRecords.removeWhere((date, _) {
+        if (serverDates.contains(date)) return false;
+        final d = _parseDateKey(date);
+        return d != null && !d.isBefore(windowStart) && !d.isAfter(today);
+      });
     }
 
     if (todayCompleted) {
@@ -788,6 +797,15 @@ class StreakProvider extends ChangeNotifier {
       _usedFreezeNotice = false;
       _warmupMissedNotice = false;
       _softResetNotice = false;
+    } else if (_dayRecords[todayKey]?.kind == StreakDayKind.done) {
+      final serverHasTodayDone = rawRecords is List &&
+          rawRecords.whereType<Map>().any(
+                (item) =>
+                    item['date'] == todayKey && item['kind'] == 'done',
+              );
+      if (!serverHasTodayDone) {
+        _dayRecords.remove(todayKey);
+      }
     }
     _syncedFromBackend = true;
   }

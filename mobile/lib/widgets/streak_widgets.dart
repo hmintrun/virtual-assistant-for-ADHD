@@ -1041,13 +1041,16 @@ class MelbelStreakIntroCard extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              const MelbelStatusPill(
-                label: 'Mới · Nhịp cùng Melbel',
-                icon: Icons.auto_awesome_rounded,
-                tone: MelbelCardTone.amber,
+              const Flexible(
+                child: MelbelStatusPill(
+                  label: 'Mới · Nhịp cùng Melbel',
+                  icon: Icons.auto_awesome_rounded,
+                  tone: MelbelCardTone.amber,
+                ),
               ),
-              const Spacer(),
+              const SizedBox(width: 8),
               TextButton(
                 onPressed: onDismiss,
                 style: TextButton.styleFrom(
@@ -1075,35 +1078,46 @@ class MelbelStreakIntroCard extends StatelessWidget {
             ),
           ),
           const SizedBox(height: 12),
-          Row(
-            children: [
-              SizedBox(
-                width: 24,
-                height: 26,
-                child: CustomPaint(
-                  painter: MelbelPawPainter(
-                    fillColor: palette.amberSoft,
-                    strokeColor: palette.amber,
-                    strokeWidth: 2.2,
-                  ),
+          SizedBox(
+            width: double.infinity,
+            child: Wrap(
+              spacing: 12,
+              runSpacing: 8,
+              alignment: WrapAlignment.spaceBetween,
+              crossAxisAlignment: WrapCrossAlignment.center,
+              children: [
+                Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    SizedBox(
+                      width: 24,
+                      height: 26,
+                      child: CustomPaint(
+                        painter: MelbelPawPainter(
+                          fillColor: palette.amberSoft,
+                          strokeColor: palette.amber,
+                          strokeWidth: 2.2,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 6),
+                    Text(
+                      '$days/${StreakProvider.unlockDays} ngày',
+                      style: theme.textTheme.labelLarge?.copyWith(
+                        fontWeight: FontWeight.w700,
+                        color: palette.accentInk,
+                        fontFeatures: const [FontFeature.tabularFigures()],
+                      ),
+                    ),
+                  ],
                 ),
-              ),
-              const SizedBox(width: 6),
-              Text(
-                '$days/${StreakProvider.unlockDays} ngày',
-                style: theme.textTheme.labelLarge?.copyWith(
-                  fontWeight: FontWeight.w700,
-                  color: palette.accentInk,
-                  fontFeatures: const [FontFeature.tabularFigures()],
+                FilledButton.tonalIcon(
+                  onPressed: onLearnMore,
+                  icon: const Icon(Icons.menu_book_rounded, size: 16),
+                  label: const Text('Xem giới thiệu'),
                 ),
-              ),
-              const Spacer(),
-              FilledButton.tonalIcon(
-                onPressed: onLearnMore,
-                icon: const Icon(Icons.menu_book_rounded, size: 16),
-                label: const Text('Xem giới thiệu'),
-              ),
-            ],
+              ],
+            ),
           ),
         ],
       ),
