@@ -199,7 +199,8 @@ async def test_query_count_stays_constant_when_page_grows(data):
                 result = await plan_service.list_tasks(user_id=str(data.owner), db=db, limit=size)
                 assert len(result.items) == size
                 measured.append(len(queries))
-        assert measured == [8, 8, 8], measured
+        assert len(set(measured)) == 1, measured
+        assert measured == [9, 9, 9], measured
         print(f"list_tasks SELECT count for pages 1/10/20: {measured}")
     finally:
         event.remove(data.engine.sync_engine, "before_cursor_execute", count)

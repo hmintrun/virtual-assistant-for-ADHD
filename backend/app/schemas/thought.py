@@ -49,6 +49,7 @@ class ThoughtData(ThoughtBase):
     linked_draft_id: str | None = None
     converted_task_id: str | None = None
     retention_expires_at: AwareDatetime | None = None
+    created_at: AwareDatetime | None = None
 
 
 class ThoughtListResult(ApiModel):

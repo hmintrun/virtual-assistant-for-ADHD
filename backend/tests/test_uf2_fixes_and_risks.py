@@ -40,7 +40,7 @@ from app.schemas.task import (
     StepPromptItem,
     TaskDecompositionResult,
 )
-from app.services import plan_service
+from app.services import draft_service, plan_service, reschedule_service, run_service
 from app.services.ai_service import AIService, ai_service
 from app.services.draft_service import resolve_user_uuid
 from app.services.planning.availability import compute_effective_free_intervals
@@ -1358,6 +1358,109 @@ async def test_risk_uf2_03_60_day_horizon_slice_pending_steps_and_uf6_expand_nex
     assert task_after["scheduling_state"] == "complete"
 
 
+async def test_risk_uf2_03_pinned_clock_session_within_15m_lead_preserved_on_expand_next_horizon(
+    api, monkeypatch
+):
+    """Pin đồng hồ tại 12:59:00Z (19:59+07): Session 1 đặt ở 13:04Z (< calc_now + 15m) không bị ép dời khi expand_next_horizon."""
+    client, _ = api
+    pinned_now = datetime(2026, 11, 22, 12, 59, 0, tzinfo=UTC)
+
+    class _PinnedDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            if tz is None:
+                return pinned_now.replace(tzinfo=None)
+            return pinned_now.astimezone(tz)
+
+    for svc in (draft_service, plan_service, reschedule_service, run_service):
+        monkeypatch.setattr(svc, "datetime", _PinnedDateTime)
+    monkeypatch.setattr(
+        reschedule_service,
+        "_current_utc_now",
+        lambda now=None: (now or pinned_now).astimezone(UTC),
+    )
+    monkeypatch.setattr(
+        run_service,
+        "_current_utc_now",
+        lambda now=None: (now or pinned_now).astimezone(UTC),
+    )
+
+    start_at = pinned_now
+    deadline_at = start_at + timedelta(days=60)
+    summary_60d = _base_summary(
+        start_at=start_at,
+        deadline_at=deadline_at,
+        weekly_rules=[
+            {"weekday": i, "start_local": "19:00", "end_local": "21:00"} for i in range(1, 8)
+        ],
+        timezone_name="Asia/Ho_Chi_Minh",
+    )
+    draft = await _confirmed_draft(client, "uf2-60d-pinned-draft", task_summary=summary_60d)
+
+    async def _fake_decompose(**kwargs):
+        return TaskDecompositionResult(
+            task_title="Khóa học 60 ngày pin clock",
+            steps=[
+                StepPromptItem(
+                    order_index=i + 1,
+                    title=f"Cột mốc tuần {i + 1}",
+                    expected_output=f"Xong cột mốc {i + 1}",
+                    estimated_minutes=180,
+                    micro_task_prompt=f"Mở bài {i + 1}",
+                    cognitive_load="medium",
+                )
+                for i in range(10)
+            ],
+            reasoning="Chia 10 cột mốc đều đặn trong 60 ngày.",
+            generation_tier="tier_1_gemini",
+        )
+
+    monkeypatch.setattr(ai_service, "decompose_task", _fake_decompose)
+
+    cand_resp = await _create_candidate_api(client, draft, "uf2-60d-pinned-cand")
+    assert cand_resp.status_code == 201, cand_resp.text
+    plan = cand_resp.json()["data"]
+    assert plan["feasibility"]["status"] == "feasible"
+    assert plan["feasibility"]["fully_scheduled"] is True
+
+    first_sess_start = datetime.fromisoformat(
+        plan["sessions"][0]["scheduled_start"].replace("Z", "+00:00")
+    )
+    assert first_sess_start == datetime(2026, 11, 22, 13, 4, 0, tzinfo=UTC)
+    assert pinned_now <= first_sess_start < pinned_now + timedelta(minutes=15)
+
+    conf_resp = await _confirm_candidate_api(client, plan, "uf2-60d-pinned-conf")
+    assert conf_resp.status_code == 201, conf_resp.text
+    task_data = conf_resp.json()["data"]["task"]
+    assert task_data["scheduling_state"] == "partial"
+
+    sched_ver = conf_resp.json()["data"]["schedule_version"]["version_number"]
+    prop_resp = await _post(
+        client,
+        "/proposals",
+        "uf6-expand-pinned-1",
+        {
+            "trigger_reason": "expand_next_horizon",
+            "target_task_id": task_data["task_id"],
+            "allowed_task_ids": [task_data["task_id"]],
+            "expected_base_schedule_revision": sched_ver,
+            "expected_source_revisions": {
+                "task": task_data["revision"],
+                "schedule": sched_ver,
+                "availability": 0,
+                "settings": 1,
+                "calendar": 1,
+            },
+        },
+    )
+    assert prop_resp.status_code == 201, prop_resp.text
+    prop = prop_resp.json()["data"]
+    assert prop["feasibility"]["status"] == "feasible", prop["feasibility"]
+    assert prop["feasibility"]["confirmable"] is True
+    assert prop["proposed_changes"]["sessions_to_move"] == []
+    assert prop["proposed_changes"]["sessions_to_add"]
+
+
 # ---------------------------------------------------------------------------
 # 2.6 RISK-UF2-04: Fallback decompose user_step_proposal & NL adjust
 # ---------------------------------------------------------------------------
@@ -1397,16 +1500,20 @@ async def test_risk_uf2_04_offline_fallbacks_for_user_step_proposal_and_nl_adjus
             "user_instruction": "Chỉnh bước 2 thành 40 phút",
         },
     )
-    assert dur_upd.status_code == 200, dur_upd.text
-    updated_steps = dur_upd.json()["data"]["steps"]
-    assert updated_steps[1]["estimated_base_seconds"] == 2400
+    assert dur_upd.status_code == 503, dur_upd.text
+    assert dur_upd.json()["error"]["code"] == "AI_UNAVAILABLE"
+
+    # Option 2A: phương án hiện tại được giữ nguyên hoàn toàn khi AI lỗi
+    preserved = (await client.get(f"/api/v1/candidates/{plan['candidate_id']}")).json()["data"]
+    assert preserved["review_revision"] == plan["review_revision"]
+    assert preserved["steps"] == plan["steps"]
 
     complex_upd = await _patch(
         client,
         f"/candidates/{plan['candidate_id']}",
         "uf204-complex",
         {
-            "expected_review_revision": dur_upd.json()["data"]["review_revision"],
+            "expected_review_revision": plan["review_revision"],
             "user_instruction": "Thêm một bước mới và đảo thứ tự bước 1 với bước 2",
         },
     )
@@ -1860,3 +1967,58 @@ async def test_calendar_ingestion_invalid_uuid_proactive_session_id_falls_back_t
 
     assert ing.busy_intervals == []
     assert ing.event_snapshots == []
+
+
+async def test_finding5b1_horizon_slice_available_seconds_matches_14d_verification_scope(
+    api, monkeypatch
+):
+    """PR #22 Finding #5B-1: allow_horizon_slice=True không trộn required_seconds 14d với available_seconds 30d/60d."""
+    client, _ = api
+    now = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
+    start_at = now + timedelta(hours=2)
+    deadline_at = start_at + timedelta(days=30)
+
+    summary_30d = _base_summary(
+        start_at=start_at,
+        deadline_at=deadline_at,
+        weekly_rules=[
+            {"weekday": i, "start_local": "19:00", "end_local": "21:00"} for i in range(1, 8)
+        ],
+        timezone_name="UTC",
+    )
+    draft = await _confirmed_draft(client, "f5b1-30d-draft", task_summary=summary_30d)
+
+    # 8 bước x 240p (~288p buffered mỗi bước) > 14d * 120p = 1680p (cần ~30d mới đủ, 14d chỉ xếp được một phần)
+    monkeypatch.setattr(
+        ai_service,
+        "decompose_task",
+        AsyncMock(
+            return_value=TaskDecompositionResult(
+                task_title="Khóa 30 ngày",
+                steps=[
+                    StepPromptItem(
+                        order_index=i + 1,
+                        title=f"Chặng {i + 1}",
+                        expected_output=f"Xong chặng {i + 1}",
+                        estimated_minutes=240,
+                        micro_task_prompt=f"Mở chặng {i + 1}",
+                    )
+                    for i in range(8)
+                ],
+                reasoning="8 chặng đều.",
+                generation_tier="tier_1_gemini",
+            )
+        ),
+    )
+
+    cand_resp = await _create_candidate_api(client, draft, "f5b1-30d-cand")
+    assert cand_resp.status_code == 201, cand_resp.text
+    plan = cand_resp.json()["data"]
+    feas = plan["feasibility"]
+    assert feas["status"] == "feasible"
+    assert feas["fully_scheduled"] is True
+    assert feas["unscheduled_step_keys"] == []
+
+    # 14 ngày * 2h/ngày = 28h = 100,800s (cộng/trừ nhỏ theo giờ hiện tại), tuyệt đối KHÔNG phải 30 ngày (~216,000s)!
+    assert feas["available_seconds"] <= 14 * 2 * 3600 + 7200
+    assert feas["required_seconds"] <= feas["available_seconds"]

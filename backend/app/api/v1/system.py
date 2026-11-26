@@ -1,5 +1,6 @@
 """Support endpoints for persisted planning contexts and command receipts."""
 
+import hmac
 from typing import Annotated
 
 from fastapi import APIRouter, Header, Path, Request
@@ -68,12 +69,45 @@ async def health_check(db: DbSessionDep) -> dict[str, str]:
     return {"status": "ok", "database": "ok"}
 
 
+def _authorize_metrics_scrape(request: Request) -> None:
+    """Bảo vệ /metrics và /api/v1/metrics bằng Bearer token trong staging/production."""
+    if not settings.is_deployed:
+        return
+    expected_token = settings.METRICS_AUTH_TOKEN.strip()
+    if not expected_token:
+        raise AppError(
+            status_code=403,
+            code="FORBIDDEN",
+            message="Metrics endpoint chưa cấu hình METRICS_AUTH_TOKEN cho môi trường deploy.",
+            next_action="authenticate",
+        )
+    auth_header = request.headers.get("authorization", "")
+    scheme, _, provided_token = auth_header.partition(" ")
+    provided_clean = provided_token.strip()
+    if (
+        scheme.lower() != "bearer"
+        or not provided_clean
+        or not hmac.compare_digest(
+            provided_clean.encode("utf-8"),
+            expected_token.encode("utf-8"),
+        )
+    ):
+        raise AppError(
+            status_code=401,
+            code="UNAUTHENTICATED",
+            message="Vui lòng cung cấp Bearer token hợp lệ cho metrics.",
+            next_action="authenticate",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+
 @router.get(
     "/metrics",
     summary="Xuất số liệu giám sát chuẩn Prometheus",
     response_class=PlainTextResponse,
 )
-async def metrics_endpoint(db: DbSessionDep) -> PlainTextResponse:
+async def metrics_endpoint(request: Request, db: DbSessionDep) -> PlainTextResponse:
+    _authorize_metrics_scrape(request)
     return PlainTextResponse(
         content=await collect_prometheus_metrics(db),
         media_type=PROMETHEUS_CONTENT_TYPE,

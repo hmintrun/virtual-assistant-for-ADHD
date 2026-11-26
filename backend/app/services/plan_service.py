@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import math
@@ -9,11 +10,11 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from itertools import pairwise
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel, ValidationError
-from sqlalchemy import func, or_, select, update
+from sqlalchemy import and_, case, exists, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -25,11 +26,14 @@ from app.models.calendar import (
     CalendarSyncJob,
     PlanningContext,
 )
+from app.models.execution import CheckIn, SessionRun
 from app.models.planning import PlanCandidate as CandidateRow
 from app.models.planning import PlanningDraft as DraftRow
 from app.models.planning import ScheduleVersion as VersionRow
+from app.models.schedule_proposal import RescheduleProposal
 from app.models.session import Session as SessionRow
 from app.models.settings import Availability as AvailabilityRow
+from app.models.settings import SettingChangeRequest
 from app.models.step import Step as StepRow
 from app.models.system import CommandReceipt, Reminder
 from app.models.task import Task as TaskRow
@@ -64,15 +68,18 @@ from app.schemas.planning import (
     KeyMapping,
     PlanCandidate,
     ScheduleVersion,
+    UndoCandidateRequest,
     UpdateCandidateRequest,
 )
 from app.schemas.schedule import ScheduleData
 from app.schemas.settings import UserPreference
 from app.schemas.task import (
     Session,
+    SplitSessionInputItem,
     Step,
     Task,
     TaskDecompositionResult,
+    TaskDeleteResult,
     TaskListData,
 )
 from app.services import draft_service
@@ -80,6 +87,7 @@ from app.services.ai_service import ai_service
 from app.services.scheduler_engine import (
     calculate_buffered_work,
     compute_effective_free_intervals,
+    compute_feasibility_recovery,
     ingest_calendar_sources,
     schedule_candidate_sessions,
     subtract_fixed_session_gaps,
@@ -264,6 +272,28 @@ async def get_preferences(
                 raise
         if created and commit_if_created:
             await db.commit()
+    pending_change_req = await db.scalar(
+        select(SettingChangeRequest)
+        .outerjoin(
+            RescheduleProposal,
+            RescheduleProposal.id == SettingChangeRequest.pending_proposal_id,
+        )
+        .where(
+            SettingChangeRequest.user_id == owner_uuid,
+            SettingChangeRequest.application_state.in_(
+                ("pending_review", "pending_proposal")
+            ),
+            (SettingChangeRequest.pending_proposal_id.is_(None))
+            | (RescheduleProposal.status == "pending"),
+        )
+        .order_by(
+            SettingChangeRequest.revision.desc(),
+            SettingChangeRequest.created_at.desc(),
+            SettingChangeRequest.id.desc(),
+        )
+        .limit(1)
+        .execution_options(populate_existing=True)
+    )
     return UserPreference(
         revision=row.revision,
         effective_revision=row.effective_revision,
@@ -276,6 +306,12 @@ async def get_preferences(
         reminder_style=row.reminder_style,
         requested_changes=row.requested_changes,
         pending_proposal_id=str(row.pending_proposal_id) if row.pending_proposal_id else None,
+        pending_change_request_id=(
+            str(pending_change_req.id) if pending_change_req is not None else None
+        ),
+        pending_change_request_revision=(
+            int(pending_change_req.revision) if pending_change_req is not None else None
+        ),
     )
 
 
@@ -626,6 +662,9 @@ def _session_schema(row: SessionRow, link_id: str | None = None) -> Session:
         step_id=str(row.step_id),
         scheduled_start=row.scheduled_start,
         scheduled_end=row.scheduled_end,
+        title=row.title,
+        session_goal=row.session_goal,
+        expected_output=row.expected_output,
         micro_task_text=row.micro_task_text or "Chuẩn bị cho phiên làm việc",
         micro_task_seconds=row.micro_task_seconds,
         work_seconds=row.work_seconds,
@@ -840,10 +879,14 @@ def _horizon(draft: PlanningDraft, requested: TimeInterval | None) -> TimeInterv
     start = max(
         tc.start_at, datetime.now(UTC) + timedelta(seconds=settings.PLANNING_REVIEW_LEAD_SECONDS)
     )
-    end = min(terminal, start + timedelta(days=14))
+    end = min(terminal, start + timedelta(days=settings.DEFAULT_PLANNING_HORIZON_DAYS))
     if requested is not None:
         start = max(start, requested.start_at)
-        end = min(terminal, requested.end_at, start + timedelta(days=14))
+        end = min(
+            terminal,
+            requested.end_at,
+            start + timedelta(days=settings.MAX_PLANNING_HORIZON_DAYS),
+        )
     if start >= end:
         raise _invalid("Phạm vi lập lịch không còn thời gian hợp lệ.", "planning_horizon")
     return TimeInterval(start_at=start, end_at=end)
@@ -934,6 +977,7 @@ def _candidate_schema(row: CandidateRow, draft_id: str) -> PlanCandidate:
                 min_inter_session_gap_seconds=row.min_inter_session_gap_seconds,
                 feasibility=row.feasibility,
                 stale=row.schema_version < 2,
+                can_undo=row.previous_snapshot is not None,
                 user_step_proposal=row.user_step_proposal,
             )
         )
@@ -1063,12 +1107,15 @@ def _reschedule(
         min_gap_seconds=candidate.min_inter_session_gap_seconds,
         extra_requirements=extra_requirements,
     )
+    step1_overflow_first_horizon = False
+    evaluated_full_horizon = False
     if (
         allow_horizon_slice
         and full_end is not None
         and full_end > horizon.end_at
         and not report.fully_scheduled
     ):
+        evaluated_full_horizon = True
         full_free = compute_effective_free_intervals(
             source.availability,
             horizon.start_at,
@@ -1124,7 +1171,7 @@ def _reschedule(
                         planning_horizon=horizon,
                     ),
                     "required_seconds": sum(item.duration_seconds for item in visible_sessions),
-                    "available_seconds": full_report.available_seconds,
+                    "available_seconds": report.available_seconds,
                     "deficit_seconds": 0,
                     "unscheduled_seconds": 0,
                     "blocking_reasons": [],
@@ -1132,11 +1179,13 @@ def _reschedule(
                     "extension_candidate_at": visible_sessions[-1].scheduled_end
                     if visible_sessions
                     else None,
+                    "applied_extra_constraints": report.applied_extra_constraints,
                 }
             )
         else:
             sessions = visible_sessions
             if full_report.fully_scheduled and not visible_step_keys:
+                step1_overflow_first_horizon = True
                 fallback_status = "search_inconclusive"
                 fallback_reasons = [
                     BlockingReason(
@@ -1160,14 +1209,54 @@ def _reschedule(
                         client_step_keys=visible_step_keys or selected,
                         planning_horizon=horizon,
                     ),
-                    "available_seconds": full_report.available_seconds,
+                    "available_seconds": report.available_seconds,
                     "deficit_seconds": full_report.deficit_seconds,
                     "unscheduled_seconds": fallback_unscheduled,
                     "unscheduled_step_keys": fallback_unscheduled_keys,
                     "blocking_reasons": fallback_reasons,
                     "extension_candidate_at": None,
+                    "applied_extra_constraints": report.applied_extra_constraints,
                 }
             )
+    if report.fully_scheduled:
+        report = report.model_copy(
+            update={
+                "earliest_feasible_end_at": None,
+                "suggested_extra_free_seconds_per_day": None,
+            }
+        )
+    else:
+        horizon_only_overflow = step1_overflow_first_horizon or (
+            not evaluated_full_horizon
+            and full_end is not None
+            and full_end > horizon.end_at
+        )
+        recovery_end = (
+            horizon.end_at
+            if horizon_only_overflow
+            else max(horizon.end_at, full_end or horizon.end_at)
+        )
+        earliest_end, extra_per_day = compute_feasibility_recovery(
+            report,
+            steps,
+            source.availability,
+            source.fixed_sessions,
+            horizon.start_at,
+            recovery_end,
+            source.preferences,
+            calendar_context=source.context,
+            manual_busy=source.context.manual_busy_intervals,
+            min_gap_seconds=candidate.min_inter_session_gap_seconds,
+            extra_requirements=extra_requirements,
+            input_timezone=source.availability.timezone,
+            skip_deadline_extension=horizon_only_overflow,
+        )
+        report = report.model_copy(
+            update={
+                "earliest_feasible_end_at": earliest_end,
+                "suggested_extra_free_seconds_per_day": extra_per_day,
+            }
+        )
     sessions = [
         item.model_copy(
             update={
@@ -1179,6 +1268,410 @@ def _reschedule(
     ]
     report = report.model_copy(update={"unexpanded_scope": candidate.unexpanded_scope})
     return candidate.model_copy(update={"sessions": sessions, "feasibility": report})
+
+
+def build_calendar_event_text(
+    session_title: str | None,
+    step_title: str | None,
+    session_goal: str | None,
+    expected_output: str | None,
+) -> tuple[str, str | None]:
+    """Tạo cặp (summary, description) chuẩn hóa cho Google Calendar event từ session & step."""
+    clean_title = (session_title or "").strip() or (step_title or "").strip() or "Focus Session"
+    summary = f"[ProPlan] {clean_title}"[:200]
+    desc_parts: list[str] = []
+    if session_goal and session_goal.strip():
+        desc_parts.append(f"Mục tiêu: {session_goal.strip()}")
+    if expected_output and expected_output.strip():
+        desc_parts.append(f"Đầu ra dự kiến: {expected_output.strip()}")
+    description = "\n".join(desc_parts) if desc_parts else None
+    return summary, description
+
+
+async def _enrich_candidate_sessions(candidate: PlanCandidate, task_title: str) -> PlanCandidate:
+    """Làm giàu title/session_goal/expected_output/micro_task_text cho sessions (chạy không giữ lock DB)."""
+    if not candidate.sessions:
+        return candidate
+
+    step_map = {step.client_step_key: step for step in candidate.steps}
+    grouped: dict[str, list[CandidateSession]] = {}
+    for sess in sorted(candidate.sessions, key=lambda item: item.scheduled_start):
+        grouped.setdefault(sess.client_step_key, []).append(sess)
+
+    updates_by_key: dict[str, dict[str, Any]] = {}
+    split_inputs: list[SplitSessionInputItem] = []
+    split_part_index: dict[str, int] = {}
+
+    def _build_single_update(
+        sess: CandidateSession,
+        *,
+        title: str,
+        expected_output: str,
+        continuation_micro: str | None = None,
+    ) -> dict[str, Any]:
+        input_micro = (
+            continuation_micro if continuation_micro is not None else sess.micro_task_text
+        )
+        enriched = ai_service.build_single_session_enrichment(
+            client_session_key=sess.client_session_key,
+            step_title=title,
+            step_expected_output=expected_output,
+            micro_task_text=input_micro,
+        )
+        has_micro = bool(sess.micro_task_text and sess.micro_task_text.strip())
+        return {
+            "title": enriched.title,
+            "session_goal": enriched.session_goal,
+            "expected_output": enriched.expected_output,
+            "micro_task_text": (
+                enriched.micro_task_text
+                if (continuation_micro is not None or not has_micro)
+                else sess.micro_task_text
+            ),
+        }
+
+    def _fallback_continuation_micro(clean_title: str, part_index: int, total: int) -> str | None:
+        if part_index < 2:
+            return None
+        return f"Mở lại tài liệu đang làm dở của '{clean_title[:180].rstrip()}' để làm tiếp phần {part_index}/{total}."
+
+    for step_key, group in grouped.items():
+        step = step_map.get(step_key)
+        if step is None:
+            continue
+        clean_title = (step.title or "").strip() or "Bước hiện tại"
+        clean_output = (step.expected_output or "").strip() or clean_title
+        if len(group) == 1:
+            sess = group[0]
+            updates_by_key[sess.client_session_key] = _build_single_update(
+                sess,
+                title=clean_title,
+                expected_output=clean_output,
+            )
+        elif len(group) <= 50:
+            total = len(group)
+            group_inputs: list[SplitSessionInputItem] = []
+            try:
+                for idx, sess in enumerate(group):
+                    part_index = idx + 1
+                    split_part_index[sess.client_session_key] = part_index
+                    group_inputs.append(
+                        SplitSessionInputItem(
+                            client_session_key=sess.client_session_key,
+                            client_step_key=step.client_step_key,
+                            step_title=clean_title[:255],
+                            step_expected_output=clean_output[:500],
+                            step_micro_task_prompt=(
+                                sess.micro_task_text.strip()[:300]
+                                if sess.micro_task_text and sess.micro_task_text.strip()
+                                else None
+                            ),
+                            session_index=part_index,
+                            total_sessions_in_step=total,
+                            work_minutes=max(1, min(480, round(sess.work_seconds / 60))),
+                        )
+                    )
+                split_inputs.extend(group_inputs)
+            except ValidationError:
+                for idx, sess in enumerate(group):
+                    part_index = idx + 1
+                    updates_by_key[sess.client_session_key] = _build_single_update(
+                        sess,
+                        title=f"{clean_title} (Phần {part_index}/{total})",
+                        expected_output=clean_output,
+                        continuation_micro=_fallback_continuation_micro(
+                            clean_title, part_index, total
+                        ),
+                    )
+        else:
+            total = len(group)
+            for idx, sess in enumerate(group):
+                part_index = idx + 1
+                updates_by_key[sess.client_session_key] = _build_single_update(
+                    sess,
+                    title=f"{clean_title} (Phần {part_index}/{total})",
+                    expected_output=clean_output,
+                    continuation_micro=_fallback_continuation_micro(
+                        clean_title, part_index, total
+                    ),
+                )
+
+    if split_inputs:
+        enrichment_results: list[Any] = []
+        try:
+            for start in range(0, len(split_inputs), 60):
+                chunk = split_inputs[start : start + 60]
+                res = await ai_service.enrich_split_sessions(
+                    split_sessions=chunk, task_title=task_title
+                )
+                enrichment_results.extend(res.sessions)
+        except (ValidationError, ValueError):
+            enrichment_results = []
+        enriched_map = {item.client_session_key: item for item in enrichment_results}
+        for sess in candidate.sessions:
+            if sess.client_session_key not in split_part_index:
+                continue
+            item = enriched_map.get(sess.client_session_key)
+            part_index = split_part_index[sess.client_session_key]
+            if item is None:
+                step = step_map.get(sess.client_step_key)
+                clean_title = (step.title if step else "").strip() or "Bước hiện tại"
+                clean_output = (step.expected_output if step else "").strip() or clean_title
+                total = len(grouped.get(sess.client_step_key, [sess]))
+                updates_by_key[sess.client_session_key] = _build_single_update(
+                    sess,
+                    title=f"{clean_title} (Phần {part_index}/{total})",
+                    expected_output=clean_output,
+                    continuation_micro=_fallback_continuation_micro(
+                        clean_title, part_index, total
+                    ),
+                )
+                continue
+            has_micro = bool(sess.micro_task_text and sess.micro_task_text.strip())
+            updates_by_key[sess.client_session_key] = {
+                "title": item.title,
+                "session_goal": item.session_goal,
+                "expected_output": item.expected_output,
+                "micro_task_text": (
+                    item.micro_task_text
+                    if (part_index >= 2 or not has_micro)
+                    else sess.micro_task_text
+                ),
+            }
+
+    if not updates_by_key:
+        return candidate
+
+    enriched_sessions = [
+        sess.model_copy(update=updates_by_key[sess.client_session_key])
+        if sess.client_session_key in updates_by_key
+        else sess
+        for sess in candidate.sessions
+    ]
+    return candidate.model_copy(update={"sessions": enriched_sessions})
+
+
+def _next_step_key(existing_keys: set[str]) -> str:
+    """Sinh client_step_key dạng 'step-{n}' chưa tồn tại trong tập khóa hiện có."""
+    max_num = 0
+    for key in existing_keys:
+        if key.startswith("step-"):
+            suffix = key[5:]
+            if suffix.isdigit():
+                max_num = max(max_num, int(suffix))
+    candidate_num = max_num + 1
+    while f"step-{candidate_num}" in existing_keys:
+        candidate_num += 1
+    return f"step-{candidate_num}"
+
+
+def _apply_structural_step_ops(
+    steps: list[CandidateStep],
+    micro_tasks: dict[str, str],
+    edits: CandidateEdits,
+    *,
+    default_buffer: float,
+    tracked_scope: set[str] | None = None,
+) -> tuple[list[CandidateStep], dict[str, str], dict[str, str], bool]:
+    """Áp dụng delete, merge, split, add và edit lên CandidateSteps; giữ và cập nhật tập khóa scope nếu truyền vào."""
+    work_steps = list(steps)
+    work_micro = dict(micro_tasks)
+    step_micro_updates: dict[str, str] = {}
+    existing_keys = {step.client_step_key for step in work_steps}
+    in_scope = set(tracked_scope or ())
+    all_were_in_scope = tracked_scope is not None and tracked_scope >= existing_keys
+
+    edited_keys = [edit.client_step_key for edit in (edits.steps or [])]
+    deleted_keys = list(edits.delete_step_keys or [])
+    merged_keys = [key for op in (edits.merge_steps or []) for key in op.source_step_keys]
+    split_keys = [op.source_step_key for op in (edits.split_steps or [])]
+
+    for collection_name, keys in (
+        ("edits.steps", edited_keys),
+        ("edits.delete_step_keys", deleted_keys),
+        ("edits.merge_steps", merged_keys),
+        ("edits.split_steps", split_keys),
+    ):
+        if len(set(keys)) != len(keys):
+            raise _invalid("Client key không tồn tại hoặc bị gửi trùng.", collection_name)
+        if any(key not in existing_keys for key in keys):
+            raise _invalid("Client key bước không tồn tại trong phương án.", collection_name)
+
+    edited_set = set(edited_keys)
+    deleted_set = set(deleted_keys)
+    merged_set = set(merged_keys)
+    split_set = set(split_keys)
+    combined_sets = edited_set | deleted_set | merged_set | split_set
+    if len(edited_set) + len(deleted_set) + len(merged_set) + len(split_set) != len(combined_sets):
+        raise _invalid("Không thể thực hiện nhiều thao tác xung đột trên cùng một bước.", "edits")
+
+    structural_changed = bool(
+        edits.delete_step_keys or edits.merge_steps or edits.split_steps or edits.add_steps
+    )
+    used_keys = set(existing_keys)
+
+    if edits.delete_step_keys:
+        work_steps = [step for step in work_steps if step.client_step_key not in deleted_set]
+        for key in deleted_set:
+            work_micro.pop(key, None)
+        in_scope -= deleted_set
+
+    for merge_op in edits.merge_steps or []:
+        src_set = set(merge_op.source_step_keys)
+        src_indices = [
+            idx for idx, step in enumerate(work_steps) if step.client_step_key in src_set
+        ]
+        if len(src_indices) != len(src_set):
+            raise _invalid("Client key bước cần gộp không còn tồn tại.", "edits.merge_steps")
+        src_steps = [work_steps[idx] for idx in src_indices]
+        insert_pos = min(src_indices)
+        merged_key = _next_step_key(used_keys)
+        used_keys.add(merged_key)
+        merged_base_seconds = (
+            merge_op.estimated_base_seconds
+            if merge_op.estimated_base_seconds is not None
+            else min(28800, max(300, sum(s.estimated_base_seconds for s in src_steps)))
+        )
+        merged_step = CandidateStep(
+            client_step_key=merged_key,
+            title=merge_op.title,
+            expected_output=merge_op.expected_output,
+            order_index=0,
+            estimated_base_seconds=merged_base_seconds,
+            remaining_base_seconds=merged_base_seconds,
+            buffer_multiplier=default_buffer,
+            estimate_source="user_confirmed",
+            status="pending",
+        )
+        merged_micro = (
+            merge_op.micro_task_text
+            or work_micro.get(src_steps[0].client_step_key)
+            or f"Chuẩn bị cho bước: {merge_op.title}"
+        )
+        for key in src_set:
+            work_micro.pop(key, None)
+        work_micro[merged_key] = merged_micro
+        work_steps = [step for step in work_steps if step.client_step_key not in src_set]
+        work_steps.insert(insert_pos, merged_step)
+        if any(key in in_scope for key in src_set):
+            in_scope -= src_set
+            in_scope.add(merged_key)
+
+    for split_op in edits.split_steps or []:
+        matches = [
+            idx
+            for idx, step in enumerate(work_steps)
+            if step.client_step_key == split_op.source_step_key
+        ]
+        if not matches:
+            raise _invalid("Client key bước cần tách không còn tồn tại.", "edits.split_steps")
+        split_idx = matches[0]
+        work_micro.pop(split_op.source_step_key, None)
+        child_steps: list[CandidateStep] = []
+        child_keys: list[str] = []
+        for item in split_op.new_steps:
+            child_key = _next_step_key(used_keys)
+            used_keys.add(child_key)
+            child_keys.append(child_key)
+            child_steps.append(
+                CandidateStep(
+                    client_step_key=child_key,
+                    title=item.title,
+                    expected_output=item.expected_output,
+                    order_index=0,
+                    estimated_base_seconds=item.estimated_base_seconds,
+                    remaining_base_seconds=item.estimated_base_seconds,
+                    buffer_multiplier=default_buffer,
+                    estimate_source="user_confirmed",
+                    status="pending",
+                )
+            )
+            work_micro[child_key] = item.micro_task_text or f"Chuẩn bị cho bước: {item.title}"
+        work_steps = work_steps[:split_idx] + child_steps + work_steps[split_idx + 1 :]
+        if split_op.source_step_key in in_scope:
+            in_scope.discard(split_op.source_step_key)
+            in_scope.update(child_keys)
+
+    for add_item in edits.add_steps or []:
+        new_key = _next_step_key(used_keys)
+        used_keys.add(new_key)
+        new_step = CandidateStep(
+            client_step_key=new_key,
+            title=add_item.title,
+            expected_output=add_item.expected_output,
+            order_index=0,
+            estimated_base_seconds=add_item.estimated_base_seconds,
+            remaining_base_seconds=add_item.estimated_base_seconds,
+            buffer_multiplier=default_buffer,
+            estimate_source="user_confirmed",
+            status="pending",
+        )
+        work_micro[new_key] = add_item.micro_task_text or f"Chuẩn bị cho bước: {add_item.title}"
+        if add_item.insert_at_index is not None:
+            pos = max(0, min(add_item.insert_at_index, len(work_steps)))
+            if all_were_in_scope or all(
+                s.client_step_key in in_scope for s in work_steps[:pos]
+            ):
+                in_scope.add(new_key)
+            work_steps.insert(pos, new_step)
+        else:
+            if all_were_in_scope:
+                in_scope.add(new_key)
+            work_steps.append(new_step)
+
+    if structural_changed:
+        work_steps = [
+            step.model_copy(update={"order_index": idx}) for idx, step in enumerate(work_steps)
+        ]
+
+    if not 1 <= len(work_steps) <= 20:
+        raise _invalid("Số lượng bước trong phương án phải nằm trong khoảng 1..20.", "edits")
+
+    if edits.steps:
+        step_index_by_key = {step.client_step_key: idx for idx, step in enumerate(work_steps)}
+        for edit in edits.steps:
+            idx = step_index_by_key[edit.client_step_key]
+            changes = edit.model_dump(
+                exclude_unset=True, exclude={"client_step_key", "micro_task_text"}
+            )
+            if "estimated_base_seconds" in changes:
+                changes["remaining_base_seconds"] = changes["estimated_base_seconds"]
+                changes["estimate_source"] = "user_confirmed"
+            if changes:
+                work_steps[idx] = CandidateStep.model_validate(
+                    {**work_steps[idx].model_dump(), **changes}
+                )
+            if edit.micro_task_text is not None:
+                work_micro[edit.client_step_key] = edit.micro_task_text
+                step_micro_updates[edit.client_step_key] = edit.micro_task_text
+
+    if len({step.order_index for step in work_steps}) != len(work_steps):
+        raise _invalid("Thứ tự bước không được trùng.", "edits.steps")
+    work_steps = sorted(work_steps, key=lambda step: step.order_index)
+
+    if tracked_scope is not None:
+        tracked_scope.clear()
+        if all_were_in_scope:
+            tracked_scope.update(step.client_step_key for step in work_steps)
+        else:
+            tracked_scope.update(in_scope)
+
+    return work_steps, work_micro, step_micro_updates, structural_changed
+
+
+def _make_undo_snapshot(row: CandidateRow) -> dict[str, Any]:
+    """Chụp snapshot JSON đầy đủ (gồm cả _micro_task_text trong steps) để hỗ trợ hoàn tác 1 bước."""
+    return copy.deepcopy(
+        {
+            "steps": row.steps,
+            "sessions": row.sessions,
+            "feasibility": row.feasibility,
+            "decomposition_state": row.decomposition_state,
+            "unexpanded_scope": row.unexpanded_scope,
+            "planning_horizon": row.planning_horizon,
+            "review_revision": row.review_revision,
+        }
+    )
 
 
 async def _update_draft(db: AsyncSession, row: DraftRow, draft: PlanningDraft) -> None:
@@ -1369,6 +1862,40 @@ async def create_candidate(
             )
             micro_tasks[key] = item.micro_task_prompt
         selected = _selection(steps, None)
+    draft_title_text = draft.summary.title or draft.summary.description or ""
+    tentative = PlanCandidate(
+        candidate_id=str(uuid4()),
+        draft_id=draft.draft_id,
+        source_summary_revision=draft.summary_revision,
+        source_planning_input_revision=draft.planning_input_revision,
+        review_revision=1,
+        decomposition_state="partial" if unexpanded else "complete",
+        unexpanded_scope=unexpanded,
+        steps=steps,
+        sessions=[],
+        planning_horizon=horizon,
+        source_revisions=source.revisions,
+        min_inter_session_gap_seconds=900,
+        feasibility=FeasibilityReport(
+            status="not_checked",
+            fully_scheduled=False,
+            verification_scope=CandidateVerificationScope(
+                client_step_keys=selected, planning_horizon=horizon
+            ),
+        ),
+        stale=False,
+        user_step_proposal=draft.user_step_proposal,
+    )
+    tentative = _reschedule(
+        tentative,
+        source,
+        micro_tasks,
+        selected,
+        full_end=full_end,
+        extra_requirements=draft.summary.extra_requirements,
+        allow_horizon_slice=(payload.selected_step_keys is None and not unexpanded),
+    )
+    tentative = await _enrich_candidate_sessions(tentative, draft_title_text)
     async with db.begin():
         await _lock_user(db, user_id)
         saved = await _receipt(db, user_id, idempotency_key, digest)
@@ -1383,37 +1910,14 @@ async def create_candidate(
         )
         if current_source.revisions != source.revisions:
             raise _error("SOURCE_CHANGED", "Nguồn đổi trong khi AI xử lý; cần tạo lại phương án.")
-        candidate = PlanCandidate(
-            candidate_id=str(uuid4()),
-            draft_id=current.draft_id,
-            source_summary_revision=current.summary_revision,
-            source_planning_input_revision=current.planning_input_revision,
-            review_revision=1,
-            decomposition_state="partial" if unexpanded else "complete",
-            unexpanded_scope=unexpanded,
-            steps=steps,
-            sessions=[],
-            planning_horizon=horizon,
-            source_revisions=current_source.revisions,
-            min_inter_session_gap_seconds=900,
-            feasibility=FeasibilityReport(
-                status="not_checked",
-                fully_scheduled=False,
-                verification_scope=CandidateVerificationScope(
-                    client_step_keys=selected, planning_horizon=horizon
-                ),
-            ),
-            stale=False,
-            user_step_proposal=current.user_step_proposal,
-        )
-        candidate = _reschedule(
-            candidate,
-            current_source,
-            micro_tasks,
-            selected,
-            full_end=max(horizon.end_at, _full_project_end(current)),
-            extra_requirements=current.summary.extra_requirements,
-            allow_horizon_slice=(payload.selected_step_keys is None and not unexpanded),
+        candidate = tentative.model_copy(
+            update={
+                "draft_id": current.draft_id,
+                "source_summary_revision": current.summary_revision,
+                "source_planning_input_revision": current.planning_input_revision,
+                "source_revisions": current_source.revisions,
+                "user_step_proposal": current.user_step_proposal,
+            }
         )
         db.add(
             CandidateRow(
@@ -1617,6 +2121,8 @@ def _review_feasibility(candidate: PlanCandidate, source: PlanningSources) -> Pl
                         "unscheduled_seconds": 0,
                         "deficit_seconds": 0,
                         "unscheduled_step_keys": [],
+                        "earliest_feasible_end_at": None,
+                        "suggested_extra_free_seconds_per_day": None,
                     }
                 )
             }
@@ -1681,12 +2187,201 @@ def _apply_edits[ModelT: BaseModel](
         if not indexes or key in seen:
             raise _invalid("Client key không tồn tại hoặc bị gửi trùng.", f"edits.{key_name}")
         seen.add(key)
-        changes = edit.model_dump(exclude_unset=True, exclude={key_name})
+        changes = edit.model_dump(exclude_unset=True, exclude={key_name, "micro_task_text"})
         if "estimated_base_seconds" in changes:
             changes["remaining_base_seconds"] = changes["estimated_base_seconds"]
             changes["estimate_source"] = "user_confirmed"
-        result[indexes[0]] = model.model_validate({**result[indexes[0]].model_dump(), **changes})
+        if changes:
+            result[indexes[0]] = model.model_validate({**result[indexes[0]].model_dump(), **changes})
     return result
+
+
+def _apply_session_edits(
+    sessions: list[CandidateSession],
+    session_edits: Sequence[Any] | None,
+    micro_tasks: dict[str, str],
+) -> list[CandidateSession]:
+    """Áp dụng chỉnh sửa lên CandidateSessions (thời gian, title, session_goal, expected_output, micro_task_text)."""
+    result = list(sessions)
+    first_session_by_step: dict[str, str] = {}
+    for sess in sorted(result, key=lambda item: item.scheduled_start):
+        first_session_by_step.setdefault(sess.client_step_key, sess.client_session_key)
+    seen: set[str] = set()
+    for edit in session_edits or []:
+        indexes = [
+            index
+            for index, item in enumerate(result)
+            if item.client_session_key == edit.client_session_key
+        ]
+        if not indexes or edit.client_session_key in seen:
+            raise _invalid(
+                "Không tìm thấy phiên hoặc client_session_key bị trùng.", "edits.sessions"
+            )
+        seen.add(edit.client_session_key)
+        index = indexes[0]
+        changes = edit.model_dump(exclude_unset=True, exclude={"client_session_key"})
+        if (
+            "scheduled_start" in changes
+            and "scheduled_end" not in changes
+            and changes["scheduled_start"] is not None
+        ):
+            changes["scheduled_end"] = changes["scheduled_start"] + timedelta(
+                seconds=result[index].duration_seconds
+            )
+        elif (
+            "scheduled_end" in changes
+            and "scheduled_start" not in changes
+            and changes["scheduled_end"] is not None
+        ):
+            changes["scheduled_start"] = changes["scheduled_end"] - timedelta(
+                seconds=result[index].duration_seconds
+            )
+        if "scheduled_start" in changes and changes["scheduled_start"] is not None:
+            changes["start_decision_due_at"] = changes["scheduled_start"] + timedelta(seconds=900)
+        result[index] = CandidateSession.model_validate({**result[index].model_dump(), **changes})
+        if edit.micro_task_text is not None:
+            step_key = result[index].client_step_key
+            if first_session_by_step.get(step_key) == edit.client_session_key:
+                micro_tasks[step_key] = edit.micro_task_text
+    return result
+
+
+def _resolve_selected_steps_after_ops(
+    snapshot: PlanCandidate,
+    new_steps: list[CandidateStep],
+    *,
+    full_end: datetime,
+    structural_changed: bool,
+    tracked_scope: set[str] | None = None,
+) -> list[str]:
+    """Xác định tập bước trong verification_scope sau khi áp dụng thay đổi hoặc thao tác cấu trúc."""
+    scope = snapshot.feasibility.verification_scope
+    if not isinstance(scope, CandidateVerificationScope):
+        raise _invalid("Phạm vi Candidate không hợp lệ.")
+    is_horizon_sliced = (
+        full_end > snapshot.planning_horizon.end_at
+        and not snapshot.unexpanded_scope
+        and (
+            snapshot.feasibility.extension_candidate_at is not None
+            or len(scope.client_step_keys) < len(snapshot.steps)
+        )
+    )
+    if is_horizon_sliced:
+        return [step.client_step_key for step in new_steps]
+    if not structural_changed:
+        return _selection(new_steps, list(scope.client_step_keys))
+    if set(scope.client_step_keys) >= {step.client_step_key for step in snapshot.steps}:
+        return [step.client_step_key for step in new_steps]
+    ordered = [step.client_step_key for step in sorted(new_steps, key=lambda item: item.order_index)]
+    in_scope = tracked_scope if tracked_scope is not None else set(scope.client_step_keys)
+    selected_indices = [idx for idx, key in enumerate(ordered) if key in in_scope]
+    if not selected_indices:
+        return [ordered[0]]
+    return ordered[: max(selected_indices) + 1]
+
+
+def _nl_adjustment_to_edits(
+    adjustment: Any,
+    snapshot: PlanCandidate,
+    current_micro_tasks: dict[str, str],
+) -> CandidateEdits:
+    """Chuyển đổi 5 mảng thao tác từ NL adjustment sang CandidateEdits đã kiểm chứng."""
+    existing = {step.client_step_key: step for step in snapshot.steps}
+    step_changes: list[dict[str, Any]] = []
+    for edit in adjustment.step_edits:
+        old_step = existing.get(edit.client_step_key)
+        if old_step is None:
+            raise _invalid("AI trả về khóa bước không có trong phương án.", "user_instruction")
+        values = edit.model_dump(exclude_none=True)
+        est_mins = values.pop("estimated_minutes", None)
+        if values.get("estimated_base_seconds") is None and est_mins is not None:
+            values["estimated_base_seconds"] = est_mins * 60
+        filtered: dict[str, Any] = {"client_step_key": edit.client_step_key}
+        for key, value in values.items():
+            if key == "client_step_key":
+                continue
+            if key == "micro_task_text":
+                if current_micro_tasks.get(edit.client_step_key) != value:
+                    filtered[key] = value
+            elif getattr(old_step, key) != value:
+                filtered[key] = value
+        if len(filtered) > 1:
+            step_changes.append(filtered)
+
+    added_steps = [
+        {
+            "title": item.title,
+            "expected_output": item.expected_output,
+            "estimated_base_seconds": (
+                item.estimated_base_seconds
+                if item.estimated_base_seconds is not None
+                else (item.estimated_minutes * 60 if item.estimated_minutes else 1500)
+            ),
+            "micro_task_text": item.micro_task_prompt,
+            "insert_at_index": item.insert_at_index,
+        }
+        for item in adjustment.add_steps
+    ]
+    deleted_keys = list(adjustment.delete_step_keys)
+    merged_steps = [
+        {
+            "source_step_keys": list(item.source_step_keys),
+            "title": item.title,
+            "expected_output": item.expected_output,
+            "estimated_base_seconds": (
+                item.estimated_base_seconds
+                if item.estimated_base_seconds is not None
+                else (item.estimated_minutes * 60 if item.estimated_minutes is not None else None)
+            ),
+            "micro_task_text": item.micro_task_prompt,
+        }
+        for item in adjustment.merge_steps
+    ]
+    split_steps = [
+        {
+            "source_step_key": item.source_step_key,
+            "new_steps": [
+                {
+                    "title": sub.title,
+                    "expected_output": sub.expected_output,
+                    "estimated_base_seconds": (
+                        sub.estimated_base_seconds
+                        if sub.estimated_base_seconds is not None
+                        else (sub.estimated_minutes * 60 if sub.estimated_minutes else 1500)
+                    ),
+                    "micro_task_text": sub.micro_task_prompt,
+                    "insert_at_index": sub.insert_at_index,
+                }
+                for sub in item.new_steps
+            ],
+        }
+        for item in adjustment.split_steps
+    ]
+
+    edits_dict: dict[str, Any] = {}
+    if step_changes:
+        edits_dict["steps"] = step_changes
+    if added_steps:
+        edits_dict["add_steps"] = added_steps
+    if deleted_keys:
+        edits_dict["delete_step_keys"] = deleted_keys
+    if merged_steps:
+        edits_dict["merge_steps"] = merged_steps
+    if split_steps:
+        edits_dict["split_steps"] = split_steps
+    if not edits_dict:
+        raise _error(
+            "NO_CANDIDATE_CHANGES",
+            "Chưa có thay đổi hợp lệ; phương án được giữ nguyên.",
+            422,
+            "review_candidate",
+        )
+    try:
+        return CandidateEdits.model_validate(edits_dict)
+    except ValidationError as exc:
+        raise _invalid(
+            "AI chưa trả chỉnh sửa hợp lệ; phương án được giữ nguyên.", "user_instruction"
+        ) from exc
 
 
 async def patch_candidate(
@@ -1701,11 +2396,18 @@ async def patch_candidate(
         "patch_candidate", candidate_id, payload.model_dump(mode="json", exclude_unset=True)
     )
     edits = payload.edits
+    snapshot: PlanCandidate | None = None
+    initial_source: PlanningSources | None = None
+    initial_micro_tasks: dict[str, str] | None = None
+    task_title_text = ""
+    full_end: datetime | None = None
+    extra_requirements: list[str] = []
+
     if payload.user_instruction is not None:
         saved = await _receipt(db, user_id, idempotency_key, digest)
         if saved is not None:
             return PlanCandidate.model_validate(_candidate_payload(saved))
-        _, draft, snapshot = await _read_candidate(db, user_id, candidate_id)
+        row, draft, snapshot = await _read_candidate(db, user_id, candidate_id)
         _require_draft(
             draft, snapshot.source_summary_revision, snapshot.source_planning_input_revision
         )
@@ -1717,9 +2419,14 @@ async def patch_candidate(
             draft,
             snapshot.planning_horizon,
             context_ref=snapshot.source_revisions.calendar_context,
+            read_only=True,
         )
         if snapshot.stale or initial_source.revisions != snapshot.source_revisions:
             raise _error("SOURCE_CHANGED", "Nguồn lập lịch đã đổi; cần tạo phương án mới.")
+        initial_micro_tasks = _micro_tasks(row)
+        task_title_text = draft.summary.title or draft.summary.description or ""
+        extra_requirements = list(draft.summary.extra_requirements or [])
+        full_end = max(snapshot.planning_horizon.end_at, _full_project_end(draft))
         # Chụp DTO trước khi chờ AI; không giữ transaction/khóa DB khi gọi provider.
         await db.rollback()
         try:
@@ -1761,34 +2468,154 @@ async def patch_candidate(
                 next_action="clarify_candidate_adjustment",
                 field_errors=[FieldError(field_path="user_instruction", message=question)],
             )
-        existing = {step.client_step_key: step for step in snapshot.steps}
-        changes = []
-        for edit in adjustment.step_edits:
-            values = edit.model_dump(exclude_none=True)
-            old_step = existing.get(edit.client_step_key)
-            if old_step is None:
-                raise _invalid("AI trả về khóa bước không có trong phương án.", "user_instruction")
-            if any(
-                getattr(old_step, key) != value
-                for key, value in values.items()
-                if key != "client_step_key"
-            ):
-                changes.append(values)
-        if not changes:
-            raise _error(
-                "NO_CANDIDATE_CHANGES",
-                "Chưa có thay đổi hợp lệ; phương án được giữ nguyên.",
-                422,
-                "review_candidate",
-            )
-        try:
-            edits = CandidateEdits.model_validate({"steps": changes})
-        except ValidationError as exc:
-            raise _invalid(
-                "AI chưa trả chỉnh sửa hợp lệ; phương án được giữ nguyên.", "user_instruction"
-            ) from exc
+        edits = _nl_adjustment_to_edits(adjustment, snapshot, initial_micro_tasks)
+
     if edits is None:
         raise _invalid("Cần nội dung chỉnh phương án.", "edits")
+
+    has_structural_ops = bool(
+        edits.add_steps or edits.delete_step_keys or edits.merge_steps or edits.split_steps
+    )
+    changed_timing = has_structural_ops or any(
+        {"estimated_base_seconds", "order_index"} & edit.model_fields_set
+        for edit in edits.steps or []
+    )
+    if changed_timing and edits.sessions:
+        raise _invalid(
+            "Không thể đồng thời đổi thời lượng/thứ tự bước và chỉnh giờ phiên trong cùng một yêu cầu; hãy áp thay đổi bước trước.",
+            "edits",
+        )
+
+    if changed_timing:
+        if snapshot is None or initial_source is None or initial_micro_tasks is None:
+            saved = await _receipt(db, user_id, idempotency_key, digest)
+            if saved is not None:
+                return PlanCandidate.model_validate(_candidate_payload(saved))
+            row, draft, snapshot = await _read_candidate(db, user_id, candidate_id)
+            _require_draft(
+                draft, snapshot.source_summary_revision, snapshot.source_planning_input_revision
+            )
+            if payload.expected_review_revision != snapshot.review_revision:
+                raise _error("REVISION_CONFLICT", "Phiên bản phương án đã thay đổi.")
+            initial_source = await _sources(
+                db,
+                user_id,
+                draft,
+                snapshot.planning_horizon,
+                context_ref=snapshot.source_revisions.calendar_context,
+                read_only=True,
+            )
+            if snapshot.stale or initial_source.revisions != snapshot.source_revisions:
+                raise _error("SOURCE_CHANGED", "Nguồn lập lịch đã đổi; cần tạo phương án mới.")
+            initial_micro_tasks = _micro_tasks(row)
+            task_title_text = draft.summary.title or draft.summary.description or ""
+            extra_requirements = list(draft.summary.extra_requirements or [])
+            full_end = max(snapshot.planning_horizon.end_at, _full_project_end(draft))
+            await db.rollback()
+
+        assert full_end is not None
+        scope = snapshot.feasibility.verification_scope
+        if not isinstance(scope, CandidateVerificationScope):
+            raise _invalid("Phạm vi Candidate không hợp lệ.")
+        tracked_scope = set(scope.client_step_keys)
+        try:
+            new_steps, new_micro_tasks, _, structural_changed = _apply_structural_step_ops(
+                list(snapshot.steps),
+                initial_micro_tasks,
+                edits,
+                default_buffer=initial_source.preferences.buffer_multiplier,
+                tracked_scope=tracked_scope,
+            )
+            selected = _resolve_selected_steps_after_ops(
+                snapshot,
+                new_steps,
+                full_end=full_end,
+                structural_changed=structural_changed,
+                tracked_scope=tracked_scope,
+            )
+            tentative = PlanCandidate.model_validate(
+                {
+                    **snapshot.model_dump(),
+                    "steps": new_steps,
+                    "sessions": [],
+                    "review_revision": snapshot.review_revision + 1,
+                }
+            )
+        except ValidationError as exc:
+            raise _invalid(
+                "Giá trị sửa không hợp lệ hoặc thời lượng phiên không khớp.", "edits"
+            ) from exc
+        tentative = _reschedule(
+            tentative,
+            initial_source,
+            new_micro_tasks,
+            selected,
+            full_end=full_end,
+            extra_requirements=extra_requirements,
+            allow_horizon_slice=(
+                not snapshot.unexpanded_scope and full_end > snapshot.planning_horizon.end_at
+            ),
+        )
+        tentative = await _enrich_candidate_sessions(tentative, task_title_text)
+        tentative = _review_feasibility(tentative, initial_source)
+
+        async with db.begin():
+            await _lock_user(db, user_id)
+            saved = await _receipt(db, user_id, idempotency_key, digest)
+            if saved is not None:
+                return PlanCandidate.model_validate(_candidate_payload(saved))
+            row, draft, candidate = await _read_candidate(db, user_id, candidate_id)
+            _require_draft(
+                draft, candidate.source_summary_revision, candidate.source_planning_input_revision
+            )
+            if payload.expected_review_revision != candidate.review_revision:
+                raise _error("REVISION_CONFLICT", "Phiên bản phương án đã thay đổi.")
+            source = await _sources(
+                db,
+                user_id,
+                draft,
+                candidate.planning_horizon,
+                context_ref=candidate.source_revisions.calendar_context,
+            )
+            if (
+                source.revisions != candidate.source_revisions
+                or source.revisions != initial_source.revisions
+            ):
+                raise _error("SOURCE_CHANGED", "Nguồn lập lịch đã đổi; cần tạo phương án mới.")
+            if candidate.stale:
+                raise _error("SOURCE_CHANGED", "Phương án cũ cần tạo lại theo hợp đồng mới.")
+            row.previous_snapshot = _make_undo_snapshot(row)
+            updated = tentative.model_copy(update={"can_undo": True})
+            for name, value in _candidate_values(updated, new_micro_tasks).items():
+                setattr(row, name, value)
+            await db.flush()
+            draft_row, current = await _read_draft(db, user_id, draft.draft_id)
+            if (
+                current.candidate_ref is not None
+                and current.candidate_ref.candidate_id == candidate_id
+            ):
+                await _update_draft(
+                    db,
+                    draft_row,
+                    current.model_copy(
+                        update={
+                            "candidate_ref": CandidateRef(
+                                candidate_id=candidate_id, review_revision=updated.review_revision
+                            )
+                        }
+                    ),
+                )
+            _record(
+                db,
+                user_id,
+                idempotency_key,
+                digest,
+                "patch_candidate",
+                updated,
+                candidate_id=candidate_id,
+            )
+        return updated
+
     await db.rollback()
     async with db.begin():
         await _lock_user(db, user_id)
@@ -1812,106 +2639,47 @@ async def patch_candidate(
             raise _error("SOURCE_CHANGED", "Nguồn lập lịch đã đổi; cần tạo phương án mới.")
         if candidate.stale:
             raise _error("SOURCE_CHANGED", "Phương án cũ cần tạo lại theo hợp đồng mới.")
-        steps, sessions = list(candidate.steps), list(candidate.sessions)
-        micro_tasks = _micro_tasks(row)
         try:
-            steps = _apply_edits(steps, edits.steps, "client_step_key", CandidateStep)
-            if len({step.order_index for step in steps}) != len(steps):
-                raise _invalid("Thứ tự bước không được trùng.", "edits.steps")
-            steps = sorted(steps, key=lambda step: step.order_index)
-            changed_timing = any(
-                {"estimated_base_seconds", "order_index"} & edit.model_fields_set
-                for edit in edits.steps or []
+            steps, micro_tasks, step_micro_updates, _ = _apply_structural_step_ops(
+                list(candidate.steps),
+                _micro_tasks(row),
+                edits,
+                default_buffer=source.preferences.buffer_multiplier,
             )
-            if changed_timing and edits.sessions:
-                raise _invalid(
-                    "Không thể đồng thời đổi thời lượng/thứ tự bước và chỉnh giờ phiên trong cùng một yêu cầu; hãy áp thay đổi bước trước.",
-                    "edits",
-                )
+            sessions = list(candidate.sessions)
+            if step_micro_updates:
+                first_session_by_step: dict[str, str] = {}
+                for sess in sorted(sessions, key=lambda item: item.scheduled_start):
+                    first_session_by_step.setdefault(sess.client_step_key, sess.client_session_key)
+                sessions = [
+                    item.model_copy(
+                        update={"micro_task_text": step_micro_updates[item.client_step_key]}
+                    )
+                    if (
+                        item.client_step_key in step_micro_updates
+                        and first_session_by_step.get(item.client_step_key)
+                        == item.client_session_key
+                    )
+                    else item
+                    for item in sessions
+                ]
+            sessions = _apply_session_edits(sessions, edits.sessions, micro_tasks)
             updated = PlanCandidate.model_validate(
                 {
                     **candidate.model_dump(),
                     "steps": steps,
+                    "sessions": sessions,
                     "review_revision": candidate.review_revision + 1,
                 }
             )
-            scope = candidate.feasibility.verification_scope
-            if not isinstance(scope, CandidateVerificationScope):
-                raise _invalid("Phạm vi Candidate không hợp lệ.")
-            full_end = max(candidate.planning_horizon.end_at, _full_project_end(draft))
-            is_horizon_sliced = (
-                full_end > candidate.planning_horizon.end_at
-                and not candidate.unexpanded_scope
-                and (
-                    candidate.feasibility.extension_candidate_at is not None
-                    or len(scope.client_step_keys) < len(steps)
-                )
-            )
-            selected = (
-                [step.client_step_key for step in steps]
-                if is_horizon_sliced
-                else _selection(steps, list(scope.client_step_keys))
-            )
-            if changed_timing:
-                updated = _reschedule(
-                    updated,
-                    source,
-                    micro_tasks,
-                    selected,
-                    full_end=full_end,
-                    extra_requirements=draft.summary.extra_requirements,
-                    allow_horizon_slice=(
-                        not candidate.unexpanded_scope
-                        and full_end > candidate.planning_horizon.end_at
-                    ),
-                )
-                sessions = list(updated.sessions)
-            seen = set()
-            for edit in edits.sessions or []:
-                indexes = [
-                    index
-                    for index, item in enumerate(sessions)
-                    if item.client_session_key == edit.client_session_key
-                ]
-                if not indexes or edit.client_session_key in seen:
-                    raise _invalid(
-                        "Không tìm thấy phiên hoặc client_session_key bị trùng.", "edits.sessions"
-                    )
-                seen.add(edit.client_session_key)
-                index = indexes[0]
-                changes = edit.model_dump(exclude_unset=True, exclude={"client_session_key"})
-                if (
-                    "scheduled_start" in changes
-                    and "scheduled_end" not in changes
-                    and changes["scheduled_start"] is not None
-                ):
-                    changes["scheduled_end"] = changes["scheduled_start"] + timedelta(
-                        seconds=sessions[index].duration_seconds
-                    )
-                elif (
-                    "scheduled_end" in changes
-                    and "scheduled_start" not in changes
-                    and changes["scheduled_end"] is not None
-                ):
-                    changes["scheduled_start"] = changes["scheduled_end"] - timedelta(
-                        seconds=sessions[index].duration_seconds
-                    )
-                if "scheduled_start" in changes and changes["scheduled_start"] is not None:
-                    changes["start_decision_due_at"] = changes["scheduled_start"] + timedelta(
-                        seconds=900
-                    )
-                sessions[index] = CandidateSession.model_validate(
-                    {**sessions[index].model_dump(), **changes}
-                )
-                if edit.micro_task_text is not None:
-                    micro_tasks[sessions[index].client_step_key] = edit.micro_task_text
-            updated = updated.model_copy(update={"sessions": sessions})
         except ValidationError as exc:
             raise _invalid(
                 "Giá trị sửa không hợp lệ hoặc thời lượng phiên không khớp.", "edits"
             ) from exc
         # Kiểm lại lịch cụ thể, không suy khả thi chỉ từ tổng phút.
         updated = _review_feasibility(updated, source)
+        row.previous_snapshot = _make_undo_snapshot(row)
+        updated = updated.model_copy(update={"can_undo": True})
         for name, value in _candidate_values(updated, micro_tasks).items():
             setattr(row, name, value)
         await db.flush()
@@ -1940,8 +2708,116 @@ async def patch_candidate(
     return updated
 
 
+async def undo_candidate_edit(
+    *,
+    user_id: str,
+    candidate_id: str,
+    idempotency_key: str,
+    payload: UndoCandidateRequest,
+    db: AsyncSession,
+) -> PlanCandidate:
+    """Hoàn tác 1 bước chỉnh sửa gần nhất trên Candidate trước khi Confirm (UF2)."""
+    digest = _hash("undo_candidate", candidate_id, payload.model_dump(mode="json"))
+    await db.rollback()
+    async with db.begin():
+        await _lock_user(db, user_id)
+        saved = await _receipt(db, user_id, idempotency_key, digest)
+        if saved is not None:
+            return PlanCandidate.model_validate(_candidate_payload(saved))
+        row, draft, candidate = await _read_candidate(db, user_id, candidate_id)
+        _require_draft(
+            draft, candidate.source_summary_revision, candidate.source_planning_input_revision
+        )
+        if payload.expected_review_revision != row.review_revision:
+            raise _error("REVISION_CONFLICT", "Phiên bản phương án đã thay đổi.")
+        if row.previous_snapshot is None:
+            raise _error(
+                "UNDO_UNAVAILABLE",
+                "Không còn thao tác chỉnh sửa nào để hoàn tác.",
+                409,
+                "review_candidate",
+            )
+        source = await _sources(
+            db,
+            user_id,
+            draft,
+            candidate.planning_horizon,
+            context_ref=candidate.source_revisions.calendar_context,
+        )
+        if source.revisions != candidate.source_revisions:
+            raise _error("SOURCE_CHANGED", "Nguồn lập lịch đã đổi; cần tạo phương án mới.")
+        if candidate.stale:
+            raise _error("SOURCE_CHANGED", "Phương án cũ cần tạo lại theo hợp đồng mới.")
+
+        snap = copy.deepcopy(row.previous_snapshot)
+        snap_steps = snap["steps"]
+        restored_micro_tasks = {
+            item["client_step_key"]: item.get(
+                "_micro_task_text", f"Chuẩn bị cho bước: {item['title']}"
+            )
+            for item in snap_steps
+        }
+        clean_steps = [
+            {k: v for k, v in item.items() if not k.startswith("_")} for item in snap_steps
+        ]
+        restored = PlanCandidate.model_validate(
+            {
+                "candidate_id": str(row.id),
+                "draft_id": draft.draft_id,
+                "source_summary_revision": row.source_summary_revision,
+                "source_planning_input_revision": row.source_planning_input_revision,
+                "review_revision": candidate.review_revision + 1,
+                "decomposition_state": snap["decomposition_state"],
+                "unexpanded_scope": snap["unexpanded_scope"],
+                "steps": clean_steps,
+                "sessions": snap["sessions"],
+                "planning_horizon": snap["planning_horizon"],
+                "source_revisions": candidate.source_revisions.model_dump(mode="json"),
+                "min_inter_session_gap_seconds": candidate.min_inter_session_gap_seconds,
+                "feasibility": snap["feasibility"],
+                "stale": False,
+                "can_undo": False,
+                "user_step_proposal": candidate.user_step_proposal,
+            }
+        )
+        restored = _review_feasibility(restored, source)
+        restored = restored.model_copy(update={"can_undo": False})
+        row.previous_snapshot = None
+        for name, value in _candidate_values(restored, restored_micro_tasks).items():
+            setattr(row, name, value)
+        await db.flush()
+        draft_row, current = await _read_draft(db, user_id, draft.draft_id)
+        if current.candidate_ref is not None and current.candidate_ref.candidate_id == candidate_id:
+            await _update_draft(
+                db,
+                draft_row,
+                current.model_copy(
+                    update={
+                        "candidate_ref": CandidateRef(
+                            candidate_id=candidate_id, review_revision=restored.review_revision
+                        )
+                    }
+                ),
+            )
+        _record(
+            db,
+            user_id,
+            idempotency_key,
+            digest,
+            "undo_candidate",
+            restored,
+            candidate_id=candidate_id,
+        )
+    return restored
+
+
 async def _enqueue_calendar(
-    db: AsyncSession, owner: UUID, sessions: list[SessionRow], version: int
+    db: AsyncSession,
+    owner: UUID,
+    sessions: list[SessionRow],
+    version: int,
+    *,
+    step_titles: dict[UUID, str] | None = None,
 ) -> str:
     """Tạo CalendarEventLink và CalendarSyncJob trong cùng transaction khi chốt lịch UF2."""
     stmt = (
@@ -1975,9 +2851,16 @@ async def _enqueue_calendar(
         )
         db.add(link)
 
-        payload_snapshot = {
+        step_title = step_titles.get(session.step_id) if step_titles else None
+        summary, description = build_calendar_event_text(
+            session.title,
+            step_title,
+            session.session_goal,
+            session.expected_output,
+        )
+        payload_snapshot: dict[str, Any] = {
             "id": event_id,
-            "summary": "ProPlan VA Focus Session",
+            "summary": summary,
             "start": {
                 "dateTime": session.scheduled_start.isoformat(),
                 "timeZone": "Asia/Ho_Chi_Minh",
@@ -1995,6 +2878,8 @@ async def _enqueue_calendar(
                 }
             },
         }
+        if description is not None:
+            payload_snapshot["description"] = description
 
         job = CalendarSyncJob(
             id=uuid4(),
@@ -2013,6 +2898,150 @@ async def _enqueue_calendar(
         )
         db.add(job)
 
+    return "pending"
+
+
+async def _enqueue_calendar_deletes_for_task(
+    db: AsyncSession,
+    owner: UUID,
+    session_ids: list[UUID],
+    version: int,
+    now: datetime,
+) -> Literal["not_integrated", "pending", "synced", "failed"]:
+    """Đóng job create chưa đồng bộ hoặc xếp hàng job delete khi hủy Task."""
+    if not session_ids:
+        return "not_integrated"
+
+    links = (
+        await db.scalars(
+            select(CalendarEventLink)
+            .where(
+                CalendarEventLink.user_id == owner,
+                CalendarEventLink.session_id.in_(session_ids),
+                CalendarEventLink.is_current.is_(True),
+            )
+            .order_by(CalendarEventLink.id)
+            .execution_options(populate_existing=True)
+        )
+    ).all()
+    if not links:
+        return "not_integrated"
+
+    for link in links:
+        queued_jobs = (
+            await db.scalars(
+                select(CalendarSyncJob)
+                .where(
+                    CalendarSyncJob.user_id == owner,
+                    CalendarSyncJob.event_link_id == link.id,
+                    CalendarSyncJob.job_state == "queued",
+                )
+                .order_by(CalendarSyncJob.created_at, CalendarSyncJob.id)
+                .execution_options(populate_existing=True)
+            )
+        ).all()
+
+        unleased_jobs = [
+            job
+            for job in queued_jobs
+            if job.lease_expires_at is None or job.lease_expires_at <= now
+        ]
+        leased_jobs = [
+            job
+            for job in queued_jobs
+            if job.lease_expires_at is not None and job.lease_expires_at > now
+        ]
+
+        if unleased_jobs:
+            await db.execute(
+                update(CalendarSyncJob)
+                .where(
+                    CalendarSyncJob.id.in_([job.id for job in unleased_jobs]),
+                    CalendarSyncJob.job_state == "queued",
+                    or_(
+                        CalendarSyncJob.lease_expires_at.is_(None),
+                        CalendarSyncJob.lease_expires_at <= now,
+                    ),
+                )
+                .values(
+                    job_state="completed",
+                    last_error_code=None,
+                    lease_expires_at=None,
+                    updated_at=now,
+                    revision=CalendarSyncJob.revision + 1,
+                )
+                .execution_options(synchronize_session="fetch")
+            )
+
+        is_unattempted_create = (
+            link.synced_schedule_revision is None
+            and not leased_jobs
+            and any(job.operation == "create" for job in unleased_jobs)
+            and all(
+                job.attempt_count == 0
+                for job in unleased_jobs
+                if job.operation == "create"
+            )
+        )
+
+        if is_unattempted_create or link.google_event_id is None:
+            await db.execute(
+                update(CalendarEventLink)
+                .where(CalendarEventLink.id == link.id)
+                .values(
+                    is_current=False,
+                    sync_state="deleted",
+                    desired_schedule_revision=version,
+                    updated_at=now,
+                    revision=CalendarEventLink.revision + 1,
+                )
+                .execution_options(synchronize_session="fetch")
+            )
+        else:
+            await db.execute(
+                update(CalendarEventLink)
+                .where(CalendarEventLink.id == link.id)
+                .values(
+                    desired_schedule_revision=version,
+                    sync_state="pending",
+                    updated_at=now,
+                    revision=CalendarEventLink.revision + 1,
+                )
+                .execution_options(synchronize_session="fetch")
+            )
+            db.add(
+                CalendarSyncJob(
+                    id=uuid4(),
+                    user_id=owner,
+                    connection_id=link.connection_id,
+                    event_link_id=link.id,
+                    target_kind="session_event",
+                    target_ref=str(link.session_id),
+                    operation="delete",
+                    target_schedule_revision=version,
+                    expected_google_etag=link.google_etag,
+                    payload_snapshot={
+                        "id": link.google_event_id,
+                        "google_calendar_id": link.google_calendar_id,
+                    },
+                    idempotency_key=(
+                        f"sync_session:{link.session_id}:v{version}:delete:{link.id.hex[:8]}"
+                    ),
+                    job_state="queued",
+                    attempt_count=0,
+                )
+            )
+
+    await db.flush()
+    state = await _calendar_state(db, owner, version)
+    if state == "not_integrated":
+        return "not_integrated"
+    if state == "pending":
+        return "pending"
+    if state == "synced":
+        return "synced"
+    if state == "failed":
+        return "failed"
     return "pending"
 
 
@@ -2100,6 +3129,13 @@ async def confirm_candidate(
             raise _error("PLAN_NOT_CONFIRMABLE", "Thiếu ràng buộc thời gian.")
         owner, task_id = draft_service.resolve_user_uuid(user_id), uuid4()
         next_version = source.revisions.schedule + 1
+        extension_candidate_at = candidate.feasibility.extension_candidate_at
+        if (
+            extension_candidate_at is None
+            and candidate.decomposition_state == "partial"
+            and candidate.sessions
+        ):
+            extension_candidate_at = max(item.scheduled_end for item in candidate.sessions)
         db.add(
             TaskRow(
                 id=task_id,
@@ -2123,6 +3159,7 @@ async def confirm_candidate(
                 source_planning_input_revision=draft.planning_input_revision,
                 decomposition_state=candidate.decomposition_state,
                 unexpanded_scope=candidate.unexpanded_scope,
+                extension_candidate_at=extension_candidate_at,
             )
         )
         await db.flush()
@@ -2170,7 +3207,10 @@ async def confirm_candidate(
                         delivery_state="scheduled",
                     )
                 )
-        calendar_state = await _enqueue_calendar(db, owner, persisted_sessions, next_version)
+        step_titles = {step_ids[step.client_step_key]: step.title for step in candidate.steps}
+        calendar_state = await _enqueue_calendar(
+            db, owner, persisted_sessions, next_version, step_titles=step_titles
+        )
         db.add(
             VersionRow(
                 user_id=owner,
@@ -2234,7 +3274,11 @@ async def get_task_by_id(*, user_id: str, task_id: str, db: AsyncSession) -> Tas
     owner = draft_service.resolve_user_uuid(user_id)
     row = await db.scalar(
         select(TaskRow)
-        .where(TaskRow.id == _uuid(task_id), TaskRow.user_id == owner)
+        .where(
+            TaskRow.id == _uuid(task_id),
+            TaskRow.user_id == owner,
+            TaskRow.status != "cancelled",
+        )
         .execution_options(populate_existing=True)
     )
     if row is None:
@@ -2276,6 +3320,11 @@ async def get_task_by_id(*, user_id: str, task_id: str, db: AsyncSession) -> Tas
     from app.services.task_state_service import get_task_planning_states
 
     state = (await get_task_planning_states(db, owner, [row.id]))[row.id]
+    from app.services import reschedule_service
+
+    source_revs, _ = await reschedule_service._compute_db_source_revisions(
+        db, owner, target_task_id=str(row.id)
+    )
     steps = [
         Step.model_validate(
             dict(
@@ -2312,9 +3361,11 @@ async def get_task_by_id(*, user_id: str, task_id: str, db: AsyncSession) -> Tas
             source_summary_revision=row.source_summary_revision,
             source_planning_input_revision=row.source_planning_input_revision,
             unexpanded_scope=row.unexpanded_scope,
+            extension_candidate_at=row.extension_candidate_at,
             steps=steps,
             sessions=[_session_schema(item, link_ids.get(item.id)) for item in session_rows],
             source_summary=row.source_summary,
+            source_revisions=source_revs,
         )
     )
 
@@ -2332,6 +3383,68 @@ def _page(
     return result, str(getattr(result[-1], key)) if result and start + limit < len(items) else None
 
 
+async def _compute_list_tasks_base_revisions(
+    db: AsyncSession,
+    owner: UUID,
+) -> tuple[int, int, int, int]:
+    """Đọc 4 revision nguồn dùng chung cho toàn trang list_tasks trong 1 query duy nhất."""
+    row = (
+        await db.execute(
+            select(
+                select(VersionRow.version_number)
+                .where(VersionRow.user_id == owner)
+                .order_by(VersionRow.version_number.desc())
+                .limit(1)
+                .scalar_subquery()
+                .label("ver_rev"),
+                select(SessionRow.schedule_revision)
+                .where(SessionRow.user_id == owner)
+                .order_by(SessionRow.schedule_revision.desc())
+                .limit(1)
+                .scalar_subquery()
+                .label("sess_rev"),
+                select(
+                    case(
+                        (AvailabilityRow.confirmed_at.is_not(None), AvailabilityRow.revision),
+                        else_=0,
+                    )
+                )
+                .where(AvailabilityRow.user_id == owner)
+                .order_by(AvailabilityRow.revision.desc())
+                .limit(1)
+                .scalar_subquery()
+                .label("avail_rev"),
+                select(PreferenceRow.effective_revision)
+                .where(PreferenceRow.user_id == owner)
+                .limit(1)
+                .scalar_subquery()
+                .label("settings_rev"),
+                select(PlanningContext.revision)
+                .where(PlanningContext.user_id == owner)
+                .order_by(PlanningContext.created_at.desc())
+                .limit(1)
+                .scalar_subquery()
+                .label("ctx_rev"),
+                select(CalendarConnection.revision)
+                .where(CalendarConnection.user_id == owner)
+                .order_by(CalendarConnection.created_at.desc())
+                .limit(1)
+                .scalar_subquery()
+                .label("conn_rev"),
+            )
+        )
+    ).one()
+    schedule_rev = max(int(row.ver_rev or 0), int(row.sess_rev or 0))
+    avail_rev = int(row.avail_rev or 0)
+    settings_rev = int(row.settings_rev) if row.settings_rev is not None else 1
+    calendar_rev = (
+        int(row.ctx_rev)
+        if row.ctx_rev is not None
+        else (int(row.conn_rev) if row.conn_rev is not None else 0)
+    )
+    return schedule_rev, avail_rev, settings_rev, calendar_rev
+
+
 async def list_tasks(
     *, user_id: str, db: AsyncSession, limit: int = 20, cursor: str | None = None
 ) -> TaskListData:
@@ -2339,7 +3452,7 @@ async def list_tasks(
     rows = (
         await db.scalars(
             select(TaskRow)
-            .where(TaskRow.user_id == owner)
+            .where(TaskRow.user_id == owner, TaskRow.status != "cancelled")
             .order_by(TaskRow.created_at, TaskRow.id)
             .execution_options(populate_existing=True)
         )
@@ -2420,10 +3533,14 @@ async def list_tasks(
     )
     link_ids = {item.session_id: str(item.id) for item in all_links}
 
-    # Batch 5: Task planning states
+    # Batch 5: Task planning states & shared source revisions (1 query, 0 N+1)
+    from app.schemas.reschedule import ProposalSourceRevisions
     from app.services.task_state_service import get_task_planning_states
 
     task_states = await get_task_planning_states(db, owner, task_ids)
+    sched_rev, avail_rev, settings_rev, cal_rev = await _compute_list_tasks_base_revisions(
+        db, owner
+    )
 
     # Construct Task DTOs in-memory without extra DB queries
     tasks: list[Task] = []
@@ -2435,6 +3552,13 @@ async def list_tasks(
         step_rows = steps_by_task.get(row.id, [])
         session_rows = sessions_by_task.get(row.id, [])
         state = task_states[row.id]
+        task_source_revs = ProposalSourceRevisions(
+            task=int(row.revision),
+            schedule=sched_rev,
+            availability=avail_rev,
+            settings=settings_rev,
+            calendar=cal_rev,
+        )
 
         steps = [
             Step.model_validate(
@@ -2473,11 +3597,13 @@ async def list_tasks(
                     source_summary_revision=row.source_summary_revision,
                     source_planning_input_revision=row.source_planning_input_revision,
                     unexpanded_scope=row.unexpanded_scope,
+                    extension_candidate_at=row.extension_candidate_at,
                     steps=steps,
                     sessions=[
                         _session_schema(item, link_ids.get(item.id)) for item in session_rows
                     ],
                     source_summary=row.source_summary,
+                    source_revisions=task_source_revs,
                 )
             )
         )
@@ -2488,12 +3614,246 @@ async def list_tasks(
     )
 
 
+async def delete_task(
+    *,
+    user_id: str,
+    task_id: str,
+    db: AsyncSession,
+    idempotency_key: str | None = None,
+    expected_task_revision: int | None = None,
+) -> TaskDeleteResult:
+    """Hủy mềm công việc chính thức: đóng bước/phiên/nhắc nhở còn mở và xếp hàng xóa Google Calendar."""
+    digest = (
+        _hash("delete_task", task_id, {"expected_task_revision": expected_task_revision})
+        if idempotency_key
+        else ""
+    )
+    await db.rollback()
+    async with db.begin():
+        await _lock_user(db, user_id)
+        if idempotency_key:
+            saved = await _receipt(db, user_id, idempotency_key, digest)
+            if saved is not None:
+                return TaskDeleteResult.model_validate(saved)
+
+        owner = draft_service.resolve_user_uuid(user_id)
+        task_uuid = _uuid(task_id)
+        row = await db.scalar(
+            select(TaskRow)
+            .where(TaskRow.id == task_uuid, TaskRow.user_id == owner)
+            .execution_options(populate_existing=True)
+        )
+        if row is None or row.status == "cancelled":
+            raise _error("RESOURCE_NOT_FOUND", "Không tìm thấy công việc.", 404, "reload")
+        if expected_task_revision is not None and row.revision != expected_task_revision:
+            raise AppError(
+                status_code=409,
+                code="REVISION_CONFLICT",
+                message="Công việc đã thay đổi.",
+                current_revisions={"task": row.revision},
+                next_action="reload_and_review",
+            )
+
+        step_rows = (
+            await db.scalars(
+                select(StepRow)
+                .where(StepRow.task_id == row.id, StepRow.user_id == owner)
+                .order_by(StepRow.order_index, StepRow.id)
+                .execution_options(populate_existing=True)
+            )
+        ).all()
+        session_rows = (
+            await db.scalars(
+                select(SessionRow)
+                .join(StepRow, StepRow.id == SessionRow.step_id)
+                .where(StepRow.task_id == row.id, SessionRow.user_id == owner)
+                .order_by(SessionRow.scheduled_start, SessionRow.id)
+                .execution_options(populate_existing=True)
+            )
+        ).all()
+        all_session_uuids = [sess.id for sess in session_rows]
+
+        now = datetime.now(UTC)
+        # Focus Mode guard nhất quán với approve_proposal: running/paused khóa toàn user
+        # để bảo vệ ScheduleVersion; awaiting_checkin chỉ khóa trong phạm vi task đang xóa.
+        live_run_id = await db.scalar(
+            select(SessionRun.id)
+            .where(
+                SessionRun.user_id == owner,
+                SessionRun.run_state.in_(("running", "paused")),
+            )
+            .limit(1)
+        )
+        awaiting_run_id = (
+            await db.scalar(
+                select(SessionRun.id)
+                .where(
+                    SessionRun.user_id == owner,
+                    SessionRun.session_id.in_(all_session_uuids),
+                    SessionRun.run_state == "awaiting_checkin",
+                    or_(
+                        SessionRun.checkin_timeout_at.is_(None),
+                        SessionRun.checkin_timeout_at > now,
+                    ),
+                    ~exists(
+                        select(CheckIn.id).where(
+                            CheckIn.run_id == SessionRun.id,
+                            CheckIn.kind == "final",
+                            CheckIn.response_state.in_(("answered", "no_respond")),
+                        )
+                    ),
+                )
+                .limit(1)
+            )
+            if all_session_uuids
+            else None
+        )
+        if live_run_id is not None or awaiting_run_id is not None:
+            raise _error(
+                "ACTIVE_RUN_EXISTS",
+                "Đang có phiên tập trung hoạt động hoặc chờ check-in; vui lòng hoàn tất trước khi xóa công việc.",
+                409,
+                "finish_active_run",
+            )
+
+        current_version = await _schedule_revision(db, owner)
+        next_version = current_version + 1
+
+        row.status = "cancelled"
+        row.unexpanded_scope = None
+        row.revision += 1
+        row.updated_at = now
+
+        for step in step_rows:
+            if step.status not in ("completed", "skipped", "cancelled"):
+                step.status = "cancelled"
+                step.revision += 1
+                step.updated_at = now
+
+        cancelled_session_ids: list[str] = []
+        cancelled_session_uuids: list[UUID] = []
+        for sess in session_rows:
+            if sess.status not in ("completed", "skipped", "cancelled", "incomplete"):
+                sess.status = "cancelled"
+                sess.start_state = "superseded"
+                sess.schedule_revision = next_version
+                sess.revision += 1
+                sess.updated_at = now
+                cancelled_session_ids.append(str(sess.id))
+                cancelled_session_uuids.append(sess.id)
+
+        cancelled_reminders = 0
+        if all_session_uuids:
+            reminder_rows = (
+                await db.scalars(
+                    select(Reminder)
+                    .where(
+                        Reminder.user_id == owner,
+                        Reminder.session_id.in_(all_session_uuids),
+                        Reminder.delivery_state.in_(("scheduled", "snoozed")),
+                    )
+                    .execution_options(populate_existing=True)
+                )
+            ).all()
+            for rem in reminder_rows:
+                rem.delivery_state = "cancelled"
+                rem.updated_at = now
+                rem.revision += 1
+                cancelled_reminders += 1
+
+        calendar_summary = await _enqueue_calendar_deletes_for_task(
+            db, owner, cancelled_session_uuids, next_version, now
+        )
+
+        pref_row = await db.scalar(
+            select(PreferenceRow)
+            .where(PreferenceRow.user_id == owner)
+            .execution_options(populate_existing=True)
+        )
+        linked_proposal_id = pref_row.pending_proposal_id if pref_row is not None else None
+        pending_proposals = (
+            await db.scalars(
+                select(RescheduleProposal)
+                .where(
+                    RescheduleProposal.user_id == owner,
+                    RescheduleProposal.status == "pending",
+                    RescheduleProposal.target_task_id == row.id,
+                )
+                .execution_options(populate_existing=True)
+            )
+        ).all()
+        for prop in pending_proposals:
+            if linked_proposal_id is not None and prop.id == linked_proposal_id:
+                continue
+            prop.status = "superseded"
+            prop.revision += 1
+            prop.updated_at = now
+            linked_setting_reqs = (
+                await db.scalars(
+                    select(SettingChangeRequest)
+                    .where(
+                        SettingChangeRequest.user_id == owner,
+                        SettingChangeRequest.pending_proposal_id == prop.id,
+                        SettingChangeRequest.application_state.in_(
+                            ("pending_review", "pending_proposal")
+                        ),
+                    )
+                    .execution_options(populate_existing=True)
+                )
+            ).all()
+            for s_req in linked_setting_reqs:
+                s_req.application_state = "cancelled"
+                s_req.requested_revision = None
+                s_req.requested_availability_revision = None
+                s_req.updated_at = now
+                s_req.revision += 1
+
+        alarm_state: Literal["pending", "not_required"] = (
+            "pending" if (cancelled_session_ids or cancelled_reminders > 0) else "not_required"
+        )
+        db.add(
+            VersionRow(
+                user_id=owner,
+                version_number=next_version,
+                base_version=current_version if current_version > 0 else None,
+                approved_at=now,
+                affected_task_ids=[str(row.id)],
+                min_inter_session_gap_seconds=900,
+                alarm_sync_state=alarm_state,
+            )
+        )
+        await db.flush()
+
+        result = TaskDeleteResult(
+            task_id=str(row.id),
+            deleted=True,
+            status="cancelled",
+            task_revision=row.revision,
+            schedule_revision=next_version,
+            cancelled_session_ids=cancelled_session_ids,
+            alarm_sync_state=alarm_state,
+            calendar_sync_summary=calendar_summary,
+        )
+        if idempotency_key:
+            _record(
+                db,
+                user_id,
+                idempotency_key,
+                digest,
+                "delete_task",
+                result,
+                task_id=str(row.id),
+            )
+    return result
+
+
 async def _calendar_state(db: AsyncSession, owner: UUID, version: int) -> str:
     states = (
         await db.scalars(
             select(CalendarSyncJob.job_state).where(
                 CalendarSyncJob.user_id == owner,
                 CalendarSyncJob.target_schedule_revision == version,
+                CalendarSyncJob.job_state != "cancelled",
             )
         )
     ).all()
@@ -2518,16 +3878,29 @@ async def get_schedule(
     except ValidationError as exc:
         raise _invalid("Cần cặp from/to có múi giờ và bắt đầu trước kết thúc.", "from") from exc
     owner = draft_service.resolve_user_uuid(user_id)
+    from app.services import run_service
+
+    await run_service.reconcile_expired_checkins(db, user_id, commit_if_read=True)
     rows = (
         await db.scalars(
             select(SessionRow)
+            .join(StepRow, StepRow.id == SessionRow.step_id)
+            .join(TaskRow, TaskRow.id == StepRow.task_id)
             .where(
                 SessionRow.user_id == owner,
                 SessionRow.scheduled_start < to_at,
                 SessionRow.scheduled_end > from_at,
                 SessionRow.status != "cancelled",
+                or_(
+                    SessionRow.status != "scheduled",
+                    and_(
+                        StepRow.status.notin_(("completed", "skipped", "cancelled")),
+                        TaskRow.status.notin_(("completed", "skipped", "cancelled")),
+                    ),
+                ),
             )
             .order_by(SessionRow.scheduled_start, SessionRow.id)
+            .execution_options(populate_existing=True)
         )
     ).all()
     page, next_cursor = _page(list(rows), limit, cursor, "id")

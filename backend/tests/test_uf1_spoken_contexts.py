@@ -2223,3 +2223,150 @@ def test_v3_tc_live_08_specific_date_normalizes_word_weekday_before_conflict_che
     assert w_conflict.is_ambiguous is True
     assert w_conflict.clarification_hint is not None
 
+
+async def test_finding1_weekly_and_daily_merge_preserves_both_and_closed_base_dates(
+    uf1_api, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """PR #22 Finding #1: (a) weekly sáng T4 + daily tối giữ cả hai (cả 2 thứ tự); (b) ngày đóng [] + daily vẫn đóng []."""
+    client, _ = uf1_api
+    # Thứ Tư nằm trong tuần: 2026-11-18 (weekday=3), Thứ Sáu: 2026-11-20 (weekday=5)
+    t_weekly_then_daily = LLMTaskExtractionPayload(
+        title="Học lập trình",
+        content="Làm bài tập cấu trúc dữ liệu",
+        scope="4 bài tập",
+        time_constraint=_week_tc(),
+        deadline=WEEK_DEADLINE,
+        structured_free_windows=[
+            ExtractedFreeWindowSchema(
+                kind="weekly_rule",
+                weekday=3,
+                start_local="08:00",
+                end_local="10:00",
+                raw_phrase="Sáng thứ Tư 08:00-10:00",
+            ),
+            ExtractedFreeWindowSchema(
+                kind="daily",
+                start_local="19:00",
+                end_local="21:00",
+                raw_phrase="Tối nào cũng rảnh 19:00-21:00",
+            ),
+        ],
+        is_complete=True,
+        summary="Sáng thứ 4 và tối hằng ngày.",
+    )
+    t_daily_then_weekly = LLMTaskExtractionPayload(
+        title="Học lập trình",
+        content="Làm bài tập cấu trúc dữ liệu",
+        scope="4 bài tập",
+        time_constraint=_week_tc(),
+        deadline=WEEK_DEADLINE,
+        availability_update_mode="replace",
+        structured_free_windows=[
+            ExtractedFreeWindowSchema(
+                kind="daily",
+                start_local="19:00",
+                end_local="21:00",
+                raw_phrase="Tối nào cũng rảnh 19:00-21:00",
+            ),
+            ExtractedFreeWindowSchema(
+                kind="weekly_rule",
+                weekday=3,
+                start_local="08:00",
+                end_local="10:00",
+                raw_phrase="Thêm sáng thứ Tư 08:00-10:00",
+            ),
+        ],
+        is_complete=True,
+        summary="Tối hằng ngày và sáng thứ 4.",
+    )
+    t_close_friday = LLMTaskExtractionPayload(
+        title="Học lập trình",
+        content="Làm bài tập cấu trúc dữ liệu",
+        scope="4 bài tập",
+        time_constraint=_week_tc(),
+        deadline=WEEK_DEADLINE,
+        availability_update_mode="replace",
+        structured_free_windows=[
+            ExtractedFreeWindowSchema(
+                kind="weekly_rule",
+                weekday=3,
+                start_local="08:00",
+                end_local="10:00",
+                raw_phrase="Sáng thứ Tư 08:00-10:00",
+            ),
+            ExtractedFreeWindowSchema(
+                kind="specific_date",
+                date="2026-11-20",
+                is_excluded=True,
+                raw_phrase="Thứ Sáu 20/11 bận cả ngày",
+            ),
+        ],
+        is_complete=True,
+        summary="Đóng 20/11.",
+    )
+    t_add_daily_keep_closed = LLMTaskExtractionPayload(
+        title="Học lập trình",
+        content="Làm bài tập cấu trúc dữ liệu",
+        scope="4 bài tập",
+        time_constraint=_week_tc(),
+        deadline=WEEK_DEADLINE,
+        structured_free_windows=[
+            ExtractedFreeWindowSchema(
+                kind="daily",
+                start_local="19:00",
+                end_local="21:00",
+                raw_phrase="Bổ sung tối nào cũng rảnh 19:00-21:00",
+            ),
+        ],
+        is_complete=True,
+        summary="Thêm tối hằng ngày, giữ 20/11 đóng.",
+    )
+    _set_ai_sequence(
+        monkeypatch,
+        [t_weekly_then_daily, t_daily_then_weekly, t_close_friday, t_add_daily_keep_closed],
+    )
+
+    d = await _create_draft(client, key="finding1")
+    d = await _analyze(client, d, key="f1-order1", message="Sáng thứ 4 8-10h, tối hằng ngày 19-21h")
+    assert _weekly_map(d["summary"]["availability"])[3] == [("08:00", "10:00"), ("19:00", "21:00")]
+    assert _override_map(d["summary"]["availability"])["2026-11-18"] == [
+        ("08:00", "10:00"),
+        ("19:00", "21:00"),
+    ]
+
+    d = await _analyze(client, d, key="f1-order2", message="Tối hằng ngày 19-21h, sáng thứ 4 8-10h")
+    assert _weekly_map(d["summary"]["availability"])[3] == [("08:00", "10:00"), ("19:00", "21:00")]
+    assert _override_map(d["summary"]["availability"])["2026-11-18"] == [
+        ("08:00", "10:00"),
+        ("19:00", "21:00"),
+    ]
+
+    d = await _analyze(client, d, key="f1-close", message="Sáng thứ 4 8-10h, 20/11 bận cả ngày")
+    assert _override_map(d["summary"]["availability"])["2026-11-20"] == []
+
+    # Giả lập base chỉ còn date_overrides=[2026-11-20: []] (không lưu window exclude trong ai_context)
+    # để kiểm chứng trực tiếp cơ chế closed_base_dates trước daily op="add".
+    base_avail = DraftAvailability.model_validate(d["summary"]["availability"])
+    clean_draft = draft_service_module.PlanningDraft.model_validate(
+        {
+            **d,
+            "ai_context": {},
+        }
+    )
+    proposal, meta = draft_service_module._availability_proposal(
+        t_add_daily_keep_closed,
+        clean_draft,
+        base_avail,
+        "Asia/Ho_Chi_Minh",
+    )
+    assert proposal is not None and meta is not None
+    prop_overrides = {
+        ov.date.isoformat(): [
+            (iv.start_local.strftime("%H:%M"), iv.end_local.strftime("%H:%M"))
+            for iv in ov.intervals
+        ]
+        for ov in proposal.date_overrides
+    }
+    assert prop_overrides["2026-11-20"] == []
+    assert prop_overrides["2026-11-18"] == [("08:00", "10:00"), ("19:00", "21:00")]
+

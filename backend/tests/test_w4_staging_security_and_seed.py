@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import sys
+from datetime import UTC, datetime, timedelta
 from typing import Literal
 from urllib.parse import parse_qs, urlparse
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from cryptography.fernet import Fernet
@@ -26,6 +28,8 @@ from app.models import (
     Base,
     CalendarAuthorization,
     CalendarConnection,
+    CalendarEventLink,
+    CalendarSyncJob,
     CheckIn,
     PlanningDraft,
     Session,
@@ -36,7 +40,13 @@ from app.models import (
     UserPreference,
 )
 from app.services.calendar_service import CalendarService
+from app.services.calendar_sync_worker import process_calendar_sync_jobs
 from app.services.credential_crypto import decrypt_credentials, encrypt_credentials
+from app.services.google_calendar_client import (
+    FakeCalendarClient,
+    get_calendar_client,
+    reset_fake_calendar_client,
+)
 from scripts import seed_w4_qa
 
 _STRONG_SECRET = "s" * 40
@@ -85,6 +95,10 @@ async def test_be02_cors_blocks_evil_origin_and_allows_local_origins():
             )
             assert opt_bad.status_code == 400
             assert "access-control-allow-origin" not in opt_bad.headers
+            assert opt_bad.headers.get("x-request-id")
+            assert opt_bad.headers["x-content-type-options"] == "nosniff"
+            assert opt_bad.headers["x-frame-options"] == "DENY"
+            assert opt_bad.headers["referrer-policy"] == "no-referrer"
 
             get_bad = await client.get("/api/v1/health", headers={"Origin": evil})
             assert get_bad.status_code == 200
@@ -101,11 +115,16 @@ async def test_be02_cors_blocks_evil_origin_and_allows_local_origins():
             assert opt_ok.status_code == 200
             assert opt_ok.headers["access-control-allow-origin"] == allowed
             assert opt_ok.headers["access-control-allow-credentials"] == "true"
+            assert opt_ok.headers.get("x-request-id")
+            assert opt_ok.headers["x-content-type-options"] == "nosniff"
+            assert opt_ok.headers["x-frame-options"] == "DENY"
+            assert opt_ok.headers["referrer-policy"] == "no-referrer"
 
             get_ok = await client.get("/api/v1/health", headers={"Origin": allowed})
             assert get_ok.status_code == 200
             assert get_ok.headers["access-control-allow-origin"] == allowed
             assert get_ok.headers["access-control-allow-credentials"] == "true"
+            assert "x-request-id" in get_ok.headers.get("access-control-expose-headers", "").lower()
 
 
 @pytest.mark.asyncio
@@ -394,6 +413,61 @@ def test_be05_deployed_secret_configuration_fails_fast(
             cfg.calendar_credential_key()
 
 
+@pytest.mark.parametrize("env_name", ["staging", "production"])
+@pytest.mark.parametrize(
+    "bad_redirect_uri",
+    [
+        "",
+        "   ",
+        "http://virtual-assistant-for-adhd.onrender.com/api/v1/calendar/oauth/callback",
+        "http://localhost:8000/api/v1/calendar/oauth/callback",
+        "https://localhost:8000/api/v1/calendar/oauth/callback",
+        "https://127.0.0.1:8000/api/v1/calendar/oauth/callback",
+        "https://[::1/callback",
+    ],
+)
+def test_be05_deployed_redirect_uri_configuration_fails_fast(
+    env_name: Literal["staging", "production"],
+    bad_redirect_uri: str,
+):
+    cfg = Settings(
+        _env_file=None,
+        ENVIRONMENT=env_name,
+        SECRET_KEY=_STRONG_SECRET,
+        CALENDAR_CREDENTIAL_SECRET_KEY=_VALID_FERNET,
+        GOOGLE_OAUTH_REDIRECT_URI=bad_redirect_uri,
+    )
+    with pytest.raises(ValueError):
+        cfg.validate_secret_configuration()
+
+
+def test_be05_redirect_uri_default_render_and_local_dev_override():
+    default_cfg = Settings(_env_file=None)
+    assert (
+        default_cfg.GOOGLE_OAUTH_REDIRECT_URI
+        == "https://virtual-assistant-for-adhd.onrender.com/api/v1/calendar/oauth/callback"
+    )
+
+    deployed_cfg = Settings(
+        _env_file=None,
+        ENVIRONMENT="staging",
+        SECRET_KEY=_STRONG_SECRET,
+        CALENDAR_CREDENTIAL_SECRET_KEY=_VALID_FERNET,
+    )
+    deployed_cfg.validate_secret_configuration()
+
+    dev_cfg = Settings(
+        _env_file=None,
+        ENVIRONMENT="development",
+        GOOGLE_OAUTH_REDIRECT_URI="http://localhost:8000/api/v1/calendar/oauth/callback",
+    )
+    dev_cfg.validate_secret_configuration()
+    assert (
+        dev_cfg.GOOGLE_OAUTH_REDIRECT_URI
+        == "http://localhost:8000/api/v1/calendar/oauth/callback"
+    )
+
+
 def test_be05_secret_valid_in_staging_and_fallback_in_dev_test(monkeypatch, caplog):
     deployed_cfg = Settings(
         _env_file=None,
@@ -621,3 +695,564 @@ def test_w4_03a_cli_main_rejects_duplicate_emails_and_missing_database_url(monke
     with pytest.raises(SystemExit) as env_exc:
         seed_w4_qa.main()
     assert env_exc.value.code != 0
+
+
+# ---------------------------------------------------------------------------
+# BE-05 (#6): Calendar Sync Worker SQLite File Concurrency & Write Lock Tests
+# ---------------------------------------------------------------------------
+
+
+def _build_sqlite_worker_connection(
+    *,
+    user_id: UUID,
+    connection_id: UUID,
+    account_ref: str,
+    write_calendar_id: str,
+    now: datetime,
+) -> CalendarConnection:
+    cred_ref = encrypt_credentials(
+        {
+            "access_token": f"fake-access-{account_ref}",
+            "refresh_token": f"fake-refresh-{account_ref}",
+            "user_id": str(user_id),
+            "connection_id": str(connection_id),
+            "stored_at": now.isoformat(),
+            "expires_in": 3600,
+        }
+    )
+    return CalendarConnection(
+        id=connection_id,
+        user_id=user_id,
+        provider="google",
+        account_ref=account_ref,
+        read_calendar_ids=["primary"],
+        write_calendar_id=write_calendar_id,
+        granted_scopes=["https://www.googleapis.com/auth/calendar"],
+        connection_state="connected",
+        credential_ref=cred_ref,
+    )
+
+
+async def _seed_sqlite_worker_task_step(db, *, user_id: UUID, now: datetime) -> Step:
+    task = Task(
+        id=uuid4(),
+        user_id=user_id,
+        title="Task đồng bộ lịch SQLite",
+        time_constraint={
+            "kind": "deadline",
+            "at": (now + timedelta(days=2)).isoformat(),
+            "input_timezone": "Asia/Ho_Chi_Minh",
+        },
+        status="scheduled",
+    )
+    db.add(task)
+    await db.flush()
+    step = Step(
+        id=uuid4(),
+        user_id=user_id,
+        task_id=task.id,
+        title="Step kiểm thử khóa ghi",
+        order_index=0,
+        estimated_base_seconds=1500,
+        remaining_base_seconds=1500,
+        buffer_multiplier=1.2,
+        estimate_source="manual",
+    )
+    db.add(step)
+    await db.flush()
+    return step
+
+
+async def _add_sqlite_worker_session(
+    db, *, user_id: UUID, step_id: UUID, start_at: datetime
+) -> Session:
+    sess = Session(
+        id=uuid4(),
+        user_id=user_id,
+        step_id=step_id,
+        scheduled_start=start_at,
+        scheduled_end=start_at + timedelta(minutes=25),
+        work_seconds=1500,
+        rest_seconds=0,
+        duration_seconds=1500,
+        segments=[{"order_index": 0, "kind": "work", "duration_seconds": 1500}],
+        schedule_revision=1,
+    )
+    db.add(sess)
+    await db.flush()
+    return sess
+
+
+@pytest.mark.asyncio
+async def test_be05_calendar_sync_worker_sqlite_concurrency_no_database_lock(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+):
+    """Nhiều coroutine process_calendar_sync_jobs chạy song song trên SQLite file DB không lỗi locked hay trùng event."""
+    reset_fake_calendar_client()
+    monkeypatch.setattr(settings, "CALENDAR_PROVIDER_MODE", "fake")
+    fake_client = get_calendar_client()
+    assert isinstance(fake_client, FakeCalendarClient)
+
+    db_url = "sqlite+aiosqlite:///" + (tmp_path / "worker_sqlite_lock.db").as_posix()
+    engine = make_engine(db_url)
+    factory = session_factory(engine)
+    now = datetime.now(UTC)
+    uid = uuid4()
+    conn_id = uuid4()
+    cal_id = "focus_cal"
+
+    orig_create = fake_client.create_event
+    orig_update = fake_client.update_event
+    create_calls: list[str] = []
+    update_calls: list[str] = []
+
+    async def slow_create(access_token: str, calendar_id: str, event_payload: dict):
+        create_calls.append(str(event_payload.get("summary", "")))
+        await asyncio.sleep(0.015)
+        return await orig_create(access_token, calendar_id, event_payload)
+
+    async def slow_update(
+        access_token: str,
+        calendar_id: str,
+        event_id: str,
+        event_payload: dict,
+        expected_etag: str | None = None,
+    ):
+        update_calls.append(str(event_payload.get("summary", "")))
+        await asyncio.sleep(0.015)
+        return await orig_update(
+            access_token, calendar_id, event_id, event_payload, expected_etag=expected_etag
+        )
+
+    try:
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+
+        # Tạo 1 event có sẵn trước trên fake client để kiểm thử job update song song
+        seeded_event = await orig_create("fake-tok", cal_id, {"summary": "Focus Existing"})
+
+        async with factory() as db:
+            db.add(
+                User(
+                    id=uid,
+                    email="worker-lock@example.com",
+                    display_name="Worker Lock",
+                    is_active=True,
+                )
+            )
+            await db.flush()
+            db.add(
+                _build_sqlite_worker_connection(
+                    user_id=uid,
+                    connection_id=conn_id,
+                    account_ref="worker-lock@gmail.com",
+                    write_calendar_id=cal_id,
+                    now=now,
+                )
+            )
+            await db.flush()
+            step = await _seed_sqlite_worker_task_step(db, user_id=uid, now=now)
+
+            s_dup = await _add_sqlite_worker_session(
+                db, user_id=uid, step_id=step.id, start_at=now + timedelta(hours=1)
+            )
+            s_c1 = await _add_sqlite_worker_session(
+                db, user_id=uid, step_id=step.id, start_at=now + timedelta(hours=2)
+            )
+            s_c2 = await _add_sqlite_worker_session(
+                db, user_id=uid, step_id=step.id, start_at=now + timedelta(hours=3)
+            )
+            s_upd = await _add_sqlite_worker_session(
+                db, user_id=uid, step_id=step.id, start_at=now + timedelta(hours=4)
+            )
+
+            link_dup = CalendarEventLink(
+                id=uuid4(),
+                user_id=uid,
+                session_id=s_dup.id,
+                connection_id=conn_id,
+                google_calendar_id=cal_id,
+                desired_schedule_revision=2,
+                sync_state="pending",
+                is_current=True,
+            )
+            link_c1 = CalendarEventLink(
+                id=uuid4(),
+                user_id=uid,
+                session_id=s_c1.id,
+                connection_id=conn_id,
+                google_calendar_id=cal_id,
+                desired_schedule_revision=1,
+                sync_state="pending",
+                is_current=True,
+            )
+            link_c2 = CalendarEventLink(
+                id=uuid4(),
+                user_id=uid,
+                session_id=s_c2.id,
+                connection_id=conn_id,
+                google_calendar_id=cal_id,
+                desired_schedule_revision=1,
+                sync_state="pending",
+                is_current=True,
+            )
+            link_upd = CalendarEventLink(
+                id=uuid4(),
+                user_id=uid,
+                session_id=s_upd.id,
+                connection_id=conn_id,
+                google_calendar_id=cal_id,
+                google_event_id=seeded_event["id"],
+                google_etag=seeded_event["etag"],
+                desired_schedule_revision=2,
+                synced_schedule_revision=1,
+                sync_state="pending",
+                is_current=True,
+            )
+            db.add_all([link_dup, link_c1, link_c2, link_upd])
+            await db.flush()
+
+            # Gồm cả 2 job queued cùng 1 event_link_id (create trước, update sau) và các link song song
+            jobs = [
+                CalendarSyncJob(
+                    id=uuid4(),
+                    user_id=uid,
+                    connection_id=conn_id,
+                    event_link_id=link_dup.id,
+                    target_kind="session",
+                    target_ref=str(s_dup.id),
+                    operation="create",
+                    target_schedule_revision=1,
+                    payload_snapshot={"summary": "Dup Create"},
+                    idempotency_key="lock-dup-create",
+                    job_state="queued",
+                    attempt_count=0,
+                    created_at=now - timedelta(seconds=30),
+                ),
+                CalendarSyncJob(
+                    id=uuid4(),
+                    user_id=uid,
+                    connection_id=conn_id,
+                    event_link_id=link_c1.id,
+                    target_kind="session",
+                    target_ref=str(s_c1.id),
+                    operation="create",
+                    target_schedule_revision=1,
+                    payload_snapshot={"summary": "Create 1"},
+                    idempotency_key="lock-create-1",
+                    job_state="queued",
+                    attempt_count=0,
+                    created_at=now - timedelta(seconds=20),
+                ),
+                CalendarSyncJob(
+                    id=uuid4(),
+                    user_id=uid,
+                    connection_id=conn_id,
+                    event_link_id=link_c2.id,
+                    target_kind="session",
+                    target_ref=str(s_c2.id),
+                    operation="create",
+                    target_schedule_revision=1,
+                    payload_snapshot={"summary": "Create 2"},
+                    idempotency_key="lock-create-2",
+                    job_state="queued",
+                    attempt_count=0,
+                    created_at=now - timedelta(seconds=15),
+                ),
+                CalendarSyncJob(
+                    id=uuid4(),
+                    user_id=uid,
+                    connection_id=conn_id,
+                    event_link_id=link_upd.id,
+                    target_kind="session",
+                    target_ref=str(s_upd.id),
+                    operation="update",
+                    target_schedule_revision=2,
+                    expected_google_etag=seeded_event["etag"],
+                    payload_snapshot={"summary": "Update Existing"},
+                    idempotency_key="lock-update-1",
+                    job_state="queued",
+                    attempt_count=0,
+                    created_at=now - timedelta(seconds=10),
+                ),
+                CalendarSyncJob(
+                    id=uuid4(),
+                    user_id=uid,
+                    connection_id=conn_id,
+                    event_link_id=link_dup.id,
+                    target_kind="session",
+                    target_ref=str(s_dup.id),
+                    operation="update",
+                    target_schedule_revision=2,
+                    payload_snapshot={"summary": "Dup Update"},
+                    idempotency_key="lock-dup-update",
+                    job_state="queued",
+                    attempt_count=0,
+                    created_at=now - timedelta(seconds=5),
+                ),
+            ]
+            db.add_all(jobs)
+            await db.commit()
+
+        monkeypatch.setattr(fake_client, "create_event", slow_create)
+        monkeypatch.setattr(fake_client, "update_event", slow_update)
+
+        async def run_worker(limit: int, skip_busy: bool) -> int:
+            async with factory() as db:
+                return await process_calendar_sync_jobs(
+                    db,
+                    user_id=uid,
+                    limit=limit,
+                    skip_busy_connections=skip_busy,
+                )
+
+        round1 = await asyncio.gather(
+            run_worker(1, False),
+            run_worker(10, False),
+            run_worker(10, False),
+            run_worker(10, False),
+        )
+        round2 = await asyncio.gather(
+            run_worker(10, False),
+            run_worker(10, False),
+        )
+        assert sum(round1) + sum(round2) == 5
+
+        assert sorted(create_calls) == ["Create 1", "Create 2", "Dup Create"]
+        assert sorted(update_calls) == ["Dup Update", "Update Existing"]
+        assert len(fake_client.mock_events.get(cal_id, [])) == 4
+
+        async with factory() as db:
+            db_jobs = (await db.scalars(select(CalendarSyncJob))).all()
+            db_links = (await db.scalars(select(CalendarEventLink))).all()
+            assert len(db_jobs) == 5
+            for job in db_jobs:
+                assert job.job_state == "completed"
+                assert job.attempt_count == 0
+                assert job.last_error_code is None
+                assert job.lease_expires_at is None
+
+            assert len(db_links) == 4
+            for link in db_links:
+                assert link.sync_state == "synced"
+                assert link.synced_schedule_revision == link.desired_schedule_revision
+                assert link.google_event_id is not None
+                assert link.google_etag is not None
+    finally:
+        reset_fake_calendar_client()
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_be05_calendar_sync_worker_sqlite_skip_busy_connections(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+):
+    """Kiểm thử skip_busy_connections=True bỏ qua connection đang giữ lock mà không chặn hay lỗi SQLite."""
+    reset_fake_calendar_client()
+    monkeypatch.setattr(settings, "CALENDAR_PROVIDER_MODE", "fake")
+    fake_client = get_calendar_client()
+    assert isinstance(fake_client, FakeCalendarClient)
+
+    db_url = "sqlite+aiosqlite:///" + (tmp_path / "worker_sqlite_skip_busy.db").as_posix()
+    engine = make_engine(db_url)
+    factory = session_factory(engine)
+    now = datetime.now(UTC)
+    uid = uuid4()
+    conn_busy_id = uuid4()
+    conn_free_id = uuid4()
+    cal_busy = "cal_busy"
+    cal_free = "cal_free"
+
+    orig_create = fake_client.create_event
+    busy_entered = asyncio.Event()
+    release_busy = asyncio.Event()
+    created_summaries: list[str] = []
+
+    async def controlled_create(access_token: str, calendar_id: str, event_payload: dict):
+        summary = str(event_payload.get("summary", ""))
+        created_summaries.append(summary)
+        if summary == "Busy First":
+            busy_entered.set()
+            await asyncio.wait_for(release_busy.wait(), timeout=5.0)
+        else:
+            await asyncio.sleep(0.01)
+        return await orig_create(access_token, calendar_id, event_payload)
+
+    try:
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+
+        async with factory() as db:
+            db.add(
+                User(
+                    id=uid,
+                    email="worker-skip@example.com",
+                    display_name="Worker Skip",
+                    is_active=True,
+                )
+            )
+            await db.flush()
+            db.add_all(
+                [
+                    _build_sqlite_worker_connection(
+                        user_id=uid,
+                        connection_id=conn_busy_id,
+                        account_ref="busy@gmail.com",
+                        write_calendar_id=cal_busy,
+                        now=now,
+                    ),
+                    _build_sqlite_worker_connection(
+                        user_id=uid,
+                        connection_id=conn_free_id,
+                        account_ref="free@gmail.com",
+                        write_calendar_id=cal_free,
+                        now=now,
+                    ),
+                ]
+            )
+            await db.flush()
+            step = await _seed_sqlite_worker_task_step(db, user_id=uid, now=now)
+
+            s_busy_1 = await _add_sqlite_worker_session(
+                db, user_id=uid, step_id=step.id, start_at=now + timedelta(hours=1)
+            )
+            s_busy_2 = await _add_sqlite_worker_session(
+                db, user_id=uid, step_id=step.id, start_at=now + timedelta(hours=2)
+            )
+            s_free = await _add_sqlite_worker_session(
+                db, user_id=uid, step_id=step.id, start_at=now + timedelta(hours=3)
+            )
+
+            l_busy_1 = CalendarEventLink(
+                id=uuid4(),
+                user_id=uid,
+                session_id=s_busy_1.id,
+                connection_id=conn_busy_id,
+                google_calendar_id=cal_busy,
+                desired_schedule_revision=1,
+                sync_state="pending",
+                is_current=True,
+            )
+            l_busy_2 = CalendarEventLink(
+                id=uuid4(),
+                user_id=uid,
+                session_id=s_busy_2.id,
+                connection_id=conn_busy_id,
+                google_calendar_id=cal_busy,
+                desired_schedule_revision=1,
+                sync_state="pending",
+                is_current=True,
+            )
+            l_free = CalendarEventLink(
+                id=uuid4(),
+                user_id=uid,
+                session_id=s_free.id,
+                connection_id=conn_free_id,
+                google_calendar_id=cal_free,
+                desired_schedule_revision=1,
+                sync_state="pending",
+                is_current=True,
+            )
+            db.add_all([l_busy_1, l_busy_2, l_free])
+            await db.flush()
+
+            db.add_all(
+                [
+                    CalendarSyncJob(
+                        id=uuid4(),
+                        user_id=uid,
+                        connection_id=conn_busy_id,
+                        event_link_id=l_busy_1.id,
+                        target_kind="session",
+                        target_ref=str(s_busy_1.id),
+                        operation="create",
+                        target_schedule_revision=1,
+                        payload_snapshot={"summary": "Busy First"},
+                        idempotency_key="skip-busy-1",
+                        job_state="queued",
+                        attempt_count=0,
+                        created_at=now - timedelta(seconds=20),
+                    ),
+                    CalendarSyncJob(
+                        id=uuid4(),
+                        user_id=uid,
+                        connection_id=conn_busy_id,
+                        event_link_id=l_busy_2.id,
+                        target_kind="session",
+                        target_ref=str(s_busy_2.id),
+                        operation="create",
+                        target_schedule_revision=1,
+                        payload_snapshot={"summary": "Busy Second"},
+                        idempotency_key="skip-busy-2",
+                        job_state="queued",
+                        attempt_count=0,
+                        created_at=now - timedelta(seconds=10),
+                    ),
+                    CalendarSyncJob(
+                        id=uuid4(),
+                        user_id=uid,
+                        connection_id=conn_free_id,
+                        event_link_id=l_free.id,
+                        target_kind="session",
+                        target_ref=str(s_free.id),
+                        operation="create",
+                        target_schedule_revision=1,
+                        payload_snapshot={"summary": "Free First"},
+                        idempotency_key="skip-free-1",
+                        job_state="queued",
+                        attempt_count=0,
+                        created_at=now - timedelta(seconds=5),
+                    ),
+                ]
+            )
+            await db.commit()
+
+        monkeypatch.setattr(fake_client, "create_event", controlled_create)
+
+        async def run_busy_first() -> int:
+            async with factory() as db:
+                return await process_calendar_sync_jobs(
+                    db,
+                    user_id=uid,
+                    connection_id=conn_busy_id,
+                    limit=1,
+                    skip_busy_connections=False,
+                )
+
+        async def run_skip_while_busy() -> int:
+            await asyncio.wait_for(busy_entered.wait(), timeout=2.0)
+            try:
+                async with factory() as db:
+                    return await process_calendar_sync_jobs(
+                        db,
+                        user_id=uid,
+                        limit=10,
+                        skip_busy_connections=True,
+                    )
+            finally:
+                release_busy.set()
+
+        processed_busy, processed_skip = await asyncio.gather(
+            run_busy_first(),
+            run_skip_while_busy(),
+        )
+        assert processed_busy == 1
+        assert processed_skip == 1
+
+        async with factory() as db:
+            remaining = await process_calendar_sync_jobs(
+                db, user_id=uid, limit=10, skip_busy_connections=True
+            )
+            assert remaining == 1
+
+            db_jobs = (await db.scalars(select(CalendarSyncJob))).all()
+            db_links = (await db.scalars(select(CalendarEventLink))).all()
+            assert all(j.job_state == "completed" and j.attempt_count == 0 for j in db_jobs)
+            assert all(link.sync_state == "synced" for link in db_links)
+
+        assert sorted(created_summaries) == ["Busy First", "Busy Second", "Free First"]
+        assert len(fake_client.mock_events.get(cal_busy, [])) == 2
+        assert len(fake_client.mock_events.get(cal_free, [])) == 1
+    finally:
+        reset_fake_calendar_client()
+        await engine.dispose()

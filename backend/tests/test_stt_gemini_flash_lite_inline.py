@@ -1,20 +1,21 @@
 """Kiểm thử chuyển đổi Backend Voice STT sang Gemini 3.5 Flash-Lite inline audio & purpose-aware routing.
 
-Bao phủ toàn bộ 9 nhóm kịch bản (mock SDK, hoàn toàn offline):
+Bao phủ toàn bộ 9 nhóm kịch bản (mock SDK/HTTP, hoàn toàn offline):
 1. Inline audio gọi models.generate_content với Part.from_bytes & temperature=0.0, không gọi files.upload
    (kèm kiểm tra > 15MB tự upload Files API + xóa file trong finally, và làm sạch code fence / ngoặc kép).
-2. Model chứa 'transcribe' (transport='auto') -> đi luồng legacy files.upload + interactions.create + files.delete.
+2. transport='transcribe_api' (legacy, chọn tường minh) -> files.upload + interactions.create + files.delete.
+   (transport='auto' với model Transcribe giờ đi transcribe_inline — xem test_stt_gemini_transcribe_inline.py.)
 3. Không có GEMINI_API_KEY nhưng có file Service Account -> dùng genai.Client(enterprise=True, ...).
 4. Sentinel [NO_SPEECH] (kể cả [NO_SPEECH]., chữ thường, [silence], [inaudible], chuỗi rỗng) -> SttError(NO_SPEECH),
-   Groq KHÔNG bị gọi; qua HTTP POST /api/v1/voice/transcriptions -> 422 NO_SPEECH_DETECTED.
-5. Gemini lỗi 429 / 503 hoặc chậm hơn primary_timeout_seconds (0.05s) -> fallback Groq trả 200,
-   provider='groq', giữ nguyên low_confidence của Groq.
-6. Purpose-aware routing: purpose='uf5_checkin' -> Groq đi trước; 'uf1_input' & 'thought_to_draft' -> Gemini đi trước;
-   khi VOICE_STT_UF5_PREFER_GROQ=False thì 'uf5_checkin' đi Gemini trước.
+   ElevenLabs KHÔNG bị gọi; qua HTTP POST /api/v1/voice/transcriptions -> 422 NO_SPEECH_DETECTED.
+5. Gemini lỗi 429 / 503 hoặc chậm hơn primary_timeout_seconds (0.05s) -> fallback ElevenLabs trả 200,
+   provider='elevenlabs'.
+6. Purpose-aware routing: purpose='uf5_checkin' -> ElevenLabs đi trước; 'uf1_input' & 'thought_to_draft' -> Gemini đi trước;
+   khi VOICE_STT_UF5_PREFER_ELEVENLABS=False thì 'uf5_checkin' đi Gemini trước.
 7. Custom SttProvider chỉ có chữ ký (audio, mime_type) vẫn chạy an toàn khi truyền purpose.
 8. Router POST /api/v1/voice/transcriptions truyền đúng purpose vào service (và vẫn tương thích mock cũ không nhận purpose).
-9. Settings defaults: VOICE_STT_TIMEOUT_SECONDS==12.0, VOICE_STT_PRIMARY_TIMEOUT_SECONDS==8.0,
-   VOICE_STT_UF5_PREFER_GROQ is True, VOICE_STT_PROVIDER=='auto', GEMINI_STT_MODEL=='gemini-3.5-flash-lite'.
+9. Settings defaults: VOICE_STT_TIMEOUT_SECONDS==12.0, VOICE_STT_PRIMARY_TIMEOUT_SECONDS==7.0,
+   VOICE_STT_UF5_PREFER_ELEVENLABS is True, VOICE_STT_PROVIDER=='auto', GEMINI_STT_MODEL=='gemini-3.5-transcribe'.
 """
 
 from __future__ import annotations
@@ -48,9 +49,9 @@ from app.services.voice_service import (
     _GEMINI_STT_PROMPT_SMART,
     _GEMINI_STT_PROMPT_VERBATIM,
     _GEMINI_STT_USER_PROMPT,
+    ElevenLabsSttProvider,
     FallbackSttProvider,
     GeminiSttProvider,
-    GroqWhisperSttProvider,
     SttError,
     SttErrorCode,
     SttResult,
@@ -258,7 +259,7 @@ async def test_gemini_transcribe_model_routes_to_legacy_interactions_api() -> No
         model="gemini-3.5-transcribe",
         mode="smart",
         language_code="vi-VN",
-        transport="auto",
+        transport="transcribe_api",
     )
     provider._client = fake_client
 
@@ -336,7 +337,7 @@ def test_gemini_get_client_missing_both_credentials_raises_provider_unavailable(
 
 
 # ------------------------------------------------------------------------------
-# Case 4: Sentinel [NO_SPEECH] / [silence] / rỗng -> NO_SPEECH, không gọi Groq, HTTP 422
+# Case 4: Sentinel [NO_SPEECH] / [silence] / rỗng -> NO_SPEECH, không gọi fallback, HTTP 422
 # ------------------------------------------------------------------------------
 
 
@@ -355,7 +356,7 @@ def test_gemini_get_client_missing_both_credentials_raises_provider_unavailable(
     ],
 )
 @pytest.mark.asyncio
-async def test_gemini_no_speech_sentinel_and_empty_raise_no_speech_without_groq_fallback(
+async def test_gemini_no_speech_sentinel_and_empty_raise_no_speech_without_fallback(
     stt_http_client: httpx.AsyncClient, raw_output: str
 ) -> None:
     fake_client, _, _, _, _ = _make_mock_gemini_client(
@@ -369,59 +370,65 @@ async def test_gemini_no_speech_sentinel_and_empty_raise_no_speech_without_groq_
     )
     gemini._client = fake_client
 
-    groq_create = AsyncMock(return_value={"text": "Không được gọi tới Groq"})
-    groq = GroqWhisperSttProvider(
-        api_key="test-groq-key",
-        model="whisper-large-v3-turbo",
+    el_calls: list[httpx.Request] = []
+    el_client = httpx.AsyncClient(
+        transport=httpx.MockTransport(
+            lambda req: (el_calls.append(req), httpx.Response(200, json={"text": "Không được gọi tới ElevenLabs"}))[1]
+        )
+    )
+    elevenlabs = ElevenLabsSttProvider(
+        api_key="test-el-key",
+        model="scribe_v2",
         language_code="vi-VN",
         timeout_seconds=5.0,
-    )
-    cast(Any, groq)._client = SimpleNamespace(
-        audio=SimpleNamespace(transcriptions=SimpleNamespace(create=groq_create))
+        http_client=el_client,
     )
 
     service = VoiceService(
         FallbackSttProvider(
             primary=gemini,
-            fallback=groq,
+            fallback=elevenlabs,
             prefer_fallback_purposes=frozenset({"uf5_checkin"}),
-            primary_timeout_seconds=8.0,
+            primary_timeout_seconds=7.0,
             total_timeout_seconds=12.0,
         ),
         timeout_seconds=12.0,
         max_audio_bytes=1024 * 1024,
     )
 
-    with pytest.raises(SttError) as exc_info:
-        await service.transcribe(
-            b"M4A-silence",
-            content_type="audio/m4a",
-            filename="silence.m4a",
-            purpose="uf1_input",
-        )
-    assert exc_info.value.code == SttErrorCode.NO_SPEECH
-    groq_create.assert_not_awaited()
+    try:
+        with pytest.raises(SttError) as exc_info:
+            await service.transcribe(
+                b"M4A-silence",
+                content_type="audio/m4a",
+                filename="silence.m4a",
+                purpose="uf1_input",
+            )
+        assert exc_info.value.code == SttErrorCode.NO_SPEECH
+        assert len(el_calls) == 0
 
-    with patch.object(voice_router_mod, "get_voice_service", return_value=service):
-        resp = await stt_http_client.post(
-            "/api/v1/voice/transcriptions",
-            headers={"Idempotency-Key": f"sentinel-{uuid4()}"},
-            data={"purpose": "uf1_input", "device_id": "dev_inline"},
-            files={"file": ("silence.m4a", b"M4A-silence", "audio/m4a")},
-        )
-    assert resp.status_code == 422, resp.text
-    assert resp.json()["error"]["code"] == "NO_SPEECH_DETECTED"
-    groq_create.assert_not_awaited()
+        with patch.object(voice_router_mod, "get_voice_service", return_value=service):
+            resp = await stt_http_client.post(
+                "/api/v1/voice/transcriptions",
+                headers={"Idempotency-Key": f"sentinel-{uuid4()}"},
+                data={"purpose": "uf1_input", "device_id": "dev_inline"},
+                files={"file": ("silence.m4a", b"M4A-silence", "audio/m4a")},
+            )
+        assert resp.status_code == 422, resp.text
+        assert resp.json()["error"]["code"] == "NO_SPEECH_DETECTED"
+        assert len(el_calls) == 0
+    finally:
+        await el_client.aclose()
 
 
 # ------------------------------------------------------------------------------
-# Case 5: Gemini lỗi 429 / 503 hoặc chậm > primary_timeout_seconds -> Groq 200
+# Case 5: Gemini lỗi 429 / 503 hoặc chậm > primary_timeout_seconds -> ElevenLabs 200
 # ------------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize("failure_mode", ["429", "503", "slow_timeout"])
 @pytest.mark.asyncio
-async def test_gemini_transient_or_primary_timeout_falls_back_to_groq_preserving_low_confidence(
+async def test_gemini_transient_or_primary_timeout_falls_back_to_elevenlabs(
     stt_http_client: httpx.AsyncClient, failure_mode: str
 ) -> None:
     if failure_mode == "429":
@@ -445,26 +452,24 @@ async def test_gemini_transient_or_primary_timeout_falls_back_to_groq_preserving
     )
     gemini._client = fake_client
 
-    groq_create = AsyncMock(
-        return_value={
-            "text": "Fallback Groq thành công",
-            "segments": [{"no_speech_prob": 0.78, "avg_logprob": -0.4}],
-        }
+    el_calls: list[httpx.Request] = []
+    el_client = httpx.AsyncClient(
+        transport=httpx.MockTransport(
+            lambda req: (el_calls.append(req), httpx.Response(200, json={"text": "Fallback ElevenLabs thành công"}))[1]
+        )
     )
-    groq = GroqWhisperSttProvider(
-        api_key="test-groq-key",
-        model="whisper-large-v3-turbo",
+    elevenlabs = ElevenLabsSttProvider(
+        api_key="test-el-key",
+        model="scribe_v2",
         language_code="vi-VN",
         timeout_seconds=5.0,
-    )
-    cast(Any, groq)._client = SimpleNamespace(
-        audio=SimpleNamespace(transcriptions=SimpleNamespace(create=groq_create))
+        http_client=el_client,
     )
 
     service = VoiceService(
         FallbackSttProvider(
             primary=gemini,
-            fallback=groq,
+            fallback=elevenlabs,
             prefer_fallback_purposes=frozenset({"uf5_checkin"}),
             primary_timeout_seconds=0.05,
             total_timeout_seconds=2.0,
@@ -473,29 +478,32 @@ async def test_gemini_transient_or_primary_timeout_falls_back_to_groq_preserving
         max_audio_bytes=1024 * 1024,
     )
 
-    res = await service.transcribe(
-        b"M4A-audio",
-        content_type="audio/m4a",
-        filename="sample.m4a",
-        purpose="uf1_input",
-    )
-    assert res.provider == "groq"
-    assert res.text == "Fallback Groq thành công"
-    assert res.low_confidence is True
-    assert gen_mock.await_count == 1
-    assert groq_create.await_count == 1
-
-    with patch.object(voice_router_mod, "get_voice_service", return_value=service):
-        resp = await stt_http_client.post(
-            "/api/v1/voice/transcriptions",
-            headers={"Idempotency-Key": f"fallback-{failure_mode}-{uuid4()}"},
-            data={"purpose": "uf1_input", "device_id": "dev_inline"},
-            files={"file": ("sample.m4a", b"M4A-audio", "audio/m4a")},
+    try:
+        res = await service.transcribe(
+            b"M4A-audio",
+            content_type="audio/m4a",
+            filename="sample.m4a",
+            purpose="uf1_input",
         )
-    assert resp.status_code == 200, resp.text
-    data = resp.json()["data"]
-    assert data["text"] == "Fallback Groq thành công"
-    assert data["low_confidence"] is True
+        assert res.provider == "elevenlabs"
+        assert res.text == "Fallback ElevenLabs thành công"
+        assert res.low_confidence is False
+        assert gen_mock.await_count == 1
+        assert len(el_calls) == 1
+
+        with patch.object(voice_router_mod, "get_voice_service", return_value=service):
+            resp = await stt_http_client.post(
+                "/api/v1/voice/transcriptions",
+                headers={"Idempotency-Key": f"fallback-{failure_mode}-{uuid4()}"},
+                data={"purpose": "uf1_input", "device_id": "dev_inline"},
+                files={"file": ("sample.m4a", b"M4A-audio", "audio/m4a")},
+            )
+        assert resp.status_code == 200, resp.text
+        data = resp.json()["data"]
+        assert data["text"] == "Fallback ElevenLabs thành công"
+        assert data["low_confidence"] is False
+    finally:
+        await el_client.aclose()
 
 
 # ------------------------------------------------------------------------------
@@ -505,50 +513,51 @@ async def test_gemini_transient_or_primary_timeout_falls_back_to_groq_preserving
 
 @pytest.mark.asyncio
 async def test_purpose_aware_routing_default_and_disabled_flag() -> None:
-    def _build_configured_service(prefer_groq_for_uf5: bool) -> tuple[VoiceService, AsyncMock, AsyncMock]:
+    def _build_configured_service(prefer_el_for_uf5: bool) -> tuple[VoiceService, AsyncMock, AsyncMock]:
         cfg = Settings(
             _env_file=None,
             VOICE_STT_PROVIDER="auto",
+            DEEPGRAM_API_KEY="",
             GEMINI_API_KEY="test-gemini-key",
-            GROQ_API_KEY="test-groq-key",
-            VOICE_STT_UF5_PREFER_GROQ=prefer_groq_for_uf5,
+            ELEVENLABS_API_KEY="test-el-key",
+            VOICE_STT_UF5_PREFER_ELEVENLABS=prefer_el_for_uf5,
         )
         svc = build_voice_service(cfg)
         assert isinstance(svc._provider, FallbackSttProvider)
 
         gemini_mock = AsyncMock(return_value="Gemini đã chép lời")
-        groq_mock = AsyncMock(return_value="Groq đã chép lời")
+        el_mock = AsyncMock(return_value="ElevenLabs đã chép lời")
         cast(Any, svc._provider._primary).transcribe = gemini_mock
-        cast(Any, svc._provider._fallback).transcribe = groq_mock
-        return svc, gemini_mock, groq_mock
+        cast(Any, svc._provider._fallback).transcribe = el_mock
+        return svc, gemini_mock, el_mock
 
-    # Mặc định VOICE_STT_UF5_PREFER_GROQ=True: uf5_checkin -> Groq trước
-    svc_default, gemini_mock, groq_mock = _build_configured_service(True)
+    # Mặc định VOICE_STT_UF5_PREFER_ELEVENLABS=True: uf5_checkin -> ElevenLabs trước
+    svc_default, gemini_mock, el_mock = _build_configured_service(True)
     res_uf5 = await svc_default.transcribe(b"RIFF-uf5", content_type="audio/wav", purpose="uf5_checkin")
-    assert res_uf5.provider == "groq"
-    assert res_uf5.text == "Groq đã chép lời"
-    groq_mock.assert_awaited_once()
+    assert res_uf5.provider == "elevenlabs"
+    assert res_uf5.text == "ElevenLabs đã chép lời"
+    el_mock.assert_awaited_once()
     gemini_mock.assert_not_awaited()
 
     # uf1_input & thought_to_draft -> Gemini trước
     for purpose in ("uf1_input", "thought_to_draft"):
-        svc_i, g_mock, q_mock = _build_configured_service(True)
+        svc_i, g_mock, e_mock = _build_configured_service(True)
         res = await svc_i.transcribe(b"RIFF-audio", content_type="audio/wav", purpose=purpose)
         assert res.provider == "gemini"
         assert res.text == "Gemini đã chép lời"
         assert res.low_confidence is False
         g_mock.assert_awaited_once()
-        q_mock.assert_not_awaited()
+        e_mock.assert_not_awaited()
 
-    # VOICE_STT_UF5_PREFER_GROQ=False: uf5_checkin -> Gemini trước
-    svc_disabled, gemini_mock_off, groq_mock_off = _build_configured_service(False)
+    # VOICE_STT_UF5_PREFER_ELEVENLABS=False: uf5_checkin -> Gemini trước
+    svc_disabled, gemini_mock_off, el_mock_off = _build_configured_service(False)
     res_uf5_off = await svc_disabled.transcribe(
         b"RIFF-uf5", content_type="audio/wav", purpose="uf5_checkin"
     )
     assert res_uf5_off.provider == "gemini"
     assert res_uf5_off.text == "Gemini đã chép lời"
     gemini_mock_off.assert_awaited_once()
-    groq_mock_off.assert_not_awaited()
+    el_mock_off.assert_not_awaited()
 
 
 # ------------------------------------------------------------------------------
@@ -650,11 +659,14 @@ async def test_router_passes_purpose_to_voice_service_and_supports_legacy_mock(
 def test_voice_stt_settings_defaults() -> None:
     cfg = Settings(_env_file=None)
     assert cfg.VOICE_STT_TIMEOUT_SECONDS == 12.0
-    assert cfg.VOICE_STT_PRIMARY_TIMEOUT_SECONDS == 8.0
-    assert cfg.VOICE_STT_UF5_PREFER_GROQ is True
+    assert cfg.VOICE_STT_PRIMARY_TIMEOUT_SECONDS == 7.0
+    assert cfg.VOICE_STT_UF5_PREFER_ELEVENLABS is True
     assert cfg.VOICE_STT_PROVIDER == "auto"
-    assert cfg.GEMINI_STT_MODEL == "gemini-3.5-flash-lite"
+    assert cfg.GEMINI_STT_MODEL == "gemini-3.5-transcribe"
     assert cfg.GEMINI_STT_TRANSPORT == "auto"
+    assert cfg.GEMINI_STT_MODE == "verbatim"
+    assert cfg.ELEVENLABS_STT_MODEL == "scribe_v2"
+    assert cfg.DEEPGRAM_STT_MODEL == "nova-3"
 
 
 # ------------------------------------------------------------------------------
@@ -687,7 +699,7 @@ def _make_pcm16_wav(samples: list[int], *, sample_rate: int = 16000) -> bytes:
     ],
 )
 @pytest.mark.asyncio
-async def test_gemini_prompt_echo_filtered_without_groq_fallback(echo_text: str) -> None:
+async def test_gemini_prompt_echo_filtered_without_fallback(echo_text: str) -> None:
     fake_client, _, _, _, _ = _make_mock_gemini_client(
         generate_content_mock=AsyncMock(return_value=SimpleNamespace(text=echo_text))
     )
@@ -699,39 +711,45 @@ async def test_gemini_prompt_echo_filtered_without_groq_fallback(echo_text: str)
     )
     gemini._client = fake_client
 
-    groq_create = AsyncMock(return_value={"text": "Không được gọi tới Groq"})
-    groq = GroqWhisperSttProvider(
-        api_key="test-groq-key",
-        model="whisper-large-v3-turbo",
+    el_calls: list[httpx.Request] = []
+    el_client = httpx.AsyncClient(
+        transport=httpx.MockTransport(
+            lambda req: (el_calls.append(req), httpx.Response(200, json={"text": "Không được gọi tới fallback"}))[1]
+        )
+    )
+    elevenlabs = ElevenLabsSttProvider(
+        api_key="test-el-key",
+        model="scribe_v2",
         language_code="vi-VN",
         timeout_seconds=5.0,
-    )
-    cast(Any, groq)._client = SimpleNamespace(
-        audio=SimpleNamespace(transcriptions=SimpleNamespace(create=groq_create))
+        http_client=el_client,
     )
 
     service = VoiceService(
         FallbackSttProvider(
             primary=gemini,
-            fallback=groq,
+            fallback=elevenlabs,
             prefer_fallback_purposes=frozenset({"uf5_checkin"}),
-            primary_timeout_seconds=8.0,
+            primary_timeout_seconds=7.0,
             total_timeout_seconds=12.0,
         ),
         timeout_seconds=12.0,
         max_audio_bytes=1024 * 1024,
     )
 
-    with pytest.raises(SttError) as exc_info:
-        await service.transcribe(
-            b"M4A-echo-test",
-            content_type="audio/m4a",
-            filename="echo.m4a",
-            purpose="uf1_input",
-        )
-    assert exc_info.value.code == SttErrorCode.NO_SPEECH
-    assert exc_info.value.detail == "prompt_echo_filtered"
-    groq_create.assert_not_awaited()
+    try:
+        with pytest.raises(SttError) as exc_info:
+            await service.transcribe(
+                b"M4A-echo-test",
+                content_type="audio/m4a",
+                filename="echo.m4a",
+                purpose="uf1_input",
+            )
+        assert exc_info.value.code == SttErrorCode.NO_SPEECH
+        assert exc_info.value.detail == "prompt_echo_filtered"
+        assert len(el_calls) == 0
+    finally:
+        await el_client.aclose()
 
 
 @pytest.mark.parametrize(
@@ -891,3 +909,147 @@ async def test_wav_corrupt_header_skips_precheck_and_calls_provider(
     )
     assert res.text == "Provider vẫn được gọi"
     provider_mock.assert_awaited_once()
+
+
+# ------------------------------------------------------------------------------
+# PR #22 Finding #7A & #7B: Gemini skips Whisper hallucination filter & strict timeout budget
+# ------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "verbatim_text",
+    [
+        "Cảm ơn các bạn đã xem",
+        "ừ ừ ừ ừ",
+    ],
+)
+@pytest.mark.asyncio
+async def test_finding7a_gemini_provider_does_not_run_whisper_hallucination_filter(
+    verbatim_text: str,
+) -> None:
+    """PR #22 #7A: Gemini giữ nguyên transcript thực tế (kể cả verbatim), còn VoiceService vẫn lọc hallucination cho provider non-gemini."""
+    fake_client, _, _, _, _ = _make_mock_gemini_client(
+        generate_content_mock=AsyncMock(return_value=SimpleNamespace(text=verbatim_text))
+    )
+    gemini = GeminiSttProvider(
+        api_key="test-gemini-key",
+        model="gemini-3.5-flash-lite",
+        mode="verbatim",
+        language_code="vi-VN",
+    )
+    gemini._client = fake_client
+
+    gemini_service = VoiceService(
+        gemini,
+        timeout_seconds=5.0,
+        max_audio_bytes=1024 * 1024,
+    )
+    res = await gemini_service.transcribe(
+        b"M4A-verbatim",
+        content_type="audio/m4a",
+        filename="verbatim.m4a",
+        purpose="uf1_input",
+    )
+    assert res.provider == "gemini"
+    assert res.text == verbatim_text
+
+    el_client = httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda _req: httpx.Response(200, json={"text": verbatim_text}))
+    )
+    elevenlabs = ElevenLabsSttProvider(
+        api_key="test-el-key",
+        model="scribe_v2",
+        language_code="vi-VN",
+        timeout_seconds=5.0,
+        http_client=el_client,
+    )
+    el_service = VoiceService(
+        elevenlabs,
+        timeout_seconds=5.0,
+        max_audio_bytes=1024 * 1024,
+    )
+    try:
+        with pytest.raises(SttError) as exc_info:
+            await el_service.transcribe(
+                b"M4A-verbatim",
+                content_type="audio/m4a",
+                filename="verbatim.m4a",
+                purpose="uf5_checkin",
+            )
+        assert exc_info.value.code == SttErrorCode.NO_SPEECH
+        assert exc_info.value.detail == "hallucination_filtered"
+    finally:
+        await el_client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_finding7b_fallback_enforces_remaining_budget_without_1s_floor() -> None:
+    """PR #22 #7B: Không có sàn max(1.0, ...); hết tổng ngân sách -> TIMEOUT fallback_timeout ngay, còn <1.0s -> cắt đúng phần còn lại."""
+    # Case 1: Primary tốn hết ngân sách 0.15s -> fallback KHÔNG được gọi, ném TIMEOUT(fallback_timeout) ngay
+    async def _slow_primary_exceeds(_audio: bytes, _mime: str) -> str:
+        await asyncio.sleep(0.30)
+        raise SttError(SttErrorCode.PROVIDER_ERROR, "late_fail")
+
+    fallback_called = False
+
+    class _SlowFailPrimary:
+        name = "gemini"
+
+        async def transcribe(self, audio: bytes, mime_type: str) -> str:
+            return await _slow_primary_exceeds(audio, mime_type)
+
+    class _SpyFallback:
+        name = "elevenlabs"
+
+        async def transcribe(self, audio: bytes, mime_type: str) -> str:
+            nonlocal fallback_called
+            fallback_called = True
+            await asyncio.sleep(0.35)
+            return "Không kịp"
+
+    svc_exhausted = VoiceService(
+        FallbackSttProvider(
+            primary=_SlowFailPrimary(),
+            fallback=_SpyFallback(),
+            primary_timeout_seconds=0.25,
+            total_timeout_seconds=0.15,
+        ),
+        timeout_seconds=0.15,
+        max_audio_bytes=1024 * 1024,
+    )
+    with pytest.raises(SttError) as exc1:
+        await svc_exhausted.transcribe(b"M4A", content_type="audio/m4a", filename="a.m4a")
+    assert exc1.value.code == SttErrorCode.TIMEOUT
+    assert exc1.value.detail == "fallback_timeout"
+    assert fallback_called is False
+
+    # Case 2: Nhánh fallback chỉ còn ~0.12s (< 1.0s) nhưng fallback mất 0.35s -> phải timeout theo ~0.12s, không được nới lên 1.0s!
+    class _FastFailPrimary:
+        name = "gemini"
+
+        async def transcribe(self, _audio: bytes, _mime_type: str) -> str:
+            await asyncio.sleep(0.05)
+            raise SttError(SttErrorCode.PROVIDER_ERROR, "boom")
+
+    class _SlowFallback:
+        name = "elevenlabs"
+
+        async def transcribe(self, _audio: bytes, _mime_type: str) -> str:
+            await asyncio.sleep(0.35)
+            return "Quá hạn"
+
+    # Kiểm tra trên cả FallbackSttProvider và legacy VoiceService(fallback_provider=...)
+    svc_legacy_budget = VoiceService(
+        _FastFailPrimary(),
+        fallback_provider=_SlowFallback(),
+        primary_timeout_seconds=0.2,
+        timeout_seconds=0.18,
+        max_audio_bytes=1024 * 1024,
+    )
+    started = asyncio.get_running_loop().time()
+    with pytest.raises(SttError) as exc2:
+        await svc_legacy_budget.transcribe(b"M4A", content_type="audio/m4a", filename="b.m4a")
+    elapsed = asyncio.get_running_loop().time() - started
+    assert exc2.value.code == SttErrorCode.TIMEOUT
+    assert exc2.value.detail == "fallback_timeout"
+    assert elapsed < 0.35

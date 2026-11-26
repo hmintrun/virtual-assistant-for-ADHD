@@ -1572,4 +1572,68 @@ async def test_mw4b_prometheus_multi_route_grammar_escaping_db_none_and_pool_res
     assert "# TYPE proactive_ai_consecutive_failures gauge" in escaped_out
 
 
+@pytest.mark.asyncio
+async def test_p3_2_metrics_protected_by_metrics_auth_token_when_deployed(monkeypatch):
+    """PR #22 P3.2: /metrics & /api/v1/metrics mở ở dev/test, khóa bằng METRICS_AUTH_TOKEN khi staging/production, không đổi OpenAPI."""
+    from app.core.config import Settings
+
+    schema = app.openapi()
+    assert "/metrics" not in schema["paths"]
+    assert not schema["paths"]["/api/v1/metrics"]["get"].get("security")
+
+    secret_cfg = Settings(_env_file=None, METRICS_AUTH_TOKEN="super-secret-scrape-token")
+    assert "super-secret-scrape-token" not in repr(secret_cfg)
+
+    async with _real_app_sqlite_env():
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            # 1) Ở development/testing: mở hoàn toàn không cần token
+            monkeypatch.setattr(settings, "ENVIRONMENT", "development")
+            monkeypatch.setattr(settings, "METRICS_AUTH_TOKEN", "")
+            for path in ("/metrics", "/api/v1/metrics"):
+                r_dev = await client.get(path)
+                assert r_dev.status_code == 200
+
+            # 2) Ở staging/production nhưng chưa cấu hình METRICS_AUTH_TOKEN -> 403 FORBIDDEN
+            monkeypatch.setattr(settings, "ENVIRONMENT", "staging")
+            monkeypatch.setattr(settings, "METRICS_AUTH_TOKEN", "")
+            for path in ("/metrics", "/api/v1/metrics"):
+                r_unconfigured = await client.get(path)
+                assert r_unconfigured.status_code == 403
+                assert r_unconfigured.json()["error"]["code"] == "FORBIDDEN"
+
+            # 3) Ở staging/production có METRICS_AUTH_TOKEN: thiếu/sai token -> 401; đúng Bearer token -> 200
+            monkeypatch.setattr(settings, "ENVIRONMENT", "production")
+            monkeypatch.setattr(settings, "METRICS_AUTH_TOKEN", "prom-token-123")
+            for path in ("/metrics", "/api/v1/metrics"):
+                r_no_hdr = await client.get(path)
+                assert r_no_hdr.status_code == 401
+                assert r_no_hdr.json()["error"]["code"] == "UNAUTHENTICATED"
+                assert r_no_hdr.headers.get("www-authenticate") == "Bearer"
+
+                r_bad_tok = await client.get(
+                    path, headers={"Authorization": "Bearer wrong-token"}
+                )
+                assert r_bad_tok.status_code == 401
+
+                # Token chứa ký tự non-ASCII Latin-1 (vd "Bearer caf\xe9") hoặc toàn khoảng trắng phải trả 401, không bao giờ 500 TypeError
+                r_non_ascii_tok = await client.get(
+                    path, headers=[(b"authorization", b"Bearer caf\xe9")]
+                )
+                assert r_non_ascii_tok.status_code == 401
+                assert r_non_ascii_tok.json()["error"]["code"] == "UNAUTHENTICATED"
+                assert r_non_ascii_tok.headers.get("www-authenticate") == "Bearer"
+
+                r_blank_tok = await client.get(
+                    path, headers={"Authorization": "Bearer    "}
+                )
+                assert r_blank_tok.status_code == 401
+                assert r_blank_tok.json()["error"]["code"] == "UNAUTHENTICATED"
+
+                r_ok = await client.get(
+                    path, headers={"Authorization": "Bearer prom-token-123"}
+                )
+                assert r_ok.status_code == 200
+                assert r_ok.headers["content-type"] == PROMETHEUS_CONTENT_TYPE
+
+
 

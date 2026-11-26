@@ -49,6 +49,7 @@
                   "task_id": "task-1",
                   "order_index": 2,
                   "title": "Hoàn thiện bản nháp",
+                  "expected_output": null,
                   "estimated_base_seconds": 3600
                 }
               ],

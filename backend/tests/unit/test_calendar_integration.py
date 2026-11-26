@@ -179,7 +179,9 @@ async def test_worker_infinite_spin_prevention(test_session: AsyncSession):
 # 5. Test ISSUE-02: Outbox Worker Xử Lý Xung Đột ETag 412
 # -------------------------------------------------------------
 @pytest.mark.asyncio
-async def test_worker_etag_conflict_handling(test_session: AsyncSession):
+async def test_worker_etag_conflict_handling(
+    test_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+):
     """Worker phát hiện 412 Conflict và dừng retry mù quáng."""
     uid = uuid4()
     user = User(id=uid, email="user2@example.com", hashed_password="pw", display_name="Test2", is_active=True)
@@ -234,7 +236,7 @@ async def test_worker_etag_conflict_handling(test_session: AsyncSession):
     async def mock_update_fail(*args, **kwargs):
         raise CalendarConflictError("ETag mismatch on Google Calendar")
 
-    cal_service.client.update_event = mock_update_fail
+    monkeypatch.setattr(cal_service.client, "update_event", mock_update_fail)
 
     status = await process_sync_job(test_session, job, cal_service)
     assert status == "conflict"

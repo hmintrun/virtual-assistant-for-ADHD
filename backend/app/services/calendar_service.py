@@ -7,12 +7,15 @@ import hashlib
 import json
 import logging
 import secrets
+from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import NAMESPACE_DNS, UUID, uuid4, uuid5
 
-from sqlalchemy import delete, or_, select
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy import delete, or_, select, update
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.calendar import (
@@ -43,18 +46,51 @@ from app.services.google_calendar_client import (
 
 logger = logging.getLogger(__name__)
 
-_OWNER_CALENDAR_LOCKS: dict[tuple[int, str], asyncio.Lock] = {}
+@dataclass
+class _RefCountedLock:
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    ref_count: int = 0
 
 
-def get_owner_calendar_lock(owner_id: str) -> asyncio.Lock:
-    """Trả về asyncio.Lock theo cặp (event_loop_id, owner_id) để tuần tự hóa thao tác confirm song song."""
+_OWNER_CALENDAR_LOCKS: dict[tuple[int, str], _RefCountedLock] = {}
+_CONNECTION_SYNC_LOCKS: dict[tuple[int, str], _RefCountedLock] = {}
+
+
+@asynccontextmanager
+async def _acquire_refcounted_lock(
+    lock_map: dict[tuple[int, str], _RefCountedLock],
+    key: tuple[int, str],
+) -> AsyncGenerator[None]:
+    entry = lock_map.get(key)
+    if entry is None:
+        entry = _RefCountedLock()
+        lock_map[key] = entry
+    entry.ref_count += 1
+    try:
+        async with entry.lock:
+            yield
+    finally:
+        entry.ref_count -= 1
+        if entry.ref_count <= 0 and lock_map.get(key) is entry:
+            lock_map.pop(key, None)
+
+
+@asynccontextmanager
+async def get_owner_calendar_lock(owner_id: str) -> AsyncGenerator[None]:
+    """Tuần tự hóa thao tác confirm song song theo (event_loop_id, owner_id) và tự dọn entry khi hết người chờ."""
     loop = asyncio.get_running_loop()
     key = (id(loop), str(owner_id))
-    lock = _OWNER_CALENDAR_LOCKS.get(key)
-    if lock is None:
-        lock = asyncio.Lock()
-        _OWNER_CALENDAR_LOCKS[key] = lock
-    return lock
+    async with _acquire_refcounted_lock(_OWNER_CALENDAR_LOCKS, key):
+        yield
+
+
+@asynccontextmanager
+async def get_connection_sync_lock(connection_id: UUID | str) -> AsyncGenerator[None]:
+    """Tuần tự hóa đồng bộ theo cặp (event_loop_id, connection_id) và tự dọn entry khi hết người chờ."""
+    loop = asyncio.get_running_loop()
+    key = (id(loop), str(_resolve_uuid(connection_id)))
+    async with _acquire_refcounted_lock(_CONNECTION_SYNC_LOCKS, key):
+        yield
 
 
 def _hash_state(state: str) -> str:
@@ -121,6 +157,104 @@ class CalendarService:
     def __init__(self, db: AsyncSession):
         self.db = db
         self.client = get_calendar_client()
+
+    @staticmethod
+    def _sanitize_read_calendar_ids(
+        read_calendar_ids: list[str] | None,
+        write_calendar_id: str | None,
+        *,
+        account_ref: str | None = None,
+        raw_calendars: list[dict[str, Any]] | None = None,
+    ) -> list[str]:
+        """Loại bỏ lịch ghi chuyên dụng (ví dụ ProPlan VA Focus) và giá trị rỗng/trùng khỏi danh sách đọc lịch bận."""
+        primary_ids: set[str] = {"primary"}
+        excluded_ids: set[str] = set()
+
+        if isinstance(account_ref, str):
+            acct = account_ref.strip()
+            if acct and acct.lower() not in (
+                "google_calendar_user",
+                "unknown@gmail.com",
+                "unknown@google.com",
+            ):
+                primary_ids.add(acct)
+
+        if raw_calendars:
+            for cal in raw_calendars:
+                cal_id = cal.get("id")
+                if not isinstance(cal_id, str):
+                    continue
+                cal_id_clean = cal_id.strip()
+                if not cal_id_clean:
+                    continue
+                if cal.get("primary"):
+                    primary_ids.add(cal_id_clean)
+                elif str(cal.get("summary") or "").strip().lower() == "proplan va focus":
+                    excluded_ids.add(cal_id_clean)
+
+        if isinstance(write_calendar_id, str):
+            write_id_clean = write_calendar_id.strip()
+            if (
+                write_id_clean
+                and write_id_clean not in ("provision_new", "create_new")
+                and write_id_clean not in primary_ids
+            ):
+                excluded_ids.add(write_id_clean)
+
+        sanitized: list[str] = []
+        seen: set[str] = set()
+        for raw_id in read_calendar_ids or []:
+            if not isinstance(raw_id, str):
+                continue
+            cal_id = raw_id.strip()
+            if not cal_id or cal_id in excluded_ids or cal_id in seen:
+                continue
+            seen.add(cal_id)
+            sanitized.append(cal_id)
+        return sanitized
+
+    async def _try_fetch_calendars_for_sanitization_detached(
+        self,
+        *,
+        credential_ref: str,
+        user_id: UUID,
+        connection_id: UUID,
+        connection_state: str,
+        read_calendar_ids: list[str] | None,
+    ) -> list[dict[str, Any]] | None:
+        """Đọc danh sách lịch không chạm DB (dùng ngoài DB lock cho Pha A)."""
+        has_non_primary_read = any(
+            isinstance(cid, str) and cid.strip() not in ("", "primary")
+            for cid in (read_calendar_ids or [])
+        )
+        if not has_non_primary_read or connection_state != "connected":
+            return None
+        try:
+            creds = _deserialize_credentials_safe(
+                credential_ref,
+                user_id=user_id,
+                connection_id=connection_id,
+            )
+            access_token = creds.get("access_token")
+            if not isinstance(access_token, str) or not access_token:
+                return None
+            return await self.client.list_calendar_list(access_token)
+        except Exception:
+            return None
+
+    async def _try_fetch_calendars_for_sanitization(
+        self,
+        conn: CalendarConnection,
+        read_calendar_ids: list[str] | None,
+    ) -> list[dict[str, Any]] | None:
+        """Đọc danh sách lịch ở chế độ read-only (không commit DB) để nhận diện ProPlan VA Focus / primary IDs."""
+        return await self._try_fetch_calendars_for_sanitization_detached(
+            credential_ref=conn.credential_ref,
+            user_id=conn.user_id,
+            connection_id=conn.id,
+            connection_state=conn.connection_state,
+            read_calendar_ids=read_calendar_ids,
+        )
 
     async def create_authorization(
         self,
@@ -350,6 +484,32 @@ class CalendarService:
         )
         return (await self.db.execute(stmt)).scalar_one_or_none()
 
+    async def mark_connection_needs_reconnect(
+        self,
+        connection_id: UUID,
+        *,
+        commit: bool = True,
+    ) -> None:
+        """Đánh dấu kết nối cần xác thực lại bằng Core SQL atomic, giữ nguyên disconnected."""
+        now_utc = datetime.now(UTC)
+        await self.db.execute(
+            update(CalendarConnection)
+            .where(
+                CalendarConnection.id == connection_id,
+                CalendarConnection.connection_state != "disconnected",
+            )
+            .values(
+                connection_state="needs_reconnect",
+                revision=CalendarConnection.revision + 1,
+                updated_at=now_utc,
+            )
+            .execution_options(synchronize_session="fetch")
+        )
+        if commit:
+            await self.db.commit()
+        else:
+            await self.db.flush()
+
     async def get_valid_access_token(self, connection: CalendarConnection) -> str:
         """Lấy access_token hợp lệ từ Fernet credential_ref, tự động refresh nếu hết hạn."""
         if connection.connection_state == "disconnected":
@@ -357,11 +517,19 @@ class CalendarService:
                 "Kết nối Google Calendar đã bị ngắt. Vui lòng kết nối lại."
             )
 
-        creds = _deserialize_credentials_safe(
-            connection.credential_ref,
-            user_id=connection.user_id,
-            connection_id=connection.id,
-        )
+        should_commit = not bool(self.db.info.get("defer_command_commit"))
+        try:
+            creds = _deserialize_credentials_safe(
+                connection.credential_ref,
+                user_id=connection.user_id,
+                connection_id=connection.id,
+            )
+        except ValueError as exc:
+            await self.mark_connection_needs_reconnect(connection.id, commit=should_commit)
+            raise CalendarAuthError(
+                "Thông tin xác thực Google Calendar không thể giải mã hoặc đã hết hiệu lực. Vui lòng kết nối lại."
+            ) from exc
+
         access_token = creds.get("access_token")
         refresh_token = creds.get("refresh_token")
         stored_at_str = creds.get("stored_at")
@@ -390,21 +558,37 @@ class CalendarService:
                     creds["refresh_token"] = new_token_data.get("refresh_token")
                 connection.credential_ref = encrypt_credentials(creds)
                 connection.connection_state = "connected"
-                await self.db.commit()
-                await self.db.refresh(connection)
+                if should_commit:
+                    await self.db.commit()
+                    await self.db.refresh(connection)
+                else:
+                    await self.db.flush()
             except CalendarAuthError as e:
-                logger.error("Permanent auth failure refreshing token for connection %s: %s", connection.id, e)
-                connection.connection_state = "needs_reconnect"
-                await self.db.commit()
-                raise CalendarAuthError("Phiên đăng nhập Google Calendar đã hết hạn và không thể làm mới. Vui lòng kết nối lại.") from e
+                logger.error(
+                    "Permanent auth failure refreshing token for connection %s: %s",
+                    connection.id,
+                    e,
+                )
+                await self.mark_connection_needs_reconnect(connection.id, commit=should_commit)
+                raise CalendarAuthError(
+                    "Phiên đăng nhập Google Calendar đã hết hạn và không thể làm mới. Vui lòng kết nối lại."
+                ) from e
             except Exception as e:
-                logger.warning("Transient network error refreshing token for connection %s: %s", connection.id, e)
-                raise CalendarClientError("Không thể kết nối đến Google Calendar để làm mới token. Vui lòng thử lại sau.", status_code=502) from e
+                logger.warning(
+                    "Transient network error refreshing token for connection %s: %s",
+                    connection.id,
+                    e,
+                )
+                raise CalendarClientError(
+                    "Không thể kết nối đến Google Calendar để làm mới token. Vui lòng thử lại sau.",
+                    status_code=502,
+                ) from e
 
         if not access_token:
-            connection.connection_state = "needs_reconnect"
-            await self.db.commit()
-            raise CalendarAuthError("Không tìm thấy thông tin đăng nhập hợp lệ. Vui lòng kết nối lại.")
+            await self.mark_connection_needs_reconnect(connection.id, commit=should_commit)
+            raise CalendarAuthError(
+                "Không tìm thấy thông tin đăng nhập hợp lệ. Vui lòng kết nối lại."
+            )
 
         return access_token
 
@@ -417,7 +601,11 @@ class CalendarService:
             raise CalendarClientError("Không tìm thấy kết nối lịch tương ứng.", status_code=404)
 
         access_token = await self.get_valid_access_token(conn)
-        raw_items = await self.client.list_calendar_list(access_token)
+        try:
+            raw_items = await self.client.list_calendar_list(access_token)
+        except CalendarAuthError:
+            await self.mark_connection_needs_reconnect(conn.id)
+            raise
         if conn.account_ref in ("unknown@google.com", "unknown@gmail.com"):
             for item in raw_items:
                 cal_id = item.get("id")
@@ -446,7 +634,29 @@ class CalendarService:
                             conn = await self.get_connection_by_id(user_id, connection_id) or conn
                     break
 
-        read_ids = set(conn.read_calendar_ids or [])
+        current_read_ids = list(conn.read_calendar_ids or [])
+        sanitized_read_ids = self._sanitize_read_calendar_ids(
+            current_read_ids,
+            conn.write_calendar_id,
+            account_ref=conn.account_ref,
+            raw_calendars=raw_items,
+        )
+        if sanitized_read_ids != current_read_ids:
+            conn.read_calendar_ids = sanitized_read_ids
+            try:
+                await self.db.commit()
+                await self.db.refresh(conn)
+            except SQLAlchemyError:
+                await self.db.rollback()
+                conn = await self.get_connection_by_id(user_id, connection_id) or conn
+                sanitized_read_ids = self._sanitize_read_calendar_ids(
+                    conn.read_calendar_ids,
+                    conn.write_calendar_id,
+                    account_ref=conn.account_ref,
+                    raw_calendars=raw_items,
+                )
+
+        read_ids = set(sanitized_read_ids)
         write_id = conn.write_calendar_id
 
         items = [
@@ -482,7 +692,13 @@ class CalendarService:
         if not conn:
             raise CalendarClientError("Không tìm thấy kết nối lịch tương ứng.", status_code=404)
 
-        conn.read_calendar_ids = read_calendar_ids
+        raw_cals = await self._try_fetch_calendars_for_sanitization(conn, read_calendar_ids)
+        conn.read_calendar_ids = self._sanitize_read_calendar_ids(
+            read_calendar_ids,
+            write_calendar_id,
+            account_ref=conn.account_ref,
+            raw_calendars=raw_cals,
+        )
         conn.write_calendar_id = write_calendar_id
         await self.db.commit()
         await self.db.refresh(conn)
@@ -512,6 +728,13 @@ class CalendarService:
         if not conn:
             raise CalendarClientError("Không tìm thấy kết nối lịch.", status_code=404)
 
+        raw_cals = await self._try_fetch_calendars_for_sanitization(conn, read_calendar_ids)
+        sanitized_read_ids = self._sanitize_read_calendar_ids(
+            read_calendar_ids,
+            write_calendar_id,
+            account_ref=conn.account_ref,
+            raw_calendars=raw_cals,
+        )
         preview = CalendarPreview(
             id=uuid4(),
             user_id=uid,
@@ -524,7 +747,7 @@ class CalendarService:
                 "connection_revision": conn.revision,
             },
             payload={
-                "read_calendar_ids": read_calendar_ids,
+                "read_calendar_ids": sanitized_read_ids,
                 "write_calendar_id": write_calendar_id,
                 "existing_event_action": existing_event_action,
             },
@@ -542,23 +765,23 @@ class CalendarService:
         preview_id: str | UUID,
         expected_preview_revision: int | None = None,
     ) -> CalendarConnection:
-        """Áp dụng cấu hình từ preview đã xác nhận, thực hiện provisioning secondary calendar nếu cần."""
+        """Áp dụng cấu hình từ preview đã xác nhận theo 2 pha lock-free I/O mạng ngoài."""
         uid = _resolve_uuid(user_id)
         pid = _resolve_uuid(preview_id)
 
         async with get_owner_calendar_lock(str(uid)):
-            await command_service.lock_owner(self.db, str(uid))
-
-            stmt = (
-                select(CalendarPreview)
-                .where(
-                    CalendarPreview.user_id == uid,
-                    CalendarPreview.id == pid,
-                    CalendarPreview.kind == "configuration",
+            # Pha A (Read-only pre-check + External Google HTTP — KHÔNG giữ lock_owner)
+            preview = (
+                await self.db.execute(
+                    select(CalendarPreview)
+                    .where(
+                        CalendarPreview.user_id == uid,
+                        CalendarPreview.id == pid,
+                        CalendarPreview.kind == "configuration",
+                    )
+                    .execution_options(populate_existing=True)
                 )
-                .execution_options(populate_existing=True)
-            )
-            preview = (await self.db.execute(stmt)).scalar_one_or_none()
+            ).scalar_one_or_none()
             if not preview:
                 raise CalendarClientError(
                     "Bản xem trước cấu hình không tồn tại.", status_code=404
@@ -568,23 +791,6 @@ class CalendarService:
                 raise CalendarClientError(
                     "Thiếu expected_preview_revision khi xác nhận bản xem trước cấu hình.",
                     status_code=422,
-                )
-
-            if preview.status == "pending" and preview.revision != expected_preview_revision:
-                raise CalendarClientError(
-                    "Phiên bản bản xem trước không khớp (đã bị cập nhật).",
-                    status_code=409,
-                    error_code="REVISION_CONFLICT",
-                )
-
-            now_utc = datetime.now(UTC)
-            if preview.status == "pending" and preview.expires_at and preview.expires_at < now_utc:
-                preview.status = "expired"
-                await self.db.commit()
-                raise CalendarClientError(
-                    "Bản xem trước cấu hình đã hết hạn. Vui lòng tạo bản xem trước mới.",
-                    status_code=409,
-                    error_code="PREVIEW_EXPIRED",
                 )
 
             conn = (
@@ -597,7 +803,6 @@ class CalendarService:
             if not conn or conn.user_id != uid:
                 raise CalendarClientError("Không tìm thấy kết nối liên quan.", status_code=404)
 
-            # Idempotent replay thống nhất với event-change-previews (Risk P1-D03 / UF6-BUG-04)
             if preview.status == "confirmed":
                 valid_replay_revisions = {preview.revision, max(1, preview.revision - 1)}
                 if expected_preview_revision not in valid_replay_revisions:
@@ -606,6 +811,7 @@ class CalendarService:
                         status_code=409,
                         error_code="REVISION_CONFLICT",
                     )
+                # Không rollback() ở đây để giữ nguyên thuộc tính ORM trên conn khi router serialize (HIGH-2)
                 return conn
 
             if preview.status == "expired":
@@ -620,6 +826,39 @@ class CalendarService:
                     "Bản xem trước cấu hình đã được xử lý hoặc hết hạn.",
                     status_code=409,
                     error_code="PREVIEW_ALREADY_PROCESSED",
+                )
+
+            if preview.revision != expected_preview_revision:
+                raise CalendarClientError(
+                    "Phiên bản bản xem trước không khớp (đã bị cập nhật).",
+                    status_code=409,
+                    error_code="REVISION_CONFLICT",
+                )
+
+            now_utc = datetime.now(UTC)
+            if preview.expires_at and _ensure_utc(preview.expires_at) < now_utc:
+                preview_id_uuid = preview.id
+                if self.db.in_transaction():
+                    await self.db.rollback()
+                await command_service.lock_owner(self.db, str(uid))
+                fresh_preview = (
+                    await self.db.execute(
+                        select(CalendarPreview)
+                        .where(
+                            CalendarPreview.user_id == uid,
+                            CalendarPreview.id == preview_id_uuid,
+                            CalendarPreview.kind == "configuration",
+                        )
+                        .execution_options(populate_existing=True)
+                    )
+                ).scalar_one_or_none()
+                if fresh_preview is not None and fresh_preview.status == "pending":
+                    fresh_preview.status = "expired"
+                    await self.db.commit()
+                raise CalendarClientError(
+                    "Bản xem trước cấu hình đã hết hạn. Vui lòng tạo bản xem trước mới.",
+                    status_code=409,
+                    error_code="PREVIEW_EXPIRED",
                 )
 
             if conn.connection_state != "connected":
@@ -640,19 +879,60 @@ class CalendarService:
                 )
 
             payload = preview.payload or {}
-            read_ids = payload.get("read_calendar_ids", [])
+            read_ids = list(payload.get("read_calendar_ids") or [])
             write_id = payload.get("write_calendar_id")
             action = payload.get("existing_event_action")
+            conn_id = conn.id
+            expected_conn_rev = conn.revision
+            conn_cred_ref = conn.credential_ref
+            conn_state_snap = conn.connection_state
+            needs_provision = action == "provision_new" or write_id in (
+                "provision_new",
+                "create_new",
+            )
 
-            # Provisioning secondary calendar "ProPlan VA Focus" nếu được yêu cầu (BUG-14: kiểm tra tránh tạo trùng)
-            if action == "provision_new" or write_id in ("provision_new", "create_new"):
-                access_token = await self.get_valid_access_token(conn)
-                expected_conn_rev = conn.revision
-                # Kiểm tra xem tài khoản đã có lịch ProPlan VA Focus từ trước chưa
-                existing_cals = await self.client.list_calendar_list(access_token)
+            # Giải phóng read transaction trước khi thực hiện HTTP Google bên ngoài DB lock
+            if self.db.in_transaction():
+                await self.db.rollback()
+
+            raw_cals: list[dict[str, Any]] | None = None
+            if needs_provision:
+                fresh_conn = (
+                    await self.db.execute(
+                        select(CalendarConnection)
+                        .where(CalendarConnection.id == conn_id)
+                        .execution_options(populate_existing=True)
+                    )
+                ).scalar_one_or_none()
+                if not fresh_conn or fresh_conn.user_id != uid:
+                    raise CalendarClientError("Không tìm thấy kết nối liên quan.", status_code=404)
+                if fresh_conn.connection_state != "connected":
+                    raise CalendarClientError(
+                        "Kết nối lịch không ở trạng thái đang kết nối. Vui lòng kết nối lại.",
+                        status_code=409,
+                        error_code="CALENDAR_CONFLICT",
+                    )
+                if fresh_conn.revision != expected_conn_rev:
+                    raise CalendarClientError(
+                        "Kết nối lịch đã thay đổi kể từ khi tạo bản xem trước. Vui lòng tạo lại bản xem trước.",
+                        status_code=409,
+                        error_code="REVISION_CONFLICT",
+                    )
+
+                access_token = await self.get_valid_access_token(fresh_conn)
+                expected_conn_rev = fresh_conn.revision
+                if self.db.in_transaction():
+                    await self.db.rollback()
+
+                try:
+                    existing_cals = await self.client.list_calendar_list(access_token)
+                except CalendarAuthError:
+                    await self.mark_connection_needs_reconnect(conn_id)
+                    raise
+                raw_cals = existing_cals
                 found_id = None
                 for c in existing_cals:
-                    if c.get("summary") == "ProPlan VA Focus":
+                    if str(c.get("summary") or "").strip().lower() == "proplan va focus":
                         found_id = c.get("id")
                         break
 
@@ -666,90 +946,125 @@ class CalendarService:
                             time_zone="Asia/Ho_Chi_Minh",
                         )
                         write_id = new_cal.get("id")
+                    except CalendarAuthError:
+                        await self.mark_connection_needs_reconnect(conn_id)
+                        raise
                     except Exception as e:
                         logger.error("Failed to provision secondary calendar: %s", e)
                         raise CalendarClientError(
                             f"Không thể tạo lịch ProPlan VA Focus: {e}", status_code=502
                         ) from e
+            else:
+                raw_cals = await self._try_fetch_calendars_for_sanitization_detached(
+                    credential_ref=conn_cred_ref,
+                    user_id=uid,
+                    connection_id=conn_id,
+                    connection_state=conn_state_snap,
+                    read_calendar_ids=read_ids,
+                )
 
-                # Tái chiếm khóa chủ sở hữu & tải lại preview/conn sau I/O mạng hoặc commit refresh token
-                await command_service.lock_owner(self.db, str(uid))
-                preview = (
-                    await self.db.execute(
-                        select(CalendarPreview)
-                        .where(
-                            CalendarPreview.user_id == uid,
-                            CalendarPreview.id == pid,
-                            CalendarPreview.kind == "configuration",
-                        )
-                        .execution_options(populate_existing=True)
-                    )
-                ).scalar_one_or_none()
-                if not preview:
-                    raise CalendarClientError(
-                        "Bản xem trước cấu hình không tồn tại.", status_code=404
-                    )
+            # Pha B (Short Atomic DB Write dưới lock_owner — 0 HTTP calls)
+            if self.db.in_transaction():
+                await self.db.rollback()
+            await command_service.lock_owner(self.db, str(uid))
 
-                conn = (
-                    await self.db.execute(
-                        select(CalendarConnection)
-                        .where(CalendarConnection.id == preview.connection_id)
-                        .execution_options(populate_existing=True)
+            preview = (
+                await self.db.execute(
+                    select(CalendarPreview)
+                    .where(
+                        CalendarPreview.user_id == uid,
+                        CalendarPreview.id == pid,
+                        CalendarPreview.kind == "configuration",
                     )
-                ).scalar_one_or_none()
-                if not conn or conn.user_id != uid:
-                    raise CalendarClientError(
-                        "Không tìm thấy kết nối liên quan.", status_code=404
-                    )
+                    .execution_options(populate_existing=True)
+                )
+            ).scalar_one_or_none()
+            if not preview:
+                raise CalendarClientError(
+                    "Bản xem trước cấu hình không tồn tại.", status_code=404
+                )
 
-                if preview.status == "confirmed":
-                    valid_replay_revisions = {preview.revision, max(1, preview.revision - 1)}
-                    if expected_preview_revision not in valid_replay_revisions:
-                        raise CalendarClientError(
-                            "Phiên bản bản xem trước không khớp (đã bị cập nhật).",
-                            status_code=409,
-                            error_code="REVISION_CONFLICT",
-                        )
-                    return conn
+            conn = (
+                await self.db.execute(
+                    select(CalendarConnection)
+                    .where(CalendarConnection.id == preview.connection_id)
+                    .execution_options(populate_existing=True)
+                )
+            ).scalar_one_or_none()
+            if not conn or conn.user_id != uid:
+                raise CalendarClientError("Không tìm thấy kết nối liên quan.", status_code=404)
 
-                if preview.status == "expired":
-                    raise CalendarClientError(
-                        "Bản xem trước cấu hình đã hết hạn. Vui lòng tạo bản xem trước mới.",
-                        status_code=409,
-                        error_code="PREVIEW_EXPIRED",
-                    )
-
-                if preview.status != "pending":
-                    raise CalendarClientError(
-                        "Bản xem trước cấu hình đã được xử lý hoặc hết hạn.",
-                        status_code=409,
-                        error_code="PREVIEW_ALREADY_PROCESSED",
-                    )
-
-                if preview.revision != expected_preview_revision:
+            if preview.status == "confirmed":
+                valid_replay_revisions = {preview.revision, max(1, preview.revision - 1)}
+                if expected_preview_revision not in valid_replay_revisions:
                     raise CalendarClientError(
                         "Phiên bản bản xem trước không khớp (đã bị cập nhật).",
                         status_code=409,
                         error_code="REVISION_CONFLICT",
                     )
-
-                if conn.connection_state != "connected":
-                    raise CalendarClientError(
-                        "Kết nối lịch không ở trạng thái đang kết nối. Vui lòng kết nối lại.",
-                        status_code=409,
-                        error_code="CALENDAR_CONFLICT",
+                await self.db.rollback()
+                fresh_replay_conn = (
+                    await self.db.execute(
+                        select(CalendarConnection)
+                        .where(CalendarConnection.id == conn_id)
+                        .execution_options(populate_existing=True)
                     )
+                ).scalar_one()
+                return fresh_replay_conn
 
-                if conn.revision != expected_conn_rev:
-                    raise CalendarClientError(
-                        "Kết nối lịch đã thay đổi kể từ khi tạo bản xem trước. Vui lòng tạo lại bản xem trước.",
-                        status_code=409,
-                        error_code="REVISION_CONFLICT",
-                    )
+            if preview.status == "expired":
+                raise CalendarClientError(
+                    "Bản xem trước cấu hình đã hết hạn. Vui lòng tạo bản xem trước mới.",
+                    status_code=409,
+                    error_code="PREVIEW_EXPIRED",
+                )
 
-            conn.read_calendar_ids = read_ids
+            if preview.status != "pending":
+                raise CalendarClientError(
+                    "Bản xem trước cấu hình đã được xử lý hoặc hết hạn.",
+                    status_code=409,
+                    error_code="PREVIEW_ALREADY_PROCESSED",
+                )
+
+            if preview.revision != expected_preview_revision:
+                raise CalendarClientError(
+                    "Phiên bản bản xem trước không khớp (đã bị cập nhật).",
+                    status_code=409,
+                    error_code="REVISION_CONFLICT",
+                )
+
+            now_utc_b = datetime.now(UTC)
+            if preview.expires_at and _ensure_utc(preview.expires_at) < now_utc_b:
+                preview.status = "expired"
+                await self.db.commit()
+                raise CalendarClientError(
+                    "Bản xem trước cấu hình đã hết hạn. Vui lòng tạo bản xem trước mới.",
+                    status_code=409,
+                    error_code="PREVIEW_EXPIRED",
+                )
+
+            if conn.connection_state != "connected":
+                raise CalendarClientError(
+                    "Kết nối lịch không ở trạng thái đang kết nối. Vui lòng kết nối lại.",
+                    status_code=409,
+                    error_code="CALENDAR_CONFLICT",
+                )
+
+            if conn.revision != expected_conn_rev:
+                raise CalendarClientError(
+                    "Kết nối lịch đã thay đổi kể từ khi tạo bản xem trước. Vui lòng tạo lại bản xem trước.",
+                    status_code=409,
+                    error_code="REVISION_CONFLICT",
+                )
+
+            conn.read_calendar_ids = self._sanitize_read_calendar_ids(
+                read_ids,
+                write_id,
+                account_ref=conn.account_ref,
+                raw_calendars=raw_cals,
+            )
             conn.write_calendar_id = write_id
-            conn.last_successful_sync_at = datetime.now(UTC)
+            conn.last_successful_sync_at = now_utc_b
             preview.status = "confirmed"
 
             await self.db.commit()
@@ -759,15 +1074,58 @@ class CalendarService:
     async def disconnect(
         self, user_id: str | UUID, connection_id: str | UUID
     ) -> CalendarConnection:
-        """Ngắt kết nối tài khoản Calendar."""
-        conn = await self.get_connection_by_id(user_id, connection_id)
-        if not conn:
-            raise CalendarClientError("Không tìm thấy kết nối lịch tương ứng.", status_code=404)
+        """Ngắt kết nối tài khoản Calendar, hủy toàn bộ sync job còn mở và bảo toàn Task/Step/Session."""
+        uid = _resolve_uuid(user_id)
+        cid = _resolve_uuid(connection_id)
+        await self.db.rollback()
+        async with get_connection_sync_lock(cid):
+            conn = (
+                await self.db.execute(
+                    select(CalendarConnection)
+                    .where(CalendarConnection.user_id == uid, CalendarConnection.id == cid)
+                    .execution_options(populate_existing=True)
+                )
+            ).scalar_one_or_none()
+            if not conn:
+                raise CalendarClientError("Không tìm thấy kết nối lịch tương ứng.", status_code=404)
 
-        conn.connection_state = "disconnected"
-        await self.db.commit()
-        await self.db.refresh(conn)
-        return conn
+            now_utc = datetime.now(UTC)
+            await self.db.execute(
+                update(CalendarConnection)
+                .where(CalendarConnection.id == cid, CalendarConnection.user_id == uid)
+                .values(
+                    connection_state="disconnected",
+                    updated_at=now_utc,
+                    revision=CalendarConnection.revision + 1,
+                )
+                .execution_options(synchronize_session="fetch")
+            )
+            await self.db.execute(
+                update(CalendarSyncJob)
+                .where(
+                    CalendarSyncJob.user_id == uid,
+                    CalendarSyncJob.connection_id == cid,
+                    CalendarSyncJob.job_state.in_(("queued", "retry", "conflict", "running")),
+                )
+                .values(
+                    job_state="cancelled",
+                    last_error_code="DISCONNECTED",
+                    next_retry_at=None,
+                    lease_expires_at=None,
+                    updated_at=now_utc,
+                    revision=CalendarSyncJob.revision + 1,
+                )
+                .execution_options(synchronize_session="fetch")
+            )
+            await self.db.commit()
+            fresh_conn = (
+                await self.db.execute(
+                    select(CalendarConnection)
+                    .where(CalendarConnection.user_id == uid, CalendarConnection.id == cid)
+                    .execution_options(populate_existing=True)
+                )
+            ).scalar_one()
+            return fresh_conn
 
     async def reconcile_external_link_changes(
         self, user_id: str | UUID, connection_id: str | UUID
@@ -841,9 +1199,14 @@ class CalendarService:
             if not link.google_event_id:
                 continue
             links_checked += 1
-            remote_event = await self.client.get_event(
-                access_token, link.google_calendar_id, str(link.google_event_id)
-            )
+            try:
+                remote_event = await self.client.get_event(
+                    access_token, link.google_calendar_id, str(link.google_event_id)
+                )
+            except CalendarAuthError:
+                await self.db.rollback()
+                await self.mark_connection_needs_reconnect(conn_id)
+                raise
             now_utc = datetime.now(UTC)
 
             if (

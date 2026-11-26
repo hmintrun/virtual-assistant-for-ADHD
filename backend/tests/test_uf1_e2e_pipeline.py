@@ -1,5 +1,5 @@
 """Kiểm thử tích hợp E2E HTTP 4 tầng cho luồng UF1 -> UF2 (Phase 5 — T5.1):
-Voice Upload -> STT (Groq verbose_json / Auto Failover / Noise Gate) -> Vietnamese ITN
+Voice Upload -> STT (Gemini 3.5 Transcribe / ElevenLabs Scribe v2 / Deepgram Nova-3 / Auto Failover / Noise Gate) -> Vietnamese ITN
 -> UF1 Draft Create & Single-Round Analyze -> Confirm Summary -> UF2 Plan Candidate.
 """
 
@@ -8,7 +8,6 @@ from __future__ import annotations
 import asyncio
 import json
 from datetime import datetime
-from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
 from uuid import UUID, uuid4
@@ -41,7 +40,9 @@ from app.services.ai_service import AIService, ai_service
 from app.services.voice_service import (
     FallbackSttProvider,
     GeminiSttProvider,
-    GroqWhisperSttProvider,
+    SttError,
+    SttErrorCode,
+    SttProviderDetails,
     VoiceService,
     get_voice_service,
 )
@@ -64,29 +65,79 @@ class _FrozenDatetime(datetime):
 
 
 class _StatusCodeError(Exception):
-    """Lỗi giả lập từ SDK Groq mang thuộc tính status_code (ví dụ 429 RATE_LIMITED)."""
+    """Lỗi giả lập từ provider STT mang thuộc tính status_code (ví dụ 429 RATE_LIMITED)."""
 
     def __init__(self, status_code: int, message: str = "provider error") -> None:
         super().__init__(message)
         self.status_code = status_code
 
 
+class _MockDetailsPrimaryProvider:
+    """Adapter kiểm thử E2E chuyển payload giả lập thành SttProviderDetails cho VoiceService."""
+
+    name = "elevenlabs"
+
+    def __init__(self, create_mock: AsyncMock) -> None:
+        self._create_mock = create_mock
+
+    async def transcribe_verbose(
+        self, audio: bytes, mime_type: str, *, contextual_hints: list[str] | None = None
+    ) -> SttProviderDetails:
+        _ = (audio, mime_type, contextual_hints)
+        try:
+            payload = await self._create_mock()
+        except Exception as exc:
+            if isinstance(exc, SttError):
+                raise
+            code = getattr(exc, "status_code", None)
+            if code in (401, 403):
+                raise SttError(SttErrorCode.PROVIDER_UNAVAILABLE, f"http_{code}") from exc
+            if code == 429:
+                raise SttError(SttErrorCode.RATE_LIMITED, "http_429") from exc
+            if isinstance(code, int) and code >= 400:
+                raise SttError(SttErrorCode.PROVIDER_ERROR, f"http_{code}") from exc
+            if isinstance(exc, TimeoutError):
+                raise SttError(SttErrorCode.TIMEOUT, "timeout") from exc
+            raise SttError(SttErrorCode.PROVIDER_ERROR, type(exc).__name__) from exc
+
+        segs = payload.get("segments") if isinstance(payload, dict) else getattr(payload, "segments", None)
+        raw_text = payload.get("text") if isinstance(payload, dict) else getattr(payload, "text", None)
+        text = str(raw_text or "").strip()
+        if isinstance(segs, (list, tuple)) and segs:
+            parsed_segs = [
+                (
+                    seg.get("no_speech_prob") if isinstance(seg, dict) else getattr(seg, "no_speech_prob", None),
+                    seg.get("avg_logprob") if isinstance(seg, dict) else getattr(seg, "avg_logprob", None),
+                )
+                for seg in segs
+            ]
+            non_silent = [
+                (nsp, alp)
+                for nsp, alp in parsed_segs
+                if not (nsp is not None and alp is not None and nsp > 0.85 and alp < -1.2)
+            ]
+            all_silent = len(non_silent) == 0
+            target = parsed_segs if all_silent else non_silent
+            nsps = [nsp for nsp, _ in target if nsp is not None]
+            alps = [alp for _, alp in target if alp is not None]
+            return SttProviderDetails(
+                text=text,
+                no_speech_prob=max(nsps) if nsps else None,
+                avg_logprob=min(alps) if alps else None,
+                all_segments_silent=all_silent,
+            )
+        return SttProviderDetails(text=text)
+
+    async def transcribe(self, audio: bytes, mime_type: str, *, contextual_hints: list[str] | None = None) -> str:
+        return (await self.transcribe_verbose(audio, mime_type, contextual_hints=contextual_hints)).text
+
+
 def _build_auto_voice_service(
-    groq_create_mock: AsyncMock,
+    primary_create_mock: AsyncMock,
     gemini_transcribe_mock: AsyncMock | None = None,
 ) -> tuple[VoiceService, AsyncMock]:
-    """Khởi tạo VoiceService chế độ auto (Groq primary -> Gemini fallback) với mock SDK."""
-    groq_provider = GroqWhisperSttProvider(
-        api_key="test-groq-key",
-        model="whisper-large-v3-turbo",
-        language_code="vi-VN",
-        timeout_seconds=5.0,
-    )
-    groq_provider._client = SimpleNamespace(
-        audio=SimpleNamespace(
-            transcriptions=SimpleNamespace(create=groq_create_mock),
-        )
-    )
+    """Khởi tạo VoiceService chế độ auto với mock provider details -> Gemini fallback."""
+    primary_provider = _MockDetailsPrimaryProvider(primary_create_mock)
     gemini_provider = GeminiSttProvider(
         api_key="test-gemini-key",
         model="gemini-3.5-transcribe",
@@ -98,7 +149,7 @@ def _build_auto_voice_service(
     )
     gemini_provider.transcribe = gemini_mock  # type: ignore[method-assign]
 
-    fallback = FallbackSttProvider(primary=groq_provider, fallback=gemini_provider)
+    fallback = FallbackSttProvider(primary=primary_provider, fallback=gemini_provider)
     service = VoiceService(
         fallback,
         timeout_seconds=5.0,
@@ -223,13 +274,13 @@ async def test_case1_happy_path_4tier_e2e_voice_stt_itn_uf1_to_uf2_candidates(
         "Ờm tối nay viết báo cáo tuần 3 trang trước mười giờ tối, "
         "làm khoảng một tiếng rưỡi từ bảy rưỡi tối đến chín giờ tối"
     )
-    groq_create = AsyncMock(
+    primary_create = AsyncMock(
         return_value={
             "text": raw_stt_transcript,
             "segments": [{"no_speech_prob": 0.04, "avg_logprob": -0.18}],
         }
     )
-    voice_service, gemini_mock = _build_auto_voice_service(groq_create)
+    voice_service, gemini_mock = _build_auto_voice_service(primary_create)
     set_voice_service(voice_service)
 
     # 1. Tầng Voice / STT: Upload multipart audio lên POST /api/v1/voice/transcriptions
@@ -244,7 +295,7 @@ async def test_case1_happy_path_4tier_e2e_voice_stt_itn_uf1_to_uf2_candidates(
     assert stt_data["text"] == raw_stt_transcript
     assert stt_data["input_source"] == "voice"
     assert stt_data["low_confidence"] is False
-    groq_create.assert_awaited_once()
+    primary_create.assert_awaited_once()
     gemini_mock.assert_not_awaited()
 
     # 2. Tầng UF1 Draft Creation: Tạo bản nháp từ kết quả STT
@@ -420,13 +471,13 @@ async def test_case2_turn2_duration_synthesis_and_long_title_over_100_chars(
     )
     assert len(long_spoken_turn1) > 100
 
-    groq_create = AsyncMock(
+    primary_create = AsyncMock(
         return_value={
             "text": long_spoken_turn1,
             "segments": [{"no_speech_prob": 0.08, "avg_logprob": -0.22}],
         }
     )
-    voice_service, _ = _build_auto_voice_service(groq_create)
+    voice_service, _ = _build_auto_voice_service(primary_create)
     set_voice_service(voice_service)
 
     stt_resp = await client.post(
@@ -577,7 +628,7 @@ async def test_case3_low_confidence_replay_auto_failover_and_noise_gate(
     """Case 3: E2E low_confidence=True, Auto Failover & Noise Gate:
     - 3A: Audio nhiễu (no_speech_prob=0.78, avg_logprob=-0.6) -> HTTP 200, low_confidence=True,
           bảo toàn qua Idempotency-Key replay (cả in-memory cache và DB CommandReceipt).
-    - 3B: Groq 429 RATE_LIMITED tự động failover sang Gemini -> HTTP 200, low_confidence=False,
+    - 3B: Nhánh chính 429 RATE_LIMITED tự động failover sang Gemini -> HTTP 200, low_confidence=False,
           tiếp tục tạo bản nháp POST /api/v1/drafts thành công.
     - 3C: Audio im lặng / ảo giác (NO_SPEECH) -> HTTP 422 NO_SPEECH_DETECTED và KHÔNG gọi Gemini fallback.
     """
@@ -587,13 +638,13 @@ async def test_case3_low_confidence_replay_auto_failover_and_noise_gate(
     set_voice_service = uf1_e2e_env["set_voice_service"]
 
     # --- 3A: Noisy audio -> low_confidence=True & Idempotency replay (in-memory + DB) ---
-    noisy_groq = AsyncMock(
+    noisy_primary = AsyncMock(
         return_value={
             "text": "Ôn tập giải thuật quy hoạch động tối thứ 5",
             "segments": [{"no_speech_prob": 0.78, "avg_logprob": -0.6}],
         }
     )
-    noisy_service, noisy_gemini = _build_auto_voice_service(noisy_groq)
+    noisy_service, noisy_gemini = _build_auto_voice_service(noisy_primary)
     set_voice_service(noisy_service)
 
     noisy_audio = b"RIFF-noisy-audio-case3a"
@@ -608,7 +659,7 @@ async def test_case3_low_confidence_replay_auto_failover_and_noise_gate(
     data_noisy = resp_noisy.json()["data"]
     assert data_noisy["low_confidence"] is True
     assert data_noisy["text"] == "Ôn tập giải thuật quy hoạch động tối thứ 5"
-    assert noisy_groq.await_count == 1
+    assert noisy_primary.await_count == 1
     noisy_gemini.assert_not_awaited()
 
     # Xóa DB CommandReceipt để ép replay đi qua nhánh _VOICE_IDEMPOTENCY_STORE in-memory
@@ -625,7 +676,7 @@ async def test_case3_low_confidence_replay_auto_failover_and_noise_gate(
     assert resp_mem_replay.status_code == 200, resp_mem_replay.text
     assert resp_mem_replay.json()["data"] == data_noisy
     assert resp_mem_replay.json()["data"]["low_confidence"] is True
-    assert noisy_groq.await_count == 1
+    assert noisy_primary.await_count == 1
 
     # Tạo lượt mới để lưu DB CommandReceipt rồi xóa _VOICE_IDEMPOTENCY_STORE -> ép replay từ DB
     idem_db = "e2e-c3-low-conf-db"
@@ -637,7 +688,7 @@ async def test_case3_low_confidence_replay_auto_failover_and_noise_gate(
     )
     assert resp_db_init.status_code == 200, resp_db_init.text
     assert resp_db_init.json()["data"]["low_confidence"] is True
-    assert noisy_groq.await_count == 2
+    assert noisy_primary.await_count == 2
 
     voice_router_mod._VOICE_IDEMPOTENCY_STORE.clear()
     resp_db_replay = await client.post(
@@ -649,15 +700,15 @@ async def test_case3_low_confidence_replay_auto_failover_and_noise_gate(
     assert resp_db_replay.status_code == 200, resp_db_replay.text
     assert resp_db_replay.json()["data"] == resp_db_init.json()["data"]
     assert resp_db_replay.json()["data"]["low_confidence"] is True
-    assert noisy_groq.await_count == 2
+    assert noisy_primary.await_count == 2
 
-    # --- 3B: Groq 429 RATE_LIMITED -> Auto Failover sang Gemini -> POST /api/v1/drafts ---
-    rate_limited_groq = AsyncMock(side_effect=_StatusCodeError(429, "rate_limited"))
+    # --- 3B: Nhánh chính 429 RATE_LIMITED -> Auto Failover sang Gemini -> POST /api/v1/drafts ---
+    rate_limited_primary = AsyncMock(side_effect=_StatusCodeError(429, "rate_limited"))
     gemini_fallback_mock = AsyncMock(
         return_value="Soạn slide thuyết trình đồ án 10 trang trước tối thứ 6"
     )
     failover_service, _ = _build_auto_voice_service(
-        rate_limited_groq,
+        rate_limited_primary,
         gemini_transcribe_mock=gemini_fallback_mock,
     )
     set_voice_service(failover_service)
@@ -673,7 +724,7 @@ async def test_case3_low_confidence_replay_auto_failover_and_noise_gate(
     assert failover_data["text"] == "Soạn slide thuyết trình đồ án 10 trang trước tối thứ 6"
     assert failover_data["low_confidence"] is False
     assert failover_data["input_source"] == "voice"
-    rate_limited_groq.assert_awaited_once()
+    rate_limited_primary.assert_awaited_once()
     gemini_fallback_mock.assert_awaited_once()
 
     draft_from_failover = await client.post(
@@ -692,13 +743,13 @@ async def test_case3_low_confidence_replay_auto_failover_and_noise_gate(
     )
 
     # --- 3C: Hallucination / Silence audio (NO_SPEECH) -> HTTP 422, KHÔNG gọi Gemini ---
-    hallucination_groq = AsyncMock(
+    hallucination_primary = AsyncMock(
         return_value={
             "text": "Hãy subscribe cho kênh ghiền mì gõ",
             "segments": [{"no_speech_prob": 0.12, "avg_logprob": -0.25}],
         }
     )
-    hallucination_service, hallucination_gemini = _build_auto_voice_service(hallucination_groq)
+    hallucination_service, hallucination_gemini = _build_auto_voice_service(hallucination_primary)
     set_voice_service(hallucination_service)
 
     resp_hallucination = await client.post(
@@ -709,7 +760,7 @@ async def test_case3_low_confidence_replay_auto_failover_and_noise_gate(
     )
     assert resp_hallucination.status_code == 422, resp_hallucination.text
     assert resp_hallucination.json()["error"]["code"] == "NO_SPEECH_DETECTED"
-    hallucination_groq.assert_awaited_once()
+    hallucination_primary.assert_awaited_once()
     hallucination_gemini.assert_not_awaited()
 
 
@@ -824,13 +875,13 @@ async def test_case5_protected_discourse_and_adverb_integrity_e2e(
         "À nhầm, tối nay ôn tiếng Anh từ từ thôi "
         "từ bảy rưỡi tối đến chín rưỡi tối, ngày ngày ôn tập đều đặn"
     )
-    groq_create = AsyncMock(
+    primary_create = AsyncMock(
         return_value={
             "text": raw_transcript,
             "segments": [{"no_speech_prob": 0.05, "avg_logprob": -0.19}],
         }
     )
-    voice_service, gemini_mock = _build_auto_voice_service(groq_create)
+    voice_service, gemini_mock = _build_auto_voice_service(primary_create)
     set_voice_service(voice_service)
 
     stt_resp = await client.post(
@@ -844,7 +895,7 @@ async def test_case5_protected_discourse_and_adverb_integrity_e2e(
     assert stt_data["text"] == raw_transcript
     assert stt_data["low_confidence"] is False
     assert stt_data["input_source"] == "voice"
-    groq_create.assert_awaited_once()
+    primary_create.assert_awaited_once()
     gemini_mock.assert_not_awaited()
 
     create_resp = await client.post(
@@ -960,7 +1011,7 @@ async def test_case6_multi_segment_speech_plus_trailing_silence_e2e(
         "Tối nay hoàn thành 5 bài tập giải tích trước mười giờ tối, "
         "làm khoảng một tiếng rưỡi từ bảy rưỡi tối đến chín giờ tối"
     )
-    groq_create = AsyncMock(
+    primary_create = AsyncMock(
         return_value={
             "text": spoken_transcript,
             "segments": [
@@ -969,7 +1020,7 @@ async def test_case6_multi_segment_speech_plus_trailing_silence_e2e(
             ],
         }
     )
-    voice_service, gemini_mock = _build_auto_voice_service(groq_create)
+    voice_service, gemini_mock = _build_auto_voice_service(primary_create)
     set_voice_service(voice_service)
 
     stt_resp = await client.post(
@@ -983,7 +1034,7 @@ async def test_case6_multi_segment_speech_plus_trailing_silence_e2e(
     assert stt_data["text"] == spoken_transcript
     assert stt_data["low_confidence"] is False
     assert stt_data["input_source"] == "voice"
-    groq_create.assert_awaited_once()
+    primary_create.assert_awaited_once()
     gemini_mock.assert_not_awaited()
 
     create_resp = await client.post(
@@ -1114,13 +1165,13 @@ async def test_case7_thought_to_draft_vs_uf1_input_purpose_isolation_e2e(
     set_voice_service = uf1_e2e_env["set_voice_service"]
 
     transcript_text = "Ghi chú ý tưởng làm slide thuyết trình cuối kỳ"
-    groq_create = AsyncMock(
+    primary_create = AsyncMock(
         return_value={
             "text": transcript_text,
             "segments": [{"no_speech_prob": 0.05, "avg_logprob": -0.15}],
         }
     )
-    voice_service, gemini_mock = _build_auto_voice_service(groq_create)
+    voice_service, gemini_mock = _build_auto_voice_service(primary_create)
     set_voice_service(voice_service)
 
     # 7A. thought_to_draft thiếu thought_id -> 422 THOUGHT_ID_REQUIRED
@@ -1137,7 +1188,7 @@ async def test_case7_thought_to_draft_vs_uf1_input_purpose_isolation_e2e(
         fe["field_path"] == "thought_id" and fe["code"] == "THOUGHT_ID_REQUIRED"
         for fe in err_payload["field_errors"]
     )
-    assert groq_create.await_count == 0
+    assert primary_create.await_count == 0
     gemini_mock.assert_not_awaited()
 
     # 7B. Tạo bản ghi Thought thật trong DB -> thought_to_draft trả về input_source="thought"
@@ -1174,7 +1225,7 @@ async def test_case7_thought_to_draft_vs_uf1_input_purpose_isolation_e2e(
     assert thought_data["input_source"] == "thought"
     assert thought_data["thought_id"] == str(thought_uuid)
     assert thought_data["low_confidence"] is False
-    assert groq_create.await_count == 1
+    assert primary_create.await_count == 1
 
     # 7C. purpose="uf1_input" -> input_source="voice", thought_id=None
     resp_uf1 = await client.post(
@@ -1189,5 +1240,5 @@ async def test_case7_thought_to_draft_vs_uf1_input_purpose_isolation_e2e(
     assert uf1_data["input_source"] == "voice"
     assert uf1_data["thought_id"] is None
     assert uf1_data["low_confidence"] is False
-    assert groq_create.await_count == 2
+    assert primary_create.await_count == 2
     gemini_mock.assert_not_awaited()

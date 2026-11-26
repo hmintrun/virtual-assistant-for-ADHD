@@ -1263,6 +1263,7 @@
             "required": false,
             "schema": {
               "type": "integer",
+              "maximum": 100,
               "exclusiveMinimum": 0,
               "description": "Số bản nháp tối đa trả về trong một trang (ví dụ: 20)",
               "default": 20,
@@ -2124,6 +2125,79 @@
         }
       }
     },
+    "/api/v1/candidates/{candidate_id}/undo": {
+      "post": {
+        "tags": [
+          "planning"
+        ],
+        "summary": "Undo Candidate",
+        "description": "Hoàn tác 1 bước chỉnh sửa gần nhất trên Candidate trước khi Confirm (UF2).",
+        "operationId": "undo_candidate_api_v1_candidates__candidate_id__undo_post",
+        "security": [
+          {
+            "AppBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "candidate_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Mã phương án lịch cần hoàn tác chỉnh sửa gần nhất (UF2).",
+              "title": "Candidate Id"
+            },
+            "description": "Mã phương án lịch cần hoàn tác chỉnh sửa gần nhất (UF2)."
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Mã chống gửi lặp cho lệnh hoàn tác Candidate.",
+              "title": "Idempotency-Key"
+            },
+            "description": "Mã chống gửi lặp cho lệnh hoàn tác Candidate."
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UndoCandidateRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SuccessEnvelope_PlanCandidate_"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/tasks": {
       "get": {
         "tags": [
@@ -2144,6 +2218,7 @@
             "required": false,
             "schema": {
               "type": "integer",
+              "maximum": 100,
               "exclusiveMinimum": 0,
               "description": "Số công việc tối đa trả về trong một trang (ví dụ: 20)",
               "default": 20,
@@ -2244,6 +2319,124 @@
             }
           }
         }
+      },
+      "delete": {
+        "tags": [
+          "tasks"
+        ],
+        "summary": "Delete Task",
+        "description": "Hủy mềm công việc chính thức, đóng các bước/phiên/nhắc nhở còn mở và đồng bộ xóa lịch Google Calendar.",
+        "operationId": "delete_task_api_v1_tasks__task_id__delete",
+        "security": [
+          {
+            "AppBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "task_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Mã công việc chính thức cần hủy/xóa (ví dụ: task_1)",
+              "title": "Task Id"
+            },
+            "description": "Mã công việc chính thức cần hủy/xóa (ví dụ: task_1)"
+          },
+          {
+            "name": "expected_task_revision",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Phiên bản công việc kỳ vọng để chống xung đột ghi đè",
+              "title": "Expected Task Revision"
+            },
+            "description": "Phiên bản công việc kỳ vọng để chống xung đột ghi đè"
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Mã chống gửi lặp tùy chọn cho lệnh hủy/xóa công việc",
+              "title": "Idempotency-Key"
+            },
+            "description": "Mã chống gửi lặp tùy chọn cho lệnh hủy/xóa công việc"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SuccessEnvelope_TaskDeleteResult_"
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          }
+        }
       }
     },
     "/api/v1/schedule": {
@@ -2290,6 +2483,7 @@
             "required": false,
             "schema": {
               "type": "integer",
+              "maximum": 100,
               "exclusiveMinimum": 0,
               "description": "Số phiên tối đa trả về trong một trang (ví dụ: 50)",
               "default": 50,
@@ -3590,6 +3784,74 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/SuccessEnvelope_DeviceStateData_"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/devices/{device_id}/telemetry": {
+      "post": {
+        "tags": [
+          "Focus & Devices - UF3"
+        ],
+        "summary": "Report Device Telemetry",
+        "operationId": "report_device_telemetry_api_v1_devices__device_id__telemetry_post",
+        "security": [
+          {
+            "AppBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "device_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "title": "Device Id"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "title": "Idempotency-Key"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DeviceTelemetryRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SuccessEnvelope_DeviceTelemetryData_"
                 }
               }
             }
@@ -4956,6 +5218,130 @@
           }
         }
       }
+    },
+    "/api/v1/streak": {
+      "get": {
+        "tags": [
+          "Focus Streak - UF6"
+        ],
+        "summary": "Đọc trạng thái Focus Streak, Khiên bảo vệ và lịch sử 35 ngày (UF6)",
+        "operationId": "get_streak_api_v1_streak_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SuccessEnvelope_StreakData_"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Chưa đăng nhập hoặc thiếu Bearer Token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Dịch vụ chuỗi tập trung chưa sẵn sàng",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "AppBearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/streak/repair": {
+      "post": {
+        "tags": [
+          "Focus Streak - UF6"
+        ],
+        "summary": "Kích hoạt Nối lại nhịp 24h (24h Repair) cho ngày vừa lỡ (UF6)",
+        "operationId": "repair_streak_api_v1_streak_repair_post",
+        "security": [
+          {
+            "AppBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "title": "Idempotency-Key"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SuccessEnvelope_StreakData_"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Chưa đăng nhập hoặc thiếu Bearer Token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Không có cửa sổ 24h Repair hợp lệ hoặc trùng Idempotency-Key",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Thiếu hoặc sai header Idempotency-Key",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Dịch vụ chuỗi tập trung chưa sẵn sàng",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -5150,6 +5536,44 @@
         ],
         "title": "AdaptationSuggestionData",
         "description": "Dòng 43 trên API Sheet (O19 AdaptationSuggestion): GET /api/v1/suggestions/current."
+      },
+      "AppliedExtraConstraints": {
+        "properties": {
+          "max_daily_work_seconds": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "exclusiveMinimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Daily Work Seconds"
+          },
+          "min_contiguous_slot_seconds": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "exclusiveMinimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Min Contiguous Slot Seconds"
+          },
+          "preferred_time_windows": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Preferred Time Windows"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "AppliedExtraConstraints"
       },
       "ApprovalEnvelope": {
         "properties": {
@@ -6430,6 +6854,66 @@
               }
             ],
             "title": "Sessions"
+          },
+          "add_steps": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/CandidateStepAdd"
+                },
+                "type": "array",
+                "minItems": 1
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Add Steps"
+          },
+          "delete_step_keys": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array",
+                "minItems": 1
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Delete Step Keys"
+          },
+          "merge_steps": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/CandidateStepMerge"
+                },
+                "type": "array",
+                "minItems": 1
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Merge Steps"
+          },
+          "split_steps": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/CandidateStepSplit"
+                },
+                "type": "array",
+                "minItems": 1
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Split Steps"
           }
         },
         "additionalProperties": false,
@@ -6478,6 +6962,39 @@
             "type": "string",
             "format": "date-time",
             "title": "Scheduled End"
+          },
+          "title": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Title"
+          },
+          "session_goal": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Session Goal"
+          },
+          "expected_output": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expected Output"
           },
           "micro_task_text": {
             "type": "string",
@@ -6582,6 +7099,45 @@
             ],
             "title": "Scheduled End"
           },
+          "title": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 160,
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Title"
+          },
+          "session_goal": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 300,
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Session Goal"
+          },
+          "expected_output": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 300,
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expected Output"
+          },
           "micro_task_text": {
             "anyOf": [
               {
@@ -6666,6 +7222,62 @@
         ],
         "title": "CandidateStep"
       },
+      "CandidateStepAdd": {
+        "properties": {
+          "title": {
+            "type": "string",
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "Title"
+          },
+          "expected_output": {
+            "type": "string",
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Expected Output"
+          },
+          "estimated_base_seconds": {
+            "type": "integer",
+            "maximum": 28800.0,
+            "minimum": 300.0,
+            "title": "Estimated Base Seconds"
+          },
+          "micro_task_text": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 300,
+                "minLength": 3
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Micro Task Text"
+          },
+          "insert_at_index": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Insert At Index"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "title",
+          "expected_output",
+          "estimated_base_seconds"
+        ],
+        "title": "CandidateStepAdd",
+        "description": "Thao tác thêm một Step mới vào Candidate (UF2 Layer 3)."
+      },
       "CandidateStepEdit": {
         "properties": {
           "client_step_key": {
@@ -6677,6 +7289,7 @@
             "anyOf": [
               {
                 "type": "string",
+                "maxLength": 255,
                 "minLength": 1
               },
               {
@@ -6689,6 +7302,7 @@
             "anyOf": [
               {
                 "type": "string",
+                "maxLength": 500,
                 "minLength": 1
               },
               {
@@ -6720,6 +7334,19 @@
               }
             ],
             "title": "Order Index"
+          },
+          "micro_task_text": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 300,
+                "minLength": 3
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Micro Task Text"
           }
         },
         "additionalProperties": false,
@@ -6729,6 +7356,92 @@
         ],
         "title": "CandidateStepEdit",
         "description": "Allowlist các trường được phép sửa trên một CandidateStep theo client_step_key (Dòng 11)."
+      },
+      "CandidateStepMerge": {
+        "properties": {
+          "source_step_keys": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "maxItems": 20,
+            "minItems": 2,
+            "title": "Source Step Keys"
+          },
+          "title": {
+            "type": "string",
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "Title"
+          },
+          "expected_output": {
+            "type": "string",
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Expected Output"
+          },
+          "estimated_base_seconds": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "maximum": 28800.0,
+                "minimum": 300.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Estimated Base Seconds"
+          },
+          "micro_task_text": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 300,
+                "minLength": 3
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Micro Task Text"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "source_step_keys",
+          "title",
+          "expected_output"
+        ],
+        "title": "CandidateStepMerge",
+        "description": "Thao tác gộp >= 2 Step hiện có thành 1 Step mới (UF2 Layer 3)."
+      },
+      "CandidateStepSplit": {
+        "properties": {
+          "source_step_key": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Source Step Key"
+          },
+          "new_steps": {
+            "items": {
+              "$ref": "#/components/schemas/CandidateStepAdd"
+            },
+            "type": "array",
+            "maxItems": 10,
+            "minItems": 2,
+            "title": "New Steps"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "source_step_key",
+          "new_steps"
+        ],
+        "title": "CandidateStepSplit",
+        "description": "Thao tác tách 1 Step hiện có thành >= 2 Step mới (UF2 Layer 3)."
       },
       "CandidateVerificationScope": {
         "properties": {
@@ -7693,6 +8406,35 @@
             "type": "boolean",
             "title": "Is Active",
             "default": true
+          },
+          "current_streak_days": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Current Streak Days",
+            "default": 0
+          },
+          "streak_frozen": {
+            "type": "boolean",
+            "title": "Streak Frozen",
+            "default": false
+          },
+          "streak_freeze_tokens": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Streak Freeze Tokens",
+            "default": 2
+          },
+          "last_streak_date": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Streak Date"
           }
         },
         "additionalProperties": false,
@@ -7938,6 +8680,140 @@
         ],
         "title": "DeviceStateReportRequest",
         "description": "Dòng21: trạng thái phải do thiết bị báo, không tự suy quyền hoặc DND."
+      },
+      "DeviceTelemetryData": {
+        "properties": {
+          "audit_event_id": {
+            "type": "string",
+            "title": "Audit Event Id"
+          },
+          "device_id": {
+            "type": "string",
+            "title": "Device Id"
+          },
+          "event_id": {
+            "type": "string",
+            "title": "Event Id"
+          },
+          "event_type": {
+            "type": "string",
+            "enum": [
+              "uf4_audio_capture_failed",
+              "uf3_alarm_drift",
+              "uf5_dnd_restore_failed"
+            ],
+            "title": "Event Type"
+          },
+          "error_code": {
+            "type": "string",
+            "title": "Error Code"
+          },
+          "received_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Received At"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "audit_event_id",
+          "device_id",
+          "event_id",
+          "event_type",
+          "error_code",
+          "received_at"
+        ],
+        "title": "DeviceTelemetryData",
+        "description": "Phản hồi sau khi ghi nhận telemetry vào AuditEvent."
+      },
+      "DeviceTelemetryRequest": {
+        "properties": {
+          "event_id": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Event Id"
+          },
+          "event_type": {
+            "type": "string",
+            "enum": [
+              "uf4_audio_capture_failed",
+              "uf3_alarm_drift",
+              "uf5_dnd_restore_failed"
+            ],
+            "title": "Event Type"
+          },
+          "error_code": {
+            "type": "string",
+            "pattern": "^[A-Z0-9_]{2,64}$",
+            "title": "Error Code"
+          },
+          "attempt_count": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "maximum": 5.0,
+                "minimum": 1.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Attempt Count"
+          },
+          "source_run_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Run Id"
+          },
+          "occurred_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Occurred At"
+          },
+          "app_version": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 32
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "App Version"
+          },
+          "platform_os": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 32
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Platform Os"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "event_id",
+          "event_type",
+          "error_code",
+          "occurred_at"
+        ],
+        "title": "DeviceTelemetryRequest",
+        "description": "Báo cáo telemetry lỗi không chứa dữ liệu nhạy cảm/PII từ thiết bị (BE-UF4-01)."
       },
       "DraftAnalyzeRequest": {
         "properties": {
@@ -8462,6 +9338,40 @@
               }
             ],
             "title": "Extension Candidate At"
+          },
+          "earliest_feasible_end_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Earliest Feasible End At"
+          },
+          "suggested_extra_free_seconds_per_day": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 1.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Suggested Extra Free Seconds Per Day"
+          },
+          "applied_extra_constraints": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AppliedExtraConstraints"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "additionalProperties": false,
@@ -8884,6 +9794,7 @@
           },
           "expected_output": {
             "type": "string",
+            "maxLength": 500,
             "minLength": 1,
             "title": "Expected Output"
           },
@@ -9024,6 +9935,11 @@
           "stale": {
             "type": "boolean",
             "title": "Stale"
+          },
+          "can_undo": {
+            "type": "boolean",
+            "title": "Can Undo",
+            "default": false
           },
           "user_step_proposal": {
             "anyOf": [
@@ -9665,6 +10581,39 @@
             "format": "date-time",
             "title": "Scheduled End"
           },
+          "title": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Title"
+          },
+          "session_goal": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Session Goal"
+          },
+          "expected_output": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expected Output"
+          },
           "micro_task_text": {
             "anyOf": [
               {
@@ -9900,6 +10849,39 @@
             "type": "string",
             "format": "date-time",
             "title": "End"
+          },
+          "title": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Title"
+          },
+          "session_goal": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Session Goal"
+          },
+          "expected_output": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expected Output"
           },
           "work_seconds": {
             "type": "integer",
@@ -10214,6 +11196,17 @@
             "type": "string",
             "minLength": 1,
             "title": "Title"
+          },
+          "expected_output": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expected Output"
           },
           "estimated_base_seconds": {
             "type": "integer",
@@ -10800,6 +11793,39 @@
             "format": "date-time",
             "title": "Scheduled End"
           },
+          "title": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Title"
+          },
+          "session_goal": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Session Goal"
+          },
+          "expected_output": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expected Output"
+          },
           "micro_task_seconds": {
             "anyOf": [
               {
@@ -11094,6 +12120,18 @@
               }
             ],
             "title": "Continuation Of Run Id"
+          },
+          "planned_ends_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Planned Ends At"
           }
         },
         "additionalProperties": false,
@@ -11159,6 +12197,39 @@
             "type": "string",
             "format": "date-time",
             "title": "Scheduled End"
+          },
+          "title": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Title"
+          },
+          "session_goal": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Session Goal"
+          },
+          "expected_output": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expected Output"
           },
           "micro_task_text": {
             "anyOf": [
@@ -11754,6 +12825,159 @@
         ],
         "title": "Step"
       },
+      "StreakData": {
+        "properties": {
+          "current_streak_days": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Current Streak Days"
+          },
+          "effective_display_streak": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Effective Display Streak"
+          },
+          "unlocked": {
+            "type": "boolean",
+            "title": "Unlocked"
+          },
+          "streak_frozen": {
+            "type": "boolean",
+            "title": "Streak Frozen"
+          },
+          "streak_freeze_tokens": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Streak Freeze Tokens"
+          },
+          "max_freeze_tokens": {
+            "type": "integer",
+            "minimum": 1.0,
+            "title": "Max Freeze Tokens",
+            "default": 2
+          },
+          "last_streak_date": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Streak Date"
+          },
+          "repair_pending": {
+            "type": "boolean",
+            "title": "Repair Pending",
+            "default": false
+          },
+          "repair_window_ends_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Repair Window Ends At"
+          },
+          "repairs_used_this_month": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Repairs Used This Month",
+            "default": 0
+          },
+          "repairs_left_this_month": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Repairs Left This Month",
+            "default": 2
+          },
+          "max_repairs_per_month": {
+            "type": "integer",
+            "minimum": 1.0,
+            "title": "Max Repairs Per Month",
+            "default": 2
+          },
+          "longest_streak_days": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Longest Streak Days",
+            "default": 0
+          },
+          "today_completed": {
+            "type": "boolean",
+            "title": "Today Completed",
+            "default": false
+          },
+          "today_focus_minutes": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Today Focus Minutes",
+            "default": 0
+          },
+          "timezone": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Timezone"
+          },
+          "day_records": {
+            "items": {
+              "$ref": "#/components/schemas/StreakDayRecordData"
+            },
+            "type": "array",
+            "title": "Day Records"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "current_streak_days",
+          "effective_display_streak",
+          "unlocked",
+          "streak_frozen",
+          "streak_freeze_tokens",
+          "timezone"
+        ],
+        "title": "StreakData",
+        "description": "Trạng thái Focus Streak đầy đủ trả về từ GET /api/v1/streak và POST /api/v1/streak/repair."
+      },
+      "StreakDayRecordData": {
+        "properties": {
+          "date": {
+            "type": "string",
+            "format": "date",
+            "title": "Date"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "done",
+              "freeze",
+              "repair"
+            ],
+            "title": "Kind"
+          },
+          "minutes": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Minutes"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "date",
+          "kind",
+          "minutes"
+        ],
+        "title": "StreakDayRecordData",
+        "description": "Một ngày hoạt động trong cửa sổ lịch sử 35 ngày gần nhất của Focus Streak."
+      },
       "SuccessEnvelope_ActualCorrectionData_": {
         "properties": {
           "data": {
@@ -12077,6 +13301,23 @@
         ],
         "title": "SuccessEnvelope[DeviceStateData]"
       },
+      "SuccessEnvelope_DeviceTelemetryData_": {
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/DeviceTelemetryData"
+          },
+          "meta": {
+            "$ref": "#/components/schemas/ResponseMeta"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "data",
+          "meta"
+        ],
+        "title": "SuccessEnvelope[DeviceTelemetryData]"
+      },
       "SuccessEnvelope_DraftListData_": {
         "properties": {
           "data": {
@@ -12315,6 +13556,23 @@
         ],
         "title": "SuccessEnvelope[SettingsChangeResult]"
       },
+      "SuccessEnvelope_StreakData_": {
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/StreakData"
+          },
+          "meta": {
+            "$ref": "#/components/schemas/ResponseMeta"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "data",
+          "meta"
+        ],
+        "title": "SuccessEnvelope[StreakData]"
+      },
       "SuccessEnvelope_SuggestionResponseResult_": {
         "properties": {
           "data": {
@@ -12331,6 +13589,23 @@
           "meta"
         ],
         "title": "SuccessEnvelope[SuggestionResponseResult]"
+      },
+      "SuccessEnvelope_TaskDeleteResult_": {
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/TaskDeleteResult"
+          },
+          "meta": {
+            "$ref": "#/components/schemas/ResponseMeta"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "data",
+          "meta"
+        ],
+        "title": "SuccessEnvelope[TaskDeleteResult]"
       },
       "SuccessEnvelope_TaskListData_": {
         "properties": {
@@ -13221,6 +14496,18 @@
             ],
             "title": "Unexpanded Scope"
           },
+          "extension_candidate_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Extension Candidate At"
+          },
           "steps": {
             "items": {
               "$ref": "#/components/schemas/Step"
@@ -13237,6 +14524,16 @@
           },
           "source_summary": {
             "$ref": "#/components/schemas/TaskSummary"
+          },
+          "source_revisions": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ProposalSourceRevisions"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "additionalProperties": false,
@@ -13278,6 +14575,72 @@
           "intervals"
         ],
         "title": "TaskAvailabilityLimit"
+      },
+      "TaskDeleteResult": {
+        "properties": {
+          "task_id": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Task Id"
+          },
+          "deleted": {
+            "type": "boolean",
+            "title": "Deleted",
+            "default": true
+          },
+          "status": {
+            "type": "string",
+            "const": "cancelled",
+            "title": "Status",
+            "default": "cancelled"
+          },
+          "task_revision": {
+            "type": "integer",
+            "minimum": 1.0,
+            "title": "Task Revision"
+          },
+          "schedule_revision": {
+            "type": "integer",
+            "minimum": 1.0,
+            "title": "Schedule Revision"
+          },
+          "cancelled_session_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Cancelled Session Ids"
+          },
+          "alarm_sync_state": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "not_required"
+            ],
+            "title": "Alarm Sync State",
+            "default": "pending"
+          },
+          "calendar_sync_summary": {
+            "type": "string",
+            "enum": [
+              "not_integrated",
+              "pending",
+              "synced",
+              "failed"
+            ],
+            "title": "Calendar Sync Summary",
+            "default": "not_integrated"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "task_id",
+          "task_revision",
+          "schedule_revision"
+        ],
+        "title": "TaskDeleteResult",
+        "description": "Kết quả hủy/xóa mềm công việc chính thức (DELETE /api/v1/tasks/{task_id})."
       },
       "TaskListData": {
         "properties": {
@@ -13583,6 +14946,18 @@
               }
             ],
             "title": "Retention Expires At"
+          },
+          "created_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Created At"
           }
         },
         "additionalProperties": false,
@@ -14284,6 +15659,21 @@
         "title": "UF5VoiceCheckInPromptResponse",
         "description": "Dữ liệu câu hỏi Check-in 2 chiều + 3 chip Bỏ qua + audio TTS (fallback on-device nếu cần)."
       },
+      "UndoCandidateRequest": {
+        "properties": {
+          "expected_review_revision": {
+            "type": "integer",
+            "minimum": 1.0,
+            "title": "Expected Review Revision"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "expected_review_revision"
+        ],
+        "title": "UndoCandidateRequest"
+      },
       "UpcomingScheduleContextData": {
         "properties": {
           "run_id": {
@@ -14564,6 +15954,29 @@
               }
             ],
             "title": "Pending Proposal Id"
+          },
+          "pending_change_request_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pending Change Request Id"
+          },
+          "pending_change_request_revision": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 1.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pending Change Request Revision"
           }
         },
         "additionalProperties": false,

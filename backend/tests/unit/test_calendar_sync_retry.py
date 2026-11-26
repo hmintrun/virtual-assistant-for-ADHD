@@ -81,11 +81,16 @@ async def test_create_retry_after_lost_response_is_not_duplicated(db: AsyncSessi
     async def already_exists(*args, **kwargs):
         raise CalendarConflictError("Event ID already exists on Google Calendar")
 
+    async def fetch_existing(*args, **kwargs):
+        return {"id": event_id, "etag": '"etag-existing"'}
+
     monkeypatch.setattr(service.client, "create_event", already_exists)
+    monkeypatch.setattr(service.client, "get_event", fetch_existing)
     assert await process_sync_job(db, job, service) == "completed"
     assert job.job_state == "completed"
     assert link.sync_state == "synced"
     assert link.google_event_id == event_id
+    assert link.google_etag == '"etag-existing"'
 
 
 @pytest.mark.asyncio
