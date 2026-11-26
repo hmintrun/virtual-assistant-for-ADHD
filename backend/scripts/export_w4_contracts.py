@@ -9,7 +9,18 @@ import json
 from pathlib import Path
 
 from app.main import app
-from app.schemas import auth, calendar, common, execution, reschedule, settings, thought, voice
+from app.schemas import (
+    auth,
+    calendar,
+    common,
+    execution,
+    reschedule,
+    settings,
+    streak,
+    thought,
+    user,
+    voice,
+)
 from app.services.ai_service import ai_service
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -58,6 +69,17 @@ def fixture_sets():
     })
     unauthenticated = error("UNAUTHENTICATED", "Phiên đăng nhập không hợp lệ hoặc đã hết hạn.", "authenticate")
     group1 = [
+        case("auth_me_success", "GET", "/api/v1/auth/me", 200,
+             success(user.CurrentUser, {
+                 "user_id": USER,
+                 "email": "demo@example.com",
+                 "display_name": "ProPlan User",
+                 "is_active": True,
+                 "current_streak_days": 3,
+                 "streak_frozen": False,
+                 "streak_freeze_tokens": 2,
+                 "last_streak_date": "2026-11-20",
+             })),
         case("refresh_success", "POST", "/api/v1/auth/refresh", 200, token_body,
              request={"refresh_token": "example-old-refresh-token"}),
         case("app_unauthenticated", "GET", "/api/v1/auth/me", 401, unauthenticated,
@@ -142,6 +164,14 @@ def fixture_sets():
              success(calendar.CalendarSyncJobRead, {"job_id": "job-1", "connection_id": CONNECTION,
                  "target_kind": "external_event", "target_ref": PREVIEW, "operation": "update",
                  "job_state": "conflict", "attempt_count": 1, "last_error_code": "ETAG_CONFLICT_412"})),
+        case("sync_job_retry_conflict", "POST", "/api/v1/calendar/sync-jobs/job-1/retry", 409,
+             error("REVISION_CONFLICT", "Phiên bản tác vụ đồng bộ đã thay đổi.", "reload_and_review",
+                   revisions={"job_revision": 2}),
+             request={"expected_job_revision": 1}),
+        case("sync_job_retry_cancelled", "POST", "/api/v1/calendar/sync-jobs/job-1/retry", 409,
+             error("JOB_CANCELLED", "Tác vụ đồng bộ đã bị hủy do ngắt kết nối lịch và không thể thử lại.",
+                   "create_preview"),
+             request={"expected_job_revision": 2}),
     ]
     thought_request = {"client_thought_id": "client-thought-1", "source_run_id": RUN, "input_type": "audio",
                        "capture_state": "saved", "attempt_count": 1, "text_content": None}
@@ -213,8 +243,40 @@ def fixture_sets():
             "next_horizon_preview": None}, "explanation": "Bạn có thể mở thêm giờ rảnh hoặc lùi hạn chót để tính lại phương án.",
         "pending_notification_state": "not_sent", "created_at": META["server_time"], "updated_at": META["server_time"]}
     prompt = ai_service.build_uf5_checkin_prompt(kind="final").model_dump(mode="json")
+    streak_day = {"date": "2026-11-20", "kind": "done", "minutes": 25}
+    streak_summary_data = {
+        "current_streak_days": 3,
+        "effective_display_streak": 3,
+        "unlocked": True,
+        "streak_frozen": False,
+        "streak_freeze_tokens": 2,
+        "max_freeze_tokens": 2,
+        "last_streak_date": "2026-11-20",
+        "repair_pending": False,
+        "repair_window_ends_at": None,
+        "repairs_used_this_month": 0,
+        "repairs_left_this_month": 2,
+        "max_repairs_per_month": 2,
+        "longest_streak_days": 3,
+        "today_completed": True,
+        "today_focus_minutes": 25,
+        "timezone": "Asia/Ho_Chi_Minh",
+        "day_records": [streak_day],
+    }
+    streak_repaired_data = {
+        **streak_summary_data,
+        "current_streak_days": 4,
+        "effective_display_streak": 4,
+        "repairs_used_this_month": 1,
+        "repairs_left_this_month": 1,
+        "longest_streak_days": 4,
+        "day_records": [streak_day, {"date": "2026-11-21", "kind": "repair", "minutes": 0}],
+    }
     group5 = [
         case("proposal_deficit", "GET", "/api/v1/proposals/current", 200, success(reschedule.ProposalData, proposal)),
+        case("streak_summary", "GET", "/api/v1/streak", 200, success(streak.StreakData, streak_summary_data)),
+        case("streak_repair", "POST", "/api/v1/streak/repair", 200, success(streak.StreakData, streak_repaired_data),
+             request_headers={"Idempotency-Key": "w4-streak-repair-1"}),
         case("tts_empty_audio", "POST", "/api/v1/voice/tts", 503,
              error("TTS_EMPTY_AUDIO", "Không tạo được âm thanh lúc này. Ứng dụng sẽ dùng giọng đọc trên máy.", "use_on_device_tts"),
              request={"text": "Đến giờ kiểm tra tiến độ."}),
@@ -285,11 +347,11 @@ Nguồn runtime: `backend` (đã tích hợp `23e856b`, `37c4491` và `BE-03`); 
 
 ### Quy tắc client và trạng thái đồng bộ code
 
-1. Auth: đọc `body.error.code`. `401 CALENDAR_AUTH_REQUIRED` chỉ yêu cầu nối lại Calendar. `BE-03` đã hoàn thành trong runtime: `POST /api/v1/auth/logout` (public theo `refresh_token`) trả `logged_out=true` và `revoked=true/false` (retry idempotent `200`), không cần header `Authorization` hay `Idempotency-Key`; `POST /api/v1/auth/refresh` xoay `jti` có lưu vết `refresh_tokens` và khi phát hiện reuse sẽ thu hồi toàn bộ family cùng `401 UNAUTHENTICATED` kèm header `WWW-Authenticate: Bearer`.
+1. Auth: đọc `body.error.code`. `401 CALENDAR_AUTH_REQUIRED` chỉ yêu cầu nối lại Calendar. `BE-03` đã hoàn thành trong runtime: `POST /api/v1/auth/logout` (public theo `refresh_token`) trả `logged_out=true` và `revoked=true/false` (retry idempotent `200`), không cần header `Authorization` hay `Idempotency-Key`; `POST /api/v1/auth/refresh` xoay `jti` có lưu vết `refresh_tokens` và khi phát hiện reuse sẽ thu hồi toàn bộ family cùng `401 UNAUTHENTICATED` kèm header `WWW-Authenticate: Bearer`. `GET /api/v1/auth/me` trả đủ 4 trường Focus Streak (`current_streak_days`, `streak_frozen`, `streak_freeze_tokens`, `last_streak_date` — `BE-UF6-04`).
 2. Settings: gửi `effective_revision` vào `expected_preferences_revision`; suggestion dùng tên **số ít** `expected_preference_revision`. Hủy dùng `change_request_id` + `request_revision` từ response save; `GET /api/v1/preferences` đã trả sẵn `pending_change_request_id` và `pending_change_request_revision` (`BE-UF7-01`) để client hủy yêu cầu đang chờ duyệt ngay cả sau khi mở lại app hoặc sau khi accept suggestion (không tự lấy `preference.revision` thay thế). Khi accept suggestion có phiên tương lai (`application_state="pending_review"`), `suggestion_revision` giữ nguyên cho tới khi proposal UF6 được duyệt (`BE-UF7-02`). `409` tải lại cấu hình. Chính sách client `buffer_multiplier ∈ [1.0, 2.0]`: runtime đã chặn cả dưới `1.0` và trên `2.0` (`422 VALIDATION_ERROR` ở `scope=runtime`).
-3. Calendar: runtime preview đã trả `preview_revision` (và `base_connection_revision`) trong response; client gửi lại giá trị này vào trường `expected_preview_revision` khi gọi `/confirm` (lệch revision trả `409 REVISION_CONFLICT` kèm `current_revisions.preview_revision`, thiếu trả `422`). JSON `412` là lỗi Google upstream; client đọc job `200` với `job_state=conflict`, `last_error_code=ETAG_CONFLICT_412`, không retry mù.
+3. Calendar: runtime preview đã trả `preview_revision` (và `base_connection_revision`) trong response; client gửi lại giá trị này vào trường `expected_preview_revision` khi gọi `/confirm` (lệch revision trả `409 REVISION_CONFLICT` kèm `current_revisions.preview_revision`, thiếu trả `422`). `POST /api/v1/calendar/sync-jobs/{job_id}/retry` kiểm tra OCC `expected_job_revision` (`409 REVISION_CONFLICT` kèm `current_revisions.job_revision`), sau đó chặn `cancelled` (`409 JOB_CANCELLED`), `completed`/`running`/active lease (`409 INVALID_STATE_TRANSITION`) và `disconnected` (`409 CALENDAR_DISCONNECTED`) (`H4-05`). JSON `412` là lỗi Google upstream; client đọc job `200` với `job_state=conflict`, `last_error_code=ETAG_CONFLICT_412`, không retry mù.
 4. Run: Start chống lặp bằng `Idempotency-Key` (body Start không có `event_id`); fixture ghi cả request gốc và retry cùng key, kèm receipt. End có cả key và `event_id`. Khi mất phản hồi, đối soát `/commands/{command_id}`/Run trước retry. Clock-skew Start được kiểm bằng giờ server, giới hạn `300s`; fixture vượt `301s` trả `422 VALIDATION_ERROR` trên `requested_start_at`. `offline_start_supported=false`. Thought giữ `source_run_id`, metadata audio không chứa transcript/path local; thử audio tối đa 3 lần. Chỉ sau phiên: `/voice/transcriptions` với `purpose=thought_to_draft`, rồi `/thoughts/{id}/draft`.
-5. UF6: giữ `steps_to_add`, `pending_notification_state`, `feasibility.next_horizon_preview` (nullable). Hiển thị mã `resegmented_by_settings_change` thành **“Chia lại phiên theo cài đặt mới”**; không đổi enum wire. `deficit_seconds>0` hoặc `confirmable=false` hiển thị hai lựa chọn mở giờ rảnh/lùi hạn chót. Approve `409` tải lại và cho user duyệt lại. Voice: STT timeout phía client ít nhất `45s`; fixture STT/TTS có nhánh `504`; TTS `503` chuyển `flutter_tts`; UF5 trả `200` với `fallback_to_device_tts=true` khi TTS lỗi.
+5. UF6 & Focus Streak: giữ `steps_to_add`, `pending_notification_state`, `feasibility.next_horizon_preview` (nullable). Hiển thị mã `resegmented_by_settings_change` thành **“Chia lại phiên theo cài đặt mới”**; không đổi enum wire. `deficit_seconds>0` hoặc `confirmable=false` hiển thị hai lựa chọn mở giờ rảnh/lùi hạn chót. Approve `409` (`REVISION_CONFLICT` / `PREVIEW_STALE` / `SOURCE_CHANGED`) tải lại hoặc gọi `/proposals/{id}/rebuild` cho user duyệt lại (`H1-01`). Focus Streak phía server dùng `GET /api/v1/streak` và `POST /api/v1/streak/repair` (`BE-UF6-04`). Voice: STT timeout phía client ít nhất `45s`; fixture STT/TTS có nhánh `504`; TTS `503` chuyển `flutter_tts`; UF5 trả `200` với `fallback_to_device_tts=true` khi TTS lỗi.
 
 ### Tái tạo và kiểm tra
 

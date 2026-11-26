@@ -12,7 +12,9 @@ from app.schemas.auth import LogoutData, RefreshTokenRequest, TokenBundle
 from app.schemas.reschedule import ProposalData
 from app.schemas.schedule import UF5CheckInPromptData
 from app.schemas.settings import SettingsChangeRequest, UserPreference
+from app.schemas.streak import StreakData
 from app.schemas.thought import ThoughtCreateRequest, ThoughtData
+from app.schemas.user import CurrentUser
 from app.schemas.voice import UF5VoiceCheckInPromptResponse
 
 DOCS = Path(__file__).resolve().parents[3] / "docs/backend"
@@ -29,6 +31,9 @@ def test_runtime_openapi_snapshot_matches_application():
     assert "/api/v1/voice/transcriptions" in snapshot["paths"]
     assert "/api/v1/voice/tts" in snapshot["paths"]
     assert "/api/v1/voice/uf5-checkin-prompt" in snapshot["paths"]
+    assert "/api/v1/devices/{device_id}/telemetry" in snapshot["paths"]
+    assert "/api/v1/streak" in snapshot["paths"]
+    assert "/api/v1/streak/repair" in snapshot["paths"]
     start_parameters = snapshot["paths"]["/api/v1/sessions/{session_id}/start"]["post"]["parameters"]
     assert any(parameter["name"] == "Idempotency-Key" and parameter["in"] == "header" and parameter["required"]
                for parameter in start_parameters)
@@ -74,6 +79,7 @@ def test_five_fixture_sets_validate_envelopes_and_dtos():
             common.ResponseMeta.model_validate(body["meta"])
 
     TokenBundle.model_validate(CASES["refresh_success"]["response"]["body"]["data"])
+    CurrentUser.model_validate(CASES["auth_me_success"]["response"]["body"]["data"])
     RefreshTokenRequest.model_validate(CASES["logout_first"]["request"])
     LogoutData.model_validate(CASES["logout_first"]["response"]["body"]["data"])
     LogoutData.model_validate(CASES["logout_retry"]["response"]["body"]["data"])
@@ -86,10 +92,15 @@ def test_five_fixture_sets_validate_envelopes_and_dtos():
     calendar.EventChangePreviewResponse.model_validate(CASES["event_preview"]["response"]["body"]["data"])
     calendar.EventChangePreviewResponse.model_validate(CASES["event_preview_dynamic_revision"]["response"]["body"]["data"])
     calendar.EventChangeConfirmRequest.model_validate(CASES["preview_conflict"]["request"])
+    calendar.CalendarSyncJobRetryRequest.model_validate(CASES["sync_job_retry_conflict"]["request"])
+    assert CASES["sync_job_retry_conflict"]["response"]["body"]["error"]["code"] == "REVISION_CONFLICT"
+    assert CASES["sync_job_retry_cancelled"]["response"]["body"]["error"]["code"] == "JOB_CANCELLED"
     execution.SessionRunData.model_validate(CASES["start_idempotent"]["response"]["body"]["data"])
     ThoughtCreateRequest.model_validate(CASES["thought_capture"]["request"])
     ThoughtData.model_validate(CASES["thought_capture"]["response"]["body"]["data"])
     ProposalData.model_validate(CASES["proposal_deficit"]["response"]["body"]["data"])
+    StreakData.model_validate(CASES["streak_summary"]["response"]["body"]["data"])
+    StreakData.model_validate(CASES["streak_repair"]["response"]["body"]["data"])
     prompt = CASES["uf5_tts_fallback"]["response"]["body"]["data"]
     UF5VoiceCheckInPromptResponse.model_validate(prompt)
     UF5CheckInPromptData.model_validate(prompt["prompt"])
