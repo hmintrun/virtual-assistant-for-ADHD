@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart' show ValueListenable;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
@@ -15,12 +16,22 @@ import '../services/schedule_service.dart';
 import 'focus_screen.dart';
 import '../widgets/melbel_ui.dart';
 import '../widgets/streak_widgets.dart';
+import '../widgets/task_delete_sheet.dart';
 import 'support_screens.dart';
 import 'task_entry_screen.dart';
 
 class CalendarScreen extends StatefulWidget {
-  const CalendarScreen({super.key, this.client});
+  const CalendarScreen({
+    super.key,
+    this.client,
+    this.embeddedInShell = false,
+    this.refreshSignal,
+  });
+
   final ApiClient? client;
+  final bool embeddedInShell;
+  final ValueListenable<int>? refreshSignal;
+
   @override
   State<CalendarScreen> createState() => _CalendarScreenState();
 }
@@ -44,7 +55,28 @@ class _CalendarScreenState extends State<CalendarScreen> {
     final now = DateTime.now();
     _month = DateTime(now.year, now.month);
     _api = widget.client ?? ApiClient();
+    widget.refreshSignal?.addListener(_onShellRefresh);
     _load();
+  }
+
+  @override
+  void didUpdateWidget(covariant CalendarScreen oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (!identical(oldWidget.refreshSignal, widget.refreshSignal)) {
+      oldWidget.refreshSignal?.removeListener(_onShellRefresh);
+      widget.refreshSignal?.addListener(_onShellRefresh);
+    }
+  }
+
+  void _onShellRefresh() {
+    if (!mounted) return;
+    unawaited(_load());
+  }
+
+  @override
+  void dispose() {
+    widget.refreshSignal?.removeListener(_onShellRefresh);
+    super.dispose();
   }
 
   Future<void> _load() async {
@@ -178,7 +210,40 @@ class _CalendarScreenState extends State<CalendarScreen> {
                                             if (session['task_title'] is String)
                                               Text(session['task_title']
                                                   as String),
-                                          ])))),
+                                          ]),
+                                      trailing: !_cached &&
+                                              session['status'] == 'scheduled' &&
+                                              session['task_id'] is String &&
+                                              (session['task_id'] as String)
+                                                  .isNotEmpty
+                                          ? IconButton(
+                                              tooltip: 'Xóa công việc',
+                                              constraints: const BoxConstraints(
+                                                minWidth: 48,
+                                                minHeight: 48,
+                                              ),
+                                              padding: EdgeInsets.zero,
+                                              onPressed: () => Navigator.pop(
+                                                context,
+                                                _CalendarDeleteTaskRequest(
+                                                  taskId: session['task_id']
+                                                      as String,
+                                                  taskTitle: (session[
+                                                              'task_title']
+                                                          as String?) ??
+                                                      (session['step_title']
+                                                          as String?) ??
+                                                      'Công việc',
+                                                  taskRevision: (session[
+                                                          'task_revision']
+                                                      as num?)?.toInt(),
+                                                ),
+                                              ),
+                                              icon: const Icon(
+                                                Icons.delete_outline_rounded,
+                                              ),
+                                            )
+                                          : null))),
                       ])),
                   Padding(
                     padding: const EdgeInsets.all(16),
@@ -189,6 +254,17 @@ class _CalendarScreenState extends State<CalendarScreen> {
                   ),
                 ]))));
     if (!mounted) return;
+    if (selected is _CalendarDeleteTaskRequest) {
+      final deleted = await confirmAndDeleteTask(
+        context,
+        taskId: selected.taskId,
+        taskTitle: selected.taskTitle,
+        taskRevision: selected.taskRevision,
+        api: _api,
+      );
+      if (deleted && mounted) await _load();
+      return;
+    }
     if (selected is FocusSessionInfo) {
       final focus = context.read<FocusProvider>();
       if (!focus.isActiveRun && !focus.hasUnfinishedServerRun) {
@@ -266,7 +342,7 @@ class _CalendarScreenState extends State<CalendarScreen> {
     final activeTint = palette.accentInk;
 
     return Scaffold(
-      appBar: const MelbelAppBar(title: 'Lịch', showBack: true),
+      appBar: MelbelAppBar(title: 'Lịch', showBack: !widget.embeddedInShell),
       body: SafeArea(
         child: ListView(
           padding: MelbelLayout.pageInsets(context, top: 4, bottom: 16),
@@ -1083,4 +1159,16 @@ class _CalendarPeekingPawsPainter extends CustomPainter {
   @override
   bool shouldRepaint(_CalendarPeekingPawsPainter oldDelegate) =>
       oldDelegate.isDark != isDark;
+}
+
+class _CalendarDeleteTaskRequest {
+  const _CalendarDeleteTaskRequest({
+    required this.taskId,
+    required this.taskTitle,
+    this.taskRevision,
+  });
+
+  final String taskId;
+  final String taskTitle;
+  final int? taskRevision;
 }

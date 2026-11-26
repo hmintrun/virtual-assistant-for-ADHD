@@ -242,6 +242,7 @@ class ApiClient {
   Future<Map<String, dynamic>> deleteData(
     String path, {
     Object? data,
+    Map<String, dynamic>? queryParameters,
     String? idempotencyKey,
     bool idempotent = false,
   }) async {
@@ -249,6 +250,7 @@ class ApiClient {
       final response = await dio.delete<Map<String, dynamic>>(
         path,
         data: data,
+        queryParameters: queryParameters,
         options: Options(
           headers: idempotent
               ? {

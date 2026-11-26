@@ -242,13 +242,15 @@ class FocusProvider extends ChangeNotifier {
     final scheduleRepo = SqliteScheduleRepository(db: db);
     final thoughtRepo = SqliteThoughtRepository(db: db);
     final clockSync = ClockSyncService.instance;
+    void Function(OutboxRecord)? onSyncedCallback;
     final worker = OutboxReplayWorker(
       repository: outboxRepo,
       apiClient: apiClient,
       thoughtRepository: thoughtRepo,
+      onRecordSynced: (record) => onSyncedCallback?.call(record),
     );
 
-    return FocusProvider(
+    final provider = FocusProvider(
       ownerId: ownerId,
       api: apiClient,
       outboxRepository: outboxRepo,
@@ -260,6 +262,13 @@ class FocusProvider extends ChangeNotifier {
       voicePlayback: voicePlayback,
       onFocusRecorded: onFocusRecorded,
     );
+    onSyncedCallback = (record) {
+      if (record.eventType == OutboxEventType.runEventBatch ||
+          record.eventType == OutboxEventType.checkinResponse) {
+        provider.markScheduleSynced();
+      }
+    };
+    return provider;
   }
 
   late final void Function(ThoughtRecording) _recordingStopped;
@@ -307,9 +316,17 @@ class FocusProvider extends ChangeNotifier {
 
   bool _awaitingCheckIn = false;
   bool _checkInExpired = false;
+  int _scheduleSyncRevision = 0;
 
   bool get awaitingCheckIn => _awaitingCheckIn;
   bool get checkInExpired => _checkInExpired;
+  int get scheduleSyncRevision => _scheduleSyncRevision;
+
+  void markScheduleSynced() {
+    if (_disposed) return;
+    _scheduleSyncRevision++;
+    _notify();
+  }
 
   void clearCheckInExpiredBanner() {
     _checkInExpired = false;
@@ -1114,6 +1131,7 @@ class FocusProvider extends ChangeNotifier {
         idempotencyKey: pending['event_id'] as String,
       );
       _pendingEnd = null;
+      _scheduleSyncRevision++;
       await _persistRun();
       _watchCheckInDeadline();
     } on ApiException catch (error) {
@@ -1323,6 +1341,7 @@ class FocusProvider extends ChangeNotifier {
         _checkInDeadline?.cancel();
         _pendingResponse = null;
         _awaitingCheckIn = false;
+        _scheduleSyncRevision++;
         await _repository.clearActiveRun();
       }
     } on ApiException catch (error) {

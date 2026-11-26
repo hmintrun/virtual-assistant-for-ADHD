@@ -727,14 +727,45 @@ class _StreakNoticeBanner extends StatelessWidget {
       tone: tone,
       borderRadius: 16,
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-      child: Text(
-        text,
-        style: theme.textTheme.labelMedium?.copyWith(
-          color: tone == MelbelCardTone.amber
-              ? palette.onAmberSoft
-              : palette.onSurface,
-          fontWeight: FontWeight.w600,
-        ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Text(
+            text,
+            style: theme.textTheme.labelMedium?.copyWith(
+              color: tone == MelbelCardTone.amber
+                  ? palette.onAmberSoft
+                  : palette.onSurface,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+          if (streak.canRepairNow) ...[
+            const SizedBox(height: 10),
+            PrimaryCta(
+              label: streak.isRepairing
+                  ? 'Đang nối lại nhịp…'
+                  : 'Nối lại nhịp 24h ngay (còn ${streak.repairsLeftThisMonth} lượt)',
+              icon: Icons.healing_rounded,
+              height: 48,
+              onPressed: streak.isRepairing
+                  ? null
+                  : () async {
+                      final messenger = ScaffoldMessenger.maybeOf(context);
+                      final err = await streak.repairWithBackend();
+                      if (!context.mounted) return;
+                      messenger?.showSnackBar(
+                        SnackBar(
+                          content: Text(
+                            err ??
+                                'Đã nối lại chuỗi ${streak.effectiveDisplayStreak} ngày!',
+                          ),
+                          behavior: SnackBarBehavior.floating,
+                        ),
+                      );
+                    },
+            ),
+          ],
+        ],
       ),
     );
   }

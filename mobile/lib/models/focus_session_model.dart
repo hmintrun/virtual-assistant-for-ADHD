@@ -11,6 +11,8 @@ class FocusSessionInfo {
     required this.restSeconds,
     required this.microTaskText,
     required this.segments,
+    this.taskId,
+    this.taskRevision,
     this.scheduleRevision = 1,
     this.isLastSessionOfStep = false,
     this.deadline,
@@ -19,6 +21,8 @@ class FocusSessionInfo {
 
   final String sessionId;
   String get id => sessionId;
+  final String? taskId;
+  final int? taskRevision;
   final String taskTitle;
   final String stepTitle;
   final DateTime scheduledStart;
@@ -35,6 +39,8 @@ class FocusSessionInfo {
   factory FocusSessionInfo.fromJson(Map<String, dynamic> json) =>
       FocusSessionInfo(
         sessionId: json['session_id'] as String? ?? '',
+        taskId: json['task_id'] as String?,
+        taskRevision: (json['task_revision'] as num?)?.toInt(),
         taskTitle: json['task_title'] as String? ?? 'Phiên tập trung',
         stepTitle: json['step_title'] as String? ?? 'Bước hiện tại',
         scheduledStart: DateTime.parse(json['scheduled_start'] as String),
@@ -55,6 +61,8 @@ class FocusSessionInfo {
 
   Map<String, dynamic> toJson() => {
         'session_id': sessionId,
+        if (taskId != null) 'task_id': taskId,
+        if (taskRevision != null) 'task_revision': taskRevision,
         'schedule_revision': scheduleRevision,
         'is_last_session_of_step': isLastSessionOfStep,
         'task_title': taskTitle,

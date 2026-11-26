@@ -442,7 +442,7 @@ class CandidateReviewScreen extends StatelessWidget {
         'feasible' => 'Đủ thời gian trước hạn chót',
         'infeasible' => 'Chưa đủ thời gian trước hạn chót',
         'search_inconclusive' => 'Chưa thể kết luận khả năng xếp lịch',
-        _ => 'Trạng thái khả thi: $status',
+        _ => 'Cần kiểm tra lại khả năng xếp lịch.',
       };
 
   static int _minutes(int seconds) => (seconds / 60).ceil();

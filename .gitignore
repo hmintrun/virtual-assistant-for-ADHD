@@ -44,6 +44,7 @@ DEVELOPER.md
 *.mp3
 *.aac
 *.ogg
+!mobile/assets/audio/melbel_meow.ogg
 recordings/
 temp_audio/
 uploads/

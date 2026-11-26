@@ -15,6 +15,7 @@ import '../services/schedule_service.dart';
 import '../services/voice_service.dart';
 import '../widgets/melbel_ui.dart';
 import '../widgets/streak_widgets.dart';
+import 'main_shell_screen.dart';
 
 class ReviewHeader extends StatelessWidget {
   const ReviewHeader(
@@ -415,8 +416,7 @@ class FocusRestScreen extends StatelessWidget {
               expression: CatExpression.sleepy),
           PrimaryCta(
               label: 'Về trang chủ',
-              onPressed: () => Navigator.of(context)
-                  .pushNamedAndRemoveUntil('/home', (_) => false)),
+              onPressed: () => MainShellScreen.returnHome(context)),
         ],
       );
 }
@@ -710,8 +710,7 @@ class _ScheduleComparisonScreenState extends State<ScheduleComparisonScreen>
     ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
       duration: Duration(seconds: 6),
       content: Text(
-        'Contract hiện yêu cầu sửa hạn chót trong Draft rồi xác nhận lại. '
-        'Chưa có API sửa trực tiếp Task đã chốt.',
+        'Để lùi hạn chót, bạn hãy chọn "Mở thêm giờ rảnh" hoặc chỉnh lại trong bản nháp công việc nhé.',
       ),
     ));
   }

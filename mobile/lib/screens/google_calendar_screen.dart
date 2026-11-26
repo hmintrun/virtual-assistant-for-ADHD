@@ -2,11 +2,14 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../core/api_client.dart';
 import '../core/responsive_layout.dart';
 import '../core/theme.dart';
+import '../services/auth_service.dart';
+import '../services/calendar_api.dart';
 import '../services/google_calendar_api.dart';
 import '../widgets/melbel_ui.dart';
 
@@ -114,6 +117,15 @@ class _GoogleCalendarScreenState extends State<GoogleCalendarScreen>
     }
   }
 
+  String? _safeEmail(BuildContext context) {
+    try {
+      return Provider.of<AuthService>(context, listen: false).user?['email']
+          as String?;
+    } on ProviderNotFoundException {
+      return null;
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final palette = context.melbel;
@@ -201,7 +213,10 @@ class _GoogleCalendarScreenState extends State<GoogleCalendarScreen>
                         ),
                       ),
                       title: Text(
-                        connection['account_ref'] as String? ?? 'Google Calendar',
+                        formatCalendarAccountLabel(
+                          connection['account_ref'] as String?,
+                          fallbackEmail: _safeEmail(context),
+                        ),
                         style: Theme.of(context)
                             .textTheme
                             .titleSmall
@@ -382,10 +397,19 @@ class _GoogleCalendarAccountState extends State<_GoogleCalendarAccount> {
     if (!mounted || choice == null || choice.$1 == _writeId && _writeId != null)
       return;
     await _perform(() async {
+      final dedicatedIds = {
+        for (final item in _calendars)
+          if (item['primary'] != true &&
+              ((choice.$1 != null && item['id'] == choice.$1) ||
+                  isDedicatedFocusWriteCalendar(
+                    CalendarItem.fromJson(item),
+                  )))
+            item['id'] as String,
+      };
       final readIds = [
         for (final id
             in (widget.connection['read_calendar_ids'] as List? ?? []))
-          if (id is String) id,
+          if (id is String && !dedicatedIds.contains(id)) id,
       ];
       final preview = await widget.api.previewWriteCalendar(
         _id,

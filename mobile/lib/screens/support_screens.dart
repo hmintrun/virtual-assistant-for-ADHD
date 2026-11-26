@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 import '../services/google_calendar_api.dart';
 import '../services/auth_service.dart';
+import '../services/calendar_api.dart';
 import '../providers/focus_provider.dart';
 import '../providers/streak_provider.dart';
 import '../providers/task_provider.dart';
@@ -126,35 +127,62 @@ class HelpScreen extends StatelessWidget {
 
 /// Blank profile state for use without the authentication and profile APIs.
 class AccountScreen extends StatefulWidget {
-  const AccountScreen({super.key});
+  const AccountScreen({
+    this.api,
+    this.embeddedInShell = false,
+    super.key,
+  });
+
+  final ApiClient? api;
+  final bool embeddedInShell;
 
   @override
   State<AccountScreen> createState() => _AccountScreenState();
 }
 
 class _AccountScreenState extends State<AccountScreen> {
-  Future<Map<String, dynamic>> _connection = ApiClient().checkHealth();
-  Future<List<Map<String, dynamic>>> _calendarConnections =
-      GoogleCalendarApi(ApiClient()).connections();
+  late final ApiClient _api = widget.api ?? ApiClient();
+  late Future<Map<String, dynamic>> _connection = _api.checkHealth();
+  late Future<List<Map<String, dynamic>>> _calendarConnections =
+      GoogleCalendarApi(_api).connections();
 
   Future<void> _openGoogleCalendar() async {
     await Navigator.pushNamed(context, '/google-calendar');
     if (!mounted) return;
-    setState(() =>
-        _calendarConnections = GoogleCalendarApi(ApiClient()).connections());
+    setState(() {
+      _calendarConnections = GoogleCalendarApi(_api).connections();
+    });
+  }
+
+  T? _maybeRead<T>(BuildContext context) {
+    try {
+      return Provider.of<T>(context, listen: false);
+    } on ProviderNotFoundException {
+      return null;
+    }
+  }
+
+  T? _maybeWatch<T>(BuildContext context) {
+    try {
+      return Provider.of<T>(context);
+    } on ProviderNotFoundException {
+      return null;
+    }
   }
 
   String _calendarStatus(AsyncSnapshot<List<Map<String, dynamic>>> snapshot) {
     if (snapshot.connectionState != ConnectionState.done)
       return 'Đang kiểm tra…';
     if (snapshot.hasError) return 'Chưa kiểm tra được kết nối';
+    final fallbackEmail = _maybeRead<AuthService>(context)?.user?['email'] as String?;
     final connections = snapshot.data ?? const [];
     for (final connection in connections) {
       if (connection['connection_state'] == 'connected') {
-        final account = connection['account_ref'];
-        return account is String && account.isNotEmpty
-            ? 'Đã liên kết · $account'
-            : 'Đã liên kết';
+        final label = formatCalendarAccountLabel(
+          connection['account_ref'] as String?,
+          fallbackEmail: fallbackEmail,
+        );
+        return 'Đã liên kết · $label';
       }
     }
     return connections.any((item) => item['connection_state'] != 'disconnected')
@@ -164,14 +192,15 @@ class _AccountScreenState extends State<AccountScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final auth = context.watch<AuthService>();
-    final focus = context.watch<FocusProvider>();
+    final auth = _maybeWatch<AuthService>(context);
+    final focus = _maybeWatch<FocusProvider>(context);
+    final task = _maybeWatch<TaskProvider>(context);
     final streak = StreakProvider.maybeOf(context);
-    final canSignOut = !focus.isActiveRun &&
-        !focus.isRecording &&
-        !focus.runCommandBusy &&
-        !focus.hasUnfinishedServerRun &&
-        !context.watch<TaskProvider>().isApiBusy;
+    final canSignOut = !(focus?.isActiveRun ?? false) &&
+        !(focus?.isRecording ?? false) &&
+        !(focus?.runCommandBusy ?? false) &&
+        !(focus?.hasUnfinishedServerRun ?? false) &&
+        !(task?.isApiBusy ?? false);
     final palette = context.melbel;
     final theme = Theme.of(context);
     final isDark = theme.brightness == Brightness.dark;
@@ -182,9 +211,9 @@ class _AccountScreenState extends State<AccountScreen> {
       showBottomClouds: true,
       child: Scaffold(
         backgroundColor: Colors.transparent,
-        appBar: const MelbelAppBar(
+        appBar: MelbelAppBar(
           title: 'Không gian cá nhân',
-          showBack: true,
+          showBack: !widget.embeddedInShell,
           showGlobalActions: false,
           showTitleRays: true,
         ),
@@ -242,8 +271,9 @@ class _AccountScreenState extends State<AccountScreen> {
                           clipBehavior: Clip.none,
                           children: [
                             MelbelCatEarAvatar(
-                              photoUrl: auth.photoUrl,
-                              displayName: auth.user?['display_name'] as String?,
+                              photoUrl: auth?.photoUrl,
+                              displayName:
+                                  auth?.user?['display_name'] as String?,
                               size: 68,
                             ),
                             Positioned(
@@ -269,7 +299,7 @@ class _AccountScreenState extends State<AccountScreen> {
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
                               Text(
-                                auth.user?['display_name'] as String? ??
+                                auth?.user?['display_name'] as String? ??
                                     'Tài khoản của bạn',
                                 style: theme.textTheme.titleLarge?.copyWith(
                                   fontSize: 20,
@@ -278,7 +308,7 @@ class _AccountScreenState extends State<AccountScreen> {
                                   color: palette.onSurface,
                                 ),
                               ),
-                              if (auth.user?['email'] case final String email)
+                              if (auth?.user?['email'] case final String email)
                                 ...[
                                   const SizedBox(height: 4),
                                   Text(
@@ -288,7 +318,7 @@ class _AccountScreenState extends State<AccountScreen> {
                                     ),
                                   ),
                                 ],
-                              if (AuthService.isDev && auth.user == null) ...[
+                              if (AuthService.isDev && auth?.user == null) ...[
                                 const SizedBox(height: 8),
                                 const MelbelStatusPill(
                                   label: 'Tài khoản phát triển',
@@ -368,9 +398,9 @@ class _AccountScreenState extends State<AccountScreen> {
                         title: 'Kết nối máy chủ',
                         subtitle: subtitle,
                         useHoney: true,
-                        onTap: () => setState(
-                          () => _connection = ApiClient().checkHealth(),
-                        ),
+                        onTap: () => setState(() {
+                          _connection = _api.checkHealth();
+                        }),
                       );
                     },
                   ),
@@ -409,20 +439,22 @@ class _AccountScreenState extends State<AccountScreen> {
                   ),
                 ]),
             const SizedBox(height: 14),
-            if (auth.needsSignIn) ...[
+            if (auth?.needsSignIn ?? false) ...[
               const Text('Hãy đăng nhập lại bằng tài khoản hiện tại để đồng bộ.'),
               const GoogleLoginButton(),
               const SizedBox(height: 10),
             ],
-            if (auth.error != null) ...[
-              Text(auth.error!),
+            if (auth?.error != null) ...[
+              Text(auth!.error!),
               const SizedBox(height: 10),
             ],
             if (!AuthService.isDev) ...[
               SecondaryCta(
                 label: 'Đăng xuất',
                 icon: Icons.logout_rounded,
-                onPressed: canSignOut && !auth.busy ? auth.signOut : null,
+                onPressed: canSignOut && auth != null && !auth.busy
+                    ? auth.signOut
+                    : null,
               ),
               if (!canSignOut) ...[
                 const SizedBox(height: 8),

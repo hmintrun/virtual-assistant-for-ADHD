@@ -11,6 +11,7 @@ import '../widgets/calendar_fallback.dart';
 import '../widgets/melbel_ui.dart';
 import 'candidate_review_screen.dart';
 import 'focus_screen.dart';
+import 'main_shell_screen.dart';
 
 // Helper for opening new screens
 Future<void> _open(BuildContext context, Widget page) => Navigator.push<void>(
@@ -618,7 +619,16 @@ class _ExtendTimeScreenState extends State<ExtendTimeScreen> {
   Widget build(BuildContext context) {
     final task = context.watch<TaskProvider>();
     final displayTitle =
-        task.title.isEmpty ? 'Soạn báo cáo đánh giá quý 3' : task.title;
+        task.title.trim().isEmpty ? 'Công việc hiện tại' : task.title;
+    final currentDeadlineLabel = task.formatDeadline(task.deadline);
+    final candidateSteps = task.candidate?.steps ?? const [];
+    final totalMinutes = candidateSteps.fold<int>(
+      0,
+      (sum, step) => sum + ((step['estimated_base_seconds'] as num?)?.toInt() ?? 0),
+    );
+    final totalDurationLabel = totalMinutes > 0
+        ? 'Tổng cộng: ${(totalMinutes / 60).ceil()} phút'
+        : 'Tổng cộng: Đang cập nhật';
     final current = _options[_selectedOption];
 
     return MelbelPageBackdrop(
@@ -684,7 +694,7 @@ class _ExtendTimeScreenState extends State<ExtendTimeScreen> {
                         ),
                         const SizedBox(height: 4),
                         Text(
-                          'Hạn hiện tại: 17:00 hôm nay',
+                          'Hạn hiện tại: $currentDeadlineLabel',
                           style: TextStyle(
                             fontSize: 13,
                             color: MelbelColors.kOnSurfaceVariant,
@@ -816,7 +826,7 @@ class _ExtendTimeScreenState extends State<ExtendTimeScreen> {
                         ),
                       ),
                       Text(
-                        'Tổng cộng: 120 phút',
+                        totalDurationLabel,
                         style: TextStyle(
                           fontSize: 13,
                           color: MelbelColors.kOnSurfaceVariant,
@@ -1263,7 +1273,7 @@ class UnconfirmedPlanScreen extends StatelessWidget {
             SecondaryCta(
               label: 'Để sau',
               onPressed: () {
-                Navigator.of(context).popUntil((route) => route.isFirst);
+                MainShellScreen.returnHome(context);
               },
             ),
             const SizedBox(height: 20),
@@ -1431,8 +1441,7 @@ class PlanLockedScreen extends StatelessWidget {
                 icon: Icons.notifications_active_outlined,
                 height: 50,
                 onPressed: () {
-                  Navigator.of(context)
-                      .pushNamedAndRemoveUntil('/home', (_) => false);
+                  MainShellScreen.returnHome(context);
                 },
               ),
             ],

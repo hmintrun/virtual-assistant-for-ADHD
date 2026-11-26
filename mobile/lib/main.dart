@@ -21,7 +21,7 @@ import 'providers/theme_provider.dart';
 import 'screens/onboarding_screens.dart';
 import 'screens/splash_screen.dart';
 import 'screens/support_screens.dart';
-import 'screens/home_screen.dart';
+import 'screens/main_shell_screen.dart';
 import 'screens/calendar_screen.dart';
 import 'screens/google_calendar_screen.dart';
 import 'screens/calendar_connect_screen.dart';
@@ -122,8 +122,10 @@ class _OwnerApp extends StatefulWidget {
 }
 
 class _OwnerAppState extends State<_OwnerApp> {
-  late final StreakProvider _streakProvider =
-      StreakProvider(ownerId: widget.session.ownerId);
+  late final StreakProvider _streakProvider = StreakProvider(
+    ownerId: widget.session.ownerId,
+    api: ApiClient(),
+  );
   late Future<FocusProvider> _focusProvider;
   bool _restoreStarted = false;
   FocusProvider? _initializedFocus;
@@ -131,13 +133,19 @@ class _OwnerAppState extends State<_OwnerApp> {
   @override
   void initState() {
     super.initState();
-    unawaited(_streakProvider.restore());
+    unawaited(
+      _streakProvider.restore().then((_) => _streakProvider.syncFromBackend()),
+    );
     _focusProvider = _createFocusProvider();
   }
 
   Future<FocusProvider> _createFocusProvider() async {
     void onFocusRecorded(int seconds) {
-      unawaited(_streakProvider.recordFocusActivity(seconds: seconds));
+      unawaited(
+        _streakProvider
+            .recordFocusActivity(seconds: seconds)
+            .then((_) => _streakProvider.syncFromBackend()),
+      );
     }
 
     if (kIsWeb) {
@@ -383,8 +391,8 @@ class _ProPlanAppState extends State<ProPlanApp> {
       themeAnimationDuration: Duration.zero,
       routes: signedIn
           ? {
-              '/login': (_) => const HomeScreen(),
-              '/home': (_) => const HomeScreen(),
+              '/login': (_) => const MainShellScreen(),
+              '/home': (_) => const MainShellScreen(),
               '/calendar': (_) => const CalendarScreen(),
               '/google-calendar': (_) =>
                   !kIsWeb && defaultTargetPlatform == TargetPlatform.android
@@ -477,7 +485,7 @@ class _ProPlanAppState extends State<ProPlanApp> {
       home: signedIn
           ? widget.onboardingRequired
               ? const SetupFlowScreen()
-              : const HomeScreen()
+              : const MainShellScreen()
           : const LoginScreen(),
     );
   }

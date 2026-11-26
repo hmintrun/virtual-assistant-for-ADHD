@@ -5,6 +5,7 @@ import '../core/responsive_layout.dart';
 import '../core/theme.dart';
 import '../providers/task_provider.dart';
 import '../widgets/melbel_ui.dart';
+import 'main_shell_screen.dart';
 
 class DraftSavedScreen extends StatelessWidget {
   const DraftSavedScreen({super.key});
@@ -77,8 +78,7 @@ class DraftSavedScreen extends StatelessWidget {
               SecondaryCta(
                   label: 'Về trang chủ',
                   icon: Icons.home_outlined,
-                  onPressed: () =>
-                      Navigator.popUntil(context, (route) => route.isFirst)),
+                  onPressed: () => MainShellScreen.returnHome(context)),
               if (!task.planLocked) ...[
                 const SizedBox(height: 6),
                 Center(
@@ -89,10 +89,7 @@ class DraftSavedScreen extends StatelessWidget {
                             try {
                               await task.deleteCurrentDraft();
                               if (!context.mounted) return;
-                              Navigator.popUntil(
-                                context,
-                                (route) => route.isFirst,
-                              );
+                              MainShellScreen.returnHome(context);
                             } catch (error) {
                               if (!context.mounted) return;
                               ScaffoldMessenger.of(context).showSnackBar(

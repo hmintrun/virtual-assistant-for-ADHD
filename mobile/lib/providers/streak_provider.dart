@@ -5,6 +5,8 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../core/api_client.dart';
+
 enum StreakDayKind { done, freeze, repair }
 
 @immutable
@@ -83,8 +85,10 @@ class StreakCelebrationEvent {
 class StreakProvider extends ChangeNotifier {
   StreakProvider({
     required String ownerId,
+    ApiClient? api,
     DateTime Function()? now,
   })  : _ownerId = ownerId,
+        _api = api,
         _now = now ?? DateTime.now;
 
   static const int unlockDays = 3;
@@ -149,8 +153,10 @@ class StreakProvider extends ChangeNotifier {
   }
 
   final String _ownerId;
+  final ApiClient? _api;
   final DateTime Function() _now;
 
+  bool _disposed = false;
   int _currentStreak = 0;
   int _longestStreak = 0;
   int _freezeCount = 1;
@@ -160,18 +166,30 @@ class StreakProvider extends ChangeNotifier {
   bool _repairPending = false;
   int _repairPreviousStreak = 0;
   String? _repairPendingDateKey;
+  DateTime? _repairWindowEndsAt;
+  bool _streakFrozen = false;
   bool _usedFreezeNotice = false;
   bool _warmupMissedNotice = false;
   bool _softResetNotice = false;
   bool _crownEnabled = true;
   bool _introDismissed = false;
   bool _restored = false;
+  bool _syncing = false;
+  bool _repairing = false;
+  bool _syncedFromBackend = false;
   StreakCelebrationEvent? _pendingCelebration;
   final Map<String, StreakDayRecord> _dayRecords = {};
 
   String get _storageKey => 'proplan.streak.v1.$_ownerId';
 
   bool get isRestored => _restored;
+  bool get isSyncing => _syncing;
+  bool get isRepairing => _repairing;
+  bool get syncedFromBackend => _syncedFromBackend;
+  DateTime? get repairWindowEndsAt => _repairWindowEndsAt;
+  bool get streakFrozen => _streakFrozen;
+  bool get canRepairNow =>
+      _repairPending && repairsLeftThisMonth > 0 && _api != null;
   int get currentStreak => _currentStreak;
   int get effectiveDisplayStreak =>
       _repairPending ? _repairPreviousStreak : _currentStreak;
@@ -618,6 +636,160 @@ class StreakProvider extends ChangeNotifier {
     _introDismissed = true;
     await _persist();
     notifyListeners();
+  }
+
+  void _notifySafe() {
+    if (!_disposed) notifyListeners();
+  }
+
+  @override
+  void dispose() {
+    _disposed = true;
+    super.dispose();
+  }
+
+  /// Fetches live streak status from `GET /api/v1/streak` and caches locally.
+  Future<bool> syncFromBackend() async {
+    final api = _api;
+    if (api == null || _disposed || _syncing) return false;
+    _syncing = true;
+    try {
+      final data = await api.getData('/streak');
+      if (_disposed) return false;
+      _applyBackendSnapshot(data);
+      await _persist();
+      _notifySafe();
+      return true;
+    } catch (_) {
+      return false;
+    } finally {
+      _syncing = false;
+    }
+  }
+
+  /// Exercises a 24h recovery repair via `POST /api/v1/streak/repair`.
+  /// Returns null on success, or a calm Vietnamese error message on failure.
+  Future<String?> repairWithBackend() async {
+    final api = _api;
+    if (api == null) return 'Chưa kết nối máy chủ để nối lại nhịp.';
+    if (_repairing) return null;
+    _repairing = true;
+    _notifySafe();
+    try {
+      final previous = effectiveDisplayStreak;
+      final oldTier = tierFor(previous);
+      final todayKey = dateKey(DateUtils.dateOnly(_now()));
+      final data = await api.postData(
+        '/streak/repair',
+        data: const <String, dynamic>{},
+        idempotencyKey: ApiClient.stableIdempotencyKey(
+          'streak_repair_${_ownerId}_$todayKey',
+          'repair',
+        ),
+      );
+      if (_disposed) return null;
+      _applyBackendSnapshot(data);
+      final restoredDays =
+          effectiveDisplayStreak > 0 ? effectiveDisplayStreak : previous;
+      final newTier = tierFor(restoredDays);
+      final todayMinutes = math.max(2, (data['today_focus_minutes'] as num?)?.toInt() ?? 2);
+      _pendingCelebration = StreakCelebrationEvent(
+        streakDays: restoredDays,
+        minutesAdded: todayMinutes,
+        justUnlocked: false,
+        restoredFromRepair: true,
+        earnedFreeze: false,
+        evolved: restoredDays >= unlockDays && newTier.level > oldTier.level,
+        tier: newTier,
+      );
+      await _persist();
+      _notifySafe();
+      return null;
+    } on ApiException catch (error) {
+      return error.message;
+    } catch (_) {
+      return 'Chưa nối lại nhịp được. Vui lòng thử lại.';
+    } finally {
+      _repairing = false;
+      _notifySafe();
+    }
+  }
+
+  void _applyBackendSnapshot(Map<String, dynamic> data) {
+    final current = (data['current_streak_days'] as num?)?.toInt();
+    final effective = (data['effective_display_streak'] as num?)?.toInt();
+    final longest = (data['longest_streak_days'] as num?)?.toInt();
+    final freeze = (data['streak_freeze_tokens'] as num?)?.toInt();
+    final repairsUsed = (data['repairs_used_this_month'] as num?)?.toInt();
+    final repairPending = data['repair_pending'] as bool?;
+    final streakFrozen = data['streak_frozen'] as bool?;
+    final lastDate = data['last_streak_date'] as String?;
+    final repairWindowRaw = data['repair_window_ends_at'] as String?;
+    final todayCompleted = data['today_completed'] as bool? ?? false;
+    final todayMinutes = (data['today_focus_minutes'] as num?)?.toInt() ?? 0;
+
+    final today = DateUtils.dateOnly(_now());
+    final todayKey = dateKey(today);
+    final mKey = monthKey(today);
+    _repairMonthKey ??= mKey;
+
+    if (repairPending != null) {
+      _repairPending = repairPending;
+    }
+    if (streakFrozen != null) {
+      _streakFrozen = streakFrozen;
+      _usedFreezeNotice = streakFrozen;
+    }
+    if (current != null) _currentStreak = current;
+    if (_repairPending) {
+      _repairPreviousStreak =
+          (effective != null && effective > 0) ? effective : _currentStreak;
+      _repairPendingDateKey = todayKey;
+    } else {
+      _repairPreviousStreak = 0;
+      _repairPendingDateKey = null;
+    }
+    if (longest != null) {
+      _longestStreak = math.max(_longestStreak, longest);
+    }
+    if (freeze != null) {
+      _freezeCount = freeze.clamp(0, maxFreeze);
+    }
+    if (repairsUsed != null) {
+      _repairsUsedThisMonth = repairsUsed.clamp(0, maxRepairsPerMonth);
+      _repairMonthKey = mKey;
+    }
+    if (lastDate != null && lastDate.isNotEmpty) {
+      _lastActiveDateKey = lastDate;
+    }
+    _repairWindowEndsAt = repairWindowRaw != null
+        ? DateTime.tryParse(repairWindowRaw)?.toLocal()
+        : null;
+
+    final rawRecords = data['day_records'];
+    if (rawRecords is List) {
+      for (final item in rawRecords.whereType<Map>()) {
+        final date = item['date'] as String?;
+        if (date == null || date.length != 10) continue;
+        final parsed = StreakDayRecord.fromJson(item);
+        if (parsed != null) {
+          _dayRecords[date] = parsed;
+        }
+      }
+    }
+
+    if (todayCompleted) {
+      final existing = _dayRecords[todayKey];
+      final mergedMinutes = math.max(existing?.minutes ?? 0, todayMinutes);
+      _dayRecords[todayKey] = StreakDayRecord(
+        kind: StreakDayKind.done,
+        minutes: mergedMinutes,
+      );
+      _usedFreezeNotice = false;
+      _warmupMissedNotice = false;
+      _softResetNotice = false;
+    }
+    _syncedFromBackend = true;
   }
 
   Future<void> _persist() async {

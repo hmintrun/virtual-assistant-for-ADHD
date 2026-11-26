@@ -10,6 +10,7 @@ import '../core/api_client.dart';
 import '../core/responsive_layout.dart';
 import '../core/theme.dart';
 import '../models/focus_session_model.dart';
+import '../models/planning_models.dart';
 import '../providers/focus_provider.dart';
 import '../providers/task_provider.dart';
 import '../services/audio_recorder_service.dart';
@@ -18,6 +19,7 @@ import '../services/voice_two_tier_service.dart';
 import '../widgets/focus_stage_widgets.dart';
 import '../widgets/melbel_ui.dart';
 import '../widgets/undo_snackbar.dart';
+import 'candidate_review_screen.dart';
 import 'focus_review_screens.dart';
 import 'task_entry_screen.dart';
 import 'task_summary_screen.dart';
@@ -407,7 +409,20 @@ class _FocusScreenState extends State<FocusScreen> with WidgetsBindingObserver {
                   tone: MelbelCardTone.amber,
                 ),
               ),
-            if (focus.startRequiresReplan)
+            if (focus.startRequiresReplan) ...[
+              Padding(
+                padding: const EdgeInsets.only(bottom: 10),
+                child: PrimaryCta(
+                  label: 'Mở đề xuất xếp lại lịch',
+                  icon: Icons.event_repeat_rounded,
+                  onPressed: () => Navigator.of(context).push(
+                    MaterialPageRoute<void>(
+                      builder: (_) =>
+                          ScheduleChangeReasonScreen(session: session),
+                    ),
+                  ),
+                ),
+              ),
               Padding(
                 padding: const EdgeInsets.only(bottom: 12),
                 child: SecondaryCta(
@@ -417,6 +432,7 @@ class _FocusScreenState extends State<FocusScreen> with WidgetsBindingObserver {
                       Navigator.of(context).pushReplacementNamed('/calendar'),
                 ),
               ),
+            ],
             AnimatedSwitcher(
               duration: MediaQuery.disableAnimationsOf(context)
                   ? Duration.zero
@@ -1741,13 +1757,121 @@ class _ThoughtInboxScreenState extends State<ThoughtInboxScreen> {
   String? _playingThoughtId;
   bool _showDraft = false;
   bool _isConverting = false;
+  List<PlanningDraftModel> _serverDrafts = const [];
+  bool _loadingDrafts = false;
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted) unawaited(context.read<FocusProvider>().loadThoughts());
+      if (mounted) unawaited(_syncAndLoadThoughts());
     });
+  }
+
+  Future<void> _syncAndLoadThoughts() async {
+    final focus = context.read<FocusProvider>();
+    await focus.flushOutbox();
+    await focus.loadThoughts();
+  }
+
+  Future<void> _loadServerDrafts() async {
+    if (!mounted) return;
+    setState(() => _loadingDrafts = true);
+    try {
+      final drafts = await context.read<TaskProvider>().fetchOpenDrafts();
+      if (mounted) setState(() => _serverDrafts = drafts);
+    } catch (_) {
+      // Offline or unauthenticated fallback uses the in-memory draft.
+    } finally {
+      if (mounted) setState(() => _loadingDrafts = false);
+    }
+  }
+
+  List<PlanningDraftModel> _mergedOpenDrafts(TaskProvider task) {
+    final merged = <PlanningDraftModel>[];
+    final seenIds = <String>{};
+    final active = task.draft;
+    if (active != null && !task.planLocked) {
+      merged.add(active);
+      seenIds.add(active.draftId);
+    }
+    for (final draft in _serverDrafts) {
+      if (seenIds.add(draft.draftId)) {
+        merged.add(draft);
+      }
+    }
+    return merged;
+  }
+
+  Future<void> _openServerDraftCard(
+    TaskProvider task,
+    PlanningDraftModel draft,
+  ) async {
+    if (task.isApiBusy) return;
+    try {
+      await task.openServerDraft(draft);
+      if (!mounted) return;
+      final Widget screen;
+      if (task.candidate != null) {
+        screen = const CandidateReviewScreen();
+      } else if (draft.stage != 'collecting' ||
+          draft.clarificationIssues.isNotEmpty) {
+        screen = const TaskSummaryScreen();
+      } else {
+        screen = const TaskEntryScreen();
+      }
+      await Navigator.of(context).push<void>(
+        MaterialPageRoute<void>(builder: (_) => screen),
+      );
+      if (mounted) await _loadServerDrafts();
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('$error')),
+      );
+    }
+  }
+
+  Future<void> _deleteServerDraftCard(
+    TaskProvider task,
+    PlanningDraftModel draft,
+  ) async {
+    if (task.isApiBusy) return;
+    try {
+      await task.deleteDraftById(draft.draftId);
+      if (!mounted) return;
+      setState(() {
+        _serverDrafts = _serverDrafts
+            .where((item) => item.draftId != draft.draftId)
+            .toList(growable: false);
+      });
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Đã xóa bản nháp công việc.'),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('$error')),
+      );
+    }
+  }
+
+  String _draftDisplayTitle(PlanningDraftModel draft, TaskProvider task) {
+    if (task.draft?.draftId == draft.draftId && task.title.trim().isNotEmpty) {
+      return task.title;
+    }
+    if (draft.title.trim().isNotEmpty) return draft.title;
+    final raw = draft.rawInput?.trim() ?? '';
+    return raw.isNotEmpty ? raw : 'Bản nháp chưa đặt tên';
+  }
+
+  String _draftStageLabel(PlanningDraftModel draft) {
+    if (draft.candidateRef != null) return 'Đã có phương án';
+    if (draft.stage == 'collecting') return 'Đang nhập thông tin';
+    return 'Chờ xem lại & lên lịch';
   }
 
   @override
@@ -1760,6 +1884,9 @@ class _ThoughtInboxScreenState extends State<ThoughtInboxScreen> {
   Widget build(BuildContext context) {
     final focus = context.watch<FocusProvider>();
     final task = context.watch<TaskProvider>();
+    final openDrafts = _mergedOpenDrafts(task);
+    final hasUnsavedLocalDraft =
+        task.draft == null && task.title.trim().isNotEmpty && !task.planLocked;
     return FocusReviewPage(
       title: 'Hộp nháp',
       children: [
@@ -1773,10 +1900,74 @@ class _ThoughtInboxScreenState extends State<ThoughtInboxScreen> {
             ButtonSegment(value: false, label: Text('Suy nghĩ đã cất')),
           ],
           selected: {_showDraft},
-          onSelectionChanged: (value) =>
-              setState(() => _showDraft = value.single),
+          onSelectionChanged: (value) {
+            final next = value.single;
+            setState(() => _showDraft = next);
+            if (next) unawaited(_loadServerDrafts());
+          },
         ),
-        if (_showDraft && task.title.isNotEmpty && !task.planLocked) ...[
+        if (_showDraft && _loadingDrafts && openDrafts.isEmpty)
+          const ClipRRect(
+            borderRadius: BorderRadius.all(Radius.circular(999)),
+            child: LinearProgressIndicator(minHeight: 4),
+          ),
+        if (_showDraft && openDrafts.isNotEmpty) ...[
+          for (final draft in openDrafts)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 10),
+              child: MelbelCard(
+                borderRadius: 24,
+                padding: EdgeInsets.zero,
+                child: ListTile(
+                  contentPadding:
+                      const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+                  leading: Container(
+                    width: 40,
+                    height: 40,
+                    decoration: BoxDecoration(
+                      color: context.melbel.sageSoft,
+                      borderRadius: BorderRadius.circular(14),
+                    ),
+                    child: Icon(
+                      Icons.edit_note_rounded,
+                      color: context.melbel.sage,
+                    ),
+                  ),
+                  title: Text(
+                    _draftDisplayTitle(draft, task),
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: Theme.of(context)
+                        .textTheme
+                        .titleSmall
+                        ?.copyWith(fontWeight: FontWeight.w700),
+                  ),
+                  subtitle: Text(_draftStageLabel(draft)),
+                  trailing: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      IconButton(
+                        tooltip: 'Xóa bản nháp',
+                        constraints: const BoxConstraints(
+                          minWidth: 48,
+                          minHeight: 48,
+                        ),
+                        padding: EdgeInsets.zero,
+                        onPressed: task.isApiBusy
+                            ? null
+                            : () => _deleteServerDraftCard(task, draft),
+                        icon: const Icon(Icons.delete_outline_rounded),
+                      ),
+                      const Icon(Icons.chevron_right_rounded),
+                    ],
+                  ),
+                  onTap: task.isApiBusy
+                      ? null
+                      : () => _openServerDraftCard(task, draft),
+                ),
+              ),
+            ),
+        ] else if (_showDraft && hasUnsavedLocalDraft) ...[
           MelbelCard(
             borderRadius: 24,
             padding: EdgeInsets.zero,
@@ -1837,7 +2028,7 @@ class _ThoughtInboxScreenState extends State<ThoughtInboxScreen> {
               label: const Text('Xóa bản nháp'),
             ),
           ),
-        ] else if (_showDraft)
+        ] else if (_showDraft && !_loadingDrafts)
           MelbelCard(
             borderRadius: 24,
             tone: MelbelCardTone.muted,
@@ -1957,11 +2148,21 @@ class _ThoughtInboxScreenState extends State<ThoughtInboxScreen> {
         await task.analyzeThoughtDraft(draft);
       } catch (_) {
         if (!mounted || task.draft?.draftId != draft.draftId) rethrow;
+        task.clearApiError();
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              'Đã chuyển thành bản nháp. Bạn có thể kiểm tra và phân tích lại sau.',
+            ),
+            behavior: SnackBarBehavior.floating,
+          ),
+        );
       }
       if (!mounted) return;
       await Navigator.of(context).push<void>(
         MaterialPageRoute(builder: (_) => const TaskSummaryScreen()),
       );
+      if (mounted) unawaited(_loadServerDrafts());
     } catch (error) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -1982,6 +2183,19 @@ class _ThoughtInboxScreenState extends State<ThoughtInboxScreen> {
         setState(() => _playingThoughtId = null);
       } else {
         setState(() => _playingThoughtId = thought.id);
+        if (!kIsWeb && defaultTargetPlatform == TargetPlatform.android) {
+          try {
+            await _audioPlayer.setAudioContext(AudioContext(
+              android: const AudioContextAndroid(
+                isSpeakerphoneOn: false,
+                stayAwake: false,
+                contentType: AndroidContentType.speech,
+                usageType: AndroidUsageType.assistanceAccessibility,
+                audioFocus: AndroidAudioFocus.gainTransientMayDuck,
+              ),
+            ));
+          } catch (_) {}
+        }
         await _audioPlayer.play(DeviceFileSource(path));
         _audioPlayer.onPlayerComplete.first.then((_) {
           if (mounted) setState(() => _playingThoughtId = null);

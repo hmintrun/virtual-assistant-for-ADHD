@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart' show ValueListenable;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
@@ -17,15 +18,25 @@ import '../services/schedule_service.dart';
 import '../widgets/melbel_ui.dart';
 import '../widgets/shimmer_loading.dart';
 import '../widgets/streak_widgets.dart';
+import '../widgets/task_delete_sheet.dart';
 import 'focus_screen.dart';
 import 'candidate_review_screen.dart';
 import 'task_entry_screen.dart';
 import 'task_summary_screen.dart';
 
 class HomeScreen extends StatefulWidget {
-  const HomeScreen({this.api, super.key});
+  const HomeScreen({
+    this.api,
+    this.embeddedInShell = false,
+    this.refreshSignal,
+    this.onSwitchTab,
+    super.key,
+  });
 
   final ApiClient? api;
+  final bool embeddedInShell;
+  final ValueListenable<int>? refreshSignal;
+  final ValueChanged<int>? onSwitchTab;
 
   @override
   State<HomeScreen> createState() => _HomeScreenState();
@@ -42,6 +53,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   String? _melbelWhisper;
   bool _showLaterToday = false;
   FocusProvider? _observedFocus;
+  int _lastHandledSyncRevision = 0;
   bool _openingRecoveredCheckIn = false;
   String? _expiredNoticeRunId;
   bool _showingStreakCelebration = false;
@@ -50,7 +62,22 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    widget.refreshSignal?.addListener(_onShellRefresh);
     _refreshAdaptation();
+  }
+
+  @override
+  void didUpdateWidget(covariant HomeScreen oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (!identical(oldWidget.refreshSignal, widget.refreshSignal)) {
+      oldWidget.refreshSignal?.removeListener(_onShellRefresh);
+      widget.refreshSignal?.addListener(_onShellRefresh);
+    }
+  }
+
+  void _onShellRefresh() {
+    if (!mounted) return;
+    unawaited(_refreshAll());
   }
 
   @override
@@ -59,6 +86,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     final focus = context.read<FocusProvider>();
     if (!identical(_observedFocus, focus)) {
       _observedFocus?.removeListener(_onFocusChanged);
+      _lastHandledSyncRevision = focus.scheduleSyncRevision;
       _observedFocus = focus..addListener(_onFocusChanged);
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (mounted) _handleRecoveredCheckIn(focus);
@@ -68,6 +96,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
 
   @override
   void dispose() {
+    widget.refreshSignal?.removeListener(_onShellRefresh);
     WidgetsBinding.instance.removeObserver(this);
     _observedFocus?.removeListener(_onFocusChanged);
     super.dispose();
@@ -85,8 +114,16 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   void _onFocusChanged() {
     final focus = _observedFocus;
     if (focus == null) return;
+    final syncChanged = focus.scheduleSyncRevision != _lastHandledSyncRevision;
+    if (syncChanged) {
+      _lastHandledSyncRevision = focus.scheduleSyncRevision;
+    }
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted) _handleRecoveredCheckIn(focus);
+      if (!mounted) return;
+      _handleRecoveredCheckIn(focus);
+      if (syncChanged) {
+        unawaited(_refreshAll());
+      }
     });
   }
 
@@ -171,6 +208,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     );
     if (streak != null) {
       unawaited(streak.ingestCompletedSessions(items));
+      unawaited(streak.syncFromBackend());
     }
     unawaited(PreSessionReminderSync.instance.sync(api: _api, sessions: items));
     return items;
@@ -197,7 +235,9 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     await _refreshAdaptation();
     if (!mounted) return;
     final next = _loadSessions();
-    setState(() => _sessions = next);
+    setState(() {
+      _sessions = next;
+    });
     try {
       await next;
     } catch (_) {}
@@ -286,6 +326,10 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
 
   Future<void> _onTabSelected(int index) async {
     HapticFeedback.selectionClick();
+    if (widget.onSwitchTab != null) {
+      widget.onSwitchTab!(index);
+      return;
+    }
     if (index == 1) {
       await Navigator.of(context).pushNamed('/calendar');
       _refreshSchedule();
@@ -331,10 +375,12 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                 onTap: () => showMelbelStreakSheet(context, streak),
               ),
       ),
-      bottomNavigationBar: MelbelFloatingNavBar(
-        selectedIndex: 0,
-        onSelected: _onTabSelected,
-      ),
+      bottomNavigationBar: widget.embeddedInShell
+          ? null
+          : MelbelFloatingNavBar(
+              selectedIndex: 0,
+              onSelected: _onTabSelected,
+            ),
       body: SafeArea(
         top: false,
         child: RefreshIndicator(
@@ -758,6 +804,24 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     return '${start.day}/${start.month}';
   }
 
+  Future<void> _confirmDeleteSessionTask(FocusSessionInfo session) async {
+    final taskId = session.taskId;
+    if (taskId == null || taskId.isEmpty) return;
+    final title = session.taskTitle != 'Phiên tập trung'
+        ? session.taskTitle
+        : session.stepTitle;
+    final deleted = await confirmAndDeleteTask(
+      context,
+      taskId: taskId,
+      taskTitle: title,
+      taskRevision: session.taskRevision,
+      api: _api,
+    );
+    if (deleted && mounted) {
+      await _refreshAll();
+    }
+  }
+
   Widget _sessionTile(FocusSessionInfo session, {bool isNextHero = false}) {
     final now = DateTime.now();
     final start = session.scheduledStart.toLocal();
@@ -793,26 +857,46 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Wrap(
-                spacing: 8,
-                runSpacing: 6,
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  const MelbelStatusPill(
-                    label: 'PHIÊN TIẾP THEO',
-                    icon: Icons.bolt_rounded,
-                    tone: MelbelCardTone.sage,
+                  Expanded(
+                    child: Wrap(
+                      spacing: 8,
+                      runSpacing: 6,
+                      children: [
+                        const MelbelStatusPill(
+                          label: 'PHIÊN TIẾP THEO',
+                          icon: Icons.bolt_rounded,
+                          tone: MelbelCardTone.sage,
+                        ),
+                        MelbelStatusPill(
+                          label: relativeLabel,
+                          tone: start.difference(now).inMinutes <= 20
+                              ? MelbelCardTone.amber
+                              : MelbelCardTone.muted,
+                        ),
+                        MelbelStatusPill(
+                          label: '$date${clock(start)}–${clock(end)}',
+                          icon: Icons.schedule_rounded,
+                          tone: MelbelCardTone.muted,
+                        ),
+                      ],
+                    ),
                   ),
-                  MelbelStatusPill(
-                    label: relativeLabel,
-                    tone: start.difference(now).inMinutes <= 20
-                        ? MelbelCardTone.amber
-                        : MelbelCardTone.muted,
-                  ),
-                  MelbelStatusPill(
-                    label: '$date${clock(start)}–${clock(end)}',
-                    icon: Icons.schedule_rounded,
-                    tone: MelbelCardTone.muted,
-                  ),
+                  if (session.taskId != null && session.taskId!.isNotEmpty)
+                    IconButton(
+                      tooltip: 'Xóa công việc',
+                      constraints:
+                          const BoxConstraints(minWidth: 48, minHeight: 48),
+                      padding: EdgeInsets.zero,
+                      onPressed: () => _confirmDeleteSessionTask(session),
+                      icon: Icon(
+                        Icons.delete_outline_rounded,
+                        size: 20,
+                        color: palette.onSurfaceVariant,
+                      ),
+                    ),
                 ],
               ),
               const SizedBox(height: 12),
@@ -967,6 +1051,18 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
               ),
             ),
             const SizedBox(width: 6),
+            if (session.taskId != null && session.taskId!.isNotEmpty)
+              IconButton(
+                tooltip: 'Xóa công việc',
+                constraints: const BoxConstraints(minWidth: 48, minHeight: 48),
+                padding: EdgeInsets.zero,
+                onPressed: () => _confirmDeleteSessionTask(session),
+                icon: Icon(
+                  Icons.delete_outline_rounded,
+                  size: 20,
+                  color: palette.onSurfaceVariant,
+                ),
+              ),
             Icon(
               Icons.chevron_right_rounded,
               color: palette.onSurfaceVariant,

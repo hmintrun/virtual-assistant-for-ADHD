@@ -45,13 +45,16 @@ class OutboxReplayWorker {
     required LocalOutboxRepository repository,
     required ApiClient apiClient,
     LocalThoughtRepository? thoughtRepository,
+    void Function(OutboxRecord record)? onRecordSynced,
   })  : _repository = repository,
         _apiClient = apiClient,
-        _thoughtRepository = thoughtRepository;
+        _thoughtRepository = thoughtRepository,
+        _onRecordSynced = onRecordSynced;
 
   final LocalOutboxRepository _repository;
   final ApiClient _apiClient;
   final LocalThoughtRepository? _thoughtRepository;
+  final void Function(OutboxRecord record)? _onRecordSynced;
 
   bool _isReplaying = false;
   bool _isPausedAuth = false;
@@ -128,6 +131,9 @@ class OutboxReplayWorker {
           await _repository.markSynced(record.clientEventId);
           syncedIds.add(record.clientEventId);
           await _handleThoughtLifecycle(record, response);
+          try {
+            _onRecordSynced?.call(record);
+          } catch (_) {}
         } on DioException catch (dioError) {
           final statusCode = dioError.response?.statusCode;
           final errorMessage = dioError.message ?? dioError.toString();

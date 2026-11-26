@@ -68,6 +68,8 @@ class ScheduleService {
             lastSessionIds.add(remaining.last['session_id']);
           }
           steps[stepId] = {
+            'task_id': task['task_id'],
+            'task_revision': task['revision'],
             'step_title': step['title'],
             'task_title': task['title'],
             'expected_output': step['expected_output'],
