@@ -9,12 +9,14 @@ import tempfile
 import unittest
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any, get_args
 from unittest.mock import AsyncMock, patch
+from zoneinfo import ZoneInfo
 
+import httpx
 from fastapi.testclient import TestClient
 from google.genai import types
+from pydantic import ValidationError
 
 from app.api.deps import get_current_user
 from app.api.v1 import voice as voice_router
@@ -48,12 +50,13 @@ from app.services.ai_service import AIService, ai_service
 from app.services.draft_service import ensure_dev_seed_in_db
 from app.services.voice_service import (
     EdgeTtsProvider,
+    ElevenLabsSttProvider,
     FakeSttProvider,
     FakeTtsProvider,
     FallbackSttProvider,
-    GroqWhisperSttProvider,
     SttError,
     SttErrorCode,
+    SttResult,
     TtsError,
     TtsErrorCode,
     TtsService,
@@ -131,20 +134,38 @@ class TestAIService(unittest.TestCase):
         self.assertEqual(report.deficit_minutes, 30)
 
     def test_settings_secret_redaction(self) -> None:
-        """Đảm bảo API Keys, đường dẫn credentials và SECRET_KEY không bao giờ lộ qua repr()."""
+        """Đảm bảo API Keys, đường dẫn credentials và SECRET_KEY không bao giờ lộ qua repr()/str()/ValidationError."""
         custom_settings = Settings(
+            _env_file=None,
             SECRET_KEY="top-secret-jwt-value",
             GEMINI_API_KEY="AIzaSyDummyGeminiSecret",
             GROQ_API_KEY="gsk_DummyGroqSecret",
+            ELEVENLABS_API_KEY="sk_el_DummyElevenLabsSecret",
+            DEEPGRAM_API_KEY="dg_DummyDeepgramSecret",
             GOOGLE_CREDENTIALS_PATH="secret_sa_key.json",
         )
-        rendered = repr(custom_settings)
-        self.assertNotIn("top-secret-jwt-value", rendered)
-        self.assertNotIn("AIzaSyDummyGeminiSecret", rendered)
-        self.assertNotIn("gsk_DummyGroqSecret", rendered)
-        self.assertNotIn("secret_sa_key.json", rendered)
+        for rendered in (repr(custom_settings), str(custom_settings)):
+            self.assertNotIn("top-secret-jwt-value", rendered)
+            self.assertNotIn("AIzaSyDummyGeminiSecret", rendered)
+            self.assertNotIn("gsk_DummyGroqSecret", rendered)
+            self.assertNotIn("sk_el_DummyElevenLabsSecret", rendered)
+            self.assertNotIn("dg_DummyDeepgramSecret", rendered)
+            self.assertNotIn("secret_sa_key.json", rendered)
         self.assertTrue(custom_settings.has_gemini_key)
         self.assertTrue(custom_settings.has_groq_key)
+        self.assertTrue(custom_settings.has_elevenlabs_key)
+        self.assertTrue(custom_settings.has_deepgram_key)
+
+        with self.assertRaises(ValidationError) as err_ctx:
+            Settings(
+                _env_file=None,
+                ELEVENLABS_API_KEY="sk_el_DummyElevenLabsSecret",
+                DEEPGRAM_API_KEY="dg_DummyDeepgramSecret",
+                VOICE_STT_TIMEOUT_SECONDS=-1,
+            )
+        err_text = str(err_ctx.exception)
+        self.assertNotIn("sk_el_DummyElevenLabsSecret", err_text)
+        self.assertNotIn("dg_DummyDeepgramSecret", err_text)
 
     def test_tier3_fallback_uf1(self) -> None:
         """Kiểm tra Fallback Tầng 3 cho UF1: Gom câu hỏi làm rõ nếu chưa đủ thông tin."""
@@ -232,6 +253,7 @@ class TestAIService(unittest.TestCase):
     def test_timeout_graceful_degradation(self) -> None:
         """Flash-Lite treo quá hạn UF1 thì dùng Tier 3, không khởi chạy provider khác."""
         fast_timeout_settings = Settings(
+            _env_file=None,
             GEMINI_API_KEY="AIzaSyTestKey",
             GOOGLE_CREDENTIALS_PATH="",
             AI_UF1_TIMEOUT_SECONDS=0.06,
@@ -272,6 +294,7 @@ class TestAIService(unittest.TestCase):
         async def run_case(*, gemini_available: bool) -> None:
             service = AIService(
                 Settings(
+                    _env_file=None,
                     AI_UF1_TIMEOUT_SECONDS=0.06,
                 )
             )
@@ -414,6 +437,7 @@ class TestAIService(unittest.TestCase):
     def test_fast_fail_cascades_immediately_to_groq(self) -> None:
         """UF1 chuyển từ Flash-Lite sang Qwen khi nhánh chính lỗi sớm."""
         cfg = Settings(
+            _env_file=None,
             GEMINI_API_KEY="AIzaSyTestKey",
             GROQ_API_KEY="gsk_TestKey",
             GOOGLE_CREDENTIALS_PATH="",
@@ -454,7 +478,7 @@ class TestAIService(unittest.TestCase):
         self.assertFalse(groq.call_args.kwargs["allow_secondary"])
 
     def test_uf1_late_failure_skips_groq(self) -> None:
-        service = AIService(Settings(AI_UF1_GROQ_FAST_FAIL_SECONDS=0.01))
+        service = AIService(Settings(_env_file=None, AI_UF1_GROQ_FAST_FAIL_SECONDS=0.01))
 
         async def late_failure(**_: Any) -> None:
             await asyncio.sleep(0.04)
@@ -474,6 +498,7 @@ class TestAIService(unittest.TestCase):
     def test_groq_secondary_fallback_when_primary_groq_rate_limited(self) -> None:
         """Khi qwen/qwen3.8-27b chạm trần 429 TPM, tự động nhảy sang openai/gpt-oss-20b."""
         cfg = Settings(
+            _env_file=None,
             GEMINI_API_KEY="",
             GROQ_API_KEY="gsk_TestKey",
             GOOGLE_CREDENTIALS_PATH="",
@@ -585,6 +610,7 @@ class TestAIService(unittest.TestCase):
     def test_uf1_python_catches_past_deadline_and_merges_previous_draft(self) -> None:
         """Kiểm tra hợp nhất previous_draft ở UF1 và lớp Python tự bắt lỗi deadline trong quá khứ."""
         cfg = Settings(
+            _env_file=None,
             GEMINI_API_KEY="AIzaSyTestKey",
             GROQ_API_KEY="",
             GOOGLE_CREDENTIALS_PATH="",
@@ -681,6 +707,7 @@ class TestAIService(unittest.TestCase):
         self.assertEqual(decomp.steps[0].title, "Tóm tắt công thức chương 1-3")
 
         cfg = Settings(
+            _env_file=None,
             GEMINI_API_KEY="AIzaSyTestKey",
             GROQ_API_KEY="",
             GOOGLE_CREDENTIALS_PATH="",
@@ -747,6 +774,7 @@ class TestAIService(unittest.TestCase):
     def test_uf6_grounded_copy_anti_injection_deficit_and_fallback(self) -> None:
         """UF6: Không gửi task_title thô lên LLM, chỉ chọn nguyên văn từ allowed_notes/allowed_tip, hỗ trợ deficit_minutes và rơi về Tier 3 nếu LLM bịa."""
         cfg = Settings(
+            _env_file=None,
             GEMINI_API_KEY="AIzaSyTestKey",
             GROQ_API_KEY="",
             GOOGLE_CREDENTIALS_PATH="",
@@ -1087,48 +1115,47 @@ class TestAIService(unittest.TestCase):
         validated = TimeConstraint.model_validate(res.time_constraint.model_dump())
         self.assertEqual(validated.deadline_at, future_deadline)
 
-    def test_groq_whisper_and_fallback_stt_provider(self) -> None:
-        """Kiểm tra GroqWhisperSttProvider và FallbackSttProvider chuyển nhánh khi Groq lỗi."""
-        captured_calls: list[dict[str, Any]] = []
+    def test_elevenlabs_and_fallback_stt_provider(self) -> None:
+        """Kiểm tra ElevenLabsSttProvider và FallbackSttProvider chuyển nhánh khi nhánh chính lỗi."""
+        captured_requests: list[httpx.Request] = []
 
-        class _FakeTranscriptions:
-            async def create(self, **kwargs: Any) -> Any:
-                captured_calls.append(kwargs)
-                return SimpleNamespace(text="  Hoàn thiện phần kết luận báo cáo  ")
+        def _ok_handler(request: httpx.Request) -> httpx.Response:
+            captured_requests.append(request)
+            return httpx.Response(200, json={"text": "  Hoàn thiện phần kết luận báo cáo  "})
 
-        fake_client = SimpleNamespace(
-            audio=SimpleNamespace(transcriptions=_FakeTranscriptions())
-        )
-        groq_provider = GroqWhisperSttProvider(
-            api_key="gsk_test_key",
-            model="whisper-large-v3-turbo",
-            language_code="vi-VN",
-        )
-        with patch.object(groq_provider, "_get_client", return_value=fake_client):
-            svc = VoiceService(groq_provider, timeout_seconds=5.0, max_audio_bytes=1024 * 1024)
-            res = asyncio.run(svc.transcribe(b"RIFF-audio", content_type="audio/wav"))
+        transport = httpx.MockTransport(_ok_handler)
+        async def _run_ok() -> SttResult:
+            async with httpx.AsyncClient(transport=transport) as http_client:
+                el_provider = ElevenLabsSttProvider(
+                    api_key="el_test_key",
+                    model="scribe_v2",
+                    language_code="vi-VN",
+                    http_client=http_client,
+                )
+                svc = VoiceService(el_provider, timeout_seconds=5.0, max_audio_bytes=1024 * 1024)
+                return await svc.transcribe(b"RIFF-audio", content_type="audio/wav")
 
+        res = asyncio.run(_run_ok())
         self.assertEqual(res.text, "Hoàn thiện phần kết luận báo cáo")
-        self.assertEqual(res.provider, "groq")
-        self.assertEqual(captured_calls[0]["language"], "vi")
-        self.assertEqual(captured_calls[0]["model"], "whisper-large-v3-turbo")
+        self.assertEqual(res.provider, "elevenlabs")
+        self.assertEqual(captured_requests[0].headers["xi-api-key"], "el_test_key")
 
-        # Thiếu Groq API key -> PROVIDER_UNAVAILABLE
-        no_key_provider = GroqWhisperSttProvider(
+        # Thiếu ElevenLabs API key -> PROVIDER_UNAVAILABLE
+        no_key_provider = ElevenLabsSttProvider(
             api_key="",
-            model="whisper-large-v3-turbo",
+            model="scribe_v2",
             language_code="vi-VN",
         )
         with self.assertRaises(SttError) as ctx:
             asyncio.run(no_key_provider.transcribe(b"RIFF", "audio/wav"))
         self.assertEqual(ctx.exception.code, SttErrorCode.PROVIDER_UNAVAILABLE)
 
-        # FallbackSttProvider: Groq unavailable -> tự chuyển sang Gemini/fallback
-        class _FailGroq:
-            name = "groq"
+        # FallbackSttProvider: ElevenLabs unavailable -> tự chuyển sang Deepgram/Gemini dự phòng
+        class _FailElevenLabs:
+            name = "elevenlabs"
 
             async def transcribe(self, audio: bytes, mime_type: str) -> str:
-                raise SttError(SttErrorCode.PROVIDER_UNAVAILABLE, "groq_down")
+                raise SttError(SttErrorCode.PROVIDER_UNAVAILABLE, "elevenlabs_down")
 
         class _OkGemini:
             name = "gemini"
@@ -1137,7 +1164,7 @@ class TestAIService(unittest.TestCase):
                 return "Chép lời từ Gemini dự phòng"
 
         fb_svc = VoiceService(
-            FallbackSttProvider(primary=_FailGroq(), fallback=_OkGemini()),
+            FallbackSttProvider(primary=_FailElevenLabs(), fallback=_OkGemini()),
             timeout_seconds=5.0,
             max_audio_bytes=1024 * 1024,
         )
@@ -1145,15 +1172,16 @@ class TestAIService(unittest.TestCase):
         self.assertEqual(fb_res.text, "Chép lời từ Gemini dự phòng")
         self.assertEqual(fb_res.provider, "gemini")
 
-        # Kiểm tra build_voice_service với VOICE_STT_PROVIDER="auto" và "groq"
+        # Kiểm tra build_voice_service với VOICE_STT_PROVIDER="auto" (gemini->elevenlabs->deepgram)
         auto_cfg = Settings(
             _env_file=None,
-            GEMINI_API_KEY="",
-            GROQ_API_KEY="",
+            ELEVENLABS_API_KEY="el_key",
+            DEEPGRAM_API_KEY="dg_key",
+            GEMINI_API_KEY="gem_key",
             VOICE_STT_PROVIDER="auto",
         )
         auto_svc = build_voice_service(auto_cfg)
-        self.assertEqual(auto_svc.provider_name, "gemini->groq")
+        self.assertEqual(auto_svc.provider_name, "gemini->elevenlabs->deepgram")
 
     def test_tts_service_fake_edge_mock_cache_and_validation(self) -> None:
         """Kiểm tra TtsService: FakeTtsProvider, EdgeTtsProvider mock, LRU cache và validate input."""
@@ -1341,7 +1369,7 @@ class TestAIService(unittest.TestCase):
             ("Rảnh 08:00–10:00, 11:00–12:00, 20:00–22:00.", {}, 10),
             ("Đổi hạn sang ngày mai.", {"edits_locked_field": True}, 10),
             ("22:00 ngày 28/11/2026", {"retrying_fallback_edit": True}, 8),
-            ("Có ngoại lệ và nhiều giờ.", {"edits_locked_field": True, "needs_user_decision": True}, 6),
+            ("Có ngoại lệ và nhiều giờ.", {"edits_locked_field": True, "needs_user_decision": True}, 10),
         )
         for text, context, expected in cases:
             with self.subTest(text=text, context=context):
@@ -1607,40 +1635,19 @@ class TestAIService(unittest.TestCase):
         self.assertEqual(empty_attempts, 2)
         self.assertEqual(err_ctx.exception.code, TtsErrorCode.EMPTY_AUDIO)
 
-    def test_groq_stt_prompt_hint_and_gemini_to_groq_fallback(self) -> None:
-        """RISK-05: GroqWhisperSttProvider truyền prompt gợi ý từ vựng và VoiceService(gemini) tự dự phòng sang Groq."""
-        captured_calls: list[dict[str, Any]] = []
-
-        class _FakeTranscriptions:
-            async def create(self, **kwargs: Any) -> Any:
-                captured_calls.append(kwargs)
-                return SimpleNamespace(text="Tạo phiên Focus Session 25 phút")
-
-        fake_client = SimpleNamespace(
-            audio=SimpleNamespace(transcriptions=_FakeTranscriptions())
-        )
-        groq_provider = GroqWhisperSttProvider(
-            api_key="gsk_test_key",
-            model="whisper-large-v3-turbo",
-            language_code="vi-VN",
-        )
-        with patch.object(groq_provider, "_get_client", return_value=fake_client):
-            text = asyncio.run(groq_provider.transcribe(b"RIFF-audio", "audio/wav"))
-        self.assertEqual(text, "Tạo phiên Focus Session 25 phút")
-        self.assertIn("prompt", captured_calls[0])
-        self.assertIn("ProPlan VA", captured_calls[0]["prompt"])
-        self.assertIn("Focus Session", captured_calls[0]["prompt"])
-
-        # Kiểm tra build_voice_service với VOICE_STT_PROVIDER="gemini" + GROQ_API_KEY
+    def test_gemini_to_elevenlabs_stt_fallback(self) -> None:
+        """RISK-05: VoiceService(gemini) tự dự phòng sang ElevenLabs khi gặp lỗi tạm thời."""
         gem_cfg = Settings(
             _env_file=None,
             GEMINI_API_KEY="AIzaSyTestKey",
-            GROQ_API_KEY="gsk_TestKey",
+            ELEVENLABS_API_KEY="el_TestKey",
+            DEEPGRAM_API_KEY="",
             VOICE_STT_PROVIDER="gemini",
         )
         gem_svc = build_voice_service(gem_cfg)
-        self.assertEqual(gem_svc.provider_name, "gemini")
-        self.assertIsNotNone(gem_svc._fallback_provider)
+        self.assertEqual(gem_svc.provider_name, "gemini->elevenlabs")
+        self.assertIsNone(gem_svc._fallback_provider)
+        assert isinstance(gem_svc._provider, FallbackSttProvider)
 
         for err_code in (
             SttErrorCode.RATE_LIMITED,
@@ -1649,40 +1656,40 @@ class TestAIService(unittest.TestCase):
         ):
             with (
                 patch.object(
-                    gem_svc._provider,
+                    gem_svc._provider._primary,
                     "transcribe",
                     AsyncMock(side_effect=SttError(err_code, "gemini_transient_err")),
                 ),
                 patch.object(
-                    gem_svc._fallback_provider,
+                    gem_svc._provider._fallback,
                     "transcribe",
-                    AsyncMock(return_value="Chép lời từ Groq dự phòng"),
-                ) as mock_groq_fb,
+                    AsyncMock(return_value="Chép lời từ ElevenLabs dự phòng"),
+                ) as mock_el_fb,
             ):
                 res = asyncio.run(gem_svc.transcribe(b"RIFF-audio", content_type="audio/wav"))
-                self.assertEqual(res.provider, "groq")
-                self.assertEqual(res.text, "Chép lời từ Groq dự phòng")
-                mock_groq_fb.assert_awaited_once()
+                self.assertEqual(res.provider, "elevenlabs")
+                self.assertEqual(res.text, "Chép lời từ ElevenLabs dự phòng")
+                mock_el_fb.assert_awaited_once()
 
         # Lỗi đầu vào UNSUPPORTED_AUDIO không được gọi fallback
         with (
             patch.object(
-                gem_svc._provider,
+                gem_svc._provider._primary,
                 "transcribe",
                 AsyncMock(
                     side_effect=SttError(SttErrorCode.UNSUPPORTED_AUDIO, "corrupt_header")
                 ),
             ),
             patch.object(
-                gem_svc._fallback_provider,
+                gem_svc._provider._fallback,
                 "transcribe",
                 AsyncMock(return_value="Không được gọi"),
-            ) as mock_groq_no_fb,
+            ) as mock_el_no_fb,
         ):
             with self.assertRaises(SttError) as bad_ctx:
                 asyncio.run(gem_svc.transcribe(b"RIFF-audio", content_type="audio/wav"))
             self.assertEqual(bad_ctx.exception.code, SttErrorCode.UNSUPPORTED_AUDIO)
-            mock_groq_no_fb.assert_not_awaited()
+            mock_el_no_fb.assert_not_awaited()
 
     def test_circuit_breaker_opens_on_auth_error_skips_slow_wait_and_recovers(self) -> None:
         """Khi Gemini lỗi auth (403/PermissionError), cầu dao mở ngay để request sau nhảy thẳng Groq <0.05s và hồi phục sau cooldown."""
@@ -2394,6 +2401,835 @@ class TestAIService(unittest.TestCase):
                             current_steps=snapshots,
                         )
                     )
+
+    # ==========================================================================
+    # Phase 1 Siri-v2: P4 + P5 (Adaptive Timeout, Backup/Retry, 5 Invariants, Duckling T3)
+    # ==========================================================================
+
+    def test_uf1_adaptive_timeout_retains_needs_user_decision_and_anchor_signals(self) -> None:
+        service = AIService(Settings(_env_file=None))
+        # anchor_count >= 2, >=2 weekdays, "lịch mặc định" -> 8.0s; >=3 -> 10.0s
+        self.assertEqual(
+            service._extraction_profile("Dùng lịch mặc định giúp mình", needs_user_decision=True).hard_timeout,
+            8.0,
+        )
+        self.assertEqual(
+            service._extraction_profile("Thứ 2 và Thứ 4", needs_user_decision=True).hard_timeout,
+            8.0,
+        )
+        self.assertEqual(
+            service._extraction_profile("Thứ 2, Thứ 4, Thứ 6", needs_user_decision=True).hard_timeout,
+            10.0,
+        )
+        self.assertEqual(
+            service._extraction_profile("Câu ngắn", anchor_count=2, needs_user_decision=True).hard_timeout,
+            8.0,
+        )
+        self.assertEqual(
+            service._extraction_profile("Câu ngắn", anchor_count=3, needs_user_decision=True).hard_timeout,
+            10.0,
+        )
+        # Số thứ tự ("lần thứ 2") không bị tính nhầm là ngày Thứ 2
+        self.assertEqual(service._extraction_profile("Làm lần thứ 2 bài tập").hard_timeout, 6.0)
+
+    def test_uf1_context_payload_includes_detected_temporal_anchors(self) -> None:
+        service = AIService(Settings(_env_file=None, GEMINI_API_KEY="AIzaSyTestKey", GROQ_API_KEY=""))
+        ref_now = datetime(2026, 11, 18, 9, 0, tzinfo=ZoneInfo("Asia/Ho_Chi_Minh"))
+        captured: dict[str, Any] = {}
+
+        async def _fake_gemini(**kwargs: Any) -> LLMTaskExtractionPayload:
+            captured["user_prompt"] = kwargs["user_prompt"]
+            return LLMTaskExtractionPayload(
+                title="Viết báo cáo",
+                content="Viết báo cáo 3 trang",
+                scope="3 trang",
+                free_time_slots=["Tối mai 19:00-21:00"],
+                structured_free_windows=[
+                    ExtractedFreeWindowSchema(
+                        kind="specific_date",
+                        date="2026-11-19",
+                        start_local="19:00",
+                        end_local="21:00",
+                        raw_phrase="tối mai 19:00-21:00",
+                    )
+                ],
+                deadline=datetime(2026, 11, 20, 22, 0, tzinfo=ZoneInfo("Asia/Ho_Chi_Minh")),
+                is_complete=True,
+                summary="Đã đủ thông tin.",
+            )
+
+        with (
+            patch.object(service, "_get_gemini_client", return_value=object()),
+            patch.object(service, "_call_gemini_structured", side_effect=_fake_gemini),
+        ):
+            res = asyncio.run(
+                service.extract_task_intent(
+                    "Viết báo cáo 3 trang, tối mai 19:00-21:00, hạn Thứ 6 20/11 lúc 22:00",
+                    reference_now=ref_now,
+                )
+            )
+        self.assertTrue(res.is_complete)
+        payload = json.loads(captured["user_prompt"])
+        self.assertIn("detected_temporal_anchors", payload)
+        self.assertEqual(len(payload["detected_temporal_anchors"]), 2)
+        self.assertEqual(payload["detected_temporal_anchors"][0]["resolved_date"], "2026-11-19")
+        self.assertEqual(payload["detected_temporal_anchors"][1]["resolved_date"], "2026-11-20")
+
+    def test_uf1_same_tier_fast_retry_and_backup_model_and_non_retryable_errors(self) -> None:
+        # 1. ServerError 503 nhanh (<1.5s) khi còn >=2.0s retry 1 lần (~0.2s) và hồi phục trên Gemini
+        class _HttpStatusErr(RuntimeError):
+            def __init__(self, msg: str, status_code: int) -> None:
+                super().__init__(msg)
+                self.status_code = status_code
+
+        cfg = Settings(
+            _env_file=None,
+            GEMINI_API_KEY="AIzaSyTestKey",
+            GROQ_API_KEY="gsk_TestKey",
+            GOOGLE_CREDENTIALS_PATH="",
+            AI_UF1_TIMEOUT_SECONDS=6.0,
+        )
+        service = AIService(app_settings=cfg, failure_threshold=2)
+        calls = 0
+
+        async def _flaky_503(**_: Any) -> LLMTaskExtractionPayload:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise _HttpStatusErr("503 Service Unavailable", 503)
+            return LLMTaskExtractionPayload(
+                title="Làm slide",
+                content="Làm slide 5 trang",
+                scope="5 trang",
+                free_time_slots=[],
+                is_complete=False,
+                summary="Khôi phục sau fast retry.",
+                clarification_questions=["Bạn rảnh khung giờ nào và hạn chót khi nào?"],
+            )
+
+        with (
+            patch.object(service, "_get_gemini_client", return_value=object()),
+            patch.object(service, "_get_groq_client", return_value=object()),
+            patch.object(service, "_call_gemini_structured", side_effect=_flaky_503),
+            patch.object(service, "_call_groq_structured") as groq_mock,
+        ):
+            res = asyncio.run(service.extract_task_intent("Làm slide 5 trang"))
+
+        self.assertEqual(calls, 2)
+        self.assertEqual(res.generation_tier, "tier_1_gemini")
+        groq_mock.assert_not_awaited()
+
+        # 2. HTTP 400 / 429 KHÔNG retry, nhảy ngay sang Groq
+        for status_code in (400, 429):
+            svc_nr = AIService(app_settings=cfg)
+            nr_calls = 0
+
+            async def _non_retryable(code: int = status_code, **_: Any) -> Any:
+                nonlocal nr_calls
+                nr_calls += 1
+                raise _HttpStatusErr(f"Error {code}", code)
+
+            async def _groq_rescue(**_: Any) -> LLMTaskExtractionPayload:
+                return LLMTaskExtractionPayload(
+                    title="Làm slide",
+                    content="Làm slide 5 trang",
+                    scope="5 trang",
+                    free_time_slots=[],
+                    is_complete=False,
+                    summary="Groq rescue",
+                    clarification_questions=["Bạn rảnh khi nào?"],
+                )
+
+            with (
+                patch.object(svc_nr, "_get_gemini_client", return_value=object()),
+                patch.object(svc_nr, "_get_groq_client", return_value=object()),
+                patch.object(svc_nr, "_call_gemini_structured", side_effect=_non_retryable),
+                patch.object(svc_nr, "_call_groq_structured", side_effect=_groq_rescue),
+            ):
+                res_nr = asyncio.run(svc_nr.extract_task_intent("Làm slide 5 trang"))
+            self.assertEqual(nr_calls, 1, f"HTTP {status_code} không được retry")
+            self.assertEqual(res_nr.generation_tier, "tier_2_groq")
+
+        # 3. Nếu 1 request retry thất bại cả 2 lần 503, Circuit Breaker chỉ đếm 1 thất bại cho request đó
+        svc_cb = AIService(
+            app_settings=Settings(
+                _env_file=None,
+                GEMINI_API_KEY="AIzaSyTestKey",
+                GROQ_API_KEY="",
+                GOOGLE_CREDENTIALS_PATH="",
+                AI_UF1_TIMEOUT_SECONDS=6.0,
+            ),
+            failure_threshold=2,
+            retry_backoff_seconds=0.01,
+        )
+
+        async def _always_503(**_: Any) -> Any:
+            raise _HttpStatusErr("503 ServerError", 503)
+
+        with (
+            patch.object(svc_cb, "_get_gemini_client", return_value=object()),
+            patch.object(svc_cb, "_call_gemini_structured", side_effect=_always_503),
+        ):
+            asyncio.run(svc_cb.extract_task_intent("Làm slide 5 trang"))
+            self.assertTrue(svc_cb.health.can_attempt("gemini", cfg.GEMINI_UF1_MODEL))
+            snap1 = svc_cb.health.snapshot()[f"gemini:{cfg.GEMINI_UF1_MODEL}"]
+            self.assertEqual(snap1["consecutive_failures"], 1)
+
+        # 4. GEMINI_UF1_BACKUP_MODEL khả dụng cho UF1 & check_providers_status
+        cfg_bk = Settings(
+            _env_file=None,
+            GEMINI_API_KEY="AIzaSyTestKey",
+            GROQ_API_KEY="",
+            GOOGLE_CREDENTIALS_PATH="",
+            GEMINI_UF1_MODEL="gemini-3.5-flash-lite",
+            GEMINI_UF1_BACKUP_MODEL="gemini-3.5-flash",
+            AI_WARM_BACKUP_DELAY_SECONDS=0.05,
+        )
+        svc_bk = AIService(app_settings=cfg_bk, max_transient_retries=0)
+        status_report = asyncio.run(svc_bk.check_providers_status(probe_live=False))
+        self.assertIn("gemini:gemini-3.5-flash", status_report["providers"])
+
+        seen_models: list[str] = []
+
+        async def _primary_down_backup_ok(**kwargs: Any) -> LLMTaskExtractionPayload:
+            m = kwargs["model_name"]
+            seen_models.append(m)
+            if m == "gemini-3.5-flash-lite":
+                raise _HttpStatusErr("Bad Request", 400)
+            return LLMTaskExtractionPayload(
+                title="Làm slide",
+                content="Làm slide 5 trang",
+                scope="5 trang",
+                free_time_slots=[],
+                is_complete=False,
+                summary="UF1 Backup cứu hộ thành công.",
+                clarification_questions=["Bạn rảnh khi nào?"],
+            )
+
+        with (
+            patch.object(svc_bk, "_get_gemini_client", return_value=object()),
+            patch.object(svc_bk, "_call_gemini_structured", side_effect=_primary_down_backup_ok),
+        ):
+            res_bk = asyncio.run(svc_bk.extract_task_intent("Làm slide 5 trang"))
+        self.assertEqual(seen_models, ["gemini-3.5-flash-lite", "gemini-3.5-flash"])
+        self.assertEqual(res_bk.generation_tier, "tier_1_gemini")
+        self.assertEqual(res_bk.summary, "UF1 Backup cứu hộ thành công.")
+
+    def test_uf1_guardrails_five_universal_invariants(self) -> None:
+        vn_tz = ZoneInfo("Asia/Ho_Chi_Minh")
+        ref_now = datetime(2026, 11, 18, 9, 0, tzinfo=vn_tz)  # Thứ Tư 18/11/2026
+
+        # I1a: Tự sửa lệch Thứ & ngày khi không có mâu thuẫn (Thứ 6 = iso 5, 20/11/2026)
+        raw_i1 = "Làm bài tập 3 câu, rảnh Thứ 6 19:00-21:00, hạn nộp Thứ 6 ngày 20/11/2026 lúc 22:00"
+        wrong_i1 = TaskExtractionResult(
+            title="Làm bài tập",
+            content=raw_i1,
+            scope="3 câu",
+            free_time_slots=["Thứ 6 19:00-21:00"],
+            structured_free_windows=[
+                ExtractedFreeWindowSchema(
+                    kind="weekly_rule",
+                    weekday=6,  # LLM bị lệch Thứ 6 -> 6 thay vì ISO 5
+                    start_local="19:00",
+                    end_local="21:00",
+                    raw_phrase="Thứ 6 19:00-21:00",
+                )
+            ],
+            deadline=datetime(2026, 11, 21, 22, 0, tzinfo=vn_tz),  # Lệch sang 21/11
+            time_constraint=ExtractedTimeConstraint(
+                kind="deadline",
+                deadline_at=datetime(2026, 11, 21, 22, 0, tzinfo=vn_tz),
+                input_timezone="Asia/Ho_Chi_Minh",
+            ),
+            is_complete=True,
+            summary="OK",
+        )
+        repaired_i1 = ai_service._enforce_uf1_temporal_guardrails(
+            wrong_i1, current_dt=ref_now, user_input=raw_i1
+        )
+        self.assertEqual(repaired_i1.structured_free_windows[0].weekday, 5)
+        self.assertEqual(repaired_i1.deadline.astimezone(vn_tz).date().isoformat(), "2026-11-20")
+        self.assertEqual(
+            repaired_i1.time_constraint.deadline_at.astimezone(vn_tz).date().isoformat(),
+            "2026-11-20",
+        )
+
+        # I1b: Mâu thuẫn Thứ ↔ Ngày (20/11/2026 là Thứ 6 chứ không phải Thứ 2) -> giữ nguyên date, ép is_ambiguous + is_complete=False
+        conflict_input = "Làm bài tập 3 câu, rảnh Thứ 2 ngày 20/11/2026 19:00-21:00, hạn 22/11/2026"
+        conflict_res = TaskExtractionResult(
+            title="Làm bài tập",
+            content=conflict_input,
+            scope="3 câu",
+            free_time_slots=["Thứ 2 ngày 20/11/2026 19:00-21:00"],
+            structured_free_windows=[
+                ExtractedFreeWindowSchema(
+                    kind="specific_date",
+                    date="2026-11-20",
+                    start_local="19:00",
+                    end_local="21:00",
+                    raw_phrase="Thứ 2 ngày 20/11/2026 19:00-21:00",
+                )
+            ],
+            deadline=datetime(2026, 11, 22, 22, 0, tzinfo=vn_tz),
+            is_complete=True,
+            summary="OK",
+        )
+        out_conflict = ai_service._enforce_uf1_temporal_guardrails(
+            conflict_res, current_dt=ref_now, user_input=conflict_input
+        )
+        self.assertFalse(out_conflict.is_complete)
+        self.assertTrue(out_conflict.structured_free_windows[0].is_ambiguous)
+        self.assertEqual(out_conflict.structured_free_windows[0].date, "2026-11-20")
+        self.assertTrue(out_conflict.clarification_questions)
+
+        # I2: Bịa giờ cụ thể khi input không có giờ tường minh & không gọi lịch mặc định
+        i2_input = "Làm bài tập 3 câu, rảnh tối mai, hạn 22/11/2026"
+        i2_res = TaskExtractionResult(
+            title="Làm bài tập",
+            content=i2_input,
+            scope="3 câu",
+            free_time_slots=["tối mai"],
+            structured_free_windows=[
+                ExtractedFreeWindowSchema(
+                    kind="specific_date",
+                    date="2026-11-19",
+                    start_local="19:00",
+                    end_local="21:00",
+                    raw_phrase="tối mai",
+                )
+            ],
+            deadline=datetime(2026, 11, 22, 22, 0, tzinfo=vn_tz),
+            is_complete=True,
+            summary="OK",
+        )
+        out_i2 = ai_service._enforce_uf1_temporal_guardrails(
+            i2_res, current_dt=ref_now, user_input=i2_input
+        )
+        self.assertFalse(out_i2.is_complete)
+        self.assertTrue(out_i2.structured_free_windows[0].is_ambiguous)
+        self.assertTrue(out_i2.clarification_questions)
+
+        # I2 positive control: dùng "lịch mặc định" thì giữ nguyên is_complete=True
+        i2_default_in = "Làm bài tập 3 câu, dùng lịch mặc định nhé, hạn 22/11/2026 20:00"
+        out_i2_def = ai_service._enforce_uf1_temporal_guardrails(
+            i2_res, current_dt=ref_now, user_input=i2_default_in
+        )
+        self.assertTrue(out_i2_def.is_complete)
+        self.assertFalse(out_i2_def.structured_free_windows[0].is_ambiguous)
+
+        # I3: Sửa +12h cho tối/chiều và chuyển daily -> specific_date khi chỉ nói "tối nay"/"ngày mai"
+        i3_input = "Làm bài tập 3 câu, tối nay 7h đến 9h, hạn 22/11/2026 20:00"
+        i3_res = TaskExtractionResult(
+            title="Làm bài tập",
+            content=i3_input,
+            scope="3 câu",
+            free_time_slots=["tối nay 7h đến 9h"],
+            structured_free_windows=[
+                ExtractedFreeWindowSchema(
+                    kind="daily",
+                    start_local="07:00",
+                    end_local="09:00",
+                    raw_phrase="tối nay 7h đến 9h",
+                )
+            ],
+            deadline=datetime(2026, 11, 22, 20, 0, tzinfo=vn_tz),
+            is_complete=True,
+            summary="OK",
+        )
+        out_i3 = ai_service._enforce_uf1_temporal_guardrails(
+            i3_res, current_dt=ref_now, user_input=i3_input
+        )
+        win_i3 = out_i3.structured_free_windows[0]
+        self.assertEqual(win_i3.kind, "specific_date")
+        self.assertEqual(win_i3.date, "2026-11-18")
+        self.assertEqual(win_i3.start_local, "19:00")
+        self.assertEqual(win_i3.end_local, "21:00")
+
+        # I4: Turn-1 Lexical Grounding — title hoàn toàn không trùng từ nội dung với user_input
+        i4_input = "Chuẩn bị bài thuyết trình Sinh học 5 slide, tối nay 19:00-21:00, hạn 22/11/2026 20:00"
+        i4_res = TaskExtractionResult(
+            title="Quản lý chi tiêu cá nhân",
+            content=i4_input,
+            scope="5 slide",
+            free_time_slots=["tối nay 19:00-21:00"],
+            structured_free_windows=[
+                ExtractedFreeWindowSchema(
+                    kind="specific_date",
+                    date="2026-11-18",
+                    start_local="19:00",
+                    end_local="21:00",
+                    raw_phrase="tối nay 19:00-21:00",
+                )
+            ],
+            deadline=datetime(2026, 11, 22, 20, 0, tzinfo=vn_tz),
+            is_complete=True,
+            summary="OK",
+        )
+        out_i4 = ai_service._enforce_uf1_temporal_guardrails(
+            i4_res, current_dt=ref_now, user_input=i4_input, previous_draft=None
+        )
+        self.assertFalse(out_i4.is_complete)
+        self.assertTrue(any("Quản lý chi tiêu cá nhân" in q for q in out_i4.clarification_questions))
+
+        # I5: Cô lập scope khi rò rỉ khung giờ HH:MM - HH:MM
+        i5_clean = TaskExtractionResult(
+            title="Viết chương",
+            content="Viết 3 chương tài liệu, 19:00-21:00",
+            scope="3 chương, rảnh từ 19:00 đến 21:00",
+            free_time_slots=["19:00-21:00 hằng ngày"],
+            structured_free_windows=[
+                ExtractedFreeWindowSchema(
+                    kind="daily",
+                    start_local="19:00",
+                    end_local="21:00",
+                    raw_phrase="19:00-21:00 hằng ngày",
+                )
+            ],
+            deadline=datetime(2026, 11, 22, 20, 0, tzinfo=vn_tz),
+            is_complete=True,
+            summary="OK",
+        )
+        out_i5_clean = ai_service._enforce_uf1_temporal_guardrails(
+            i5_clean,
+            current_dt=ref_now,
+            user_input="Viết 3 chương tài liệu, 19:00-21:00 hằng ngày, hạn 22/11/2026 20:00",
+        )
+        self.assertEqual(out_i5_clean.scope, "3 chương")
+
+        i5_empty = i5_clean.model_copy(update={"scope": "19:00 đến 21:00"})
+        out_i5_empty = ai_service._enforce_uf1_temporal_guardrails(
+            i5_empty,
+            current_dt=ref_now,
+            user_input="Viết tài liệu, 19:00-21:00 hằng ngày, hạn 22/11/2026 20:00",
+        )
+        self.assertIsNone(out_i5_empty.scope)
+        self.assertFalse(out_i5_empty.is_complete)
+        self.assertTrue(out_i5_empty.clarification_questions)
+
+    def test_uf1_tier3_fallback_uses_duckling_for_relative_dates_and_deadlines(self) -> None:
+        vn_tz = ZoneInfo("Asia/Ho_Chi_Minh")
+        ref_wed = datetime(2026, 11, 18, 9, 0, tzinfo=vn_tz)
+
+        res = ai_service._fallback_extract_task(
+            "Ôn 3 chương mạng máy tính, ngày mai 08:00-10:00, hạn Thứ 6 lúc 20:00",
+            timezone="Asia/Ho_Chi_Minh",
+            reference_now=ref_wed,
+        )
+        self.assertEqual(res.generation_tier, "tier_3_rule_based")
+        self.assertFalse(res.is_complete)
+        self.assertEqual(len(res.structured_free_windows), 1)
+        win = res.structured_free_windows[0]
+        self.assertEqual(win.kind, "specific_date")
+        self.assertEqual(win.date, "2026-11-19")
+        self.assertEqual(win.start_local, "08:00")
+        self.assertEqual(win.end_local, "10:00")
+        self.assertIsNotNone(res.deadline)
+        self.assertEqual(res.deadline.astimezone(vn_tz).date().isoformat(), "2026-11-20")
+        self.assertEqual(res.deadline.astimezone(vn_tz).hour, 20)
+
+        res_text_dl = ai_service._fallback_extract_task(
+            "Làm báo cáo, 20/11 19:00-21:00, nộp ngày 22 tháng 11 lúc 21:30",
+            timezone="Asia/Ho_Chi_Minh",
+            reference_now=ref_wed,
+        )
+        self.assertEqual(len(res_text_dl.structured_free_windows), 1)
+        self.assertEqual(res_text_dl.structured_free_windows[0].date, "2026-11-20")
+        self.assertIsNotNone(res_text_dl.deadline)
+        self.assertEqual(res_text_dl.deadline.astimezone(vn_tz).date().isoformat(), "2026-11-22")
+        self.assertEqual(res_text_dl.deadline.astimezone(vn_tz).hour, 21)
+        self.assertEqual(res_text_dl.deadline.astimezone(vn_tz).minute, 30)
+
+    def test_phase1_review_i4_turn1_empty_previous_draft_unaccented_and_content_overlap(self) -> None:
+        vn_tz = ZoneInfo("Asia/Ho_Chi_Minh")
+        ref_now = datetime(2026, 11, 18, 9, 0, tzinfo=vn_tz)
+
+        # 1. HTTP /drafts/{id}/analyze truyền previous_draft rỗng ở Turn 1 -> I4 vẫn kích hoạt chặn hallucination
+        empty_prev = LLMTaskExtractionPayload(
+            title=None,
+            content=None,
+            summary="Bản nháp công việc",
+        )
+        hallucinated = TaskExtractionResult(
+            title="Quản lý chi tiêu cá nhân",
+            content="Chuẩn bị bài thuyết trình Sinh học 5 slide",
+            scope="5 slide",
+            free_time_slots=["tối nay 19:00-21:00"],
+            structured_free_windows=[
+                ExtractedFreeWindowSchema(
+                    kind="specific_date",
+                    date="2026-11-18",
+                    start_local="19:00",
+                    end_local="21:00",
+                    raw_phrase="tối nay 19:00-21:00",
+                )
+            ],
+            deadline=datetime(2026, 11, 22, 20, 0, tzinfo=vn_tz),
+            is_complete=True,
+            summary="OK",
+        )
+        blocked = ai_service._enforce_uf1_temporal_guardrails(
+            hallucinated,
+            current_dt=ref_now,
+            user_input="Chuẩn bị bài thuyết trình Sinh học 5 slide, tối nay 19:00-21:00, hạn 22/11/2026 20:00",
+            previous_draft=empty_prev,
+        )
+        self.assertFalse(blocked.is_complete)
+        self.assertTrue(any("Quản lý chi tiêu cá nhân" in q for q in blocked.clarification_questions))
+
+        # 1b. Draft tạo rỗng nhưng gọi /analyze lần đầu bằng message (followup_message có giá trị) -> I4 vẫn phải chặn!
+        turn1_msg = "Chuẩn bị bài thuyết trình Sinh học 5 slide, tối nay 19:00-21:00, hạn 22/11/2026 20:00"
+        blocked_via_msg = ai_service._enforce_uf1_temporal_guardrails(
+            hallucinated,
+            current_dt=ref_now,
+            user_input=turn1_msg,
+            previous_draft=empty_prev,
+            followup_message=turn1_msg,
+        )
+        self.assertFalse(blocked_via_msg.is_complete)
+        self.assertTrue(
+            any("Quản lý chi tiêu cá nhân" in q for q in blocked_via_msg.clarification_questions)
+        )
+
+        # 2. Input không dấu ("on tap giai tich") khớp với title có dấu ("Ôn tập Giải tích") -> KHÔNG chặn
+        unaccented_in = "on tap giai tich 5 bai, toi nay 19:00-21:00, han 22/11/2026 20:00"
+        accented_res = hallucinated.model_copy(
+            update={
+                "title": "Ôn tập Giải tích",
+                "content": "Ôn tập Giải tích 5 bài",
+                "scope": "5 bài",
+            }
+        )
+        ok_unaccented = ai_service._enforce_uf1_temporal_guardrails(
+            accented_res,
+            current_dt=ref_now,
+            user_input=unaccented_in,
+            previous_draft=empty_prev,
+        )
+        self.assertTrue(ok_unaccented.is_complete)
+
+        # 3. Tiếng Anh ngắn có content song ngữ đã grounded với user_input -> title khớp qua content
+        en_in = "fix login bug, tối nay 19:00-21:00, hạn 22/11/2026 20:00"
+        bilingual_res = hallucinated.model_copy(
+            update={
+                "title": "Sửa lỗi đăng nhập",
+                "content": "Sửa lỗi đăng nhập (fix login bug)",
+                "scope": "1 module login",
+            }
+        )
+        ok_bilingual = ai_service._enforce_uf1_temporal_guardrails(
+            bilingual_res,
+            current_dt=ref_now,
+            user_input=en_in,
+            previous_draft=empty_prev,
+        )
+        self.assertTrue(ok_bilingual.is_complete)
+
+    def test_phase1_review_i1_deadline_busy_exclusion_and_turn2_followup_priority(self) -> None:
+        vn_tz = ZoneInfo("Asia/Ho_Chi_Minh")
+        ref_now = datetime(2026, 11, 18, 9, 0, tzinfo=vn_tz)
+
+        # 1. "Hạn 25/11, trừ ngày 20/11 bận trước 20:00" -> chọn đúng 25/11, bỏ qua 20/11 bận
+        busy_dl_input = (
+            "Làm báo cáo 3 trang, hằng ngày 19:00-21:00, "
+            "hạn 25/11 lúc 22:00, trừ ngày 20/11 bận trước 20:00"
+        )
+        res_busy = TaskExtractionResult(
+            title="Làm báo cáo",
+            content=busy_dl_input,
+            scope="3 trang",
+            free_time_slots=["19:00-21:00 hằng ngày"],
+            structured_free_windows=[
+                ExtractedFreeWindowSchema(
+                    kind="daily",
+                    start_local="19:00",
+                    end_local="21:00",
+                    raw_phrase="hằng ngày 19:00-21:00",
+                ),
+                ExtractedFreeWindowSchema(
+                    kind="specific_date",
+                    date="2026-11-20",
+                    start_local="00:00",
+                    end_local="20:00",
+                    is_excluded=True,
+                    raw_phrase="trừ ngày 20/11 bận trước 20:00",
+                ),
+            ],
+            deadline=datetime(2026, 11, 20, 22, 0, tzinfo=vn_tz),  # LLM nhầm sang 20/11
+            is_complete=True,
+            summary="OK",
+        )
+        fixed_busy = ai_service._enforce_uf1_temporal_guardrails(
+            res_busy,
+            current_dt=ref_now,
+            user_input=busy_dl_input,
+        )
+        self.assertEqual(fixed_busy.deadline.astimezone(vn_tz).date().isoformat(), "2026-11-25")
+
+        # 2. Turn-2 followup sửa deadline từ 20/11 sang 25/11: raw_input Turn 1 không được ghi đè ngược lại!
+        service = AIService(Settings(_env_file=None, GEMINI_API_KEY="AIzaSyTestKey", GROQ_API_KEY=""))
+        prev_turn1 = LLMTaskExtractionPayload(
+            title="Viết báo cáo",
+            content="Viết báo cáo 3 trang",
+            scope="3 trang",
+            free_time_slots=["tối mai 19:00-21:00"],
+            structured_free_windows=[
+                ExtractedFreeWindowSchema(
+                    kind="specific_date",
+                    date="2026-11-19",
+                    start_local="19:00",
+                    end_local="21:00",
+                    raw_phrase="tối mai 19:00-21:00",
+                )
+            ],
+            deadline=datetime(2026, 11, 20, 22, 0, tzinfo=vn_tz),
+            time_constraint=ExtractedTimeConstraint(
+                kind="deadline",
+                deadline_at=datetime(2026, 11, 20, 22, 0, tzinfo=vn_tz),
+                input_timezone="Asia/Ho_Chi_Minh",
+            ),
+            summary="Hạn cũ 20/11.",
+        )
+
+        async def _turn2_llm(**_: Any) -> LLMTaskExtractionPayload:
+            return prev_turn1.model_copy(
+                update={
+                    "deadline": datetime(2026, 11, 25, 22, 0, tzinfo=vn_tz),
+                    "time_constraint": ExtractedTimeConstraint(
+                        kind="deadline",
+                        deadline_at=datetime(2026, 11, 25, 22, 0, tzinfo=vn_tz),
+                        input_timezone="Asia/Ho_Chi_Minh",
+                    ),
+                    "is_complete": True,
+                }
+            )
+
+        combined_input = (
+            "Viết báo cáo 3 trang, tối mai 19:00-21:00, hạn 20/11 lúc 22:00\n"
+            "Dời sang ngày 25/11 lúc 22:00 nhé"
+        )
+        with (
+            patch.object(service, "_get_gemini_client", return_value=object()),
+            patch.object(service, "_call_gemini_structured", side_effect=_turn2_llm),
+        ):
+            turn2_out = asyncio.run(
+                service.extract_task_intent(
+                    combined_input,
+                    previous_draft=prev_turn1,
+                    followup_message="Dời sang ngày 25/11 lúc 22:00 nhé",
+                    reference_now=ref_now,
+                )
+            )
+        self.assertTrue(turn2_out.is_complete)
+        self.assertEqual(turn2_out.deadline.astimezone(vn_tz).date().isoformat(), "2026-11-25")
+
+    def test_phase1_review_i2_per_window_clock_and_open_ended_duration(self) -> None:
+        vn_tz = ZoneInfo("Asia/Ho_Chi_Minh")
+        ref_now = datetime(2026, 11, 18, 9, 0, tzinfo=vn_tz)
+
+        # 1. Deadline có giờ ("lúc 22:00") KHÔNG được làm cho "rảnh tối mai" thoát kiểm tra thiếu giờ
+        dl_clock_input = "Làm bài tập 3 câu, rảnh tối mai, hạn 20/11 lúc 22:00"
+        hallucinated_win_res = TaskExtractionResult(
+            title="Làm bài tập",
+            content=dl_clock_input,
+            scope="3 câu",
+            free_time_slots=["rảnh tối mai"],
+            structured_free_windows=[
+                ExtractedFreeWindowSchema(
+                    kind="specific_date",
+                    date="2026-11-19",
+                    start_local="19:00",
+                    end_local="21:00",
+                    raw_phrase="rảnh tối mai",
+                )
+            ],
+            deadline=datetime(2026, 11, 20, 22, 0, tzinfo=vn_tz),
+            is_complete=True,
+            summary="OK",
+        )
+        flagged = ai_service._enforce_uf1_temporal_guardrails(
+            hallucinated_win_res,
+            current_dt=ref_now,
+            user_input=dl_clock_input,
+        )
+        self.assertFalse(flagged.is_complete)
+        self.assertTrue(flagged.structured_free_windows[0].is_ambiguous)
+
+        # 2. previous_draft có window open-ended ("sau 19:30") + Turn-2 có thời lượng ("Làm được 90 phút") -> grounded!
+        prev_open = LLMTaskExtractionPayload(
+            title="Làm bài tập",
+            content="Làm bài tập 3 câu",
+            scope="3 câu",
+            structured_free_windows=[
+                ExtractedFreeWindowSchema(
+                    kind="specific_date",
+                    date="2026-11-19",
+                    start_local="19:30",
+                    end_local=None,
+                    raw_phrase="tối mai sau 19:30",
+                    is_ambiguous=True,
+                )
+            ],
+            deadline=datetime(2026, 11, 20, 22, 0, tzinfo=vn_tz),
+            summary="Thiếu thời lượng tối mai.",
+        )
+        completed_open_res = TaskExtractionResult(
+            title="Làm bài tập",
+            content="Làm bài tập 3 câu",
+            scope="3 câu",
+            free_time_slots=["tối mai 19:30-21:00"],
+            structured_free_windows=[
+                ExtractedFreeWindowSchema(
+                    kind="specific_date",
+                    date="2026-11-19",
+                    start_local="19:30",
+                    end_local="21:00",
+                    raw_phrase="tối mai 19:30-21:00",
+                )
+            ],
+            deadline=datetime(2026, 11, 20, 22, 0, tzinfo=vn_tz),
+            is_complete=True,
+            summary="OK",
+        )
+        grounded_open = ai_service._enforce_uf1_temporal_guardrails(
+            completed_open_res,
+            current_dt=ref_now,
+            user_input="Làm được 90 phút",
+            previous_draft=prev_open,
+            followup_message="Làm được 90 phút",
+        )
+        self.assertTrue(grounded_open.is_complete)
+        self.assertFalse(grounded_open.structured_free_windows[0].is_ambiguous)
+
+    def test_phase1_review_i3a_i3b_i5_and_groq_only_buzzer_rescue(self) -> None:
+        vn_tz = ZoneInfo("Asia/Ho_Chi_Minh")
+        ref_now = datetime(2026, 11, 18, 9, 0, tzinfo=vn_tz)
+
+        # 1. I3a: Không dịch +12h làm đảo hoặc chập giờ cho "Từ 11:00 đến tối 20:00" & "09:00 đến tối 21:00"
+        for raw_phrase, s_in, e_in in (
+            ("Từ 11:00 đến tối 20:00", "11:00", "20:00"),
+            ("09:00 đến tối 21:00", "09:00", "21:00"),
+        ):
+            inp = f"Làm bài tập 3 câu, {raw_phrase}, hạn 22/11/2026 22:00"
+            res_in = TaskExtractionResult(
+                title="Làm bài tập",
+                content=inp,
+                scope="3 câu",
+                free_time_slots=[raw_phrase],
+                structured_free_windows=[
+                    ExtractedFreeWindowSchema(
+                        kind="specific_date",
+                        date="2026-11-19",
+                        start_local=s_in,
+                        end_local=e_in,
+                        raw_phrase=raw_phrase,
+                    )
+                ],
+                deadline=datetime(2026, 11, 22, 22, 0, tzinfo=vn_tz),
+                is_complete=True,
+                summary="OK",
+            )
+            out = ai_service._enforce_uf1_temporal_guardrails(
+                res_in, current_dt=ref_now, user_input=inp
+            )
+            self.assertEqual(out.structured_free_windows[0].start_local, s_in)
+            self.assertEqual(out.structured_free_windows[0].end_local, e_in)
+
+        # 2. I3b: Không gộp câu 2 ngày "tối nay và tối mai" từ daily thành 1 specific_date duy nhất
+        two_days_in = "Làm bài tập 3 câu, tối nay và tối mai 19:00-21:00, hạn 22/11/2026 22:00"
+        two_days_res = TaskExtractionResult(
+            title="Làm bài tập",
+            content=two_days_in,
+            scope="3 câu",
+            free_time_slots=["tối nay và tối mai 19:00-21:00"],
+            structured_free_windows=[
+                ExtractedFreeWindowSchema(
+                    kind="daily",
+                    start_local="19:00",
+                    end_local="21:00",
+                    raw_phrase="tối nay và tối mai 19:00-21:00",
+                )
+            ],
+            deadline=datetime(2026, 11, 22, 22, 0, tzinfo=vn_tz),
+            is_complete=True,
+            summary="OK",
+        )
+        out_two_days = ai_service._enforce_uf1_temporal_guardrails(
+            two_days_res, current_dt=ref_now, user_input=two_days_in
+        )
+        self.assertEqual(out_two_days.structured_free_windows[0].kind, "daily")
+
+        # 3. I5: Bảo toàn timestamp nội dung "Cắt đoạn 01:30-03:45 trong video", chỉ xóa phần rảnh rò rỉ
+        video_in = (
+            "Biên tập video bài giảng, cắt đoạn 01:30-03:45 trong video, "
+            "rảnh tối mai 19:00-21:00, hạn 22/11/2026 22:00"
+        )
+        video_res = TaskExtractionResult(
+            title="Biên tập video",
+            content=video_in,
+            scope="Cắt đoạn 01:30-03:45 trong video",
+            free_time_slots=["tối mai 19:00-21:00"],
+            structured_free_windows=[
+                ExtractedFreeWindowSchema(
+                    kind="specific_date",
+                    date="2026-11-19",
+                    start_local="19:00",
+                    end_local="21:00",
+                    raw_phrase="tối mai 19:00-21:00",
+                )
+            ],
+            deadline=datetime(2026, 11, 22, 22, 0, tzinfo=vn_tz),
+            is_complete=True,
+            summary="OK",
+        )
+        out_video = ai_service._enforce_uf1_temporal_guardrails(
+            video_res, current_dt=ref_now, user_input=video_in
+        )
+        self.assertEqual(out_video.scope, "Cắt đoạn 01:30-03:45 trong video")
+        self.assertTrue(out_video.is_complete)
+
+        mixed_video = video_res.model_copy(
+            update={"scope": "Cắt đoạn 01:30-03:45 trong video, rảnh từ 19:00 đến 21:00"}
+        )
+        out_mixed = ai_service._enforce_uf1_temporal_guardrails(
+            mixed_video, current_dt=ref_now, user_input=video_in
+        )
+        self.assertEqual(out_mixed.scope, "Cắt đoạn 01:30-03:45 trong video")
+
+        # 4. groq_only cứu kết quả hợp lệ đã hoàn tất ngay sát/qua vạch deadline
+        cfg_groq = Settings(
+            _env_file=None,
+            GEMINI_API_KEY="",
+            GROQ_API_KEY="gsk_TestKey",
+            GOOGLE_CREDENTIALS_PATH="",
+            AI_UF1_TIMEOUT_SECONDS=0.05,
+        )
+        svc_groq = AIService(app_settings=cfg_groq, max_transient_retries=0)
+
+        async def _buzzer_groq(**_: Any) -> LLMTaskExtractionPayload:
+            await asyncio.sleep(0.06)
+            return LLMTaskExtractionPayload(
+                title="Làm bài tập",
+                content="Làm bài tập 3 câu",
+                scope="3 câu",
+                free_time_slots=[],
+                is_complete=False,
+                summary="Groq xong sát vạch.",
+                clarification_questions=["Bạn rảnh khi nào?"],
+            )
+
+        async def _instant_wait(tasks: Any, **_: Any) -> Any:
+            # Chờ task hoàn tất ngay để mô phỏng race loop.time() >= deadline sau khi task vừa done()
+            await asyncio.gather(*tasks)
+            return set(tasks), set()
+
+        with (
+            patch.object(svc_groq, "_get_groq_client", return_value=object()),
+            patch.object(svc_groq, "_call_groq_structured", side_effect=_buzzer_groq),
+            patch("app.services.ai_service.asyncio.wait", side_effect=_instant_wait),
+        ):
+            rescued = asyncio.run(svc_groq.extract_task_intent("Làm bài tập 3 câu"))
+        self.assertEqual(rescued.generation_tier, "tier_2_groq")
+        self.assertEqual(rescued.summary, "Groq xong sát vạch.")
 
 
 if __name__ == "__main__":

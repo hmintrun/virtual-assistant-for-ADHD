@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="320" height="320" viewBox="0 0 320 320">
+<title>Happy — dark — super chubby front-facing cat</title>
+
+<path d="M257 198 C297 185 301 148 286 139 C273 130 266 141 272 151" fill="none" stroke="#F7F7F8" stroke-width="29" stroke-linecap="round"/><path d="M 58 142
+C 61 121 79 109 89 93
+L 106 66 Q 113 57 124 64 L 149 84
+Q 160 80 171 84 L 196 64 Q 207 57 214 66
+L 231 93 C 241 109 259 121 262 142
+C 285 157 295 184 290 211
+C 286 245 265 262 237 268
+C 235 284 217 287 207 276
+Q 160 281 113 276
+C 103 287 85 284 83 268
+C 55 262 34 245 30 211
+C 25 184 35 157 58 142 Z" fill="#F7F7F8"/><path d="M107 148 Q125 122 143 148 M177 148 Q195 122 213 148" fill="none" stroke="#18181B" stroke-width="8" stroke-linecap="round"/><path d="M69 70 L55 58 M80 59 L73 43 M59 84 L43 80" stroke="#F7F7F8" stroke-width="7" stroke-linecap="round"/>
+<path d="M83 165 L68 159 M83 176 L68 174 M237 165 L252 159 M237 176 L252 174"
+      fill="none" stroke="#18181B" stroke-width="6" stroke-linecap="round"/>
+</svg>

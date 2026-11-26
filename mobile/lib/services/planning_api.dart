@@ -12,13 +12,16 @@ class PlanningApi {
   PlanningApi(
       {ApiClient? client,
       FlutterSecureStorage? storage,
+      String? ownerId,
       DateTime Function()? now})
       : _client = client ?? ApiClient(),
         _storage = storage ?? const FlutterSecureStorage(),
+        _ownerId = ownerId,
         _now = now ?? DateTime.now;
 
   final ApiClient _client;
   final FlutterSecureStorage _storage;
+  final String? _ownerId;
   final DateTime Function() _now;
 
   // Một lệnh chưa biết kết quả giữ nguyên cả body và key, kể cả khi mở lại app.
@@ -30,7 +33,10 @@ class PlanningApi {
     String? fixedKey,
     bool retainCompleted = false,
   }) async {
-    final slot = 'planning_command_$operation';
+    final owner = _ownerId;
+    final slot = owner == null
+        ? 'planning_command_$operation'
+        : 'planning_command_${owner}_$operation';
     final signature = jsonEncode(intent);
     final stored = await _storage.read(key: slot);
     JsonMap? command;
@@ -56,12 +62,37 @@ class PlanningApi {
       if (status != null &&
           status >= 400 &&
           status < 500 &&
+          status != 401 &&
           status != 408 &&
           status != 429) {
         await _storage.delete(key: slot);
       }
       rethrow;
     }
+  }
+
+  Future<String?> refreshCalendarSync({
+    required int scheduleRevision,
+    required DateTime from,
+    required DateTime to,
+  }) async {
+    final connections = await _client.getListData('/calendar/connections');
+    final connection = connections
+        .where((item) =>
+            item['connection_state'] == 'connected' &&
+            item['write_calendar_id'] != null &&
+            item['connection_id'] is String)
+        .firstOrNull;
+    if (connection == null) return null;
+    final id = Uri.encodeComponent(connection['connection_id'] as String);
+    await _client.postData('/calendar/connections/$id/refresh',
+        data: const <String, dynamic>{}, idempotent: false);
+    final schedule = await _client.getData('/schedule', queryParameters: {
+      'from': from.toUtc().toIso8601String(),
+      'to': to.toUtc().toIso8601String(),
+    });
+    if (schedule['schedule_revision'] != scheduleRevision) return null;
+    return schedule['calendar_sync_summary'] as String?;
   }
 
   Future<PlanningDraftModel> getDraft(String draftId) async =>
@@ -106,10 +137,7 @@ class PlanningApi {
         'input_source': inputSource,
         'raw_input': rawInput,
         'summary': {
-          if (title.trim().isNotEmpty &&
-              title != rawInput &&
-              title.length <= 100)
-            'title': title,
+          if (title.trim().isNotEmpty && title != rawInput) 'title': title,
           if (availability != null) 'availability': availability,
           'importance': 3,
           if (scope.trim().isNotEmpty) 'scope': scope.trim(),
@@ -147,7 +175,20 @@ class PlanningApi {
           'message': message.trim(),
       },
     );
-    return PlanningDraftModel.fromJson(json);
+    final analyzed = json['summary'] as JsonMap? ?? const {};
+    return PlanningDraftModel.fromJson({
+      ...json,
+      'raw_input': json['raw_input'] ?? draft.rawInput,
+      'input_source': json['input_source'] ?? draft.inputSource,
+      'client_draft_id': json['client_draft_id'] ?? draft.clientDraftId,
+      'summary': {
+        ...draft.summary,
+        // Validation is always owned by the latest analysis response.
+        'can_plan': false,
+        'clarification_issues': const [],
+        ...analyzed,
+      },
+    });
   }
 
   Future<PlanningDraftModel> updateSummary({
@@ -156,20 +197,43 @@ class PlanningApi {
     required String scope,
     required DateTime? deadline,
     JsonMap? availability,
+    bool clearAvailability = false,
+    List<String>? extraRequirements,
   }) async {
     final oldTime = draft.summary['time_constraint'] as Map<String, dynamic>?;
     final oldEnd = DateTime.tryParse(
         (oldTime?['deadline_at'] ?? oldTime?['finish_by_at']) as String? ?? '');
     final deadlineChanged = deadline != null &&
         (oldEnd == null || !deadline.isAtSameMomentAs(oldEnd));
+    final changes = <String, dynamic>{
+      if (title != draft.title) 'title': title,
+      if (scope != draft.scope) 'scope': scope,
+      if (clearAvailability) ...{
+        'availability': null,
+        'availability_ref': null,
+      },
+      if (availability != null) 'availability': availability,
+      if (extraRequirements != null) 'extra_requirements': extraRequirements,
+      if (deadlineChanged)
+        'time_constraint': {
+          'kind': 'deadline',
+          'start_at': oldTime?['start_at'] ?? _vnIso(_now()),
+          'deadline_at': _vnIso(deadline),
+          'finish_by_at': null,
+          'input_timezone': oldTime?['input_timezone'] ?? defaultTimezone,
+        },
+    };
+    if (changes.isEmpty) return draft;
     final intent = <String, dynamic>{
       'summary_revision': draft.summaryRevision,
       'input_revision': draft.planningInputRevision,
       'title': title,
       'scope': scope,
       'deadline': deadline?.toUtc().toIso8601String(),
+      'clear_availability': clearAvailability,
       if (availability != null) 'availability': availability,
       'previous_time_constraint': oldTime,
+      if (extraRequirements != null) 'extra_requirements': extraRequirements,
     };
     final json = await _command(
       operation: 'patch_${draft.draftId}',
@@ -177,23 +241,7 @@ class PlanningApi {
       buildBody: () => {
         'expected_summary_revision': draft.summaryRevision,
         'expected_planning_input_revision': draft.planningInputRevision,
-        'changes': {
-          'summary': {
-            if (title.length <= 100) 'title': title,
-            'scope': scope,
-            if (availability != null) 'availability': availability,
-            // Chỉ sửa thời gian khi user đổi hạn; không đổi start/window khi sửa chữ.
-            if (deadlineChanged)
-              'time_constraint': {
-                'kind': 'deadline',
-                'start_at': oldTime?['start_at'] ?? _vnIso(_now()),
-                'deadline_at': _vnIso(deadline),
-                'finish_by_at': null,
-                'input_timezone':
-                    oldTime?['input_timezone'] ?? defaultTimezone,
-              },
-          }
-        },
+        'changes': {'summary': changes},
       },
       send: (body, key) => _client.patchData(
           '/drafts/${Uri.encodeComponent(draft.draftId)}',
@@ -230,12 +278,19 @@ class PlanningApi {
         data: {'expected_summary_revision': draft.summaryRevision},
       );
 
-  Future<PlanCandidateModel> createCandidate(PlanningDraftModel draft) async {
+  /// [calendarContextRef] (`context_id` + `revision`) cho Backend biết dùng
+  /// đúng bản chụp lịch bận Google nào khi xếp phiên.
+  Future<PlanCandidateModel> createCandidate(
+    PlanningDraftModel draft, {
+    Map<String, dynamic>? calendarContextRef,
+  }) async {
     final body = <String, dynamic>{
       'source_summary_revision': draft.summaryRevision,
       'source_planning_input_revision': draft.planningInputRevision,
       'selected_step_keys': null,
       'planning_horizon': null,
+      if (calendarContextRef != null)
+        'calendar_context_ref': calendarContextRef,
     };
     final json = await _command(
       operation: 'candidate_${draft.draftId}',
@@ -258,6 +313,10 @@ class PlanningApi {
   Future<TaskModel> getTask(String taskId) async => TaskModel.fromJson(
         await _client.getData('/tasks/${Uri.encodeComponent(taskId)}'),
       );
+
+  Future<void> deleteDraft(String draftId) async {
+    await _client.deleteData('/drafts/${Uri.encodeComponent(draftId)}');
+  }
 
   Future<PlanCandidateModel> updateCandidateStep({
     required PlanCandidateModel candidate,

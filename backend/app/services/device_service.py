@@ -12,12 +12,14 @@ from app.core.errors import AppError
 from app.models.device import DeviceState
 from app.models.planning import ScheduleVersion
 from app.models.session import Session
-from app.models.system import Reminder
+from app.models.system import AuditEvent, Reminder
 from app.models.user import UserPreference
 from app.repositories import device_repository, run_repository
 from app.schemas.execution import (
     DeviceStateData,
     DeviceStateReportRequest,
+    DeviceTelemetryData,
+    DeviceTelemetryRequest,
     ReminderData,
     ReminderListResult,
     ReminderReceiptRequest,
@@ -52,6 +54,10 @@ USER_ACTIONS = {None, "start_micro_task", "start_session", "snooze", "dismiss"}
 
 def _now() -> datetime:
     return _current_utc_now()
+
+
+def _ensure_aware(dt: datetime) -> datetime:
+    return dt.replace(tzinfo=UTC) if dt.tzinfo is None else dt.astimezone(UTC)
 
 
 def _error(
@@ -191,6 +197,7 @@ async def list_reminders(
                 next_action="reload_schedule",
             )
         pref = await db.scalar(select(UserPreference).where(UserPreference.user_id == owner))
+        pref_rev = pref.effective_revision if pref is not None else 0
         offsets = list(pref.reminder_offsets) if pref is not None else [900, 600, 300]
         if (
             not 1 <= len(offsets) <= 3
@@ -198,6 +205,8 @@ async def list_reminders(
             or len(set(offsets)) != len(offsets)
         ):
             raise _error("VALIDATION_ERROR", "Các mốc nhắc đã lưu không hợp lệ.")
+        offset_set = set(offsets)
+        pref_token = f":pref:{pref_rev}:"
         # Revision toàn user tăng khi thêm Task khác; Session cũ không vì thế mất hiệu lực.
         stale = await db.execute(
             select(Reminder, Session)
@@ -209,9 +218,23 @@ async def list_reminders(
             )
         )
         for reminder, session in stale:
+            stale_pref = False
+            if (
+                reminder.kind == "before_session"
+                and ":pref:" in reminder.dedupe_key
+                and pref_token not in reminder.dedupe_key
+            ):
+                actual_offset = round(
+                    (
+                        _ensure_aware(session.scheduled_start) - _ensure_aware(reminder.fire_at)
+                    ).total_seconds()
+                )
+                if actual_offset not in offset_set:
+                    stale_pref = True
             if (
                 session.status != "scheduled"
                 or reminder.schedule_revision != session.schedule_revision
+                or stale_pref
             ):
                 reminder.delivery_state = "cancelled"
         try:
@@ -239,15 +262,30 @@ async def list_reminders(
             )
         )
         keys = {r.dedupe_key for r in existing}
+        active_or_delivered_slots = {
+            (r.session_id, r.schedule_revision, _ensure_aware(r.fire_at))
+            for r in existing
+            if r.kind == "before_session" and r.delivery_state != "cancelled"
+        }
         identity = sha256(device_id.encode()).hexdigest()
         now = _now()
+        from_utc = _ensure_aware(from_time)
+        to_utc = _ensure_aware(to_time)
         for session in sessions:
+            s_start_utc = _ensure_aware(session.scheduled_start)
             for offset in offsets:
-                fire_at = session.scheduled_start - timedelta(seconds=offset)
-                if not from_time <= fire_at <= to_time or fire_at < now:
+                fire_at = s_start_utc - timedelta(seconds=offset)
+                if not from_utc <= fire_at <= to_utc or fire_at < now:
                     continue
-                key = f"session:{session.id}:rev:{session.schedule_revision}:offset:{offset}:device:{identity}"
-                if key in keys:
+                key = (
+                    f"session:{session.id}:rev:{session.schedule_revision}"
+                    f":pref:{pref_rev}:offset:{offset}:device:{identity}"
+                )
+                if (
+                    key in keys
+                    or (session.id, session.schedule_revision, fire_at)
+                    in active_or_delivered_slots
+                ):
                     continue
                 # Thêm/flush trong savepoint; không rollback toàn transaction khi trùng key.
                 try:
@@ -274,6 +312,7 @@ async def list_reminders(
                     if found is None:
                         raise
                 keys.add(key)
+                active_or_delivered_slots.add((session.id, session.schedule_revision, fire_at))
         await db.flush()
         rows = list(
             await db.scalars(
@@ -366,3 +405,120 @@ async def record_reminder_receipt(
     row.device_id = payload.device_id
     await db.flush()
     return _reminder_data(row)
+
+
+async def _resolve_existing_telemetry(
+    db: AsyncSession,
+    owner: UUID,
+    device_id: str,
+    payload: DeviceTelemetryRequest,
+    normalized_source_run_id: str | None,
+) -> DeviceTelemetryData | None:
+    """Kiểm tra (user_id, event_id) đã tồn tại trong AuditEvent để trả về idempotent hoặc 409 xung đột."""
+    existing = await db.scalar(
+        select(AuditEvent)
+        .where(AuditEvent.user_id == owner, AuditEvent.event_id == payload.event_id)
+        .execution_options(populate_existing=True)
+    )
+    if existing is None:
+        return None
+    ref = existing.resource_ref or {}
+    existing_occ = (
+        existing.occurred_at
+        if existing.occurred_at.tzinfo is not None
+        else existing.occurred_at.replace(tzinfo=UTC)
+    )
+    if (
+        existing.event_type == payload.event_type
+        and ref.get("device_id") == device_id
+        and ref.get("error_code") == payload.error_code
+        and ref.get("attempt_count") == payload.attempt_count
+        and ref.get("source_run_id") == normalized_source_run_id
+        and ref.get("app_version") == payload.app_version
+        and ref.get("platform_os") == payload.platform_os
+        and existing_occ.astimezone(UTC) == payload.occurred_at.astimezone(UTC)
+    ):
+        return DeviceTelemetryData(
+            audit_event_id=str(existing.id),
+            device_id=device_id,
+            event_id=existing.event_id,
+            event_type=existing.event_type,
+            error_code=ref["error_code"],
+            received_at=existing.received_at,
+        )
+    raise _error(
+        "CLIENT_EVENT_CONFLICT",
+        "Mã sự kiện đã được dùng cho thông tin khác.",
+        status=409,
+        next_action="use_new_event_id",
+    )
+
+
+@command_service.durable_command(
+    "record_device_telemetry", DeviceTelemetryData, resource_arg="device_id"
+)
+async def record_device_telemetry(
+    db: AsyncSession,
+    *,
+    user_id: str,
+    device_id: str,
+    idempotency_key: str,
+    payload: DeviceTelemetryRequest,
+) -> DeviceTelemetryData:
+    """Ghi nhận telemetry lỗi thiết bị (Zero-PII, Zero-AI) vào AuditEvent."""
+    owner = command_service.owner_uuid(user_id)
+    server_now = _now()
+    if payload.occurred_at.astimezone(UTC) > server_now + timedelta(seconds=300):
+        raise _error(
+            "VALIDATION_ERROR",
+            "Thời điểm sự kiện vượt quá giới hạn sai lệch đồng hồ cho phép.",
+        )
+    normalized_source_run_id: str | None = None
+    if payload.source_run_id is not None:
+        source_uuid = _uuid(payload.source_run_id)
+        if await run_repository.get_run(db, owner, source_uuid) is None:
+            raise _error("RESOURCE_NOT_FOUND", "Không tìm thấy phiên nguồn.", status=404)
+        normalized_source_run_id = str(source_uuid)
+
+    matched = await _resolve_existing_telemetry(
+        db, owner, device_id, payload, normalized_source_run_id
+    )
+    if matched is not None:
+        return matched
+
+    row = AuditEvent(
+        user_id=owner,
+        event_id=payload.event_id,
+        event_type=payload.event_type,
+        resource_ref={
+            "device_id": device_id,
+            "error_code": payload.error_code,
+            "attempt_count": payload.attempt_count,
+            "source_run_id": normalized_source_run_id,
+            "app_version": payload.app_version,
+            "platform_os": payload.platform_os,
+        },
+        occurred_at=payload.occurred_at.astimezone(UTC),
+        received_at=server_now,
+        command_id=idempotency_key,
+    )
+    try:
+        async with db.begin_nested():
+            db.add(row)
+            await db.flush()
+    except IntegrityError:
+        matched = await _resolve_existing_telemetry(
+            db, owner, device_id, payload, normalized_source_run_id
+        )
+        if matched is not None:
+            return matched
+        raise
+
+    return DeviceTelemetryData(
+        audit_event_id=str(row.id),
+        device_id=device_id,
+        event_id=row.event_id,
+        event_type=payload.event_type,
+        error_code=payload.error_code,
+        received_at=row.received_at,
+    )

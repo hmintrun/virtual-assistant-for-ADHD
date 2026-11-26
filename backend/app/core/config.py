@@ -60,6 +60,8 @@ class Settings(BaseSettings):
     # Khóa API & Chứng thực Cloud cho AI/Voice (ẩn khỏi repr/log theo quy tắc bảo mật O00-O26)
     GEMINI_API_KEY: str = Field(default="", repr=False)
     GROQ_API_KEY: str = Field(default="", repr=False)
+    ELEVENLABS_API_KEY: str = Field(default="", repr=False)
+    DEEPGRAM_API_KEY: str = Field(default="", repr=False)
     GOOGLE_CREDENTIALS_PATH: str = Field(
         default="",
         repr=False,
@@ -75,11 +77,9 @@ class Settings(BaseSettings):
     GEMINI_FLASH_MODEL: str = "gemini-3.5-flash-lite"
     GEMINI_BACKUP_MODEL: str = "gemini-3.5-flash-lite"
     GEMINI_UF1_MODEL: str = "gemini-3.5-flash-lite"
+    GEMINI_UF1_BACKUP_MODEL: str = ""
     GROQ_FALLBACK_MODEL: str = "qwen/qwen3.8-27b"
     GROQ_SECONDARY_FALLBACK_MODEL: str = "openai/gpt-oss-20b"
-    # v3 (không turbo): turbo + prompt bịa cả câu ở clip 25s và luôn trả no_speech_prob=0
-    # (bộ lọc im lặng vô hiệu) — xem docs/backend/VOICE_STT_BENCHMARK.md §6.
-    GROQ_STT_MODEL: str = "whisper-large-v3"
 
     # Tích hợp Google Calendar (A22.1 — O23 CalendarConnection & Event Ingestion)
     # Mode "fake": chạy mock adapter hoàn toàn offline, an toàn cho dev/CI/unit test.
@@ -111,19 +111,33 @@ class Settings(BaseSettings):
     ENABLE_CALENDAR_SYNC_WORKER: bool = True
     TESTING: bool = False
 
-    # Voice STT (V01 & A21) — Gemini 3.5 Transcribe inline qua generate_content (chính) và Groq Whisper.
+    # Voice STT (V01 & A21) — Kiến trúc 3 tầng không dùng Groq STT:
+    # Gemini 3.5 Transcribe (Tier 1) -> ElevenLabs Scribe v2 (Tier 2) -> Deepgram Nova-3 (Tier 3).
     # Số đo chọn model: docs/backend/VOICE_STT_BENCHMARK.md.
-    # Mode "auto": ưu tiên Gemini -> Groq; riêng purpose="uf5_checkin" đảo sang Groq -> Gemini khi bật cờ.
+    # Mode "auto": ghép chuỗi theo thứ tự [gemini, elevenlabs, deepgram] dựa trên key đã cấu hình
+    # (uf5_checkin ưu tiên ElevenLabs trước Gemini nếu bật VOICE_STT_UF5_PREFER_ELEVENLABS).
     # Dự phòng khi Backend lỗi/mất mạng nằm ở Mobile (speech_to_text on-device).
-    VOICE_STT_PROVIDER: Literal["gemini", "groq", "auto", "fake"] = "auto"
+    VOICE_STT_PROVIDER: Literal["gemini", "elevenlabs", "deepgram", "auto", "fake"] = "auto"
+    ELEVENLABS_STT_MODEL: str = "scribe_v2"
+    ELEVENLABS_STT_BASE_URL: str = "https://api.elevenlabs.io/v1/speech-to-text"
+    ELEVENLABS_STT_TAG_AUDIO_EVENTS: bool = False
+    ELEVENLABS_STT_DIARIZE: bool = False
+    ELEVENLABS_STT_TIMEOUT_SECONDS: float = Field(default=5.0, gt=0.0, le=30.0)
+    DEEPGRAM_STT_MODEL: str = "nova-3"
+    DEEPGRAM_STT_PUNCTUATE: bool = True
+    # Giữ verbatim để tầng T2 ITN/ReALM chuẩn hóa và giữ cụm tự đính chính của người dùng.
+    DEEPGRAM_STT_SMART_FORMAT: bool = False
+    DEEPGRAM_STT_BASE_URL: str = "https://api.deepgram.com/v1/listen"
+    DEEPGRAM_STT_USE_KEYTERMS: bool = False
+    DEEPGRAM_STT_TIMEOUT_SECONDS: float = Field(default=5.0, gt=0.0, le=30.0)
     GEMINI_STT_MODEL: str = "gemini-3.5-transcribe"
     GEMINI_STT_TRANSPORT: Literal["auto", "inline", "transcribe_inline", "transcribe_api"] = "auto"
     GEMINI_STT_MODE: Literal["smart", "verbatim"] = "verbatim"
     VOICE_STT_LANGUAGE: str = "vi-VN"
-    VOICE_STT_UF5_PREFER_GROQ: bool = True
-    # Ngưỡng timeout nhánh chính để còn quỹ thời gian dự phòng sang nhánh phụ trong tổng ngân sách 12s.
-    VOICE_STT_PRIMARY_TIMEOUT_SECONDS: float = Field(default=8.0, gt=0.0, le=60.0)
-    # Gemini 3.5 Transcribe inline ~2-2.9s (câu 12-43s); tổng ngân sách 12s đủ cả nhánh chính lẫn fallback Groq.
+    VOICE_STT_UF5_PREFER_ELEVENLABS: bool = True
+    # Cắt nhánh chính ở 7.0s để giữ đủ 5.0s còn lại trong ngân sách 12s cho ElevenLabs (3.0s) -> Deepgram (2.0s).
+    VOICE_STT_PRIMARY_TIMEOUT_SECONDS: float = Field(default=7.0, gt=0.0, le=60.0)
+    # Tổng ngân sách STT 12s cho phép đủ 3 tầng chạy lần lượt khi nhánh trước lỗi hoặc timeout.
     VOICE_STT_TIMEOUT_SECONDS: float = Field(default=12.0, gt=0.0, le=120.0)
     VOICE_MAX_AUDIO_BYTES: int = Field(default=10 * 1024 * 1024, gt=0)
     MAX_JSON_BODY_BYTES: int = Field(default=1 * 1024 * 1024, gt=0)
@@ -141,6 +155,7 @@ class Settings(BaseSettings):
     VOICE_TTS_PREWARM: bool = True
 
     # UF1: trần cơ sở, ưu tiên Gemini và mốc hedge là ba giới hạn riêng.
+    UF1_AUDIO_NATIVE_ENABLED: bool = False
     AI_UF1_TIMEOUT_SECONDS: float = Field(default=6.0, gt=0.0, le=15.0)
     AI_UF1_ADAPTIVE_TIMEOUT_ENABLED: bool = True
     AI_UF1_PRIMARY_PRIORITY_SECONDS: float = Field(default=4.5, ge=0.0, le=15.0)
@@ -159,11 +174,19 @@ class Settings(BaseSettings):
     AI_UF2_WARM_BACKUP_DELAY_SECONDS: float = Field(default=2.0, ge=0.0, le=25.0)
     AI_UF2_GROQ_HEDGE_DELAY_SECONDS: float = Field(default=5.0, ge=0.0, le=25.0)
 
+    # Khung thời gian C — Làm giàu ngữ nghĩa từng phiên khi Step tách >= 2 phiên (UF2 Nhịp 1B):
+    AI_UF2_ENRICH_TIMEOUT_SECONDS: float = Field(default=3.0, gt=0.0, le=10.0)
+    AI_UF2_ENRICH_PRIMARY_PRIORITY_SECONDS: float = Field(default=1.8, gt=0.0, le=10.0)
+    AI_UF2_ENRICH_WARM_BACKUP_DELAY_SECONDS: float = Field(default=1.0, ge=0.0, le=10.0)
+    AI_UF2_ENRICH_GROQ_HEDGE_DELAY_SECONDS: float = Field(default=1.6, ge=0.0, le=10.0)
+
     # Cấu hình mặc định của Trợ lý ở Giai đoạn Lập kế hoạch Tuần 1 (O01 UserPreference)
     DEFAULT_WORK_INTERVAL_SECONDS: int = 1500  # 25 phút tập trung
     DEFAULT_REST_INTERVAL_SECONDS: int = 300  # 5 phút nghỉ ngắn
     DEFAULT_MICRO_TASK_SECONDS: int = 120  # 2 phút khởi động phá vỡ tê liệt ADHD
     PLANNING_REVIEW_LEAD_SECONDS: int = Field(default=300, ge=120)
+    DEFAULT_PLANNING_HORIZON_DAYS: int = Field(default=14, ge=7, le=21)
+    MAX_PLANNING_HORIZON_DAYS: int = Field(default=21, ge=14, le=30)
     DEFAULT_MIN_INTER_SESSION_GAP_SECONDS: int = 900  # Khoảng cách tối thiểu 15 phút giữa 2 phiên
     DEFAULT_BUFFER_MULTIPLIER: float = 1.2
     DEFAULT_TIMEZONE: str = "Asia/Ho_Chi_Minh"
@@ -277,6 +300,18 @@ class Settings(BaseSettings):
         """Kiểm tra đã cấu hình GROQ_API_KEY hợp lệ (khác rỗng và khác giá trị mẫu)."""
         cleaned = self.GROQ_API_KEY.strip()
         return bool(cleaned and cleaned != "your-groq-api-key-here")
+
+    @property
+    def has_deepgram_key(self) -> bool:
+        """Kiểm tra đã cấu hình DEEPGRAM_API_KEY hợp lệ (khác rỗng và khác giá trị mẫu)."""
+        cleaned = self.DEEPGRAM_API_KEY.strip()
+        return bool(cleaned and cleaned != "your-deepgram-api-key-here")
+
+    @property
+    def has_elevenlabs_key(self) -> bool:
+        """Kiểm tra đã cấu hình ELEVENLABS_API_KEY hợp lệ (khác rỗng và khác giá trị mẫu)."""
+        cleaned = self.ELEVENLABS_API_KEY.strip()
+        return bool(cleaned and cleaned != "your-elevenlabs-api-key-here")
 
     @property
     def has_google_oauth_credentials(self) -> bool:

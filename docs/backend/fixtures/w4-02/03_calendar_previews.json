@@ -230,6 +230,60 @@
           }
         }
       }
+    },
+    {
+      "name": "sync_job_retry_conflict",
+      "scope": "runtime",
+      "method": "POST",
+      "path": "/api/v1/calendar/sync-jobs/job-1/retry",
+      "response": {
+        "status": 409,
+        "body": {
+          "error": {
+            "code": "REVISION_CONFLICT",
+            "message": "Phiên bản tác vụ đồng bộ đã thay đổi.",
+            "field_errors": [],
+            "retryable": false,
+            "current_revisions": {
+              "job_revision": 2
+            },
+            "next_action": "reload_and_review"
+          },
+          "meta": {
+            "request_id": "w4-example",
+            "server_time": "2026-11-20T03:00:00Z"
+          }
+        }
+      },
+      "request": {
+        "expected_job_revision": 1
+      }
+    },
+    {
+      "name": "sync_job_retry_cancelled",
+      "scope": "runtime",
+      "method": "POST",
+      "path": "/api/v1/calendar/sync-jobs/job-1/retry",
+      "response": {
+        "status": 409,
+        "body": {
+          "error": {
+            "code": "JOB_CANCELLED",
+            "message": "Tác vụ đồng bộ đã bị hủy do ngắt kết nối lịch và không thể thử lại.",
+            "field_errors": [],
+            "retryable": false,
+            "current_revisions": {},
+            "next_action": "create_preview"
+          },
+          "meta": {
+            "request_id": "w4-example",
+            "server_time": "2026-11-20T03:00:00Z"
+          }
+        }
+      },
+      "request": {
+        "expected_job_revision": 2
+      }
     }
   ]
 }

@@ -5,9 +5,15 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import AwareDatetime, Field, model_validator
+from pydantic import AwareDatetime, Field, field_validator, model_validator
 
 from app.schemas.common import ApiModel, SessionSegment
+
+TelemetryEventType = Literal[
+    "uf4_audio_capture_failed",
+    "uf3_alarm_drift",
+    "uf5_dnd_restore_failed",
+]
 
 SkipScope = Literal["skip_session", "postpone_session", "skip_step"]
 SessionOutcome = Literal[
@@ -55,6 +61,9 @@ class SessionSnapshot(ApiModel):
     step_id: str = Field(min_length=1)
     scheduled_start: datetime
     scheduled_end: datetime
+    title: str | None = None
+    session_goal: str | None = None
+    expected_output: str | None = None
     micro_task_text: str | None = Field(default=None)
     micro_task_seconds: int | None = Field(default=None, ge=0)
     work_seconds: int = Field(gt=0)
@@ -127,6 +136,7 @@ class SessionRunData(ApiModel):
     total_planned_seconds: int | None = Field(default=None, ge=0)
     segments: list[SessionSegment] = Field(default_factory=list)
     continuation_of_run_id: str | None = None
+    planned_ends_at: datetime | None = None
 
 
 SessionRun = SessionRunData
@@ -326,12 +336,46 @@ class ReminderReceiptRequest(ApiModel):
     user_action: str | None = None
 
 
+class DeviceTelemetryRequest(ApiModel):
+    """Báo cáo telemetry lỗi không chứa dữ liệu nhạy cảm/PII từ thiết bị (BE-UF4-01)."""
+
+    event_id: str = Field(min_length=1, max_length=128)
+    event_type: TelemetryEventType
+    error_code: str = Field(pattern=r"^[A-Z0-9_]{2,64}$")
+    attempt_count: int | None = Field(default=None, ge=1, le=5)
+    source_run_id: str | None = Field(default=None, min_length=1)
+    occurred_at: AwareDatetime
+    app_version: str | None = Field(default=None, max_length=32)
+    platform_os: str | None = Field(default=None, max_length=32)
+
+    @field_validator("event_id", mode="before")
+    @classmethod
+    def validate_event_id(cls, v: Any) -> str:
+        if not isinstance(v, str) or not v.strip():
+            raise ValueError("Mã event_id không được để trống hoặc chỉ chứa khoảng trắng.")
+        return v.strip()
+
+
+class DeviceTelemetryData(ApiModel):
+    """Phản hồi sau khi ghi nhận telemetry vào AuditEvent."""
+
+    audit_event_id: str
+    device_id: str
+    event_id: str
+    event_type: TelemetryEventType
+    error_code: str
+    received_at: AwareDatetime
+
+
 __all__ = [
     "DeviceStateData",
     "DeviceStateReportRequest",
+    "DeviceTelemetryData",
+    "DeviceTelemetryRequest",
     "ReminderData",
     "ReminderListResult",
     "ReminderReceiptRequest",
+    "TelemetryEventType",
     "ActivePhase",
     "ActualCorrectionData",
     "ActualCorrectionRequest",

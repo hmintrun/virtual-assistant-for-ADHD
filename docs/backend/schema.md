@@ -74,13 +74,15 @@ API liên quan: [dòng 39](https://docs.google.com/spreadsheets/d/1RTI0Hv0DydDX5
 | `work_interval_seconds` | integer | Độ dài tối đa một quãng làm chính theo cấu hình có hiệu lực; không phải toàn Session. |
 | `rest_interval_seconds` | integer | Độ dài nghỉ bên trong khi có; khác khoảng cách 900 giây giữa hai Session. Có thể không tạo quãng nghỉ bên trong. |
 | `micro_task_seconds` | integer \| null | Ước lượng độ nhỏ của gợi ý chuẩn bị nếu có; có thể null khi chưa chốt qua nghiên cứu. Không có timer riêng và không cộng vào thời lượng Run/Session chính. |
-| `reminder_offsets` | array<integer> | Đích tuần 2 đã chốt: 1–3 integer giây không âm, không trùng, chuẩn hóa giảm dần; default mới `[900, 600, 300]`, giữ cấu hình user đã lưu. Code nền vẫn một offset `[900]`, chưa gửi mảng ba phần tử vào API cho tới khi DTO/validation được mở rộng. Micro-task hiển thị cùng lời nhắc, không tự start Run. |
+| `reminder_offsets` | array<integer> | 1–3 integer giây không âm giảm dần nghiêm ngặt (ví dụ `[900, 600, 300]`); giữ cấu hình user đã lưu. Micro-task hiển thị cùng lời nhắc, không tự start Run. |
 | `requested_revision` | integer \| null | Phiên bản cài đặt mới được yêu cầu, có thể đang chờ đổi lịch. |
 | `effective_revision` | integer | Phiên bản đã có hiệu lực; dùng tạo lịch hoặc snapshot thực thi. |
-| `buffer_multiplier` | number | Hệ số dự phòng đang có hiệu lực; chỉ áp một lần lên làm chính. Giá trị cụ thể cần nghiên cứu/pilot. |
-| `reminder_style` | string | Giọng, cách diễn đạt và hình thức nhắc người dùng đã chọn; không tự thay thời lượng phiên. |
+| `buffer_multiplier` | number | Hệ số dự phòng đang có hiệu lực (`1.0..2.0`); áp một lần lên làm chính và đồng bộ về `Step.buffer_multiplier` của các bước chưa hoàn thành khi áp dụng cài đặt. |
+| `reminder_style` | string | Giọng, cách diễn đạt và hình thức nhắc người dùng đã chọn (`gentle`, `upbeat`, `encouraging`; vẫn nhận legacy `firm`, `minimal`, `gentle_sound`, `balanced`, `default`); không tự thay thời lượng phiên. |
 | `requested_changes` | PreferenceChanges \| null | Các giá trị mới được yêu cầu; chưa dùng thay bản hiệu lực khi còn chờ phương án lịch. |
 | `pending_proposal_id` | string \| null | Phương án UF6 liên quan nếu thay cài đặt làm ảnh hưởng lịch; null khi không cần đổi lịch. |
+| `pending_change_request_id` | string \| null | *(BE-UF7-01)* Mã `SettingsChangeRequest` đang ở trạng thái `pending` để client có thể mở banner hoặc gọi `/cancel` ngay cả sau khi đóng/mở lại app. |
+| `pending_change_request_revision` | integer \| null | *(BE-UF7-01)* Phiên bản hiện hành của `pending_change_request_id` truyền vào `expected_request_revision` khi hủy yêu cầu. |
 | `revision` | integer | Trường bổ sung từ response Sheet; xem điều kiện trả của endpoint tương ứng. |
 
 ### O02 Availability
@@ -190,6 +192,8 @@ API liên quan: [dòng 9](https://docs.google.com/spreadsheets/d/1RTI0Hv0DydDX5S
 | `source_revisions` | SourceRevisions | Các revision của giờ rảnh, cấu hình, lịch nền và CalendarContext dùng tính; xác nhận phải kiểm lại các nguồn này. |
 | `user_step_proposal` | string \| null | Ý tưởng chia bước nguồn đã dùng để tạo phương án, hoặc null khi người dùng giao trợ lý đề xuất. |
 | `stale` | boolean | Server tính từ toàn bộ revisions/nguồn hiện hành; không tin cờ false lưu từ lần tính cũ. |
+| `can_undo` | boolean | Cờ dẫn xuất (`true` khi tồn tại `previous_snapshot` để hoàn tác 1 bước trước confirm). |
+| `previous_snapshot` | object \| null | *(Cột DB nội bộ từ `20261124_01`, không trả trực tiếp trong response API)* Ảnh chụp phương án trước lần `PATCH` gần nhất để phục vụ `POST /candidates/{candidate_id}/undo`; bị xóa về `null` khi tạo mới, sau khi undo hoặc confirm. |
 
 CandidateStep/CandidateSession tương ứng O08/O09, dùng client key trước confirm và chưa có lịch vận hành. feasible chỉ áp dụng các Steps trong verification_scope và horizon; không tự bao gồm unexpanded_scope. Candidate cũ có schema PlanningPart chỉ được chuyển đổi để đọc, bị đánh stale và phải tạo lại trước confirm.
 
@@ -217,10 +221,12 @@ API liên quan: [dòng 12](https://docs.google.com/spreadsheets/d/1RTI0Hv0DydDX5
 | `source_summary_revision` | integer \| null | Phiên bản summary đã xác nhận để tạo Task; null nếu dữ liệu cũ không có bằng chứng. |
 | `source_planning_input_revision` | integer \| null | Phiên bản đầu vào đã dùng khi confirm. |
 | `unexpanded_scope` | string \| null | Phạm vi còn chưa chia, giữ nguyên ở Task để lập tiếp về sau. |
+| `extension_candidate_at` | date-time \| null | *(Cột DB từ `20261124_01`)* Mốc gợi ý bắt đầu mở rộng chặng Rolling Horizon kế tiếp khi `decomposition_state` hoặc `scheduling_state` còn `partial`; chuyển về `null` khi hoàn tất toàn bộ phạm vi. |
 | `task_id` | string | Trường bổ sung từ response Sheet; mã tài nguyên hoặc liên kết server. |
 | `steps` | array<Step> | Trường bổ sung từ response Sheet; xem điều kiện trả của endpoint tương ứng. |
 | `sessions` | array<Session> | Trường bổ sung từ response Sheet; xem điều kiện trả của endpoint tương ứng. |
 | `source_summary` | O04 | Trường bổ sung từ response Sheet; xem điều kiện trả của endpoint tương ứng. |
+| `source_revisions` | ProposalSourceRevisions \| null | *(BE-UF6-03)* Trả đủ 5 revision (`task`, `schedule`, `availability`, `settings`, `calendar`) trên cả `GET /api/v1/tasks` và `GET /api/v1/tasks/{task_id}` để phục vụ `expand_next_horizon` hoặc tái lập lịch UF6. |
 
 source_summary giữ đầy đủ O04, kể cả goal và nguồn giá trị. Không tự thêm goal vào top-level Task khi JSON chưa có trường này.
 
@@ -254,6 +260,9 @@ API liên quan: [dòng 9](https://docs.google.com/spreadsheets/d/1RTI0Hv0DydDX5S
 | `step_id` | string | Bước được thực hiện trong phiên; từ đó xác định Task. |
 | `scheduled_start` | date-time | Giờ bắt đầu theo lịch đã xếp. |
 | `scheduled_end` | date-time | Giờ kết thúc; bằng giờ bắt đầu cộng tổng thời lượng phiên. |
+| `title` | string \| null | *(Cột DB từ `20261124_01`)* Tiêu đề phiên tập trung (đặc biệt khi một Step tách nhiều phiên dạng `(Phần i/n)` hoặc kế thừa `Step.title`). |
+| `session_goal` | string \| null | *(Cột DB từ `20261124_01`)* Mục tiêu cụ thể của riêng phiên hiện tại. |
+| `expected_output` | string \| null | *(Cột DB từ `20261124_01`)* Đầu ra dự kiến của phiên (có thể phân tách theo từng phần từ `Step.expected_output`). |
 | `micro_task_seconds` | integer \| null | Độ dài gợi ý nếu có số ước lượng; hiện có thể null. Không có timer micro-task và không cộng vào Session chính. |
 | `work_seconds` | integer | Tổng thời gian làm chính của mọi quãng, đã gồm buffer phân bổ. |
 | `rest_seconds` | integer | Tổng nghỉ bên trong phiên; không gồm 15 phút giữa hai Session. |
@@ -288,7 +297,10 @@ API liên quan: [dòng 9](https://docs.google.com/spreadsheets/d/1RTI0Hv0DydDX5S
 | `deficit_seconds` | integer \| null | Cận dưới thiếu thời lượng khi so required_seconds với available_seconds cho phần đã ước lượng. Bằng 0 vẫn có thể không xếp được; không cộng 900 giây vào từng phiên. |
 | `unscheduled_step_keys` | array<string> | client_step_key của Steps đã biết nhưng chưa được xếp đủ trong Candidate. |
 | `unexpanded_scope` | string \| null | Phạm vi chưa chia/chưa ước lượng; không gộp thành 0 giây hoặc vào required_seconds. |
-| `extension_candidate_at` | date-time \| null | Mốc kết thúc được gợi ý sau khi thử xếp thêm; không gọi là hạn tối thiểu tối ưu nếu chưa chứng minh. |
+| `extension_candidate_at` | date-time \| null | Mốc kết thúc/gợi ý mở rộng chặng Rolling Horizon kế tiếp khi còn phạm vi chưa xếp đủ hoặc chưa chia hết. |
+| `earliest_feasible_end_at` | date-time \| null | Hạn chót khả thi sớm nhất tìm được khi phương án hiện tại `infeasible` (bảo toàn Proof-of-Feasibility và `min_contiguous_slot_seconds`). |
+| `suggested_extra_free_seconds_per_day` | integer \| null | Số giây rảnh gợi ý cần mở thêm mỗi ngày để kịp deadline hiện tại (khi áp dụng được). |
+| `applied_extra_constraints` | AppliedExtraConstraints \| null | Các ràng buộc bổ sung thực tế đã áp từ `extra_requirements`: `max_daily_work_seconds`, `min_contiguous_slot_seconds`, `preferred_time_windows`. |
 
 ### O11 ScheduleVersion
 
@@ -328,7 +340,8 @@ API liên quan: [dòng 16](https://docs.google.com/spreadsheets/d/1RTI0Hv0DydDX5
 | `actual_source` | string enum \| null | timer_proxy hoặc self_report; null nếu chưa có nguồn hợp lệ. Sửa tự báo cáo phải giữ lịch sử nguồn trước. |
 | `outcome` | string enum | Kết quả riêng của phiên; không thay xác nhận Step hoặc Task đã xong. |
 | `checkin_timeout_at` | date-time \| null | ended_at + 300 giây, chỉ có khi Run đã kết thúc. Tới hạn chưa trả lời thì no_respond. Hạn phản hồi không kéo dài timer hoặc actual. |
-| `settings_snapshot` | SettingsSnapshot | Cấu trúc Session và cấu hình effective tại lúc start; đổi cài đặt sau đó không sửa Run hiện tại. |
+| `settings_snapshot` | SettingsSnapshot | Cấu trúc Session (`SessionSnapshot` gồm thêm `title`, `session_goal`, `expected_output`) và cấu hình `effective_revision` tại lúc start; đổi cài đặt sau đó không sửa Run hiện tại. |
+| `planned_ends_at` | date-time \| null | *(BE-UF3)* Mốc kết thúc dự kiến theo UTC đã cộng dồn các quãng `paused` thực tế giúp countdown trên thiết bị khớp sau khi tắt/mở lại app. |
 | `run_id` | string | Trường bổ sung từ response Sheet; mã tài nguyên hoặc liên kết server. |
 | `run_revision` | integer | Trường bổ sung từ response Sheet; xem điều kiện trả của endpoint tương ứng. |
 | `check_in` | O13 \| null | Dòng 20 nhúng CheckIn cuối phiên sau khi Run dừng; không phải trường bắt buộc trên mọi response Run. |
@@ -366,16 +379,17 @@ API liên quan: [dòng 24](https://docs.google.com/spreadsheets/d/1RTI0Hv0DydDX5
 | --- | --- | --- |
 | `client_thought_id` | string | Mã ổn định giúp lưu hoặc đồng bộ không nhân đôi suy nghĩ. |
 | `source_run_id` | string \| null | Lần thực hiện đang diễn ra khi suy nghĩ được ghi lại. |
-| `input_type` | string enum; ví dụ API: audio | Giữ đúng nhãn audio trong ví dụ Sheet; không dùng raw_audio từ bản cũ. Nhánh text fallback có trong nghiệp vụ, tên enum wire đầy đủ cần thống nhất. |
+| `input_type` | string enum (`"audio" \| "text"`) | Nhánh thu âm dùng `"audio"` (Zero AI, `text_content = null`); nhánh nhập tay fallback lần 4+ dùng `"text"` kèm `text_content`. |
 | `local_audio_path` | string \| null (local) | Đường dẫn file trên thiết bị; không phải URL để Backend tự tải, không có trong DTO Thought của Sheet hiện tại. |
 | `text_content` | string \| null | Nội dung chữ khi dùng phương án nhập dự phòng. |
-| `attempt_count` | integer | Số lượt thu/lưu chủ động; tối đa ba lượt cho một lần cất. |
+| `attempt_count` | integer (`1..5`) | Số lượt thu/lưu chủ động: tối đa 3 lượt với `"audio"` (`>3` bị chặn `422`), từ lượt 4 chuyển sang `"text"`. |
 | `linked_draft_id` | string \| null | Nháp tạo việc từ suy nghĩ; chưa chứng minh đã tạo Task. |
 | `converted_task_id` | string \| null | Task thật sau UF2 xác nhận và lưu thành công. |
-| `capture_state` | string enum | Đang thu, đã lưu hoặc lỗi theo bằng chứng file và metadata; không báo Đã lưu khi chỉ mới thu xong. |
+| `capture_state` | string enum | Đang thu, đã lưu (`saved`), hoặc `failed`; `GET /api/v1/thoughts` tự động lọc bỏ `capture_state == "failed"` và chặn cursor `failed` (`422`). |
 | `retention_expires_at` | date-time \| null | Mốc giữ/xóa khi đã có chính sách; null khi chưa áp dụng. Không mặc định một số ngày khi nhóm chưa chốt. |
+| `created_at` | date-time \| null | *(BE-UF4-02)* Thời điểm tạo Thought (UTC `AwareDatetime`) để hiển thị trong Inbox. |
 | `thought_id` | string | Trường bổ sung từ response Sheet; mã tài nguyên hoặc liên kết server. |
-| `thought_revision` | integer | Trường bổ sung từ response Sheet; xem điều kiện trả của endpoint tương ứng. |
+| `thought_revision` | integer | Trường bổ sung từ response Sheet; xem điều kiện trả của endpoint tương ứng (kể cả `current_revisions.thought_revision` khi `DELETE` trả `409`). |
 
 ### O15 RescheduleProposal
 
@@ -713,13 +727,15 @@ Các cấu trúc dưới đây phục vụ endpoint cụ thể, không tự đá
 
 Server tạo client keys và ghi estimate_source=user_confirmed cho nguồn thủ công. Cùng Context/preferences và Algorithm được dùng như nhánh AI; vẫn cần user review và confirm riêng. A04 cần làm rõ trả 422 DECOMPOSITION_REQUIRES_CLARIFICATION, field user_step_proposal; Draft được giữ, chưa có Candidate mới.
 
-`PATCH /api/v1/candidates/{candidate_id}` giữ expected_review_revision, nhận **đúng một** trong edits (sửa có cấu trúc hiện có) hoặc user_instruction (string 1–2000 ký tự, không chỉ khoảng trắng). Success vẫn là O06 PlanCandidate; không thay response bằng text của AI.
+`PATCH /api/v1/candidates/{candidate_id}` giữ `expected_review_revision`, nhận **đúng một** trong `edits` (sửa có cấu trúc) hoặc `user_instruction` (string 1–2000 ký tự, không chỉ khoảng trắng). Success vẫn là O06 PlanCandidate (với `can_undo=true` sau khi áp dụng thay đổi thành công); không thay response bằng text của AI.
 
-- NL chỉ sửa Step đã có: title, expected_output, estimated_base_seconds, order_index. Dùng đúng client_step_key qua reorder; không thêm/xóa/gộp hoặc sửa Session bằng NL trong bản này. Sửa Session có cấu trúc tiếp tục dùng edits.sessions.
-- Kết quả AI nội bộ có keyed step_edits và các cờ cần hỏi lại/đổi Draft/thao tác chưa hỗ trợ. Đây là DTO nội bộ, không tạo object DB hoặc endpoint mới.
-- Đổi availability/deadline/window trả 422 DRAFT_UPDATE_REQUIRED, next_action=edit_draft_and_reconfirm. User sửa Draft, xác nhận UF1 và tạo lại nguồn/phương án phù hợp; không áp một phần Step của yêu cầu hỗn hợp.
-- 422 ADJUSTMENT_REQUIRES_CLARIFICATION / UNSUPPORTED_CANDIDATE_CHANGE / NO_CANDIDATE_CHANGES hoặc 503 AI_UNAVAILABLE giữ nguyên phương án/revision. Lỗi có câu hỏi/field_errors; không lấy assistant_note làm bằng chứng đã thay đổi lịch.
-- Kết quả AI cũ gặp nguồn/review revision đã đổi bị chặn 409. Replay lệnh thành công vẫn đọc receipt trước kiểm bản đã thay đổi; cùng key khác payload bị từ chối.
+- **`edits` (`CandidateEdits`):** Ngoài sửa trường của `steps` (`CandidateStepEdit` gồm `title`, `expected_output`, `estimated_base_seconds`, `order_index`, `micro_task_text`) và `sessions` (`CandidateSessionEdit` gồm `scheduled_start`, `scheduled_end`, `title`, `session_goal`, `expected_output`, `micro_task_text`), hỗ trợ thêm các thao tác cấu trúc bước: `add_steps` (`CandidateStepAdd`), `delete_step_keys` (`array<string>`), `merge_steps` (`CandidateStepMerge`), `split_steps` (`CandidateStepSplit`), giới hạn tổng bước sau chỉnh sửa trong `1..20`. Không chỉnh đồng thời thông số thời lượng/cấu trúc bước và giờ phiên trong cùng một request (`422 VALIDATION_ERROR`).
+- **`user_instruction` (`adjust_candidate_by_nl`):** Hỗ trợ ánh xạ sang `step_edits`, `add_steps`, `delete_step_keys`, `merge_steps`, `split_steps` theo `client_step_key` hợp lệ.
+- **Hoàn tác 1 bước (`POST /api/v1/candidates/{candidate_id}/undo`):** Nhận header `Idempotency-Key` và body `UndoCandidateRequest` (`expected_review_revision >= 1`). Khôi phục toàn bộ ảnh chụp từ `previous_snapshot` gần nhất, tăng `review_revision` và đặt lại `can_undo=false`; gọi lần 2 khi không còn snapshot trả `409 UNDO_UNAVAILABLE`.
+- Kết quả AI nội bộ có keyed `step_edits`, các mảng structural ops và các cờ cần hỏi lại/đổi Draft/thao tác chưa hỗ trợ. Đây là DTO nội bộ, không tạo object DB mới.
+- Đổi availability/deadline/window trả `422 DRAFT_UPDATE_REQUIRED`, `next_action=edit_draft_and_reconfirm`. User sửa Draft, xác nhận UF1 và tạo lại nguồn/phương án phù hợp; không áp một phần Step của yêu cầu hỗn hợp.
+- `422 ADJUSTMENT_REQUIRES_CLARIFICATION` / `UNSUPPORTED_CANDIDATE_CHANGE` / `NO_CANDIDATE_CHANGES` hoặc `503 AI_UNAVAILABLE` giữ nguyên phương án/revision. Lỗi có câu hỏi/`field_errors`; không lấy `assistant_note` làm bằng chứng đã thay đổi lịch.
+- Kết quả AI cũ gặp nguồn/review revision đã đổi bị chặn `409 REVISION_CONFLICT`. Replay lệnh thành công vẫn đọc receipt trước kiểm bản đã thay đổi; cùng key khác payload bị từ chối.
 
 ### ConfirmSummaryResult
 
@@ -937,6 +953,7 @@ Bảng này là chỉ mục, không thay request validation. Các trường dư�
 | 10 | GET `/api/v1/candidates/{candidate_id}` | path: candidate_id; body: null |
 | 11 | PATCH `/api/v1/candidates/{candidate_id}` | path: candidate_id; body: expected_review_revision, edits |
 | 12 | POST `/api/v1/candidates/{candidate_id}/confirm` | path: candidate_id; body: expected_review_revision, expected_summary_revision, expected_source_revisions, expected_planning_input_revision |
+| Bổ sung (UF2 Undo) | POST `/api/v1/candidates/{candidate_id}/undo` | path: candidate_id; header: Idempotency-Key; body: expected_review_revision |
 | 13 | GET `/api/v1/tasks` | query: limit; body: null |
 | 14 | GET `/api/v1/tasks/{task_id}` | path: task_id; body: null |
 | 15 | GET `/api/v1/schedule` | query: from, to; body: null |
@@ -1040,6 +1057,10 @@ Auth contract triển khai: [AUTH_GUIDE.md](AUTH_GUIDE.md). PR17 bàn giao Backe
 | display_name | trimmed Google name, fallback email local part, cắt tối đa100 |
 | is_active | DB false →403 ACCOUNT_DISABLED; User đã xóa →401 |
 | preferences | tạo đúng một UserPreference theo defaults khi tạo User; không reset khi login lại |
+| current_streak_days | *(BE-UF6-04)* integer `>= 0` — số ngày tập trung liên tiếp hiện tại |
+| streak_frozen | *(BE-UF6-04)* boolean — ngày hôm qua được bảo vệ bằng Streak Freeze tự động |
+| streak_freeze_tokens | *(BE-UF6-04)* integer `>= 0` (tối đa `2`) — số Khiên bảo vệ hiện có |
+| last_streak_date | *(BE-UF6-04)* date (`YYYY-MM-DD`) \| null — ngày gần nhất được ghi nhận chuỗi |
 
 Login200 dùng SuccessEnvelope[GoogleLoginData]: access_token, token_type=bearer, expires_in=3600, refresh_token, refresh_expires_in=2592000, user=CurrentUser. Me200 dùng SuccessEnvelope[CurrentUser]. Request GoogleLoginRequest chỉ id_token, extra=forbid, không blank/padded, dài 1–16384. Login không cần Idempotency-Key hoặc app Bearer. Chi tiết JSON/lỗi/next_action ở mục 14 và Sheet `api!A65:J66`; không renumber routes cũ.
 
@@ -1047,7 +1068,7 @@ JWT app HS256 allowlist, JWT_SECRET_KEY riêng khỏi SECRET_KEY Calendar; requi
 
 Auth errors:422 VALIDATION_ERROR/fix_fields;401 INVALID_GOOGLE_ID_TOKEN hoặc UNAUTHENTICATED/authenticate;403 ACCOUNT_DISABLED/contact_support;409 ACCOUNT_LINK_CONFLICT/review_account_link;422 GOOGLE_PROFILE_INCOMPLETE/review_google_profile;503 AUTH_PROVIDER_UNAVAILABLE/retry_login (retryable=true). Các lỗi khác retryable=false. ErrorEnvelope giữ field_errors/current_revisions/meta; mọi Auth401 có WWW-Authenticate: Bearer. Đây là contract delta, không phải tuyên bố Google thật/Tester598cases đã đạt.
 
-Password/streak legacy nằm ngoài phạm vi Auth này. Bằng chứng/lệnh tái lập và phạm vi PostgreSQL/Calendar QA mới ở [PR17_AUTH_VERIFICATION.md](PR17_AUTH_VERIFICATION.md); không cần handoff local để review.
+Password auth nằm ngoài phạm vi Auth này; các trường Focus Streak của `CurrentUser` (`current_streak_days`, `streak_frozen`, `streak_freeze_tokens`, `last_streak_date`) đã được triển khai đồng bộ phía server qua `GET /api/v1/streak` và `POST /api/v1/streak/repair` (`BE-UF6-04`, xem mục `14.5`). Bằng chứng/lệnh tái lập và phạm vi PostgreSQL/Calendar QA mới ở [PR17_AUTH_VERIFICATION.md](PR17_AUTH_VERIFICATION.md); không cần handoff local để review.
 
 ## 9. Giới hạn và trạng thái triển khai C01 — 03/11/2026
 
@@ -1219,7 +1240,7 @@ Mục này bổ sung đầy đủ contract các endpoint đã có trong code (`b
 
 #### a) Bổ sung bảng lỗi `POST /api/v1/voice/transcriptions` (STT)
 
-Endpoint Dòng 8 trong Sheet (`multipart/form-data`: `purpose` ∈ `{"uf1_input", "thought_to_draft", "uf5_checkin"}`, `device_id`, `file`, `thought_id` bắt buộc khi `purpose="thought_to_draft"`; header `Idempotency-Key`) trả về `200 SuccessEnvelope[TranscriptionData]` (`text`, `input_source: "voice" | "thought"`, `thought_id: string | null`). Các mã lỗi ánh xạ từ `_STT_ERROR_MAP` (`backend/app/api/v1/voice.py`):
+Endpoint Dòng 8 trong Sheet (`multipart/form-data`: `purpose` ∈ `{"uf1_input", "thought_to_draft", "uf5_checkin"}`, `device_id`, `file`, `thought_id` bắt buộc khi `purpose="thought_to_draft"`; header `Idempotency-Key`) trả về `200 SuccessEnvelope[TranscriptionData]` (`text`, `low_confidence: boolean`, `input_source: "voice" | "thought"`, `thought_id: string | null`). Các mã lỗi ánh xạ từ `_STT_ERROR_MAP` (`backend/app/api/v1/voice.py`):
 
 | HTTP | `error.code` | `retryable` | `error.next_action` | Điều kiện |
 | --- | --- | --- | --- | --- |
@@ -1232,7 +1253,7 @@ Endpoint Dòng 8 trong Sheet (`multipart/form-data`: `purpose` ∈ `{"uf1_input"
 | `409` | `IDEMPOTENCY_KEY_REUSED` | `false` | `use_original_payload_or_new_command` | Trùng `Idempotency-Key` với nội dung audio/metadata khác. |
 | `503` | `STT_UNAVAILABLE` | `false` | `use_on_device_stt_or_type` | Provider STT chưa cấu hình key hoặc bị từ chối quyền. |
 | `503` | `STT_RATE_LIMITED` | `true` | `use_on_device_stt_or_type` | Provider STT bị HTTP 429. |
-| `503` | `STT_PROVIDER_ERROR` | `true` | `use_on_device_stt_or_type` | Lỗi mạng / 5xx từ Groq Whisper. |
+| `503` | `STT_PROVIDER_ERROR` | `true` | `use_on_device_stt_or_type` | Lỗi mạng / 5xx từ STT provider (Gemini / ElevenLabs / Deepgram). |
 | `504` | `STT_TIMEOUT` | `true` | `use_on_device_stt_or_type` | Quá thời gian chờ STT. |
 
 #### b) `POST /api/v1/voice/tts` `[Đã có trong code]`
@@ -1386,6 +1407,43 @@ Endpoint Dòng 8 trong Sheet (`multipart/form-data`: `purpose` ∈ `{"uf1_input"
   ```
 - **Errors:** `503 DATABASE_UNAVAILABLE` (`retryable=true`, `next_action="retry_later"`, trả theo chuẩn `ErrorEnvelope`) khi truy vấn kiểm tra `SELECT 1` xuống DB thất bại.
 
+---
+
+### 14.4. Nâng cấp UF2 Toàn trình (5 Tầng) & Migration `20261124_01` `[Đã có trong code — 24/11/2026]`
+
+- **Migration `20261124_01_uf2_upgrade_columns.py` (`down_revision="20261118_01"`):**
+  - Thêm `plan_candidates.previous_snapshot` (`JSON`, nullable) để lưu snapshot 1 bước cho Undo trước Confirm.
+  - Thêm `tasks.extension_candidate_at` (`DateTime(timezone=True)`, nullable) để lưu mốc gợi ý mở rộng chặng Rolling Horizon kế tiếp khi `Task` còn `partial`.
+  - Thêm `sessions.title` (`String(160)`), `sessions.session_goal` (`Text`), `sessions.expected_output` (`Text`) đều nullable để lưu metadata phiên giàu ngữ cảnh.
+- **Tầng 1 (Option 1 Batch Session Enrichment & NL Structural Ops):** `build_single_session_enrichment()` xử lý miễn phí các Step 1 phiên (`0` LLM call); `enrich_split_sessions()` gộp thành **1 batch LLM call** (Khung C `3.0s`) cho các Step bị tách nhiều phiên (`(Phần i/n)`), kèm fallback Python tất định khi hết giờ/lỗi; `adjust_candidate_by_nl()` mở rộng hỗ trợ `add_steps`, `delete_step_keys`, `merge_steps`, `split_steps` và `micro_task_text`.
+- **Tầng 2 (Feasibility Advisor & Extra Constraints):** `FeasibilityReport` bổ sung `earliest_feasible_end_at` (bảo toàn Proof-of-Feasibility và `min_contiguous_slot_seconds`), `suggested_extra_free_seconds_per_day`, và `applied_extra_constraints` (`AppliedExtraConstraints`: `max_daily_work_seconds`, `min_contiguous_slot_seconds`, `preferred_time_windows`); chẩn đoán `FRAGMENTED_FREE_SLOTS` theo trần công suất từng ngày.
+- **Tầng 3 & 4 (Structural Ops, Undo, Rolling Horizon, Calendar Outbox & UF6 Bridge):**
+  - `POST /api/v1/candidates/{candidate_id}/undo` hoàn tác 1 bước chỉnh sửa gần nhất; sửa phi thời gian (`changed_timing=False`) giữ nguyên `scheduled_start`/`scheduled_end` và không gọi lại LLM enrich.
+  - Rolling Horizon `planning_horizon` cho phép `14..21` ngày (`> 21` ngày kẹp về `21` ngày); khi Confirm đặt `Task.extension_candidate_at`, enqueue Google Calendar Outbox summary `[ProPlan] ...` kèm `description` (`Mục tiêu`, `Đầu ra dự kiến`).
+  - UF6 `expand_next_horizon` hỗ trợ **Branch 1** (sinh thêm Step từ `unexpanded_scope` + batch enrich) và **Branch 2** (xếp tiếp các Step đang pending qua nhiều chặng tới `complete`); `ProposalSessionData` trả đủ `title`, `session_goal`, `expected_output` và `ProposedStepItem` hỗ trợ `expected_output`.
+
+---
+
+### 14.5. Đồng bộ Backend UF3–UF7 & Full-Codebase Hardening (`e3d52ca` — 26/11/2026) `[Đã có trong code]`
+
+Toàn bộ các nâng cấp dưới đây giữ nguyên **0 migration Alembic mới** (head `20261124_01`) và tương thích 100% SQLite + PostgreSQL 16:
+
+- **`BE-UF3` (`d7c2fe2`):** `GET /api/v1/schedule` tự đối soát các check-in quá hạn; `D1-A` cho phép bắt đầu Bước kế tiếp khi phiên trước kết thúc `no_respond`; `SessionRunData.planned_ends_at` cộng dồn quãng `paused`; `SessionSnapshot` mang đủ `title`, `session_goal`, `expected_output`; `D2-Safe` chặn ghi đè sự kiện lịch chính.
+- **`BE-UF4` (`e7549cd`):** Bổ sung `POST /api/v1/devices/{device_id}/telemetry` (`DeviceTelemetryRequest` / `DeviceTelemetryData`, `201`, lưu `audit_events`, Zero-PII, `occurred_at` lệch tối đa `300s`); `ThoughtData.created_at` (UTC); `GET /api/v1/thoughts` lọc `capture_state != "failed"` và chặn cursor `failed` (`422`); `DELETE /api/v1/thoughts/{id}` trả kèm `current_revisions.thought_revision` trên mọi nhánh `409`.
+- **`BE-UF5` (`92120c2`):** Hoàn thành sớm Step/Task hoặc chọn `skip_step` tự hủy mọi `Session` tương lai `scheduled`, `Reminder` chưa bắn và xếp job xóa event Google Calendar dư (bảo toàn lịch sử `completed` và giữ nguyên phiên đã retired qua `UF6 approve`); Undo Check-in 4 vòng khôi phục nguyên vẹn Session/Reminder và hủy delete job chưa chạy.
+- **`BE-UF6` (`1b898a9`):**
+  - Sinh lời đồng cảm UF7 $\rightarrow$ UF6 hoàn toàn lock-free (0 giữ row/tx lock khi gọi LLM).
+  - `POST /api/v1/calendar/connections/{id}/disconnect` hủy toàn bộ `CalendarSyncJob` còn mở (`cancelled`, `last_error_code="DISCONNECTED"`, tăng `job.revision`) và bảo toàn Task/Step/Session.
+  - `Task.source_revisions` trả đủ 5 revision nguồn trên cả `GET /api/v1/tasks` và `GET /api/v1/tasks/{task_id}`.
+  - **Focus Streak Server-Side (`BE-UF6-04`):** Bổ sung `GET /api/v1/streak` và `POST /api/v1/streak/repair` (`StreakData`, `StreakDayRecordData`), đồng bộ 4 trường streak trên `CurrentUser` (`GET /api/v1/auth/me`) qua bảng `users` + `audit_events` (3-day unlock, Auto-Freeze tối đa `2` khiên, 24h Repair tối đa `2` lần/tháng, và hoàn tác Streak/Freeze khi `actual-corrections < 120s` hoặc Undo Check-in).
+- **`BE-UF7` (`e163e72`):** `GET /api/v1/preferences` lộ `pending_change_request_id` và `pending_change_request_revision` (`BE-UF7-01`); `AdaptationSuggestion` giữ trạng thái `pending` đến khi proposal UF6 được `approve` và mở lại nếu bị `reject` (`BE-UF7-02`); đồng bộ `Step.buffer_multiplier` của các bước chưa xong khi duyệt/áp dụng ngay; chuẩn hóa `reminder_style` (`gentle`, `upbeat`, `encouraging` + legacy).
+- **Full-Codebase Hardening `H1-01..H4-07` (`e3d52ca`):**
+  - Giới hạn `limit` phân trang `1..100` trên `GET /drafts`, `GET /tasks`, `GET /schedule` (`H3-04`).
+  - Chặn sửa/analyze/confirm/xóa Draft đã `confirmed` với `409 INVALID_STATE_TRANSITION` (`H3-01`, `H3-02`).
+  - `approve_proposal` kiểm tra target terminal/malformed trước ghi nhận DB (`409 SOURCE_CHANGED`, `next_action="rebuild_and_review"`, `H1-01`).
+  - `POST /api/v1/calendar/sync-jobs/{job_id}/retry` khóa trong `get_connection_sync_lock` và kiểm tra theo thứ tự OCC: `expected_job_revision` $\rightarrow$ `409 REVISION_CONFLICT` (`current_revisions.job_revision`), tiếp đến `cancelled` $\rightarrow$ `409 JOB_CANCELLED`, `completed`/`running`/active lease $\rightarrow$ `409 INVALID_STATE_TRANSITION`, và `disconnected` $\rightarrow$ `409 CALENDAR_DISCONNECTED` (`H4-05`).
+  - Bắt `ValueError` giải mã Fernet & `401` Google API đồng nhất về `connection_state="needs_reconnect"` (`H4-02`, `H4-06`); hỗ trợ `early_completion_pull_forward` và giữ khóa `delete_task` toàn user cho `running`/`paused` (`409 ACTIVE_RUN_EXISTS`, `H4-07`); namespace reminder `dedupe_key` theo `:pref:{effective_revision}:` (`H1-07`, `H2-01`).
+
 ## 15. W4-02 — Bộ bàn giao OpenAPI và JSON fixtures
 
 Nguồn runtime: `backend` (đã tích hợp `23e856b`, `37c4491` và `BE-03`); contract Auth do VQH chốt tại `ba16055` (mục 14.1). Mã và thời gian trong fixture là dữ liệu giả, không chứa token thật. `scope=runtime` mô tả code hiện tại (đã bao gồm `BE-03`: refresh rotation/reuse detection và `POST /api/v1/auth/logout`). Contract tests đối chiếu OpenAPI runtime và validate DTO/fixtures.
@@ -1396,11 +1454,11 @@ Nguồn runtime: `backend` (đã tích hợp `23e856b`, `37c4491` và `BE-03`); 
 
 ### Quy tắc client và trạng thái đồng bộ code
 
-1. Auth: đọc `body.error.code`. `401 CALENDAR_AUTH_REQUIRED` chỉ yêu cầu nối lại Calendar. `BE-03` đã hoàn thành trong runtime: `POST /api/v1/auth/logout` (public theo `refresh_token`) trả `logged_out=true` và `revoked=true/false` (retry idempotent `200`), không cần header `Authorization` hay `Idempotency-Key`; `POST /api/v1/auth/refresh` xoay `jti` có lưu vết `refresh_tokens` và khi phát hiện reuse sẽ thu hồi toàn bộ family cùng `401 UNAUTHENTICATED` kèm header `WWW-Authenticate: Bearer`.
-2. Settings: gửi `effective_revision` vào `expected_preferences_revision`; suggestion dùng tên **số ít** `expected_preference_revision`. Hủy dùng `change_request_id` + `request_revision` từ response save. Sau reopen hoặc accept suggestion, response hiện chưa cung cấp đủ request revision để hủy: không tự lấy preference revision thay thế. `409` tải lại cấu hình. Chính sách client `buffer_multiplier ∈ [1.0, 2.0]`: runtime đã chặn cả dưới `1.0` và trên `2.0` (`422 VALIDATION_ERROR` ở `scope=runtime`).
-3. Calendar: runtime preview đã trả `preview_revision` (và `base_connection_revision`) trong response; client gửi lại giá trị này vào trường `expected_preview_revision` khi gọi `/confirm` (lệch revision trả `409 REVISION_CONFLICT` kèm `current_revisions.preview_revision`, thiếu trả `422`). JSON `412` là lỗi Google upstream; client đọc job `200` với `job_state=conflict`, `last_error_code=ETAG_CONFLICT_412`, không retry mù.
+1. Auth: đọc `body.error.code`. `401 CALENDAR_AUTH_REQUIRED` chỉ yêu cầu nối lại Calendar. `BE-03` đã hoàn thành trong runtime: `POST /api/v1/auth/logout` (public theo `refresh_token`) trả `logged_out=true` và `revoked=true/false` (retry idempotent `200`), không cần header `Authorization` hay `Idempotency-Key`; `POST /api/v1/auth/refresh` xoay `jti` có lưu vết `refresh_tokens` và khi phát hiện reuse sẽ thu hồi toàn bộ family cùng `401 UNAUTHENTICATED` kèm header `WWW-Authenticate: Bearer`. `GET /api/v1/auth/me` trả đủ 4 trường Focus Streak (`current_streak_days`, `streak_frozen`, `streak_freeze_tokens`, `last_streak_date` — `BE-UF6-04`).
+2. Settings: gửi `effective_revision` vào `expected_preferences_revision`; suggestion dùng tên **số ít** `expected_preference_revision`. Hủy dùng `change_request_id` + `request_revision` từ response save; `GET /api/v1/preferences` đã trả sẵn `pending_change_request_id` và `pending_change_request_revision` (`BE-UF7-01`) để client hủy yêu cầu đang chờ duyệt ngay cả sau khi mở lại app hoặc sau khi accept suggestion (không tự lấy `preference.revision` thay thế). Khi accept suggestion có phiên tương lai (`application_state="pending_review"`), `suggestion_revision` giữ nguyên cho tới khi proposal UF6 được duyệt (`BE-UF7-02`). `409` tải lại cấu hình. Chính sách client `buffer_multiplier ∈ [1.0, 2.0]`: runtime đã chặn cả dưới `1.0` và trên `2.0` (`422 VALIDATION_ERROR` ở `scope=runtime`).
+3. Calendar: runtime preview đã trả `preview_revision` (và `base_connection_revision`) trong response; client gửi lại giá trị này vào trường `expected_preview_revision` khi gọi `/confirm` (lệch revision trả `409 REVISION_CONFLICT` kèm `current_revisions.preview_revision`, thiếu trả `422`). `POST /api/v1/calendar/sync-jobs/{job_id}/retry` kiểm tra OCC `expected_job_revision` (`409 REVISION_CONFLICT` kèm `current_revisions.job_revision`), sau đó chặn `cancelled` (`409 JOB_CANCELLED`), `completed`/`running`/active lease (`409 INVALID_STATE_TRANSITION`) và `disconnected` (`409 CALENDAR_DISCONNECTED`) (`H4-05`). JSON `412` là lỗi Google upstream; client đọc job `200` với `job_state=conflict`, `last_error_code=ETAG_CONFLICT_412`, không retry mù.
 4. Run: Start chống lặp bằng `Idempotency-Key` (body Start không có `event_id`); fixture ghi cả request gốc và retry cùng key, kèm receipt. End có cả key và `event_id`. Khi mất phản hồi, đối soát `/commands/{command_id}`/Run trước retry. Clock-skew Start được kiểm bằng giờ server, giới hạn `300s`; fixture vượt `301s` trả `422 VALIDATION_ERROR` trên `requested_start_at`. `offline_start_supported=false`. Thought giữ `source_run_id`, metadata audio không chứa transcript/path local; thử audio tối đa 3 lần. Chỉ sau phiên: `/voice/transcriptions` với `purpose=thought_to_draft`, rồi `/thoughts/{id}/draft`.
-5. UF6: giữ `steps_to_add`, `pending_notification_state`, `feasibility.next_horizon_preview` (nullable). Hiển thị mã `resegmented_by_settings_change` thành **“Chia lại phiên theo cài đặt mới”**; không đổi enum wire. `deficit_seconds>0` hoặc `confirmable=false` hiển thị hai lựa chọn mở giờ rảnh/lùi hạn chót. Approve `409` tải lại và cho user duyệt lại. Voice: STT timeout phía client ít nhất `45s`; fixture STT/TTS có nhánh `504`; TTS `503` chuyển `flutter_tts`; UF5 trả `200` với `fallback_to_device_tts=true` khi TTS lỗi.
+5. UF6 & Focus Streak: giữ `steps_to_add`, `pending_notification_state`, `feasibility.next_horizon_preview` (nullable). Hiển thị mã `resegmented_by_settings_change` thành **“Chia lại phiên theo cài đặt mới”**; không đổi enum wire. `deficit_seconds>0` hoặc `confirmable=false` hiển thị hai lựa chọn mở giờ rảnh/lùi hạn chót. Approve `409` (`REVISION_CONFLICT` / `PREVIEW_STALE` / `SOURCE_CHANGED`) tải lại hoặc gọi `/proposals/{id}/rebuild` cho user duyệt lại (`H1-01`). Focus Streak phía server dùng `GET /api/v1/streak` và `POST /api/v1/streak/repair` (`BE-UF6-04`). Voice: STT timeout phía client ít nhất `45s`; fixture STT/TTS có nhánh `504`; TTS `503` chuyển `flutter_tts`; UF5 trả `200` với `fallback_to_device_tts=true` khi TTS lỗi.
 
 ### Tái tạo và kiểm tra
 
@@ -1425,6 +1483,31 @@ Chưa có xác nhận các thành viên đã nhận fixture; người thực hi�
 {
   "contract_source": "schema.md sections 14–15; backend 23e856b; auth target ba16055",
   "cases": [
+    {
+      "name": "auth_me_success",
+      "scope": "runtime",
+      "method": "GET",
+      "path": "/api/v1/auth/me",
+      "response": {
+        "status": 200,
+        "body": {
+          "data": {
+            "user_id": "11111111-1111-4111-8111-111111111111",
+            "email": "demo@example.com",
+            "display_name": "ProPlan User",
+            "is_active": true,
+            "current_streak_days": 3,
+            "streak_frozen": false,
+            "streak_freeze_tokens": 2,
+            "last_streak_date": "2026-11-20"
+          },
+          "meta": {
+            "request_id": "w4-example",
+            "server_time": "2026-11-20T03:00:00Z"
+          }
+        }
+      }
+    },
     {
       "name": "refresh_success",
       "scope": "runtime",
@@ -1612,7 +1695,9 @@ Chưa có xác nhận các thành viên đã nhận fixture; người thực hi�
             "buffer_multiplier": 1.2,
             "reminder_style": "gentle",
             "requested_changes": null,
-            "pending_proposal_id": null
+            "pending_proposal_id": null,
+            "pending_change_request_id": null,
+            "pending_change_request_revision": null
           },
           "meta": {
             "request_id": "w4-example",
@@ -1890,7 +1975,7 @@ Chưa có xác nhận các thành viên đã nhận fixture; người thực hi�
         "body": {
           "data": {
             "suggestion_id": "suggestion-1",
-            "suggestion_revision": 2,
+            "suggestion_revision": 1,
             "kind": "buffer_multiplier",
             "action": "accept",
             "status": "accepted",
@@ -2159,6 +2244,60 @@ Chưa có xác nhận các thành viên đã nhận fixture; người thực hi�
           }
         }
       }
+    },
+    {
+      "name": "sync_job_retry_conflict",
+      "scope": "runtime",
+      "method": "POST",
+      "path": "/api/v1/calendar/sync-jobs/job-1/retry",
+      "response": {
+        "status": 409,
+        "body": {
+          "error": {
+            "code": "REVISION_CONFLICT",
+            "message": "Phiên bản tác vụ đồng bộ đã thay đổi.",
+            "field_errors": [],
+            "retryable": false,
+            "current_revisions": {
+              "job_revision": 2
+            },
+            "next_action": "reload_and_review"
+          },
+          "meta": {
+            "request_id": "w4-example",
+            "server_time": "2026-11-20T03:00:00Z"
+          }
+        }
+      },
+      "request": {
+        "expected_job_revision": 1
+      }
+    },
+    {
+      "name": "sync_job_retry_cancelled",
+      "scope": "runtime",
+      "method": "POST",
+      "path": "/api/v1/calendar/sync-jobs/job-1/retry",
+      "response": {
+        "status": 409,
+        "body": {
+          "error": {
+            "code": "JOB_CANCELLED",
+            "message": "Tác vụ đồng bộ đã bị hủy do ngắt kết nối lịch và không thể thử lại.",
+            "field_errors": [],
+            "retryable": false,
+            "current_revisions": {},
+            "next_action": "create_preview"
+          },
+          "meta": {
+            "request_id": "w4-example",
+            "server_time": "2026-11-20T03:00:00Z"
+          }
+        }
+      },
+      "request": {
+        "expected_job_revision": 2
+      }
     }
   ]
 }
@@ -2208,6 +2347,9 @@ Chưa có xác nhận các thành viên đã nhận fixture; người thực hi�
                 "step_id": "step-1",
                 "scheduled_start": "2026-11-20T03:00:00Z",
                 "scheduled_end": "2026-11-20T03:30:00Z",
+                "title": null,
+                "session_goal": null,
+                "expected_output": null,
                 "micro_task_text": null,
                 "micro_task_seconds": null,
                 "work_seconds": 1500,
@@ -2236,7 +2378,8 @@ Chưa có xác nhận các thành viên đã nhận fixture; người thực hi�
             "dnd_release_at": null,
             "total_planned_seconds": null,
             "segments": [],
-            "continuation_of_run_id": null
+            "continuation_of_run_id": null,
+            "planned_ends_at": null
           },
           "meta": {
             "request_id": "w4-example",
@@ -2284,6 +2427,9 @@ Chưa có xác nhận các thành viên đã nhận fixture; người thực hi�
                 "step_id": "step-1",
                 "scheduled_start": "2026-11-20T03:00:00Z",
                 "scheduled_end": "2026-11-20T03:30:00Z",
+                "title": null,
+                "session_goal": null,
+                "expected_output": null,
                 "micro_task_text": null,
                 "micro_task_seconds": null,
                 "work_seconds": 1500,
@@ -2312,7 +2458,8 @@ Chưa có xác nhận các thành viên đã nhận fixture; người thực hi�
             "dnd_release_at": null,
             "total_planned_seconds": null,
             "segments": [],
-            "continuation_of_run_id": null
+            "continuation_of_run_id": null,
+            "planned_ends_at": null
           },
           "meta": {
             "request_id": "w4-example",
@@ -2405,14 +2552,15 @@ Chưa có xác nhận các thành viên đã nhận fixture; người thực hi�
             "client_thought_id": "client-thought-1",
             "source_run_id": "44444444-4444-4444-8444-444444444444",
             "input_type": "audio",
-            "capture_state": "raw_saved",
+            "capture_state": "saved",
             "attempt_count": 1,
             "text_content": null,
             "thought_id": "66666666-6666-4666-8666-666666666666",
             "thought_revision": 1,
             "linked_draft_id": null,
             "converted_task_id": null,
-            "retention_expires_at": null
+            "retention_expires_at": null,
+            "created_at": "2026-11-20T03:00:00Z"
           },
           "meta": {
             "request_id": "w4-example",
@@ -2424,9 +2572,45 @@ Chưa có xác nhận các thành viên đã nhận fixture; người thực hi�
         "client_thought_id": "client-thought-1",
         "source_run_id": "44444444-4444-4444-8444-444444444444",
         "input_type": "audio",
-        "capture_state": "raw_saved",
+        "capture_state": "saved",
         "attempt_count": 1,
         "text_content": null
+      }
+    },
+    {
+      "name": "thought_capture_telemetry",
+      "scope": "runtime",
+      "method": "POST",
+      "path": "/api/v1/devices/device-1/telemetry",
+      "response": {
+        "status": 201,
+        "body": {
+          "data": {
+            "audit_event_id": "77777777-7777-4777-8777-777777777777",
+            "device_id": "device-1",
+            "event_id": "evt-uf4-fail-1",
+            "event_type": "uf4_audio_capture_failed",
+            "error_code": "MIC_PERMISSION_DENIED",
+            "received_at": "2026-11-20T03:00:00Z"
+          },
+          "meta": {
+            "request_id": "w4-example",
+            "server_time": "2026-11-20T03:00:00Z"
+          }
+        }
+      },
+      "request": {
+        "event_id": "evt-uf4-fail-1",
+        "event_type": "uf4_audio_capture_failed",
+        "error_code": "MIC_PERMISSION_DENIED",
+        "attempt_count": 1,
+        "source_run_id": "44444444-4444-4444-8444-444444444444",
+        "occurred_at": "2026-11-20T03:00:00Z",
+        "app_version": "1.0.0",
+        "platform_os": "android"
+      },
+      "request_headers": {
+        "Idempotency-Key": "w4-telemetry-1"
       }
     },
     {
@@ -2517,6 +2701,7 @@ Chưa có xác nhận các thành viên đã nhận fixture; người thực hi�
                   "task_id": "task-1",
                   "order_index": 2,
                   "title": "Hoàn thiện bản nháp",
+                  "expected_output": null,
                   "estimated_base_seconds": 3600
                 }
               ],
@@ -2551,6 +2736,94 @@ Chưa có xác nhận các thành viên đã nhận fixture; người thực hi�
             "server_time": "2026-11-20T03:00:00Z"
           }
         }
+      }
+    },
+    {
+      "name": "streak_summary",
+      "scope": "runtime",
+      "method": "GET",
+      "path": "/api/v1/streak",
+      "response": {
+        "status": 200,
+        "body": {
+          "data": {
+            "current_streak_days": 3,
+            "effective_display_streak": 3,
+            "unlocked": true,
+            "streak_frozen": false,
+            "streak_freeze_tokens": 2,
+            "max_freeze_tokens": 2,
+            "last_streak_date": "2026-11-20",
+            "repair_pending": false,
+            "repair_window_ends_at": null,
+            "repairs_used_this_month": 0,
+            "repairs_left_this_month": 2,
+            "max_repairs_per_month": 2,
+            "longest_streak_days": 3,
+            "today_completed": true,
+            "today_focus_minutes": 25,
+            "timezone": "Asia/Ho_Chi_Minh",
+            "day_records": [
+              {
+                "date": "2026-11-20",
+                "kind": "done",
+                "minutes": 25
+              }
+            ]
+          },
+          "meta": {
+            "request_id": "w4-example",
+            "server_time": "2026-11-20T03:00:00Z"
+          }
+        }
+      }
+    },
+    {
+      "name": "streak_repair",
+      "scope": "runtime",
+      "method": "POST",
+      "path": "/api/v1/streak/repair",
+      "response": {
+        "status": 200,
+        "body": {
+          "data": {
+            "current_streak_days": 4,
+            "effective_display_streak": 4,
+            "unlocked": true,
+            "streak_frozen": false,
+            "streak_freeze_tokens": 2,
+            "max_freeze_tokens": 2,
+            "last_streak_date": "2026-11-20",
+            "repair_pending": false,
+            "repair_window_ends_at": null,
+            "repairs_used_this_month": 1,
+            "repairs_left_this_month": 1,
+            "max_repairs_per_month": 2,
+            "longest_streak_days": 4,
+            "today_completed": true,
+            "today_focus_minutes": 25,
+            "timezone": "Asia/Ho_Chi_Minh",
+            "day_records": [
+              {
+                "date": "2026-11-20",
+                "kind": "done",
+                "minutes": 25
+              },
+              {
+                "date": "2026-11-21",
+                "kind": "repair",
+                "minutes": 0
+              }
+            ]
+          },
+          "meta": {
+            "request_id": "w4-example",
+            "server_time": "2026-11-20T03:00:00Z"
+          }
+        }
+      },
+      "request_headers": {
+        "Idempotency-Key": "w4-streak-repair-1"
       }
     },
     {

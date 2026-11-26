@@ -1,11 +1,11 @@
 {
-    "name": "proplan_va",
-    "short_name": "proplan_va",
+    "name": "ProPlan VA",
+    "short_name": "ProPlan VA",
     "start_url": ".",
     "display": "standalone",
-    "background_color": "#0175C2",
-    "theme_color": "#0175C2",
-    "description": "A new Flutter project.",
+    "background_color": "#FCF5EB",
+    "theme_color": "#7A5EBD",
+    "description": "Trợ lý lập kế hoạch và tập trung cho người ADHD-I.",
     "orientation": "portrait-primary",
     "prefer_related_applications": false,
     "icons": [

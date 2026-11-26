@@ -245,7 +245,13 @@ def offline_test_environment(monkeypatch):
     monkeypatch.setattr(settings, "VOICE_TTS_PROVIDER", "fake")
     monkeypatch.setattr(settings, "VOICE_STT_PROVIDER", "fake")
     monkeypatch.setenv("DATABASE_URL", "sqlite+aiosqlite:///:memory:")
-    for name in ("GEMINI_API_KEY", "GROQ_API_KEY", "GOOGLE_CREDENTIALS_PATH"):
+    for name in (
+        "GEMINI_API_KEY",
+        "GROQ_API_KEY",
+        "ELEVENLABS_API_KEY",
+        "DEEPGRAM_API_KEY",
+        "GOOGLE_CREDENTIALS_PATH",
+    ):
         monkeypatch.setenv(name, "")
 
     from app.services.voice_service import get_tts_service, get_voice_service

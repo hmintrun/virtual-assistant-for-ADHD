@@ -2,12 +2,12 @@ import 'dart:math';
 
 import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart';
-import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import 'api_session.dart';
 
 /// Dio client for the FastAPI v1 envelope contract.
 class ApiClient {
-  ApiClient({Dio? dio, FlutterSecureStorage? secureStorage})
-      : _storage = secureStorage ?? const FlutterSecureStorage(),
+  ApiClient({Dio? dio, bool bindSession = true})
+      : _session = bindSession ? ApiSession.current : null,
         dio = dio ??
             Dio(BaseOptions(
               baseUrl: _baseUrl,
@@ -18,14 +18,73 @@ class ApiClient {
               headers: const {'Accept': 'application/json'},
             )) {
     this.dio.interceptors.add(InterceptorsWrapper(
-      onRequest: (options, handler) async {
-        final token = await _storage.read(key: 'access_token');
-        if (token != null && token.isNotEmpty) {
-          options.headers['Authorization'] = 'Bearer $token';
-        }
-        handler.next(options);
-      },
-    ));
+          onRequest: (options, handler) {
+            final session = _session;
+            if (session != null && !session.active) {
+              handler.reject(DioException(
+                  requestOptions: options, type: DioExceptionType.cancel));
+              return;
+            }
+            final token = session?.token;
+            if (token != null)
+              options.headers['Authorization'] = 'Bearer $token';
+            handler.next(options);
+          },
+          onResponse: (response, handler) {
+            if (_session?.active == false) {
+              handler.reject(DioException(
+                requestOptions: response.requestOptions,
+                type: DioExceptionType.cancel,
+              ));
+              return;
+            }
+            handler.next(response);
+          },
+          onError: (error, handler) async {
+            final session = _session;
+            final request = error.requestOptions;
+            if (session == null ||
+                !session.active ||
+                error.response?.statusCode != 401 ||
+                _isCalendarAuthorizationError(error) ||
+                request.extra['auth_retried'] == true) {
+              handler.next(error);
+              return;
+            }
+            final sentToken = request.headers['Authorization'];
+            final tokenChanged =
+                session.token != null && sentToken != 'Bearer ${session.token}';
+            final renewed =
+                tokenChanged || (await session.renew?.call() ?? false);
+            if (!renewed || !session.active) {
+              if (session.active) session.onUnauthorized?.call();
+              handler.next(error);
+              return;
+            }
+            try {
+              handler.resolve(await this.dio.fetch<dynamic>(request.copyWith(
+                    data: request.data is FormData
+                        ? (request.data as FormData).clone()
+                        : request.data,
+                    extra: {...request.extra, 'auth_retried': true},
+                  )));
+            } on DioException catch (retryError) {
+              if (session.active &&
+                  retryError.response?.statusCode == 401 &&
+                  !_isCalendarAuthorizationError(retryError)) {
+                session.onUnauthorized?.call();
+              }
+              handler.next(retryError);
+            }
+          },
+        ));
+  }
+
+  static bool _isCalendarAuthorizationError(DioException error) {
+    final body = error.response?.data;
+    if (body is! Map) return false;
+    final details = body['error'];
+    return details is Map && details['code'] == 'CALENDAR_AUTH_REQUIRED';
   }
 
   static const _configuredBaseUrl = String.fromEnvironment('API_BASE_URL');
@@ -39,10 +98,15 @@ class ApiClient {
   }
 
   final Dio dio;
-  final FlutterSecureStorage _storage;
+  final ApiSession? _session;
 
   static String newIdempotencyKey(String operation) {
-    final random = Random.secure().nextInt(1 << 32).toRadixString(16);
+    final secureRandom = Random.secure();
+    // Combine two 16-bit values without a 32-bit shift on Dart web.
+    final random = List.generate(
+      2,
+      (_) => secureRandom.nextInt(0x10000).toRadixString(16).padLeft(4, '0'),
+    ).join();
     return '${operation}_${DateTime.now().microsecondsSinceEpoch}_$random';
   }
 
@@ -69,6 +133,40 @@ class ApiClient {
     }
   }
 
+  String? get ownerId => _session?.active == true ? _session!.ownerId : null;
+
+  Future<Map<String, dynamic>?> getOptionalData(String path) async {
+    try {
+      final response = await dio.get<Map<String, dynamic>>(path);
+      final body = response.data;
+      if (body != null && body.containsKey('data') && body['data'] == null) {
+        return null;
+      }
+      return _unwrap(body);
+    } on DioException catch (error) {
+      throw ApiException.fromDio(error);
+    }
+  }
+
+  Future<List<Map<String, dynamic>>> getListData(
+    String path, {
+    Map<String, dynamic>? queryParameters,
+  }) async {
+    try {
+      final response = await dio.get<Map<String, dynamic>>(
+        path,
+        queryParameters: queryParameters,
+      );
+      final items = response.data?['data'];
+      if (items is! List) {
+        throw const ApiException('Backend trả về danh sách không hợp lệ.');
+      }
+      return items.whereType<Map<String, dynamic>>().toList(growable: false);
+    } on DioException catch (error) {
+      throw ApiException.fromDio(error);
+    }
+  }
+
   Future<Map<String, dynamic>> postData(
     String path, {
     Object? data,
@@ -81,7 +179,10 @@ class ApiClient {
         path,
         data: data,
         options: Options(
-            receiveTimeout: receiveTimeout,
+            receiveTimeout: receiveTimeout ??
+                (path == '/voice/transcriptions'
+                    ? const Duration(seconds: 45)
+                    : null),
             headers: idempotent
                 ? {
                     'Idempotency-Key':
@@ -119,6 +220,68 @@ class ApiClient {
     }
   }
 
+  Future<Map<String, dynamic>> putData(
+    String path, {
+    required Object data,
+    String? idempotencyKey,
+  }) async {
+    try {
+      final response = await dio.put<Map<String, dynamic>>(
+        path,
+        data: data,
+        options: Options(headers: {
+          'Idempotency-Key': idempotencyKey ?? newIdempotencyKey('mobile_put'),
+        }),
+      );
+      return _unwrap(response.data);
+    } on DioException catch (error) {
+      throw ApiException.fromDio(error);
+    }
+  }
+
+  Future<Map<String, dynamic>> deleteData(
+    String path, {
+    Object? data,
+    String? idempotencyKey,
+    bool idempotent = false,
+  }) async {
+    try {
+      final response = await dio.delete<Map<String, dynamic>>(
+        path,
+        data: data,
+        options: Options(
+          headers: idempotent
+              ? {
+                  'Idempotency-Key':
+                      idempotencyKey ?? newIdempotencyKey('mobile_delete'),
+                }
+              : null,
+        ),
+      );
+      return _unwrap(response.data);
+    } on DioException catch (error) {
+      throw ApiException.fromDio(error);
+    }
+  }
+
+  /// Checks `/api/v1/health` (unwrapped JSON) and falls back cleanly to
+  /// `/capabilities` on older backend versions returning 404.
+  Future<Map<String, dynamic>> checkHealth() async {
+    try {
+      final response = await dio.get<Map<String, dynamic>>('/health');
+      final body = response.data;
+      if (body != null && body['status'] == 'ok') {
+        return body;
+      }
+      return _unwrap(body);
+    } on DioException catch (error) {
+      if (error.response?.statusCode == 404) {
+        return getData('/capabilities');
+      }
+      throw ApiException.fromDio(error);
+    }
+  }
+
   Map<String, dynamic> _unwrap(Map<String, dynamic>? body) {
     if (body == null || body['data'] is! Map<String, dynamic>) {
       throw const ApiException('Backend trả về dữ liệu không đúng envelope.');
@@ -149,7 +312,9 @@ class ApiException implements Exception {
     final detail = body is Map<String, dynamic>
         ? body['error'] as Map<String, dynamic>?
         : null;
-    final serverMessage = detail?['message'] as String?;
+    final legacyDetail = body is Map<String, dynamic> ? body['detail'] : null;
+    final serverMessage = detail?['message'] as String? ??
+        (legacyDetail is String ? legacyDetail : null);
     final message = serverMessage ??
         switch (error.type) {
           DioExceptionType.connectionTimeout =>

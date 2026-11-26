@@ -225,8 +225,28 @@ class GoogleCalendarClient(CalendarClientInterface):
         async with httpx.AsyncClient(timeout=15.0) as client:
             resp = await client.post(GOOGLE_TOKEN_ENDPOINT, data=data)
             if resp.status_code != 200:
-                logger.warning("Failed to refresh Google access token: status=%d", resp.status_code)
-                raise CalendarAuthError("Refresh access token failed")
+                err_code = ""
+                try:
+                    body = resp.json()
+                    if isinstance(body, dict):
+                        err_code = str(body.get("error") or "").strip().lower()
+                except Exception:
+                    err_code = ""
+                logger.warning(
+                    "Failed to refresh Google access token: status=%d error=%s",
+                    resp.status_code,
+                    err_code or "unknown",
+                )
+                if resp.status_code in (400, 401) or err_code in (
+                    "invalid_grant",
+                    "unauthorized_client",
+                    "invalid_client",
+                ):
+                    raise CalendarAuthError("Refresh access token failed")
+                raise CalendarClientError(
+                    f"Google token endpoint transient error: {resp.status_code}",
+                    status_code=resp.status_code if resp.status_code >= 400 else 502,
+                )
             return resp.json()
 
     async def provision_proactive_calendar(
@@ -579,8 +599,7 @@ _fake_client_instance: FakeCalendarClient | None = None
 def reset_fake_calendar_client() -> None:
     """Đặt lại client giả lập phục vụ cô lập môi trường test."""
     global _fake_client_instance
-    if _fake_client_instance is not None:
-        _fake_client_instance.reset()
+    _fake_client_instance = None
 
 
 def get_calendar_client() -> CalendarClientInterface:

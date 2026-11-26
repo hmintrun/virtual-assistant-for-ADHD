@@ -12,8 +12,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import AsyncGenerator
-from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
@@ -25,25 +23,44 @@ from sqlalchemy.orm import aliased
 
 from app.models.calendar import CalendarConnection, CalendarEventLink, CalendarSyncJob
 from app.services.calendar_service import (
+    _CONNECTION_SYNC_LOCKS,
     CalendarService,
-    _acquire_refcounted_lock,
-    _RefCountedLock,
     _resolve_uuid,
+    get_connection_sync_lock,
 )
 from app.services.google_calendar_client import CalendarAuthError, CalendarConflictError
 
 logger = logging.getLogger(__name__)
 
-_CONNECTION_SYNC_LOCKS: dict[tuple[int, str], _RefCountedLock] = {}
+
+def _resolve_target_calendar_id(
+    link_cal_id: str | None,
+    payload_snapshot: dict[str, Any] | None,
+    write_cal_id: str | None,
+) -> str | None:
+    """Xác định calendar_id đích theo thứ tự: link -> payload_snapshot -> write_calendar_id."""
+    if isinstance(link_cal_id, str) and link_cal_id.strip():
+        return link_cal_id.strip()
+    if isinstance(payload_snapshot, dict):
+        snap_cal = payload_snapshot.get("_google_calendar_id") or payload_snapshot.get(
+            "google_calendar_id"
+        )
+        if isinstance(snap_cal, str) and snap_cal.strip():
+            return snap_cal.strip()
+    if isinstance(write_cal_id, str) and write_cal_id.strip():
+        return write_cal_id.strip()
+    return None
 
 
-@asynccontextmanager
-async def get_connection_sync_lock(connection_id: UUID | str) -> AsyncGenerator[None]:
-    """Tuần tự hóa đồng bộ theo cặp (event_loop_id, connection_id) và tự dọn entry khi hết người chờ."""
-    loop = asyncio.get_running_loop()
-    key = (id(loop), str(_resolve_uuid(connection_id)))
-    async with _acquire_refcounted_lock(_CONNECTION_SYNC_LOCKS, key):
-        yield
+def _strip_internal_payload_keys(payload: dict[str, Any] | None) -> dict[str, Any]:
+    """Loại bỏ các khóa định tuyến nội bộ trước khi gửi payload sang Google Calendar API."""
+    if not isinstance(payload, dict):
+        return {}
+    return {
+        k: v
+        for k, v in payload.items()
+        if k not in ("_google_calendar_id", "google_calendar_id")
+    }
 
 
 def _busy_connection_ids_for_current_loop() -> list[UUID]:
@@ -202,7 +219,19 @@ async def process_sync_job(
         await db.commit()
         return "failed"
 
-    if not conn.write_calendar_id:
+    initial_link_cal_id: str | None = None
+    if link_id is not None:
+        initial_link_cal_id = await db.scalar(
+            select(CalendarEventLink.google_calendar_id).where(
+                CalendarEventLink.id == link_id
+            )
+        )
+    initial_target_calendar_id = _resolve_target_calendar_id(
+        initial_link_cal_id,
+        fresh_job.payload_snapshot,
+        conn.write_calendar_id,
+    )
+    if not initial_target_calendar_id:
         await _update_sync_job_core(
             db,
             job_id,
@@ -216,7 +245,7 @@ async def process_sync_job(
         )
         await db.commit()
         return "failed"
-    write_calendar_id: str = conn.write_calendar_id
+    write_calendar_id: str | None = conn.write_calendar_id
 
     # 2. Lấy Access Token
     try:
@@ -285,16 +314,26 @@ async def process_sync_job(
     link_google_event_id = link.google_event_id if link is not None else None
     link_google_etag = link.google_etag if link is not None else None
 
-    payload_cal_id = (
-        payload_snapshot.get("google_calendar_id")
-        if isinstance(payload_snapshot, dict)
-        else None
+    target_calendar_id = _resolve_target_calendar_id(
+        link_google_calendar_id,
+        payload_snapshot,
+        write_calendar_id,
     )
-    target_calendar_id = (
-        (link_google_calendar_id if link_google_calendar_id else None)
-        or (str(payload_cal_id) if payload_cal_id else None)
-        or write_calendar_id
-    )
+    if not target_calendar_id:
+        await _update_sync_job_core(
+            db,
+            job_id,
+            values={
+                "job_state": "failed",
+                "last_error_code": "NO_WRITE_CALENDAR",
+                "attempt_count": 5,
+                "lease_expires_at": None,
+                "updated_at": now_utc,
+            },
+        )
+        await db.commit()
+        return "failed"
+    clean_payload = _strip_internal_payload_keys(payload_snapshot)
     effective_etag = (
         link_google_etag
         if (link is not None and link_google_etag)
@@ -308,7 +347,7 @@ async def process_sync_job(
                 res = await client.create_event(
                     access_token=access_token,
                     calendar_id=target_calendar_id,
-                    event_payload=payload_snapshot,
+                    event_payload=clean_payload,
                 )
             except CalendarConflictError:
                 existing_id = (payload_snapshot or {}).get("id")
@@ -403,7 +442,7 @@ async def process_sync_job(
                 access_token=access_token,
                 calendar_id=target_calendar_id,
                 event_id=target_google_event_id,
-                event_payload=payload_snapshot,
+                event_payload=clean_payload,
                 expected_etag=effective_etag,
             )
             now_done = datetime.now(UTC)

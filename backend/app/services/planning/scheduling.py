@@ -6,14 +6,18 @@ phiên cố định, không chứng minh vô nghiệm chỉ từ việc greedy c
 
 from __future__ import annotations
 
+import math
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from app.schemas.availability import Availability, DraftAvailability
+from app.schemas.calendar import CalendarContext, ManualBusyInterval
 from app.schemas.common import BlockingReason, TimeConstraint, TimeInterval
 from app.schemas.planning import (
+    AppliedExtraConstraints,
     CandidateSession,
     CandidateStep,
     CandidateVerificationScope,
@@ -21,8 +25,16 @@ from app.schemas.planning import (
 )
 from app.schemas.settings import UserPreference
 from app.schemas.task import Session
-from app.services.planning.availability import _merge_intervals, _subtract_intervals
-from app.services.planning.durations import calculate_buffered_work, fit_session_to_slot
+from app.services.planning.availability import (
+    _merge_intervals,
+    _subtract_intervals,
+    compute_effective_free_intervals,
+)
+from app.services.planning.durations import (
+    build_session_segments,
+    calculate_buffered_work,
+    fit_session_to_slot,
+)
 
 _DEFAULT_TZ_NAME = "Asia/Ho_Chi_Minh"
 _DUR_PATTERN = (
@@ -165,6 +177,30 @@ def parse_extra_requirements(
         max_daily_work_seconds=min(daily_caps) if daily_caps else None,
         min_contiguous_slot_seconds=max(min_slots) if min_slots else None,
         preferred_time_windows=tuple(dict.fromkeys(preferred)),
+    )
+
+
+def _format_minutes_hhmm(minutes: int) -> str:
+    return f"{minutes // 60:02d}:{minutes % 60:02d}"
+
+
+def serialize_extra_constraints(
+    constraints: ExtraSchedulingConstraints,
+) -> AppliedExtraConstraints | None:
+    """Chuyển ExtraSchedulingConstraints sang schema API để báo cáo minh bạch cho client."""
+    if (
+        constraints.max_daily_work_seconds is None
+        and constraints.min_contiguous_slot_seconds is None
+        and not constraints.preferred_time_windows
+    ):
+        return None
+    return AppliedExtraConstraints(
+        max_daily_work_seconds=constraints.max_daily_work_seconds,
+        min_contiguous_slot_seconds=constraints.min_contiguous_slot_seconds,
+        preferred_time_windows=[
+            f"{_format_minutes_hhmm(start_min)}-{_format_minutes_hhmm(end_min)}"
+            for start_min, end_min in constraints.preferred_time_windows
+        ],
     )
 
 
@@ -400,6 +436,83 @@ def _run_schedule_pass(
     return scheduled, remaining
 
 
+_DEFAULT_FRAGMENTED_MSG = (
+    "Chưa xếp đủ Steps theo thứ tự, giờ rảnh, nghỉ nội bộ và gap; chưa chứng minh vô nghiệm."
+)
+
+
+def _run_two_pass_schedule(
+    ordered: list[CandidateStep],
+    free_slots: list[tuple[datetime, datetime]],
+    pref: UserPreference,
+    gap: timedelta,
+    constraints: ExtraSchedulingConstraints,
+    local_tz: ZoneInfo,
+) -> tuple[list[CandidateSession], dict[str, int]]:
+    scheduled: list[CandidateSession] = []
+    remaining: dict[str, int] = {}
+    if constraints.preferred_time_windows:
+        preferred_free = _intersect_preferred_windows(
+            free_slots, constraints.preferred_time_windows, local_tz
+        )
+        if preferred_free:
+            scheduled, remaining = _run_schedule_pass(
+                ordered, preferred_free, pref, gap, constraints, local_tz
+            )
+    if not (bool(ordered) and remaining and sum(remaining.values()) == 0):
+        scheduled, remaining = _run_schedule_pass(
+            ordered, free_slots, pref, gap, constraints, local_tz
+        )
+    return scheduled, remaining
+
+
+def _format_duration_vi(seconds: int) -> str:
+    if seconds >= 60 and seconds % 60 == 0:
+        return f"{seconds // 60} phút"
+    if seconds >= 60:
+        return f"{seconds // 60} phút {seconds % 60} giây"
+    return f"{seconds} giây"
+
+
+def _diagnose_fragmented_reason(
+    free_slots: Sequence[tuple[datetime, datetime]],
+    constraints: ExtraSchedulingConstraints,
+    total_work: int,
+    local_tz: ZoneInfo,
+) -> str:
+    """Giải thích nút thắt cụ thể khi tổng giờ rảnh đủ nhưng chưa xếp đủ lịch (U2-BE-06)."""
+    if total_work <= 0:
+        return _DEFAULT_FRAGMENTED_MSG
+
+    causes: list[str] = []
+    if constraints.max_daily_work_seconds is not None:
+        by_day: dict[date, int] = {}
+        for s_utc, e_utc in _split_intervals_by_local_day(free_slots, local_tz):
+            day = s_utc.astimezone(local_tz).date()
+            by_day[day] = by_day.get(day, 0) + int((e_utc - s_utc).total_seconds())
+        capped_total = sum(
+            min(day_secs, constraints.max_daily_work_seconds) for day_secs in by_day.values()
+        )
+        if capped_total < total_work:
+            causes.append(
+                f"Giới hạn tối đa {_format_duration_vi(constraints.max_daily_work_seconds)}/ngày "
+                f"trên {len(by_day)} ngày khả dụng không đủ cho toàn bộ khối lượng"
+            )
+
+    if constraints.min_contiguous_slot_seconds is not None and any(
+        (slot_end - slot_start).total_seconds() < constraints.min_contiguous_slot_seconds
+        for slot_start, slot_end in free_slots
+    ):
+        causes.append(
+            f"Một số khoảng rảnh ngắn hơn ngưỡng khe rảnh liên tục tối thiểu "
+            f"{_format_duration_vi(constraints.min_contiguous_slot_seconds)} nên bị bỏ qua"
+        )
+
+    if causes:
+        return "Chưa xếp đủ lịch: " + "; ".join(causes) + "."
+    return _DEFAULT_FRAGMENTED_MSG
+
+
 def schedule_candidate_sessions(
     steps: list[CandidateStep],
     effective_intervals: list[TimeInterval],
@@ -473,20 +586,9 @@ def schedule_candidate_sessions(
     constraints = parse_extra_requirements(extra_requirements)
     local_tz = _resolve_tz(time_constraint.input_timezone)
 
-    scheduled: list[CandidateSession] = []
-    remaining: dict[str, int] = {}
-    if constraints.preferred_time_windows:
-        preferred_free = _intersect_preferred_windows(
-            free, constraints.preferred_time_windows, local_tz
-        )
-        if preferred_free:
-            scheduled, remaining = _run_schedule_pass(
-                ordered, preferred_free, pref, gap, constraints, local_tz
-            )
-    if not (bool(steps) and remaining and sum(remaining.values()) == 0):
-        scheduled, remaining = _run_schedule_pass(
-            ordered, free, pref, gap, constraints, local_tz
-        )
+    scheduled, remaining = _run_two_pass_schedule(
+        ordered, free, pref, gap, constraints, local_tz
+    )
 
     unscheduled = sum(remaining.values())
     fully_scheduled = bool(steps) and unscheduled == 0
@@ -500,7 +602,7 @@ def schedule_candidate_sessions(
                 code="TOTAL_DEFICIT" if deficit else "FRAGMENTED_FREE_SLOTS",
                 message=f"Thiếu ít nhất {deficit} giây làm chính trong phạm vi lập lịch."
                 if deficit
-                else "Chưa xếp đủ Steps theo thứ tự, giờ rảnh, nghỉ nội bộ và gap; chưa chứng minh vô nghiệm.",
+                else _diagnose_fragmented_reason(free, constraints, total_work, local_tz),
             )
         ]
     )
@@ -517,4 +619,176 @@ def schedule_candidate_sessions(
         blocking_reasons=reasons,
         unscheduled_step_keys=[s.client_step_key for s in ordered if remaining[s.client_step_key]],
         extension_candidate_at=None,
+        applied_extra_constraints=serialize_extra_constraints(constraints),
     )
+
+
+def find_earliest_feasible_end_at(
+    steps: Sequence[CandidateStep],
+    availability: Availability | DraftAvailability,
+    fixed_sessions: Sequence[Session],
+    start_at: datetime,
+    pref: UserPreference,
+    *,
+    calendar_context: CalendarContext | None = None,
+    manual_busy: Sequence[ManualBusyInterval] | None = None,
+    min_gap_seconds: int = 900,
+    max_search_days: int = 90,
+    extra_requirements: Sequence[str] | None = None,
+    input_timezone: str | None = None,
+    task_id: str | None = None,
+    task_priority_map: dict[str, tuple] | None = None,
+    step_to_task_map: dict[str, str] | None = None,
+) -> datetime | None:
+    """Tìm mốc kết thúc khả thi sớm nhất bằng cách tìm kiếm mở rộng trong tối đa 365 ngày (U2-BE-05)."""
+    if start_at.utcoffset() is None:
+        raise ValueError("Mốc bắt đầu phải có offset.")
+    if min_gap_seconds < 900:
+        raise ValueError("Gap tối thiểu không được dưới 900 giây.")
+    if pref.work_interval_seconds <= 0 or pref.rest_interval_seconds < 0:
+        raise ValueError("Cấu hình work/rest không hợp lệ.")
+    if not steps:
+        return None
+
+    search_days = max(1, min(365, max_search_days))
+    start_utc = start_at.astimezone(UTC)
+    search_end_utc = start_utc + timedelta(days=search_days)
+    fixed_list = list(fixed_sessions)
+    manual_busy_list = list(manual_busy) if manual_busy is not None else None
+
+    effective_intervals = compute_effective_free_intervals(
+        availability,
+        start_utc,
+        search_end_utc,
+        calendar_context=calendar_context,
+        manual_busy=manual_busy_list,
+        fixed_sessions=fixed_list,
+        task_id=task_id,
+    )
+    free = subtract_fixed_session_gaps(
+        effective_intervals,
+        fixed_list,
+        start_utc,
+        search_end_utc,
+        min_gap_seconds=min_gap_seconds,
+    )
+    if not free:
+        return None
+
+    ordered = order_steps_by_priority(
+        steps=list(steps),
+        task_priority_map=task_priority_map,
+        step_to_task_map=step_to_task_map,
+    )
+    constraints = parse_extra_requirements(extra_requirements)
+    local_tz = _resolve_tz(input_timezone or availability.timezone)
+    gap = timedelta(seconds=min_gap_seconds)
+
+    scheduled, remaining = _run_two_pass_schedule(
+        ordered, free, pref, gap, constraints, local_tz
+    )
+    if scheduled and sum(remaining.values()) == 0:
+        earliest_end = scheduled[-1].scheduled_end
+        if constraints.min_contiguous_slot_seconds is not None:
+            earliest_end = max(
+                earliest_end,
+                scheduled[-1].scheduled_start
+                + timedelta(seconds=constraints.min_contiguous_slot_seconds),
+            )
+        return earliest_end
+    return None
+
+
+def estimate_extra_free_seconds_per_day(
+    unscheduled_work_seconds: int,
+    window_start: datetime,
+    window_end: datetime,
+    pref: UserPreference,
+    input_timezone: str | None = None,
+) -> int | None:
+    """Ước lượng số giây rảnh gộp (work + rest) cần mở thêm mỗi ngày trong khung thời gian."""
+    if window_start.utcoffset() is None or window_end.utcoffset() is None:
+        raise ValueError("Mốc thời gian phải có offset.")
+    if unscheduled_work_seconds <= 0 or window_end <= window_start:
+        return None
+
+    segments, _, _, _ = build_session_segments(
+        unscheduled_work_seconds,
+        pref.work_interval_seconds,
+        pref.rest_interval_seconds,
+    )
+    needed_gross = sum(seg.duration_seconds for seg in segments)
+    local_tz = _resolve_tz(input_timezone)
+    start_day = window_start.astimezone(local_tz).date()
+    end_day = (window_end - timedelta(microseconds=1)).astimezone(local_tz).date()
+    span_days = max(1, (end_day - start_day).days + 1)
+    return max(1, math.ceil(needed_gross / span_days))
+
+
+def compute_feasibility_recovery(
+    report: FeasibilityReport,
+    steps: Sequence[CandidateStep],
+    availability: Availability | DraftAvailability,
+    fixed_sessions: Sequence[Session],
+    window_start: datetime,
+    window_end: datetime,
+    pref: UserPreference,
+    *,
+    calendar_context: CalendarContext | None = None,
+    manual_busy: Sequence[ManualBusyInterval] | None = None,
+    min_gap_seconds: int = 900,
+    extra_requirements: Sequence[str] | None = None,
+    input_timezone: str | None = None,
+    max_search_days: int = 90,
+    skip_deadline_extension: bool = False,
+    task_id: str | None = None,
+) -> tuple[datetime | None, int | None]:
+    """Tính gợi ý nới deadline và mở thêm giờ rảnh/ngày cho phương án chưa khả thi (U2-BE-05/06)."""
+    if report.fully_scheduled or not steps:
+        return (None, None)
+
+    unscheduled_work: int = (
+        report.unscheduled_seconds
+        if report.unscheduled_seconds is not None and report.unscheduled_seconds > 0
+        else (report.deficit_seconds or 0)
+    )
+    resolved_tz = input_timezone or availability.timezone
+    extra_per_day = estimate_extra_free_seconds_per_day(
+        unscheduled_work,
+        window_start,
+        window_end,
+        pref,
+        input_timezone=resolved_tz,
+    )
+    if skip_deadline_extension:
+        earliest_end = None
+    else:
+        effective_days = min(
+            365,
+            max(
+                max_search_days,
+                math.ceil(
+                    max(
+                        0.0,
+                        (window_end.astimezone(UTC) - window_start.astimezone(UTC)).total_seconds(),
+                    )
+                    / 86400
+                )
+                + 30,
+            ),
+        )
+        earliest_end = find_earliest_feasible_end_at(
+            steps,
+            availability,
+            fixed_sessions,
+            window_start,
+            pref,
+            calendar_context=calendar_context,
+            manual_busy=manual_busy,
+            min_gap_seconds=min_gap_seconds,
+            max_search_days=effective_days,
+            extra_requirements=extra_requirements,
+            input_timezone=resolved_tz,
+            task_id=task_id,
+        )
+    return (earliest_end, extra_per_day)

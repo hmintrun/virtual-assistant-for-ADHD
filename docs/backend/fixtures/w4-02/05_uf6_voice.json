@@ -49,6 +49,7 @@
                   "task_id": "task-1",
                   "order_index": 2,
                   "title": "Hoàn thiện bản nháp",
+                  "expected_output": null,
                   "estimated_base_seconds": 3600
                 }
               ],
@@ -83,6 +84,94 @@
             "server_time": "2026-11-20T03:00:00Z"
           }
         }
+      }
+    },
+    {
+      "name": "streak_summary",
+      "scope": "runtime",
+      "method": "GET",
+      "path": "/api/v1/streak",
+      "response": {
+        "status": 200,
+        "body": {
+          "data": {
+            "current_streak_days": 3,
+            "effective_display_streak": 3,
+            "unlocked": true,
+            "streak_frozen": false,
+            "streak_freeze_tokens": 2,
+            "max_freeze_tokens": 2,
+            "last_streak_date": "2026-11-20",
+            "repair_pending": false,
+            "repair_window_ends_at": null,
+            "repairs_used_this_month": 0,
+            "repairs_left_this_month": 2,
+            "max_repairs_per_month": 2,
+            "longest_streak_days": 3,
+            "today_completed": true,
+            "today_focus_minutes": 25,
+            "timezone": "Asia/Ho_Chi_Minh",
+            "day_records": [
+              {
+                "date": "2026-11-20",
+                "kind": "done",
+                "minutes": 25
+              }
+            ]
+          },
+          "meta": {
+            "request_id": "w4-example",
+            "server_time": "2026-11-20T03:00:00Z"
+          }
+        }
+      }
+    },
+    {
+      "name": "streak_repair",
+      "scope": "runtime",
+      "method": "POST",
+      "path": "/api/v1/streak/repair",
+      "response": {
+        "status": 200,
+        "body": {
+          "data": {
+            "current_streak_days": 4,
+            "effective_display_streak": 4,
+            "unlocked": true,
+            "streak_frozen": false,
+            "streak_freeze_tokens": 2,
+            "max_freeze_tokens": 2,
+            "last_streak_date": "2026-11-20",
+            "repair_pending": false,
+            "repair_window_ends_at": null,
+            "repairs_used_this_month": 1,
+            "repairs_left_this_month": 1,
+            "max_repairs_per_month": 2,
+            "longest_streak_days": 4,
+            "today_completed": true,
+            "today_focus_minutes": 25,
+            "timezone": "Asia/Ho_Chi_Minh",
+            "day_records": [
+              {
+                "date": "2026-11-20",
+                "kind": "done",
+                "minutes": 25
+              },
+              {
+                "date": "2026-11-21",
+                "kind": "repair",
+                "minutes": 0
+              }
+            ]
+          },
+          "meta": {
+            "request_id": "w4-example",
+            "server_time": "2026-11-20T03:00:00Z"
+          }
+        }
+      },
+      "request_headers": {
+        "Idempotency-Key": "w4-streak-repair-1"
       }
     },
     {

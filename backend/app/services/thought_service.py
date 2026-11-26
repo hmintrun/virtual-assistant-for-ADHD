@@ -68,6 +68,7 @@ def _data(row: Thought, linked: thought_repository.ThoughtLinks | None = None) -
         attempt_count=row.attempt_count,
         text_content=row.text_content,
         retention_expires_at=row.retention_expires_at,
+        created_at=row.created_at,
         linked_draft_id=str(linked.draft.id) if linked else None,
         converted_task_id=str(linked.task_id) if linked and linked.task_id else None,
     )
@@ -131,13 +132,13 @@ async def list_thoughts(
     if not 1 <= limit <= 100:
         raise _error("VALIDATION_ERROR", "Kích thước trang phải từ 1 đến 100.")
     owner = command_service.owner_uuid(user_id)
-    stmt = select(Thought).where(Thought.user_id == owner)
+    stmt = select(Thought).where(Thought.user_id == owner, Thought.capture_state != "failed")
     if cursor is not None:
         try:
             anchor = await thought_repository.get_thought(db, owner, UUID(cursor))
         except (ValueError, TypeError):
             anchor = None
-        if anchor is None:
+        if anchor is None or anchor.capture_state == "failed":
             raise _error("VALIDATION_ERROR", "Con trỏ trang không hợp lệ.")
         stmt = stmt.where(
             or_(
@@ -323,6 +324,7 @@ async def delete_thought(
             "THOUGHT_ALREADY_LINKED",
             "Không thể xóa nguồn của nháp hoặc công việc đã liên kết.",
             status=409,
+            revision=row.revision,
         )
     if row.revision != payload.expected_thought_revision:
         raise _error(
@@ -332,5 +334,24 @@ async def delete_thought(
     if not await thought_repository.delete_thought(
         db, owner, row.id, payload.expected_thought_revision
     ):
-        raise _error("REVISION_CONFLICT", "Suy nghĩ đã thay đổi; vui lòng tải lại.", status=409)
+        latest = await db.scalar(
+            select(Thought)
+            .where(Thought.user_id == owner, Thought.id == row.id)
+            .execution_options(populate_existing=True)
+        )
+        if latest is None:
+            raise _error("RESOURCE_NOT_FOUND", "Không tìm thấy suy nghĩ.", status=404)
+        if latest.id in await thought_repository.get_links(db, owner, [latest.id]):
+            raise _error(
+                "THOUGHT_ALREADY_LINKED",
+                "Không thể xóa nguồn của nháp hoặc công việc đã liên kết.",
+                status=409,
+                revision=latest.revision,
+            )
+        raise _error(
+            "REVISION_CONFLICT",
+            "Suy nghĩ đã thay đổi; vui lòng tải lại.",
+            status=409,
+            revision=latest.revision,
+        )
     return ThoughtDeleteResult(thought_id=thought_id, deleted=True, local_cleanup_required=cleanup)

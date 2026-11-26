@@ -12,12 +12,16 @@ Triển khai đầy đủ 7 endpoints theo API Sheet (Dòng 64 và Dòng 33–38
 
 from __future__ import annotations
 
+import asyncio
+import logging
+import math
 import zoneinfo
 from datetime import UTC, date, datetime, time, timedelta
-from typing import Any, Literal, cast
+from typing import Any, Literal, NoReturn, cast
 from uuid import UUID, uuid4
 
-from sqlalchemy import func, select
+from pydantic import ValidationError
+from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -33,8 +37,8 @@ from app.models.execution import RunEvent, SessionRun
 from app.models.planning import ScheduleVersion as ScheduleVersionRow
 from app.models.schedule_proposal import RescheduleProposal
 from app.models.session import Session as SessionRow
+from app.models.settings import AdaptationSuggestion, SettingChangeRequest
 from app.models.settings import Availability as AvailabilityRow
-from app.models.settings import SettingChangeRequest
 from app.models.step import Step as StepRow
 from app.models.system import Reminder
 from app.models.task import Task as TaskRow
@@ -80,8 +84,10 @@ from app.schemas.reschedule import (
     TimelineSessionItem,
     UpcomingScheduleContextData,
 )
+from app.schemas.task import SplitSessionInputItem
 from app.services import command_service, draft_service, run_service
 from app.services.ai_service import ai_service
+from app.services.plan_service import build_calendar_event_text
 from app.services.planning.availability import compute_effective_free_intervals
 from app.services.planning.durations import (
     calculate_buffered_work,
@@ -94,7 +100,10 @@ from app.services.planning.scheduling import (
     parse_extra_requirements,
 )
 
+logger = logging.getLogger(__name__)
+
 STANDARD_INTER_SESSION_GAP_SECONDS = 900
+TERMINAL_PARENT_STATUSES = ("completed", "skipped", "cancelled")
 SourceRevisions = ProposalSourceRevisions
 FeasibilityData = ProposalFeasibilityData
 GenerationTier = ProposalGenerationTier
@@ -165,6 +174,29 @@ def _current_utc_now(now: datetime | None = None) -> datetime:
 
 def _ensure_aware(dt: datetime) -> datetime:
     return dt if dt.utcoffset() is not None else dt.replace(tzinfo=UTC)
+
+
+def _scheduled_parent_active_clause():
+    """Chỉ giữ phiên scheduled có Step và Task chưa kết thúc (giữ nguyên phiên đã chạy)."""
+    return or_(
+        SessionRow.status != "scheduled",
+        and_(
+            StepRow.status.notin_(TERMINAL_PARENT_STATUSES),
+            TaskRow.status.notin_(TERMINAL_PARENT_STATUSES),
+        ),
+    )
+
+
+def _is_scheduled_session_parent_active(
+    step: StepRow | None,
+    task: TaskRow | None,
+) -> bool:
+    """Kiểm tra in-memory Step và Task của phiên scheduled đều chưa kết thúc."""
+    if step is not None and step.status in TERMINAL_PARENT_STATUSES:
+        return False
+    if task is not None and task.status in TERMINAL_PARENT_STATUSES:
+        return False
+    return True
 
 
 def _parse_iso_dt(value: Any) -> datetime | None:
@@ -363,14 +395,33 @@ async def _load_google_busy_items(
     from_time: datetime,
     to_time: datetime,
 ) -> tuple[list[TimelineGoogleBusyItem], Literal["ok", "stale", "unavailable"], datetime | None]:
-    """Đọc các khoảng bận Google Calendar từ PlanningContext gần nhất của user."""
-    ctx = await db.scalar(
+    """Đọc các khoảng bận Google Calendar từ PlanningContext valid gần nhất của user."""
+    conn_states = (
+        await db.scalars(
+            select(CalendarConnection.connection_state).where(
+                CalendarConnection.user_id == owner
+            )
+        )
+    ).all()
+    if conn_states and all(state == "disconnected" for state in conn_states):
+        return [], "ok", None
+
+    latest_ctx = await db.scalar(
         select(PlanningContext)
         .where(PlanningContext.user_id == owner)
-        .order_by(PlanningContext.created_at.desc())
+        .order_by(PlanningContext.created_at.desc(), PlanningContext.id.desc())
         .limit(1)
     )
-    if ctx is None:
+    valid_ctx = await db.scalar(
+        select(PlanningContext)
+        .where(
+            PlanningContext.user_id == owner,
+            PlanningContext.sync_state.in_(("valid", "ok", "synced")),
+        )
+        .order_by(PlanningContext.created_at.desc(), PlanningContext.id.desc())
+        .limit(1)
+    )
+    if latest_ctx is None and valid_ctx is None:
         conn = await db.scalar(
             select(CalendarConnection)
             .where(CalendarConnection.user_id == owner)
@@ -381,73 +432,85 @@ async def _load_google_busy_items(
         return [], "ok", fetched_at
 
     cal_status: Literal["ok", "stale", "unavailable"] = "ok"
-    if ctx.coverage_state == "degraded" or ctx.sync_state in ("error", "failed"):
-        cal_status = "unavailable"
-    elif ctx.sync_state == "stale":
-        cal_status = "stale"
+    if latest_ctx is not None:
+        if latest_ctx.coverage_state == "degraded" or latest_ctx.sync_state in ("error", "failed"):
+            cal_status = "unavailable"
+        elif latest_ctx.sync_state == "stale":
+            cal_status = "stale"
 
     busy_items: list[TimelineGoogleBusyItem] = []
     seen_ids: set[str] = set()
 
-    # Đọc từ event_snapshots hoặc busy_intervals trong PlanningContext
-    raw_snapshots = ctx.event_snapshots if isinstance(ctx.event_snapshots, list) else []
-    for idx, item in enumerate(raw_snapshots):
-        if not isinstance(item, dict):
-            continue
-        start_dt = _parse_iso_dt(item.get("start") or item.get("start_at"))
-        end_dt = _parse_iso_dt(item.get("end") or item.get("end_at"))
-        if start_dt is None or end_dt is None:
-            continue
-        if end_dt <= from_time or start_dt >= to_time:
-            continue
-        ev_id = str(item.get("event_id") or item.get("google_event_id") or item.get("id") or f"gcal_event_{idx + 1}")
-        if ev_id in seen_ids:
-            continue
-        seen_ids.add(ev_id)
-        busy_items.append(
-            TimelineGoogleBusyItem(
-                kind="google_busy",
-                event_id=ev_id,
-                title=str(item.get("title") or item.get("summary") or "Busy"),
-                start=start_dt,
-                end=end_dt,
-                is_locked=bool(item.get("is_locked", True)),
-                is_movable=bool(item.get("is_movable", False)),
+    if valid_ctx is not None:
+        # Đọc từ event_snapshots hoặc busy_intervals trong PlanningContext hợp lệ gần nhất
+        raw_snapshots = valid_ctx.event_snapshots if isinstance(valid_ctx.event_snapshots, list) else []
+        for idx, item in enumerate(raw_snapshots):
+            if not isinstance(item, dict):
+                continue
+            start_dt = _parse_iso_dt(item.get("start") or item.get("start_at"))
+            end_dt = _parse_iso_dt(item.get("end") or item.get("end_at"))
+            if start_dt is None or end_dt is None:
+                continue
+            if end_dt <= from_time or start_dt >= to_time:
+                continue
+            ev_id = str(
+                item.get("event_id")
+                or item.get("google_event_id")
+                or item.get("id")
+                or f"gcal_event_{idx + 1}"
             )
-        )
-
-    raw_busy = ctx.busy_intervals if isinstance(ctx.busy_intervals, list) else []
-    for idx, item in enumerate(raw_busy):
-        if not isinstance(item, dict):
-            continue
-        start_dt = _parse_iso_dt(item.get("start") or item.get("start_at"))
-        end_dt = _parse_iso_dt(item.get("end") or item.get("end_at"))
-        if start_dt is None or end_dt is None:
-            continue
-        if end_dt <= from_time or start_dt >= to_time:
-            continue
-        ev_id = str(
-            item.get("event_id")
-            or item.get("source_event_id")
-            or item.get("id")
-            or f"gcal_busy_{idx + 1}"
-        )
-        if ev_id in seen_ids:
-            continue
-        seen_ids.add(ev_id)
-        busy_items.append(
-            TimelineGoogleBusyItem(
-                kind="google_busy",
-                event_id=ev_id,
-                title=str(item.get("title") or item.get("summary") or "Busy"),
-                start=start_dt,
-                end=end_dt,
-                is_locked=True,
-                is_movable=False,
+            if ev_id in seen_ids:
+                continue
+            seen_ids.add(ev_id)
+            busy_items.append(
+                TimelineGoogleBusyItem(
+                    kind="google_busy",
+                    event_id=ev_id,
+                    title=str(item.get("title") or item.get("summary") or "Busy"),
+                    start=start_dt,
+                    end=end_dt,
+                    is_locked=bool(item.get("is_locked", True)),
+                    is_movable=bool(item.get("is_movable", False)),
+                )
             )
-        )
 
-    return busy_items, cal_status, ctx.fetched_at
+        raw_busy = valid_ctx.busy_intervals if isinstance(valid_ctx.busy_intervals, list) else []
+        for idx, item in enumerate(raw_busy):
+            if not isinstance(item, dict):
+                continue
+            start_dt = _parse_iso_dt(item.get("start") or item.get("start_at"))
+            end_dt = _parse_iso_dt(item.get("end") or item.get("end_at"))
+            if start_dt is None or end_dt is None:
+                continue
+            if end_dt <= from_time or start_dt >= to_time:
+                continue
+            ev_id = str(
+                item.get("event_id")
+                or item.get("source_event_id")
+                or item.get("id")
+                or f"gcal_busy_{idx + 1}"
+            )
+            if ev_id in seen_ids:
+                continue
+            seen_ids.add(ev_id)
+            busy_items.append(
+                TimelineGoogleBusyItem(
+                    kind="google_busy",
+                    event_id=ev_id,
+                    title=str(item.get("title") or item.get("summary") or "Busy"),
+                    start=start_dt,
+                    end=end_dt,
+                    is_locked=True,
+                    is_movable=False,
+                )
+            )
+
+    fetched_at = (
+        valid_ctx.fetched_at
+        if valid_ctx is not None
+        else (latest_ctx.fetched_at if latest_ctx is not None else None)
+    )
+    return busy_items, cal_status, fetched_at
 
 
 def _parse_local_time_hhmm(raw: Any) -> time | None:
@@ -1047,12 +1110,15 @@ async def get_upcoming_schedule_context(
     upcoming_rows = (
         await db.scalars(
             select(SessionRow)
+            .join(StepRow, StepRow.id == SessionRow.step_id)
+            .join(TaskRow, TaskRow.id == StepRow.task_id)
             .where(
                 SessionRow.user_id == owner,
                 SessionRow.id != run.session_id,
                 SessionRow.status.in_(("scheduled", "in_progress")),
                 SessionRow.scheduled_end > window_from,
                 SessionRow.scheduled_start < window_to,
+                _scheduled_parent_active_clause(),
             )
             .order_by(SessionRow.scheduled_start.asc())
         )
@@ -1145,12 +1211,15 @@ async def get_upcoming_schedule_context(
         calc_rows = (
             await db.scalars(
                 select(SessionRow)
+                .join(StepRow, StepRow.id == SessionRow.step_id)
+                .join(TaskRow, TaskRow.id == StepRow.task_id)
                 .where(
                     SessionRow.user_id == owner,
                     SessionRow.id != run.session_id,
                     SessionRow.status.in_(("scheduled", "in_progress")),
                     SessionRow.scheduled_end > calc_window_from,
                     SessionRow.scheduled_start < calc_window_to,
+                    _scheduled_parent_active_clause(),
                 )
                 .order_by(SessionRow.scheduled_start.asc())
             )
@@ -1262,8 +1331,12 @@ def _pack_proposed_changes(
     request_text: str | None = None,
     override_preferences: dict[str, Any] | None = None,
     override_availability: dict[str, Any] | None = None,
+    suggestion_id: str | None = None,
 ) -> dict[str, Any]:
     raw = changes.model_dump(mode="json")
+    clean_suggestion_id = (
+        suggestion_id.strip() if isinstance(suggestion_id, str) and suggestion_id.strip() else None
+    )
     raw["_meta"] = {
         "calculated_at": calculated_at.isoformat() if calculated_at else None,
         "continuation_request": continuation_request.model_dump(mode="json")
@@ -1277,8 +1350,17 @@ def _pack_proposed_changes(
         "request_text": request_text,
         "override_preferences": dict(override_preferences) if override_preferences else None,
         "override_availability": dict(override_availability) if override_availability else None,
+        "suggestion_id": clean_suggestion_id,
     }
     return raw
+
+
+def _unpack_suggestion_id(raw_changes: dict[str, Any] | None) -> str | None:
+    meta = (raw_changes or {}).get("_meta") or {}
+    raw_id = meta.get("suggestion_id")
+    if isinstance(raw_id, str) and raw_id.strip():
+        return raw_id.strip()
+    return None
 
 
 def _unpack_settings_overrides(
@@ -1391,6 +1473,7 @@ async def _validate_continuation_chain_at_time(
             pass
 
     source_session_id: UUID | None = None
+    src_run_bounds: tuple[datetime, datetime] | None = None
     if cont_add.source_run_id:
         try:
             src_run_uuid = UUID(str(cont_add.source_run_id))
@@ -1402,6 +1485,11 @@ async def _validate_continuation_chain_at_time(
             )
             if src_run is not None:
                 source_session_id = src_run.session_id
+                if src_run.ended_at is not None:
+                    src_run_bounds = (
+                        _ensure_aware(src_run.started_at),
+                        _ensure_aware(src_run.ended_at),
+                    )
         except ValueError:
             pass
 
@@ -1411,11 +1499,17 @@ async def _validate_continuation_chain_at_time(
     query_end = max_chain_end + timedelta(hours=24)
 
     excluded_ids = moved_ids | cancelled_ids
-    live_stmt = select(SessionRow).where(
-        SessionRow.user_id == owner,
-        SessionRow.status.notin_(("cancelled", "skipped")),
-        SessionRow.scheduled_end > query_start,
-        SessionRow.scheduled_start < query_end,
+    live_stmt = (
+        select(SessionRow)
+        .join(StepRow, StepRow.id == SessionRow.step_id)
+        .join(TaskRow, TaskRow.id == StepRow.task_id)
+        .where(
+            SessionRow.user_id == owner,
+            SessionRow.status.notin_(("cancelled", "skipped")),
+            SessionRow.scheduled_end > query_start,
+            SessionRow.scheduled_start < query_end,
+            _scheduled_parent_active_clause(),
+        )
     )
     if excluded_ids:
         live_stmt = live_stmt.where(SessionRow.id.notin_(excluded_ids))
@@ -1455,6 +1549,8 @@ async def _validate_continuation_chain_at_time(
                     _ensure_aware(r.started_at),
                     _ensure_aware(r.ended_at),
                 )
+    if source_session_id is not None and src_run_bounds is not None:
+        ended_run_bounds[source_session_id] = src_run_bounds
 
     allowed_set = {str(x) for x in (proposal.allowed_task_ids or [])}
     gap_ex_map: dict[tuple[str, str], int] = {}
@@ -1801,7 +1897,13 @@ async def _build_continuation_plan(
         if source_step is not None
         else None
     )
-    if source_session is None or source_step is None or source_task is None:
+    if (
+        source_session is None
+        or source_step is None
+        or source_task is None
+        or source_task.status == "cancelled"
+        or source_session.status == "cancelled"
+    ):
         raise AppError(
             status_code=404,
             code="RESOURCE_NOT_FOUND",
@@ -1838,12 +1940,16 @@ async def _build_continuation_plan(
     upcoming_sessions = (
         await db.scalars(
             select(SessionRow)
+            .join(StepRow, StepRow.id == SessionRow.step_id)
+            .join(TaskRow, TaskRow.id == StepRow.task_id)
             .where(
                 SessionRow.user_id == owner,
                 SessionRow.id != source_session.id,
                 SessionRow.status == "scheduled",
                 SessionRow.scheduled_end > cont_start,
                 SessionRow.scheduled_start < horizon_end,
+                StepRow.status.notin_(TERMINAL_PARENT_STATUSES),
+                TaskRow.status.notin_(TERMINAL_PARENT_STATUSES),
             )
             .order_by(SessionRow.scheduled_start.asc())
         )
@@ -2220,6 +2326,9 @@ async def _build_continuation_plan(
             step_id=str(source_step.id),
             start=cont_start,
             end=cont_end,
+            title=source_session.title or source_step.title,
+            session_goal=source_session.session_goal,
+            expected_output=source_session.expected_output,
             work_seconds=work_secs,
             rest_seconds=0,
             duration_seconds=work_secs,
@@ -2363,6 +2472,7 @@ async def _build_normal_proposal_plan(
     calc_now: datetime,
     override_preferences: dict[str, Any] | None = None,
     override_availability: dict[str, Any] | None = None,
+    allow_ai_rollback: bool = True,
 ) -> tuple[UUID | None, list[str], ProposedChanges, FeasibilityData, str]:
     """Tính toán phương án tái lập lịch thường & tái phân đoạn UF7 (giữ cứng gap = 900s)."""
     target_uuid: UUID | None = None
@@ -2370,7 +2480,11 @@ async def _build_normal_proposal_plan(
     if target_task_id:
         target_uuid = _uuid_or_404(target_task_id, "Không tìm thấy công việc mục tiêu.")
         target_row = await db.scalar(
-            select(TaskRow).where(TaskRow.id == target_uuid, TaskRow.user_id == owner)
+            select(TaskRow).where(
+                TaskRow.id == target_uuid,
+                TaskRow.user_id == owner,
+                TaskRow.status != "cancelled",
+            )
         )
         if target_row is None:
             raise AppError(
@@ -2573,6 +2687,15 @@ async def _build_normal_proposal_plan(
             ).all()
             for t in t_rows:
                 tasks_map[t.id] = t
+
+    all_scheduled = [
+        sess
+        for sess in all_scheduled
+        if _is_scheduled_session_parent_active(
+            steps_map.get(sess.step_id),
+            tasks_map.get(step_to_task[sess.step_id]) if sess.step_id in step_to_task else None,
+        )
+    ]
 
     horizon_days = 21 if trigger_reason != "expand_next_horizon" else 14
     horizon_end = calc_now + timedelta(days=horizon_days)
@@ -2989,6 +3112,9 @@ async def _build_normal_proposal_plan(
                 "missed_start",
                 "user_reschedule",
             ) and (target_uuid is None or t_uuid == target_uuid)
+            is_pull_forward = trigger_reason == "early_completion_pull_forward" and (
+                target_uuid is None or t_uuid == target_uuid
+            )
             min_valid_start = (
                 task_cursors[t_uuid]
                 if trigger_reason == "expand_next_horizon" and t_uuid in task_cursors
@@ -2996,6 +3122,48 @@ async def _build_normal_proposal_plan(
             )
             needs_move = (not existing_valid) or (s_start < min_valid_start) or is_targeted_reschedule
             if not needs_move:
+                if is_pull_forward and s_start > task_cursor:
+                    earlier_slot = _find_free_slot_with_constraints(
+                        task_free,
+                        fixed_intervals,
+                        task_cursor,
+                        dur,
+                        work_seconds=sess.work_seconds,
+                        constraints=constraints,
+                        daily_work_used=t_daily_used,
+                        local_tz=local_tz,
+                    )
+                    if earlier_slot is not None and earlier_slot[0] < s_start:
+                        candidate_start, candidate_end = earlier_slot
+                        shift_secs = int((candidate_start - s_start).total_seconds())
+                        moves.append(
+                            ProposedSessionMoveItem(
+                                session_id=str(sess.id),
+                                task_id=s_task_id or None,
+                                step_id=str(sess.step_id),
+                                from_start=s_start,
+                                from_end=s_end,
+                                to_start=candidate_start,
+                                to_end=candidate_end,
+                                before=ProposalTimeRange(start=s_start, end=s_end),
+                                after=ProposalTimeRange(
+                                    start=candidate_start, end=candidate_end
+                                ),
+                                shift_seconds=shift_secs,
+                                reason=trigger_reason,
+                            )
+                        )
+                        if s_task_id and s_task_id not in affected_tasks:
+                            affected_tasks.append(s_task_id)
+                        fixed_intervals.append(
+                            (candidate_start, candidate_end, f"session:{sess.id}")
+                        )
+                        _record_daily_work(t_uuid, candidate_start, sess.work_seconds)
+                        task_cursors[t_uuid] = max(
+                            task_cursor,
+                            candidate_end + timedelta(seconds=STANDARD_INTER_SESSION_GAP_SECONDS),
+                        )
+                        continue
                 fixed_intervals.append((s_start, s_end, f"session:{sess.id}"))
                 _record_daily_work(t_uuid, s_start, sess.work_seconds)
                 task_cursors[t_uuid] = max(
@@ -3069,6 +3237,11 @@ async def _build_normal_proposal_plan(
 
     if trigger_reason == "expand_next_horizon" and target_row is not None:
         target_row_id = target_row.id
+        target_id_str = str(target_row_id)
+        target_title = target_row.title
+        target_extra_reqs = list(target_row.extra_requirements or [])
+        step_meta: dict[str, tuple[str, str | None, str]] = {}
+        did_ai_rollback = False
         horizon_sess_counter = 0
 
         def _append_horizon_sessions(
@@ -3086,7 +3259,7 @@ async def _build_normal_proposal_plan(
                     ProposedSessionAddItem(
                         temp_session_id=f"temp_horizon_{horizon_sess_counter}",
                         action="create_session",
-                        task_id=str(target_row_id),
+                        task_id=target_id_str,
                         step_id=step_id_str,
                         source_run_id=None,
                         before=None,
@@ -3115,37 +3288,45 @@ async def _build_normal_proposal_plan(
         horizon_constraints = _get_constraints(target_row_id, target_row)
         horizon_daily_used = daily_work_by_task.setdefault(target_row_id, {})
 
-        if pending_unscheduled_steps:
-            next_start = max(initial_cursor, task_cursors.get(target_row.id, initial_cursor))
+        async def _prepare_horizon_window(
+            target_obj: TaskRow,
+        ) -> tuple[datetime, datetime, datetime, list[tuple[datetime, datetime]], datetime | None]:
+            w_start = max(initial_cursor, task_cursors.get(target_row_id, initial_cursor))
             latest_task_sess_end = await db.scalar(
                 select(func.max(SessionRow.scheduled_end))
                 .join(StepRow, StepRow.id == SessionRow.step_id)
                 .where(
                     StepRow.user_id == owner,
-                    StepRow.task_id == target_row.id,
+                    StepRow.task_id == target_row_id,
                     SessionRow.status.notin_(("cancelled", "skipped")),
                 )
             )
             if latest_task_sess_end is not None:
-                next_start = max(
-                    next_start,
+                w_start = max(
+                    w_start,
                     _ensure_aware(latest_task_sess_end)
                     + timedelta(seconds=STANDARD_INTER_SESSION_GAP_SECONDS),
                 )
-            _, t_deadline = _extract_task_time_bounds(target_row)
-            window_limit = next_start + timedelta(days=14)
-            next_end = min(t_deadline, window_limit) if t_deadline is not None else window_limit
-            horizon_from_dt = next_start
-            horizon_to_dt = next_end
-            if next_end > horizon_end:
-                extra_busy, _, _ = await _load_google_busy_items(db, owner, horizon_end, next_end)
+            _, deadline_dt = _extract_task_time_bounds(target_obj)
+            w_limit = w_start + timedelta(days=14)
+            w_end = min(deadline_dt, w_limit) if deadline_dt is not None else w_limit
+            if w_end > horizon_end:
+                extra_busy, _, _ = await _load_google_busy_items(db, owner, horizon_end, w_end)
                 for b in extra_busy:
                     fixed_intervals.append((b.start, b.end, f"busy:{b.event_id}"))
-            task_free, t_deadline = _task_free_windows(
-                target_row,
-                window_start_override=next_start,
-                window_end_override=next_end,
+            w_free, deadline_dt = _task_free_windows(
+                target_obj,
+                window_start_override=w_start,
+                window_end_override=w_end,
             )
+            return w_start, w_limit, w_end, w_free, deadline_dt
+
+        if pending_unscheduled_steps:
+            next_start, window_limit, next_end, task_free, t_deadline = (
+                await _prepare_horizon_window(target_row)
+            )
+            horizon_from_dt = next_start
+            horizon_to_dt = next_end
             step_cursor = next_start
             for st_row in pending_unscheduled_steps:
                 eff_st_buf = (
@@ -3158,6 +3339,12 @@ async def _build_normal_proposal_plan(
                 )
                 micro_text = f"Mở tài liệu và bắt đầu 2 phút cho: {st_row.title[:80]}"
                 micro_secs = new_micro_sec if new_micro_sec > 0 else 120
+                st_id_str = str(st_row.id)
+                step_meta[st_id_str] = (
+                    st_row.title,
+                    st_row.expected_output or st_row.title,
+                    micro_text,
+                )
                 planned_horizon, rem_work, step_end_cursor = _plan_step_sessions_with_constraints(
                     target_work=target_work,
                     task_free=task_free,
@@ -3176,12 +3363,12 @@ async def _build_normal_proposal_plan(
                     break
                 expanded_steps_count += 1
                 step_cursor = step_end_cursor
-                _append_horizon_sessions(str(st_row.id), micro_text, micro_secs, planned_horizon)
+                _append_horizon_sessions(st_id_str, micro_text, micro_secs, planned_horizon)
         else:
             existing_task_steps = (
                 await db.scalars(
                     select(StepRow)
-                    .where(StepRow.user_id == owner, StepRow.task_id == target_row.id)
+                    .where(StepRow.user_id == owner, StepRow.task_id == target_row_id)
                     .order_by(StepRow.order_index.asc())
                 )
             ).all()
@@ -3197,30 +3384,111 @@ async def _build_normal_proposal_plan(
             ]
             if not all_parts and raw_unexpanded:
                 all_parts = [raw_unexpanded]
-            raw_parts = all_parts[:6]
-            leftover_parts = all_parts[6:]
-            remaining_unexpanded_scope = "; ".join(leftover_parts) if leftover_parts else None
 
-            base_est_per_step = max(300, round(new_work_int / max(new_buffer, 1.0)))
-            for idx, part_title in enumerate(raw_parts):
-                steps_to_add.append(
-                    ProposedStepItem(
-                        step_id=str(uuid4()),
-                        task_id=str(target_row.id),
-                        title=part_title[:200],
-                        order_index=next_order_idx + idx,
-                        estimated_base_seconds=base_est_per_step,
-                    )
+            next_start, window_limit, next_end, task_free, t_deadline = (
+                await _prepare_horizon_window(target_row)
+            )
+            horizon_from_dt = next_start
+            horizon_to_dt = next_end
+            avail_slots_for_window = _subtract_blocked_from_free(task_free, fixed_intervals)
+            window_free_secs = sum(
+                max(0, int((slot_end - max(slot_start, next_start)).total_seconds()))
+                for slot_start, slot_end in avail_slots_for_window
+                if slot_end > max(slot_start, next_start)
+            )
+            window_free_hours = round(window_free_secs / 3600.0, 2)
+            total_rem_days = (
+                max(1, math.ceil((t_deadline - calc_now).total_seconds() / 86400))
+                if t_deadline is not None
+                else 14
+            )
+
+            if allow_ai_rollback and not bool(db.info.get("defer_command_commit")):
+                await db.rollback()
+                did_ai_rollback = True
+
+            ai_result = None
+            try:
+                ai_result = await ai_service.decompose_task(
+                    task_title=target_title,
+                    scope=raw_unexpanded,
+                    extra_requirements=target_extra_reqs,
+                    user_focus_duration=max(1, new_work_int // 60),
+                    planning_horizon_days=14,
+                    total_project_days=total_rem_days,
+                    total_free_hours=window_free_hours,
                 )
+            except Exception:
+                ai_result = None
 
-            task_free, t_deadline = _task_free_windows(target_row)
+            if (
+                ai_result is not None
+                and ai_result.generation_tier != "tier_3_rule_based"
+                and not ai_result.requires_clarification
+                and ai_result.steps
+            ):
+                selected_ai = ai_result.steps[:6]
+                for idx, ai_step in enumerate(selected_ai):
+                    step_id_str = str(uuid4())
+                    step_title_str = ai_step.title[:200]
+                    step_exp_out = (ai_step.expected_output or "").strip() or step_title_str
+                    steps_to_add.append(
+                        ProposedStepItem(
+                            step_id=step_id_str,
+                            task_id=target_id_str,
+                            title=step_title_str,
+                            expected_output=step_exp_out,
+                            order_index=next_order_idx + idx,
+                            estimated_base_seconds=ai_step.estimated_base_seconds,
+                        )
+                    )
+                    step_meta[step_id_str] = (
+                        step_title_str,
+                        step_exp_out,
+                        ai_step.micro_task_prompt,
+                    )
+                extra_titles = (
+                    "; ".join(s.title for s in ai_result.steps[6:])
+                    if len(ai_result.steps) > 6
+                    else ""
+                )
+                raw_ai_rem = (ai_result.unexpanded_scope or "").strip()
+                if raw_ai_rem and extra_titles:
+                    remaining_unexpanded_scope = f"{extra_titles}; {raw_ai_rem}"
+                else:
+                    remaining_unexpanded_scope = raw_ai_rem or extra_titles or None
+            else:
+                raw_parts = all_parts[:6]
+                leftover_parts = all_parts[6:]
+                remaining_unexpanded_scope = "; ".join(leftover_parts) if leftover_parts else None
+                base_est_per_step = max(300, round(new_work_int / max(new_buffer, 1.0)))
+                for idx, part_title in enumerate(raw_parts):
+                    step_id_str = str(uuid4())
+                    step_title_str = part_title[:200]
+                    steps_to_add.append(
+                        ProposedStepItem(
+                            step_id=step_id_str,
+                            task_id=target_id_str,
+                            title=step_title_str,
+                            expected_output=step_title_str,
+                            order_index=next_order_idx + idx,
+                            estimated_base_seconds=base_est_per_step,
+                        )
+                    )
+                    step_meta[step_id_str] = (
+                        step_title_str,
+                        step_title_str,
+                        f"Mở tài liệu và bắt đầu 2 phút cho: {step_title_str[:80]}",
+                    )
+
+            scheduled_horizon_steps: list[ProposedStepItem] = []
+            step_cursor = next_start
             for st_item in steps_to_add:
                 target_work = calculate_buffered_work(
                     st_item.estimated_base_seconds, new_buffer
                 )
-                micro_text = f"Mở tài liệu và bắt đầu 2 phút cho: {st_item.title[:80]}"
+                micro_text = step_meta[st_item.step_id][2]
                 micro_secs = new_micro_sec if new_micro_sec > 0 else 120
-                step_cursor = task_cursors.get(target_row.id, initial_cursor)
                 planned_horizon, rem_work, step_end_cursor = _plan_step_sessions_with_constraints(
                     target_work=target_work,
                     task_free=task_free,
@@ -3233,13 +3501,159 @@ async def _build_normal_proposal_plan(
                     local_tz=local_tz,
                 )
                 if rem_work > 0:
+                    if (t_deadline is None or window_limit < t_deadline) and expanded_steps_count > 0:
+                        unscheduled_tail = [
+                            s.title for s in steps_to_add[expanded_steps_count:]
+                        ]
+                        if remaining_unexpanded_scope:
+                            unscheduled_tail.append(remaining_unexpanded_scope)
+                        remaining_unexpanded_scope = "; ".join(unscheduled_tail) or None
+                        steps_to_add = scheduled_horizon_steps
+                        break
                     _record_blocking(t_deadline, step_end_cursor, rem_work, task_free)
+                    break
+                expanded_steps_count += 1
+                scheduled_horizon_steps.append(st_item)
+                step_cursor = step_end_cursor
                 _append_horizon_sessions(
                     st_item.step_id, micro_text, micro_secs, planned_horizon
                 )
-            expanded_steps_count = len(steps_to_add)
-        if str(target_row.id) not in affected_tasks:
-            affected_tasks.append(str(target_row.id))
+
+        horizon_adds = [item for item in adds if item.reason == "expand_next_horizon"]
+        if horizon_adds:
+            grouped_horizon: dict[str, list[ProposedSessionAddItem]] = {}
+            for item in sorted(horizon_adds, key=lambda x: x.after.start):
+                grouped_horizon.setdefault(item.step_id, []).append(item)
+            split_inputs: list[SplitSessionInputItem] = []
+            split_part_idx: dict[str, int] = {}
+            for step_id_str, group in grouped_horizon.items():
+                s_title, s_exp_out, s_micro = step_meta.get(
+                    step_id_str, ("Bước tiếp theo", None, "Mở tài liệu và bắt đầu 2 phút.")
+                )
+                eff_exp_out = (s_exp_out or "").strip() or s_title
+                if len(group) == 1:
+                    item = group[0]
+                    enriched = ai_service.build_single_session_enrichment(
+                        client_session_key=item.temp_session_id,
+                        step_title=s_title,
+                        step_expected_output=eff_exp_out,
+                        micro_task_text=item.after.micro_task_text or s_micro,
+                    )
+                    item.after.title = enriched.title
+                    item.after.session_goal = enriched.session_goal
+                    item.after.expected_output = enriched.expected_output
+                    if not (item.after.micro_task_text and item.after.micro_task_text.strip()):
+                        item.after.micro_task_text = enriched.micro_task_text
+                elif len(group) <= 50:
+                    total_parts = len(group)
+                    split_group_inputs: list[SplitSessionInputItem] = []
+                    try:
+                        for p_idx, item in enumerate(group):
+                            part_num = p_idx + 1
+                            split_part_idx[item.temp_session_id] = part_num
+                            split_group_inputs.append(
+                                SplitSessionInputItem(
+                                    client_session_key=item.temp_session_id,
+                                    client_step_key=step_id_str,
+                                    step_title=s_title[:255],
+                                    step_expected_output=eff_exp_out[:500],
+                                    step_micro_task_prompt=(s_micro[:300] if s_micro else None),
+                                    session_index=part_num,
+                                    total_sessions_in_step=total_parts,
+                                    work_minutes=max(1, min(480, round(item.after.work_seconds / 60))),
+                                )
+                            )
+                        split_inputs.extend(split_group_inputs)
+                    except (ValidationError, ValueError):
+                        for p_idx, item in enumerate(group):
+                            part_num = p_idx + 1
+                            split_part_idx.pop(item.temp_session_id, None)
+                            enriched = ai_service.build_single_session_enrichment(
+                                client_session_key=item.temp_session_id,
+                                step_title=f"{s_title} (Phần {part_num}/{total_parts})",
+                                step_expected_output=eff_exp_out,
+                                micro_task_text=item.after.micro_task_text or s_micro,
+                            )
+                            item.after.title = enriched.title
+                            item.after.session_goal = enriched.session_goal
+                            item.after.expected_output = enriched.expected_output
+                            if p_idx >= 1 or not (
+                                item.after.micro_task_text and item.after.micro_task_text.strip()
+                            ):
+                                item.after.micro_task_text = enriched.micro_task_text
+                else:
+                    total_parts = len(group)
+                    for p_idx, item in enumerate(group):
+                        part_num = p_idx + 1
+                        enriched = ai_service.build_single_session_enrichment(
+                            client_session_key=item.temp_session_id,
+                            step_title=f"{s_title} (Phần {part_num}/{total_parts})",
+                            step_expected_output=eff_exp_out,
+                            micro_task_text=item.after.micro_task_text or s_micro,
+                        )
+                        item.after.title = enriched.title
+                        item.after.session_goal = enriched.session_goal
+                        item.after.expected_output = enriched.expected_output
+                        if p_idx >= 1 or not (
+                            item.after.micro_task_text and item.after.micro_task_text.strip()
+                        ):
+                            item.after.micro_task_text = enriched.micro_task_text
+
+            if split_inputs:
+                if (
+                    allow_ai_rollback
+                    and not bool(db.info.get("defer_command_commit"))
+                    and not did_ai_rollback
+                ):
+                    await db.rollback()
+                    did_ai_rollback = True
+                enrichment_items: list[Any] = []
+                for start in range(0, len(split_inputs), 60):
+                    chunk = split_inputs[start : start + 60]
+                    try:
+                        enrich_res = await ai_service.enrich_split_sessions(
+                            split_sessions=chunk,
+                            task_title=target_title,
+                        )
+                        enrichment_items.extend(enrich_res.sessions)
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning(
+                            "UF6 expand_next_horizon enrich_split_sessions chunk failed (%s); falling back.",
+                            type(exc).__name__,
+                        )
+                enriched_map = {e.client_session_key: e for e in enrichment_items}
+                split_input_map = {si.client_session_key: si for si in split_inputs}
+                for item in horizon_adds:
+                    if item.temp_session_id not in split_part_idx:
+                        continue
+                    part_num = split_part_idx[item.temp_session_id]
+                    enriched = enriched_map.get(item.temp_session_id)
+                    if enriched is None:
+                        si = split_input_map.get(item.temp_session_id)
+                        if si is not None:
+                            enriched = ai_service._fallback_enrich_split_sessions([si]).sessions[0]
+                        else:
+                            enriched = ai_service.build_single_session_enrichment(
+                                client_session_key=item.temp_session_id,
+                                step_title=f"Bước hiện tại (Phần {part_num}/{part_num})",
+                                step_expected_output="Hoàn thành phiên tập trung.",
+                                micro_task_text=(
+                                    item.after.micro_task_text
+                                    or "Mở tài liệu và bắt đầu 2 phút."
+                                ),
+                            )
+                    item.after.title = enriched.title
+                    item.after.session_goal = enriched.session_goal
+                    item.after.expected_output = enriched.expected_output
+                    if part_num >= 2 or not (
+                        item.after.micro_task_text and item.after.micro_task_text.strip()
+                    ):
+                        item.after.micro_task_text = enriched.micro_task_text
+
+        if target_id_str not in affected_tasks:
+            affected_tasks.append(target_id_str)
 
     if target_uuid is not None and str(target_uuid) not in affected_tasks and (
         moves or adds or cancels or steps_to_add or trigger_reason == "settings_change"
@@ -3447,6 +3861,7 @@ async def create_proposal(
             allowed_task_ids=payload.allowed_task_ids,
             request_text=payload.request_text,
             calc_now=calc_now,
+            allow_ai_rollback=not deferred,
         )
         effective_allowed = list(dict.fromkeys(payload.allowed_task_ids))
         if target_uuid is not None and str(target_uuid) not in effective_allowed:
@@ -3579,6 +3994,68 @@ async def create_proposal(
         db.info.pop("command_result_meta", None)
 
 
+_TERMINAL_OR_ARCHIVED_STATUSES = ("completed", "skipped", "cancelled", "archived")
+
+
+async def sync_active_steps_buffer_multiplier(
+    db: AsyncSession,
+    *,
+    owner: UUID,
+    new_buffer: float,
+    now: datetime,
+) -> int:
+    """Đồng bộ Step.buffer_multiplier cho các bước chưa hoàn tất (không chạm step có phiên/run đang chạy)."""
+    if not (1.0 <= new_buffer <= 2.0):
+        return 0
+
+    active_step_ids: set[UUID] = set(
+        (
+            await db.scalars(
+                select(SessionRow.step_id).where(
+                    SessionRow.user_id == owner,
+                    SessionRow.status == "in_progress",
+                )
+            )
+        ).all()
+    )
+    active_run_step_ids = (
+        await db.scalars(
+            select(SessionRow.step_id)
+            .join(SessionRun, SessionRun.session_id == SessionRow.id)
+            .where(
+                SessionRow.user_id == owner,
+                SessionRun.user_id == owner,
+                SessionRun.run_state.in_(("running", "paused", "awaiting_checkin")),
+            )
+        )
+    ).all()
+    active_step_ids.update(active_run_step_ids)
+
+    eligible_steps = (
+        await db.scalars(
+            select(StepRow)
+            .join(TaskRow, TaskRow.id == StepRow.task_id)
+            .where(
+                StepRow.user_id == owner,
+                TaskRow.user_id == owner,
+                TaskRow.status.not_in(_TERMINAL_OR_ARCHIVED_STATUSES),
+                StepRow.status.not_in(_TERMINAL_OR_ARCHIVED_STATUSES),
+            )
+        )
+    ).all()
+
+    updated_count = 0
+    for st_row in eligible_steps:
+        if st_row.id in active_step_ids:
+            continue
+        if abs(float(st_row.buffer_multiplier) - new_buffer) > 1e-9:
+            st_row.buffer_multiplier = new_buffer
+            st_row.revision += 1
+            st_row.updated_at = now
+            updated_count += 1
+    return updated_count
+
+
 async def _cancel_linked_setting_requests(
     db: AsyncSession,
     owner: UUID,
@@ -3637,7 +4114,56 @@ async def _supersede_existing_pending_proposal(
     return existing_pending.id
 
 
-async def create_settings_change_proposal(
+async def _resolve_settings_allowed_tasks(
+    db: AsyncSession,
+    owner: UUID,
+    *,
+    target_task_id: str | None = None,
+    allowed_task_ids: list[str] | None = None,
+) -> list[str]:
+    if allowed_task_ids is not None:
+        return list(dict.fromkeys(allowed_task_ids))
+    if target_task_id is not None:
+        return [target_task_id]
+    active_task_ids = (
+        await db.scalars(
+            select(TaskRow.id)
+            .where(
+                TaskRow.user_id == owner,
+                TaskRow.status.not_in(("completed", "cancelled")),
+            )
+            .order_by(TaskRow.created_at.asc())
+        )
+    ).all()
+    return [str(tid) for tid in active_task_ids]
+
+
+async def compute_settings_change_revisions(
+    db: AsyncSession,
+    *,
+    owner: UUID,
+    target_task_id: str | None = None,
+    allowed_task_ids: list[str] | None = None,
+) -> tuple[SourceRevisions, dict[str, bool], int]:
+    """Đọc source revisions và schedule revision hiện tại phục vụ đối soát Phase B UF7->UF6."""
+    current_sched_rev = await _get_current_schedule_revision(db, owner)
+    effective_allowed = await _resolve_settings_allowed_tasks(
+        db,
+        owner,
+        target_task_id=target_task_id,
+        allowed_task_ids=allowed_task_ids,
+    )
+    db_revs, present = await _compute_db_source_revisions(
+        db,
+        owner,
+        target_task_id=target_task_id,
+        allowed_task_ids=effective_allowed,
+        fallback_revisions=None,
+    )
+    return db_revs, present, current_sched_rev
+
+
+async def preview_settings_change_context(
     db: AsyncSession,
     *,
     owner: UUID,
@@ -3647,28 +4173,67 @@ async def create_settings_change_proposal(
     override_preferences: dict[str, Any] | None = None,
     override_availability: dict[str, Any] | None = None,
     now: datetime | None = None,
+) -> tuple[SourceRevisions, dict[str, bool], int, FeasibilityData]:
+    """Tính trước ngữ cảnh và độ khả thi cho UF7->UF6 hoàn toàn read-only, không khóa DB và không gọi AI."""
+    calc_now = _current_utc_now(now)
+    current_sched_rev = await _get_current_schedule_revision(db, owner)
+    effective_allowed = await _resolve_settings_allowed_tasks(
+        db,
+        owner,
+        target_task_id=target_task_id,
+        allowed_task_ids=allowed_task_ids,
+    )
+    db_revs, present = await _compute_db_source_revisions(
+        db,
+        owner,
+        target_task_id=target_task_id,
+        allowed_task_ids=effective_allowed,
+        fallback_revisions=None,
+    )
+    _, _, _, feasibility, _ = await _build_normal_proposal_plan(
+        db,
+        owner,
+        trigger_reason="settings_change",
+        target_task_id=target_task_id,
+        allowed_task_ids=effective_allowed,
+        request_text=request_text,
+        calc_now=calc_now,
+        override_preferences=override_preferences,
+        override_availability=override_availability,
+        allow_ai_rollback=False,
+    )
+    return db_revs, present, current_sched_rev, feasibility
+
+
+async def generate_settings_change_empathy(
+    feasibility: FeasibilityData,
+) -> tuple[str, GenerationTier]:
+    """Sinh lời giải thích Guilt-free UF6 cho settings_change ngoài DB transaction/lock."""
+    return await _generate_uf6_explanation_and_tier("settings_change", feasibility)
+
+
+async def create_settings_change_proposal(
+    db: AsyncSession,
+    *,
+    owner: UUID,
+    target_task_id: str | None = None,
+    allowed_task_ids: list[str] | None = None,
+    request_text: str | None = None,
+    override_preferences: dict[str, Any] | None = None,
+    override_availability: dict[str, Any] | None = None,
+    suggestion_id: str | None = None,
+    now: datetime | None = None,
     precomputed_empathy: tuple[str, GenerationTier] | None = None,
 ) -> ProposalData:
     """Helper nội bộ (không bọc @durable_command) tạo RescheduleProposal cho UF7 settings_change."""
     calc_now = _current_utc_now(now)
     current_sched_rev = await _get_current_schedule_revision(db, owner)
-
-    if allowed_task_ids is not None:
-        effective_allowed = list(dict.fromkeys(allowed_task_ids))
-    elif target_task_id is not None:
-        effective_allowed = [target_task_id]
-    else:
-        active_task_ids = (
-            await db.scalars(
-                select(TaskRow.id)
-                .where(
-                    TaskRow.user_id == owner,
-                    TaskRow.status.not_in(("completed", "cancelled")),
-                )
-                .order_by(TaskRow.created_at.asc())
-            )
-        ).all()
-        effective_allowed = [str(tid) for tid in active_task_ids]
+    effective_allowed = await _resolve_settings_allowed_tasks(
+        db,
+        owner,
+        target_task_id=target_task_id,
+        allowed_task_ids=allowed_task_ids,
+    )
 
     db_revs, _ = await _compute_db_source_revisions(
         db,
@@ -3694,6 +4259,7 @@ async def create_settings_change_proposal(
         calc_now=calc_now,
         override_preferences=override_preferences,
         override_availability=override_availability,
+        allow_ai_rollback=False,
     )
     packed_changes = _pack_proposed_changes(
         changes,
@@ -3705,6 +4271,7 @@ async def create_settings_change_proposal(
         request_text=request_text,
         override_preferences=override_preferences,
         override_availability=override_availability,
+        suggestion_id=suggestion_id,
     )
     if precomputed_empathy is not None:
         explanation, gen_tier = precomputed_empathy
@@ -3743,6 +4310,39 @@ async def create_settings_change_proposal(
     return await _proposal_row_to_schema(db, owner, new_proposal, calc_now)
 
 
+async def _mark_proposal_notification_sent_atomic(
+    db: AsyncSession,
+    *,
+    proposal_id: UUID,
+    owner: UUID,
+    sent_at: datetime,
+) -> None:
+    """Cập nhật pending_notification_state='sent' bằng Core SQL atomic, tránh StaleDataError/SQLite lock."""
+    in_command_tx = bool(db.info.get("defer_command_commit"))
+    if not in_command_tx and db.in_transaction():
+        await db.rollback()
+    await db.execute(
+        update(RescheduleProposal)
+        .where(
+            RescheduleProposal.id == proposal_id,
+            RescheduleProposal.user_id == owner,
+            RescheduleProposal.status == "pending",
+            RescheduleProposal.pending_notification_state.in_(("pending", "not_sent")),
+        )
+        .values(
+            pending_notification_state="sent",
+            pending_notification_sent_at=sent_at,
+            updated_at=sent_at,
+            revision=RescheduleProposal.revision + 1,
+        )
+        .execution_options(synchronize_session=False)
+    )
+    if not in_command_tx:
+        await db.commit()
+    else:
+        await db.flush()
+
+
 async def get_current_proposal(
     db: AsyncSession,
     *,
@@ -3761,10 +4361,23 @@ async def get_current_proposal(
     if row is None:
         return None
     if row.pending_notification_state in ("pending", "not_sent"):
-        row.pending_notification_state = "sent"
-        row.pending_notification_sent_at = calc_now
-        await db.flush()
-        await db.commit()
+        proposal_uuid = row.id
+        await _mark_proposal_notification_sent_atomic(
+            db,
+            proposal_id=proposal_uuid,
+            owner=owner,
+            sent_at=calc_now,
+        )
+        row = await db.scalar(
+            select(RescheduleProposal)
+            .where(
+                RescheduleProposal.id == proposal_uuid,
+                RescheduleProposal.user_id == owner,
+            )
+            .execution_options(populate_existing=True)
+        )
+        if row is None:
+            return None
     return await _proposal_row_to_schema(db, owner, row, calc_now)
 
 
@@ -3793,10 +4406,28 @@ async def get_proposal_detail(
             next_action="reload",
         )
     if row.status == "pending" and row.pending_notification_state in ("pending", "not_sent"):
-        row.pending_notification_state = "sent"
-        row.pending_notification_sent_at = calc_now
-        await db.flush()
-        await db.commit()
+        proposal_uuid = row.id
+        await _mark_proposal_notification_sent_atomic(
+            db,
+            proposal_id=proposal_uuid,
+            owner=owner,
+            sent_at=calc_now,
+        )
+        row = await db.scalar(
+            select(RescheduleProposal)
+            .where(
+                RescheduleProposal.id == proposal_uuid,
+                RescheduleProposal.user_id == owner,
+            )
+            .execution_options(populate_existing=True)
+        )
+        if row is None:
+            raise AppError(
+                status_code=404,
+                code="RESOURCE_NOT_FOUND",
+                message="Không tìm thấy đề xuất điều chỉnh lịch.",
+                next_action="reload",
+            )
     return await _proposal_row_to_schema(db, owner, row, calc_now)
 
 
@@ -3867,6 +4498,7 @@ async def rebuild_proposal(
     row_source_revisions_dict = dict(row.source_revisions or {})
     row_proposed_changes_dict = dict(row.proposed_changes or {})
 
+    old_suggestion_id = _unpack_suggestion_id(row_proposed_changes_dict)
     _, _, cont_req, _, _, _, old_req_text = _unpack_proposal_meta(row_proposed_changes_dict)
     effective_req_text = (
         payload.request_text if payload.request_text is not None else old_req_text
@@ -3923,6 +4555,7 @@ async def rebuild_proposal(
             start_window=start_window,
             approval_envelope=approval_envelope,
             request_text=effective_req_text,
+            suggestion_id=old_suggestion_id,
         )
         new_target_uuid = target_uuid
         gen_tier: GenerationTier = "python_fallback"
@@ -3946,6 +4579,7 @@ async def rebuild_proposal(
             calc_now=calc_now,
             override_preferences=override_prefs,
             override_availability=override_avail,
+            allow_ai_rollback=not deferred,
         )
         packed_changes = _pack_proposed_changes(
             changes,
@@ -3957,6 +4591,7 @@ async def rebuild_proposal(
             request_text=effective_req_text,
             override_preferences=override_prefs,
             override_availability=override_avail,
+            suggestion_id=old_suggestion_id,
         )
         if not deferred:
             # Giải phóng toàn bộ transaction/lock DB trước khi gọi AI empathy
@@ -4147,6 +4782,18 @@ async def _sync_calendar_on_approve(
     )
 
     job_enqueued = False
+    all_step_ids = list({sess.step_id for sess in added_sessions + moved_sessions})
+    step_titles: dict[UUID, str] = {}
+    if all_step_ids:
+        st_pairs = (
+            await db.execute(
+                select(StepRow.id, StepRow.title).where(
+                    StepRow.user_id == owner,
+                    StepRow.id.in_(all_step_ids),
+                )
+            )
+        ).all()
+        step_titles = {st_id: st_title for st_id, st_title in st_pairs}
 
     for sess in added_sessions:
         event_id = await _next_session_google_event_id(
@@ -4171,9 +4818,15 @@ async def _sync_calendar_on_approve(
         db.add(link)
         await db.flush()
 
-        payload_snapshot = {
+        summary, description = build_calendar_event_text(
+            sess.title,
+            step_titles.get(sess.step_id),
+            sess.session_goal,
+            sess.expected_output,
+        )
+        payload_snapshot: dict[str, Any] = {
             "id": event_id,
-            "summary": "ProPlan VA Focus Session",
+            "summary": summary,
             "start": {
                 "dateTime": _ensure_aware(sess.scheduled_start).isoformat(),
                 "timeZone": "Asia/Ho_Chi_Minh",
@@ -4191,6 +4844,8 @@ async def _sync_calendar_on_approve(
                 }
             },
         }
+        if description is not None:
+            payload_snapshot["description"] = description
         db.add(
             CalendarSyncJob(
                 id=uuid4(),
@@ -4299,9 +4954,15 @@ async def _sync_calendar_on_approve(
             existing_link.sync_state = "pending"
             op = "update"
 
-        payload_snapshot = {
+        summary, description = build_calendar_event_text(
+            sess.title,
+            step_titles.get(sess.step_id),
+            sess.session_goal,
+            sess.expected_output,
+        )
+        payload_snapshot: dict[str, Any] = {
             "id": event_id,
-            "summary": "ProPlan VA Focus Session",
+            "summary": summary,
             "start": {
                 "dateTime": _ensure_aware(sess.scheduled_start).isoformat(),
                 "timeZone": "Asia/Ho_Chi_Minh",
@@ -4319,6 +4980,8 @@ async def _sync_calendar_on_approve(
                 }
             },
         }
+        if description is not None:
+            payload_snapshot["description"] = description
         db.add(
             CalendarSyncJob(
                 id=uuid4(),
@@ -4395,6 +5058,9 @@ def _session_row_to_schema(sess: SessionRow, link_id: str | None = None) -> Sess
         step_id=str(sess.step_id),
         scheduled_start=_ensure_aware(sess.scheduled_start),
         scheduled_end=_ensure_aware(sess.scheduled_end),
+        title=sess.title,
+        session_goal=sess.session_goal,
+        expected_output=sess.expected_output,
         micro_task_text=sess.micro_task_text,
         micro_task_seconds=sess.micro_task_seconds,
         work_seconds=sess.work_seconds,
@@ -4655,6 +5321,144 @@ async def approve_proposal(
             )
         await _check_continuation_chain_limit(db, owner, source_run)
 
+    # Pre-Mutation Integrity Guard (H1-01): xác minh trạng thái live của toàn bộ đích trước khi ghi DB
+    terminal_step_task_statuses = ("completed", "skipped", "cancelled")
+
+    def _raise_stale_target() -> NoReturn:
+        raise AppError(
+            status_code=409,
+            code="SOURCE_CHANGED",
+            message="Một số phiên, bước hoặc công việc mục tiêu đã thay đổi trạng thái kể từ khi tạo đề xuất. Vui lòng tính toán lại.",
+            current_revisions={
+                "schedule": current_sched_rev,
+                "proposal_revision": row.proposal_revision,
+            },
+            next_action="rebuild_and_review",
+        )
+
+    def _parse_uuid_or_stale(raw_id: str | None) -> UUID:
+        try:
+            return UUID(str(raw_id))
+        except (ValueError, TypeError, AttributeError):
+            _raise_stale_target()
+
+    added_step_ids: set[UUID] = set()
+    if changes.steps_to_add:
+        step_task_uuids: set[UUID] = set()
+        for st_item in changes.steps_to_add:
+            added_step_ids.add(_parse_uuid_or_stale(st_item.step_id))
+            step_task_uuids.add(_parse_uuid_or_stale(st_item.task_id))
+        step_tasks_by_id = {
+            t.id: t
+            for t in (
+                await db.scalars(
+                    select(TaskRow)
+                    .where(TaskRow.user_id == owner, TaskRow.id.in_(step_task_uuids))
+                    .execution_options(populate_existing=True)
+                )
+            ).all()
+        }
+        for t_uuid in step_task_uuids:
+            t_obj = step_tasks_by_id.get(t_uuid)
+            if t_obj is None or t_obj.status in terminal_step_task_statuses:
+                _raise_stale_target()
+
+    target_session_uuids = {
+        _parse_uuid_or_stale(item.session_id)
+        for item in [*changes.sessions_to_cancel, *changes.sessions_to_move]
+    }
+    if target_session_uuids:
+        sess_by_id = {
+            s.id: s
+            for s in (
+                await db.scalars(
+                    select(SessionRow)
+                    .where(
+                        SessionRow.user_id == owner,
+                        SessionRow.id.in_(target_session_uuids),
+                    )
+                    .execution_options(populate_existing=True)
+                )
+            ).all()
+        }
+        if len(sess_by_id) != len(target_session_uuids) or any(
+            s.status != "scheduled" for s in sess_by_id.values()
+        ):
+            _raise_stale_target()
+
+        target_step_uuids = {s.step_id for s in sess_by_id.values()}
+        step_by_id = {
+            st.id: st
+            for st in (
+                await db.scalars(
+                    select(StepRow)
+                    .where(StepRow.user_id == owner, StepRow.id.in_(target_step_uuids))
+                    .execution_options(populate_existing=True)
+                )
+            ).all()
+        }
+        if len(step_by_id) != len(target_step_uuids) or any(
+            st.status in terminal_step_task_statuses for st in step_by_id.values()
+        ):
+            _raise_stale_target()
+
+        target_task_uuids = {st.task_id for st in step_by_id.values()}
+        task_by_id = {
+            t.id: t
+            for t in (
+                await db.scalars(
+                    select(TaskRow)
+                    .where(TaskRow.user_id == owner, TaskRow.id.in_(target_task_uuids))
+                    .execution_options(populate_existing=True)
+                )
+            ).all()
+        }
+        if len(task_by_id) != len(target_task_uuids) or any(
+            t.status in terminal_step_task_statuses for t in task_by_id.values()
+        ):
+            _raise_stale_target()
+
+    if changes.sessions_to_add:
+        add_target_step_uuids: set[UUID] = set()
+        for a_item in changes.sessions_to_add:
+            step_uuid = _parse_uuid_or_stale(a_item.after.step_id)
+            if step_uuid not in added_step_ids:
+                add_target_step_uuids.add(step_uuid)
+        if add_target_step_uuids:
+            add_steps_by_id = {
+                st.id: st
+                for st in (
+                    await db.scalars(
+                        select(StepRow)
+                        .where(
+                            StepRow.user_id == owner,
+                            StepRow.id.in_(add_target_step_uuids),
+                        )
+                        .execution_options(populate_existing=True)
+                    )
+                ).all()
+            }
+            if len(add_steps_by_id) != len(add_target_step_uuids) or any(
+                st.status in terminal_step_task_statuses for st in add_steps_by_id.values()
+            ):
+                _raise_stale_target()
+
+            add_task_uuids = {st.task_id for st in add_steps_by_id.values()}
+            add_tasks_by_id = {
+                t.id: t
+                for t in (
+                    await db.scalars(
+                        select(TaskRow)
+                        .where(TaskRow.user_id == owner, TaskRow.id.in_(add_task_uuids))
+                        .execution_options(populate_existing=True)
+                    )
+                ).all()
+            }
+            if len(add_tasks_by_id) != len(add_task_uuids) or any(
+                t.status in terminal_step_task_statuses for t in add_tasks_by_id.values()
+            ):
+                _raise_stale_target()
+
     next_version = row.base_schedule_revision + 1
     pref_row = await db.scalar(
         select(UserPreferenceRow).where(UserPreferenceRow.user_id == owner)
@@ -4677,11 +5481,21 @@ async def approve_proposal(
     )
 
     # 1. Áp dụng steps_to_add (nếu có)
-    eff_buf = (
+    pending_req_prefs = (
+        pref_row.requested_changes
+        if pref_row is not None
+        and pref_row.pending_proposal_id == row.id
+        and isinstance(pref_row.requested_changes, dict)
+        else {}
+    )
+    raw_pending_buf = pending_req_prefs.get("buffer_multiplier")
+    has_pending_buffer_change = raw_pending_buf is not None
+    old_buffer = (
         float(pref_row.buffer_multiplier)
         if pref_row is not None and pref_row.buffer_multiplier
         else 1.2
     )
+    eff_buf = float(raw_pending_buf) if has_pending_buffer_change else old_buffer
     for st_item in changes.steps_to_add:
         st_uuid = UUID(st_item.step_id)
         existing_st = await db.scalar(
@@ -4695,7 +5509,7 @@ async def approve_proposal(
                     task_id=UUID(st_item.task_id),
                     order_index=st_item.order_index,
                     title=st_item.title,
-                    expected_output=st_item.title,
+                    expected_output=st_item.expected_output or st_item.title,
                     estimated_base_seconds=st_item.estimated_base_seconds,
                     remaining_base_seconds=st_item.estimated_base_seconds,
                     buffer_multiplier=eff_buf,
@@ -4778,6 +5592,9 @@ async def approve_proposal(
             step_id=UUID(after.step_id),
             scheduled_start=add_start,
             scheduled_end=add_end,
+            title=after.title,
+            session_goal=after.session_goal,
+            expected_output=after.expected_output,
             micro_task_text=after.micro_task_text
             or "Mở tài liệu và bắt đầu 2 phút đầu tiên.",
             micro_task_seconds=after.micro_task_seconds,
@@ -4870,6 +5687,7 @@ async def approve_proposal(
         s_row.scheduled_end = new_end
         s_row.schedule_revision = next_version
         if s_row.status == "scheduled":
+            s_row.start_state = "waiting"
             s_row.start_decision_due_at = new_start + timedelta(seconds=START_GRACE_SECONDS)
         s_row.updated_at = approve_now
         moved_rows.append(s_row)
@@ -4920,8 +5738,21 @@ async def approve_proposal(
                 )
                 if not remaining_pending and not has_unexpanded:
                     exp_task.decomposition_state = "complete"
+                    exp_task.extension_candidate_at = None
                 else:
                     exp_task.decomposition_state = "partial"
+                    latest_end = await db.scalar(
+                        select(func.max(SessionRow.scheduled_end))
+                        .join(StepRow, StepRow.id == SessionRow.step_id)
+                        .where(
+                            StepRow.user_id == owner,
+                            StepRow.task_id == exp_tid,
+                            SessionRow.status.notin_(("cancelled", "skipped")),
+                        )
+                    )
+                    exp_task.extension_candidate_at = (
+                        _ensure_aware(latest_end) if latest_end is not None else None
+                    )
                 exp_task.revision += 1
                 exp_task.updated_at = approve_now
         await db.flush()
@@ -4955,6 +5786,9 @@ async def approve_proposal(
                 step_id=str(continuation_session_row.step_id),
                 scheduled_start=_ensure_aware(continuation_session_row.scheduled_start),
                 scheduled_end=_ensure_aware(continuation_session_row.scheduled_end),
+                title=continuation_session_row.title,
+                session_goal=continuation_session_row.session_goal,
+                expected_output=continuation_session_row.expected_output,
                 micro_task_text=continuation_session_row.micro_task_text,
                 micro_task_seconds=continuation_session_row.micro_task_seconds,
                 work_seconds=continuation_session_row.work_seconds,
@@ -5020,7 +5854,7 @@ async def approve_proposal(
         )
         await db.flush()
         cont_run_schema = await run_service._run_to_schema(
-            db, cont_run_row, settings_snapshot=snap_model
+            db, cont_run_row, settings_snapshot=snap_model, paused_seconds=0
         )
 
     # 7. Tạo ScheduleVersion mới
@@ -5063,6 +5897,63 @@ async def approve_proposal(
         pref_row.pending_proposal_id = None
         pref_row.updated_at = approve_now
 
+    # H1-07: Khi duyệt đổi reminder_offsets qua UF7->UF6, tái tạo Reminder cho các phiên tương lai chưa được động tới
+    if pending_req_offsets is not None and pref_row is not None:
+        handled_session_ids = (
+            {s.id for s in added_rows}
+            | {s.id for s in moved_rows}
+            | {s.id for s in cancelled_rows}
+        )
+        untouched_stmt = select(SessionRow).where(
+            SessionRow.user_id == owner,
+            SessionRow.status == "scheduled",
+            SessionRow.scheduled_start > approve_now,
+        )
+        if handled_session_ids:
+            untouched_stmt = untouched_stmt.where(SessionRow.id.notin_(handled_session_ids))
+        untouched_sessions = list((await db.scalars(untouched_stmt)).all())
+        if untouched_sessions:
+            existing_rems = list(
+                (
+                    await db.scalars(
+                        select(Reminder).where(
+                            Reminder.user_id == owner,
+                            Reminder.session_id.in_([s.id for s in untouched_sessions]),
+                            Reminder.delivery_state.in_(("scheduled", "snoozed")),
+                        )
+                    )
+                ).all()
+            )
+            for rem in existing_rems:
+                rem.delivery_state = "cancelled"
+                rem.updated_at = approve_now
+            for s in untouched_sessions:
+                s_start_aware = _ensure_aware(s.scheduled_start)
+                for offset in reminder_offsets:
+                    fire_at = s_start_aware - timedelta(seconds=offset)
+                    if fire_at < approve_now:
+                        continue
+                    key = (
+                        f"session:{s.id}:version:{s.schedule_revision}"
+                        f":reminder:{offset}:pref:{pref_row.effective_revision}"
+                    )
+                    try:
+                        async with db.begin_nested():
+                            db.add(
+                                Reminder(
+                                    user_id=owner,
+                                    session_id=s.id,
+                                    schedule_revision=s.schedule_revision,
+                                    kind="pre_session",
+                                    fire_at=fire_at,
+                                    dedupe_key=key,
+                                    delivery_state="scheduled",
+                                )
+                            )
+                            await db.flush()
+                    except IntegrityError:
+                        pass
+
     setting_reqs = (
         await db.scalars(
             select(SettingChangeRequest).where(
@@ -5074,12 +5965,19 @@ async def approve_proposal(
             )
         )
     ).all()
+    linked_sugg_ids: set[UUID] = set()
     for s_req in setting_reqs:
         s_req.application_state = "applied"
         if pref_row is not None:
             s_req.effective_revision = pref_row.effective_revision
         s_req.requested_revision = None
         if isinstance(s_req.requested_changes, dict):
+            raw_sid = s_req.requested_changes.get("suggestion_id")
+            if raw_sid:
+                try:
+                    linked_sugg_ids.add(UUID(str(raw_sid)))
+                except ValueError:
+                    pass
             req_avail = s_req.requested_changes.get("availability")
             req_task_id = s_req.requested_changes.get("target_task_id")
             if req_avail is not None and req_task_id:
@@ -5089,6 +5987,7 @@ async def approve_proposal(
                         select(TaskRow).where(
                             TaskRow.id == t_uuid,
                             TaskRow.user_id == owner,
+                            TaskRow.status != "cancelled",
                         )
                     )
                     if t_row is not None:
@@ -5102,6 +6001,46 @@ async def approve_proposal(
                 except ValueError:
                     pass
         s_req.updated_at = approve_now
+
+    meta_sid = _unpack_suggestion_id(
+        row.proposed_changes if isinstance(row.proposed_changes, dict) else None
+    )
+    if meta_sid:
+        try:
+            linked_sugg_ids.add(UUID(meta_sid))
+        except ValueError:
+            pass
+
+    for sugg_uuid in linked_sugg_ids:
+        sugg_row = await db.scalar(
+            select(AdaptationSuggestion).where(
+                AdaptationSuggestion.id == sugg_uuid,
+                AdaptationSuggestion.user_id == owner,
+            )
+        )
+        if sugg_row is not None and sugg_row.status == "pending":
+            sugg_row.status = "accepted"
+            sugg_row.revision += 1
+            sugg_row.updated_at = approve_now
+
+    if has_pending_buffer_change:
+        await sync_active_steps_buffer_multiplier(
+            db, owner=owner, new_buffer=eff_buf, now=approve_now
+        )
+        other_pending_stmt = select(AdaptationSuggestion).where(
+            AdaptationSuggestion.user_id == owner,
+            AdaptationSuggestion.kind == "buffer_multiplier",
+            AdaptationSuggestion.status == "pending",
+        )
+        if linked_sugg_ids:
+            other_pending_stmt = other_pending_stmt.where(
+                AdaptationSuggestion.id.notin_(linked_sugg_ids)
+            )
+        other_pending_suggs = (await db.scalars(other_pending_stmt)).all()
+        for other_sugg in other_pending_suggs:
+            other_sugg.status = "superseded"
+            other_sugg.revision += 1
+            other_sugg.updated_at = approve_now
 
     await db.flush()
 

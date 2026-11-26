@@ -63,6 +63,7 @@ class PlanCandidate(OwnedMixin, RecordMixin, Base):
     min_inter_session_gap_seconds: Mapped[int] = mapped_column(default=900)
     generation_tier: Mapped[str | None] = mapped_column(String(32))
     user_step_proposal: Mapped[str | None] = mapped_column(Text)
+    previous_snapshot: Mapped[dict[str, Any] | None] = mapped_column(JSON(none_as_null=True))
     # stale được so sánh với revision nguồn khi đọc, không lưu boolean dễ lỗi thời.
 
 

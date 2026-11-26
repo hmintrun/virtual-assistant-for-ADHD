@@ -28,7 +28,11 @@ void main() {
         'stale': false,
         'decomposition_state': partial ? 'partial' : 'complete',
         'unexpanded_scope': partial ? 'Viết báo cáo cuối kỳ' : null,
-        'feasibility': {'status': 'feasible', 'fully_scheduled': true},
+        'feasibility': {
+          'status': 'feasible',
+          'fully_scheduled': true,
+          'deficit_seconds': 0,
+        },
         'steps': [
           {'client_step_key': 'step-1', 'title': 'Thu thập dữ liệu'},
           if (partial) {'client_step_key': 'step-2', 'title': 'Phân tích'},
@@ -48,6 +52,7 @@ void main() {
         child: const MaterialApp(home: CandidateReviewScreen()),
       ));
 
+      expect(find.textContaining('Thiếu tối thiểu 0 phút'), findsNothing);
       if (partial) {
         expect(find.text('Chưa chia thành bước: Viết báo cáo cuối kỳ'),
             findsOneWidget);
