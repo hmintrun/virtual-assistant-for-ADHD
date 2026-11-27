@@ -21,7 +21,7 @@ import 'providers/theme_provider.dart';
 import 'screens/onboarding_screens.dart';
 import 'screens/splash_screen.dart';
 import 'screens/support_screens.dart';
-import 'screens/home_screen.dart';
+import 'screens/main_shell_screen.dart';
 import 'screens/calendar_screen.dart';
 import 'screens/google_calendar_screen.dart';
 import 'screens/calendar_connect_screen.dart';
@@ -30,14 +30,24 @@ import 'widgets/melbel_ui.dart';
 import 'screens/settings_screen.dart';
 import 'screens/focus_review_screens.dart';
 import 'services/alarm_service.dart';
+import 'services/audio_recorder_service.dart';
 import 'services/focus_native_controller.dart';
+import 'services/voice_playback_service.dart';
+import 'services/voice_service.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  PaintingBinding.instance.imageCache.maximumSize = 60;
+  PaintingBinding.instance.imageCache.maximumSizeBytes = 25 * 1024 * 1024;
   LicenseRegistry.addLicense(() async* {
     final license = await rootBundle.loadString('assets/fonts/OFL.txt');
     yield LicenseEntryWithLineBreaks(const ['Be Vietnam Pro'], license);
   });
+  if (!kIsWeb) {
+    unawaited(Uf1VoiceRecorderService.cleanupOrphanRecordings());
+    unawaited(AudioRecorderService.cleanupStaleRecordings());
+    unawaited(FileTtsAudioCache.pruneCache());
+  }
   if (!kIsWeb && defaultTargetPlatform == TargetPlatform.android) {
     await AlarmService.instance.init();
     await FocusNativeController.instance.init();
@@ -122,8 +132,10 @@ class _OwnerApp extends StatefulWidget {
 }
 
 class _OwnerAppState extends State<_OwnerApp> {
-  late final StreakProvider _streakProvider =
-      StreakProvider(ownerId: widget.session.ownerId);
+  late final StreakProvider _streakProvider = StreakProvider(
+    ownerId: widget.session.ownerId,
+    api: ApiClient(),
+  );
   late Future<FocusProvider> _focusProvider;
   bool _restoreStarted = false;
   FocusProvider? _initializedFocus;
@@ -131,13 +143,19 @@ class _OwnerAppState extends State<_OwnerApp> {
   @override
   void initState() {
     super.initState();
-    unawaited(_streakProvider.restore());
+    unawaited(
+      _streakProvider.restore().then((_) => _streakProvider.syncFromBackend()),
+    );
     _focusProvider = _createFocusProvider();
   }
 
   Future<FocusProvider> _createFocusProvider() async {
     void onFocusRecorded(int seconds) {
-      unawaited(_streakProvider.recordFocusActivity(seconds: seconds));
+      unawaited(
+        _streakProvider
+            .recordFocusActivity(seconds: seconds)
+            .then((_) => _streakProvider.syncFromBackend()),
+      );
     }
 
     if (kIsWeb) {
@@ -149,12 +167,14 @@ class _OwnerAppState extends State<_OwnerApp> {
           thoughtsKey: 'proplan.uf4.local_thoughts.v1.${widget.session.ownerId}',
         ),
         onFocusRecorded: onFocusRecorded,
+        onStreakInvalidated: () => unawaited(_streakProvider.syncFromBackend()),
       );
     }
     return FocusProvider.createOfflineAware(
       ownerId: widget.session.ownerId,
       apiClient: ApiClient(),
       onFocusRecorded: onFocusRecorded,
+      onStreakInvalidated: () => unawaited(_streakProvider.syncFromBackend()),
     );
   }
 
@@ -383,8 +403,8 @@ class _ProPlanAppState extends State<ProPlanApp> {
       themeAnimationDuration: Duration.zero,
       routes: signedIn
           ? {
-              '/login': (_) => const HomeScreen(),
-              '/home': (_) => const HomeScreen(),
+              '/login': (_) => const MainShellScreen(),
+              '/home': (_) => const MainShellScreen(),
               '/calendar': (_) => const CalendarScreen(),
               '/google-calendar': (_) =>
                   !kIsWeb && defaultTargetPlatform == TargetPlatform.android
@@ -405,6 +425,11 @@ class _ProPlanAppState extends State<ProPlanApp> {
           : (_) => MaterialPageRoute<void>(
                 builder: (_) => const LoginScreen(),
               ),
+      onUnknownRoute: signedIn
+          ? (_) => MaterialPageRoute<void>(
+                builder: (_) => const MainShellScreen(),
+              )
+          : null,
       builder: (context, child) => MediaQuery(
         data: MediaQuery.of(context).copyWith(alwaysUse24HourFormat: true),
         child: AnnotatedRegion<SystemUiOverlayStyle>(
@@ -477,7 +502,7 @@ class _ProPlanAppState extends State<ProPlanApp> {
       home: signedIn
           ? widget.onboardingRequired
               ? const SetupFlowScreen()
-              : const HomeScreen()
+              : const MainShellScreen()
           : const LoginScreen(),
     );
   }

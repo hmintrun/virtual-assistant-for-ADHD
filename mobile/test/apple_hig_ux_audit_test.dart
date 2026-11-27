@@ -77,16 +77,30 @@ void main() {
           greaterThanOrEqualTo(4.5),
           reason: '$name: onSurfaceVariant on mutedSurface');
 
+      expect(_contrastRatio(p.onSurface, p.elevatedSurface), greaterThanOrEqualTo(4.5),
+          reason: '$name: onSurface on elevatedSurface');
+      expect(
+          _contrastRatio(p.onSurfaceVariant, p.elevatedSurface),
+          greaterThanOrEqualTo(4.5),
+          reason: '$name: onSurfaceVariant on elevatedSurface');
+      expect(_contrastRatio(p.onSurface, p.selectedSurface), greaterThanOrEqualTo(4.5),
+          reason: '$name: onSurface on selectedSurface');
+      expect(_contrastRatio(p.onSageSoft, p.heroSurface), greaterThanOrEqualTo(4.5),
+          reason: '$name: onSageSoft on heroSurface');
+
       expect(_contrastRatio(p.onSage, p.sage), greaterThanOrEqualTo(4.5),
           reason: '$name: onSage on sage');
       expect(_contrastRatio(MelbelColors.kOnBrandHoney, p.amber),
           greaterThanOrEqualTo(7.0),
           reason: '$name: kOnBrandHoney on amber');
-      expect(_contrastRatio(MelbelColors.kOnError, p.softError),
+      expect(_contrastRatio(p.onError, p.softError),
           greaterThanOrEqualTo(4.5),
-          reason: '$name: kOnError on softError');
+          reason: '$name: onError on softError');
+      expect(_contrastRatio(p.onSuccess, p.success),
+          greaterThanOrEqualTo(4.5),
+          reason: '$name: onSuccess on success');
 
-      for (final bg in [p.background, p.surface, p.sageSoft]) {
+      for (final bg in [p.background, p.surface, p.sageSoft, p.selectedSurface]) {
         expect(_contrastRatio(p.accentInk, bg), greaterThanOrEqualTo(4.5),
             reason: '$name: accentInk vs $bg');
       }
@@ -98,6 +112,10 @@ void main() {
         expect(_contrastRatio(p.errorInk, bg), greaterThanOrEqualTo(4.5),
             reason: '$name: errorInk vs $bg');
       }
+      for (final bg in [p.background, p.surface, p.successSoft]) {
+        expect(_contrastRatio(p.successInk, bg), greaterThanOrEqualTo(4.5),
+            reason: '$name: successInk vs $bg');
+      }
 
       expect(_contrastRatio(p.onSageSoft, p.sageSoft), greaterThanOrEqualTo(4.5),
           reason: '$name: onSageSoft on sageSoft');
@@ -107,6 +125,9 @@ void main() {
       expect(_contrastRatio(p.onSoftErrorSoft, p.softErrorSoft),
           greaterThanOrEqualTo(4.5),
           reason: '$name: onSoftErrorSoft on softErrorSoft');
+      expect(_contrastRatio(p.onSuccessSoft, p.successSoft),
+          greaterThanOrEqualTo(4.5),
+          reason: '$name: onSuccessSoft on successSoft');
 
       expect(_contrastRatio(p.controlOutline, p.surface),
           greaterThanOrEqualTo(3.0),
@@ -239,7 +260,7 @@ void main() {
       ));
       await tester.pumpAndSettle();
 
-      final trigger = find.text('Sửa thời gian thực tế');
+      final trigger = find.byTooltip('Sửa thời gian thực tế');
       await tester.ensureVisible(trigger);
       await tester.tap(trigger);
       await tester.pumpAndSettle();
@@ -564,5 +585,26 @@ void main() {
       ),
     ));
     expect(currentBarScale(), closeTo(0.75, 0.001));
+  });
+
+  test('ADHD-I typography and 3-tier surface tokens match design system spec',
+      () {
+    for (final isDark in [false, true]) {
+      final theme = MelbelTheme.themeFor(isDark: isDark);
+      expect(theme.textTheme.bodyMedium?.height, 1.5);
+      expect(theme.textTheme.bodySmall?.height, 1.5);
+      expect(theme.textTheme.bodySmall?.fontWeight, FontWeight.w400);
+      expect(theme.textTheme.titleMedium?.fontWeight, FontWeight.w700);
+    }
+
+    expect(MelbelPalette.light.background, const Color(0xFFF8F5EE));
+    expect(MelbelPalette.light.surface, const Color(0xFFFFFDFA));
+    expect(MelbelPalette.light.heroSurface, const Color(0xFFEAE1FC));
+    expect(MelbelPalette.dark.background, const Color(0xFF131118));
+    expect(MelbelPalette.dark.surface, const Color(0xFF1E1A27));
+    expect(MelbelPalette.dark.elevatedSurface, const Color(0xFF2A2438));
+    expect(MelbelPalette.dark.heroSurface, const Color(0xFF2E2540));
+    expect(MelbelPalette.dark.sage, const Color(0xFF9F82E8));
+    expect(MelbelPalette.dark.onSage, const Color(0xFF131118));
   });
 }

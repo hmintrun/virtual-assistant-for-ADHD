@@ -1,14 +1,14 @@
-"""Kiểm thử Phase 3 STT (P3-C1, P3-C2, P3-C3 & RISK-03):
-- Mặc định VOICE_STT_PROVIDER='auto' -> build_voice_service trả 'gemini->groq' với GEMINI_STT_MODEL='gemini-3.5-flash-lite'.
-- Contextual biasing prompt (_DEFAULT_STT_PROMPT) chứa từ khóa ngày/giờ/ngoại lệ tiếng Việt.
-- Groq verbose_json: phát hiện hallucination & lọc im lặng âm học -> SttError(NO_SPEECH) / HTTP 422 NO_SPEECH_DETECTED,
-  KHÔNG kích hoạt Gemini fallback trong mode auto.
+"""Kiểm thử STT đa tầng & VoiceService (ElevenLabs Scribe v2 / Deepgram Nova-3 / Gemini 3.5 Transcribe):
+- Mặc định VOICE_STT_PROVIDER='auto' -> build_voice_service trả 'gemini->elevenlabs->deepgram' (hoặc rút gọn theo key).
+- Chuẩn hóa từ khóa gợi ý (_DEFAULT_STT_PROMPT) cho ngữ cảnh tiếng Việt ADHD.
+- VoiceService lọc hallucination & im lặng âm học (SttProviderDetails) -> SttError(NO_SPEECH) / HTTP 422 NO_SPEECH_DETECTED,
+  KHÔNG kích hoạt fallback khi nhánh chính xác nhận NO_SPEECH.
 - Câu hợp lệ không bị lọc nhầm (false positive).
 - Ngưỡng low_confidence (no_speech_prob > 0.7 hoặc avg_logprob < -1.0) -> HTTP 200 + low_confidence=True,
   bảo toàn qua cả in-memory _VOICE_IDEMPOTENCY_STORE hit và DB command_receipts hit.
-- Segment dạng dict & attribute-style với chỉ số sạch -> HTTP 200 + low_confidence=False.
-- Failover tự động Groq (RATE_LIMITED / TIMEOUT / PROVIDER_ERROR) -> Gemini -> HTTP 200 + low_confidence=False.
+- Failover tự động (RATE_LIMITED / TIMEOUT / PROVIDER_ERROR / PROVIDER_UNAVAILABLE) -> Gemini/nhánh kế tiếp 200 OK.
 - Tương thích ngược RISK-03: TranscriptionData.model_validate khi thiếu trường low_confidence.
+- Pure-Python ADTS (.aac -> .m4a) remuxer (_ensure_container_compatible_audio) cho DeepgramSttProvider.
 """
 
 from __future__ import annotations
@@ -35,42 +35,99 @@ from app.schemas.voice import TranscriptionData
 from app.services import command_service
 from app.services.voice_service import (
     _DEFAULT_STT_PROMPT,
+    DeepgramSttProvider,
+    ElevenLabsSttProvider,
     FallbackSttProvider,
     GeminiSttProvider,
-    GroqWhisperSttProvider,
     SttError,
     SttErrorCode,
+    SttProviderDetails,
     VoiceService,
+    _ensure_container_compatible_audio,
+    _is_adts_aac,
     _is_whisper_hallucination,
+    _remux_adts_aac_to_m4a,
     build_voice_service,
     get_voice_service,
 )
 
 
 class _StatusCodeError(Exception):
-    """Lỗi giả lập từ SDK Groq mang thuộc tính status_code."""
+    """Lỗi giả lập từ provider mang thuộc tính status_code."""
 
     def __init__(self, status_code: int, message: str = "provider error") -> None:
         super().__init__(message)
         self.status_code = status_code
 
 
+class _MockDetailsPrimaryProvider:
+    """Adapter kiểm thử VoiceService đọc payload giả lập (dict / object) sang SttProviderDetails."""
+
+    name = "elevenlabs"
+
+    def __init__(self, create_mock: AsyncMock) -> None:
+        self._create_mock = create_mock
+
+    async def transcribe_verbose(
+        self, audio: bytes, mime_type: str, *, contextual_hints: list[str] | None = None
+    ) -> SttProviderDetails:
+        _ = (audio, mime_type, contextual_hints)
+        try:
+            payload = await self._create_mock()
+        except Exception as exc:
+            if isinstance(exc, SttError):
+                raise
+            code = getattr(exc, "status_code", None)
+            if code in (401, 403):
+                raise SttError(SttErrorCode.PROVIDER_UNAVAILABLE, f"http_{code}") from exc
+            if code == 429:
+                raise SttError(SttErrorCode.RATE_LIMITED, "http_429") from exc
+            if isinstance(code, int) and code >= 400:
+                raise SttError(SttErrorCode.PROVIDER_ERROR, f"http_{code}") from exc
+            if isinstance(exc, TimeoutError):
+                raise SttError(SttErrorCode.TIMEOUT, "timeout") from exc
+            raise SttError(SttErrorCode.PROVIDER_ERROR, type(exc).__name__) from exc
+
+        segs = (
+            payload.get("segments")
+            if isinstance(payload, dict)
+            else getattr(payload, "segments", None)
+        )
+        raw_text = payload.get("text") if isinstance(payload, dict) else getattr(payload, "text", None)
+        text = str(raw_text or "").strip()
+        if isinstance(segs, (list, tuple)) and segs:
+            parsed_segs: list[tuple[float | None, float | None]] = []
+            for seg in segs:
+                nsp = seg.get("no_speech_prob") if isinstance(seg, dict) else getattr(seg, "no_speech_prob", None)
+                alp = seg.get("avg_logprob") if isinstance(seg, dict) else getattr(seg, "avg_logprob", None)
+                parsed_segs.append((nsp, alp))
+            non_silent = [
+                (nsp, alp)
+                for nsp, alp in parsed_segs
+                if not (nsp is not None and alp is not None and nsp > 0.85 and alp < -1.2)
+            ]
+            all_silent = len(non_silent) == 0
+            target = parsed_segs if all_silent else non_silent
+            nsps = [nsp for nsp, _ in target if nsp is not None]
+            alps = [alp for _, alp in target if alp is not None]
+            return SttProviderDetails(
+                text=text,
+                no_speech_prob=max(nsps) if nsps else None,
+                avg_logprob=min(alps) if alps else None,
+                all_segments_silent=all_silent,
+            )
+        return SttProviderDetails(text=text)
+
+    async def transcribe(self, audio: bytes, mime_type: str, *, contextual_hints: list[str] | None = None) -> str:
+        return (await self.transcribe_verbose(audio, mime_type, contextual_hints=contextual_hints)).text
+
+
 def _build_auto_voice_service(
-    groq_create_mock: AsyncMock,
+    primary_create_mock: AsyncMock,
     gemini_transcribe_mock: AsyncMock | None = None,
 ) -> tuple[VoiceService, AsyncMock]:
-    """Tạo VoiceService chế độ auto (Groq -> Gemini) dùng mock ở lớp SDK/provider."""
-    groq_provider = GroqWhisperSttProvider(
-        api_key="test-groq-key",
-        model="whisper-large-v3-turbo",
-        language_code="vi-VN",
-        timeout_seconds=5.0,
-    )
-    groq_provider._client = SimpleNamespace(
-        audio=SimpleNamespace(
-            transcriptions=SimpleNamespace(create=groq_create_mock),
-        )
-    )
+    """Tạo VoiceService kiểm thử luồng details/confidence/failover với mock provider."""
+    primary_provider = _MockDetailsPrimaryProvider(primary_create_mock)
     gemini_provider = GeminiSttProvider(
         api_key="test-gemini-key",
         model="gemini-3.5-transcribe",
@@ -80,7 +137,7 @@ def _build_auto_voice_service(
     gemini_mock = gemini_transcribe_mock or AsyncMock(return_value="Fallback Gemini thành công")
     gemini_provider.transcribe = gemini_mock  # type: ignore[method-assign]
 
-    fallback = FallbackSttProvider(primary=groq_provider, fallback=gemini_provider)
+    fallback = FallbackSttProvider(primary=primary_provider, fallback=gemini_provider)
     service = VoiceService(
         fallback,
         timeout_seconds=5.0,
@@ -150,18 +207,21 @@ async def voice_api_client():
 
 
 def test_default_settings_auto_provider_and_vietnamese_prompt_keywords() -> None:
-    """Kiểm tra mặc định VOICE_STT_PROVIDER='auto', provider_name='gemini->groq' và từ khóa prompt."""
+    """Kiểm tra mặc định VOICE_STT_PROVIDER='auto', chuỗi 3 tầng 'gemini->elevenlabs->deepgram' và từ khóa prompt."""
     cfg = Settings(_env_file=None)
     assert cfg.VOICE_STT_PROVIDER == "auto"
-    assert cfg.GEMINI_STT_MODEL == "gemini-3.5-flash-lite"
+    assert cfg.GEMINI_STT_MODEL == "gemini-3.5-transcribe"
+    assert cfg.VOICE_STT_PRIMARY_TIMEOUT_SECONDS == 7.0
+    assert cfg.VOICE_STT_UF5_PREFER_ELEVENLABS is True
 
     configured = Settings(
         _env_file=None,
         GEMINI_API_KEY="test-gemini-key",
-        GROQ_API_KEY="test-groq-key",
+        ELEVENLABS_API_KEY="test-elevenlabs-key",
+        DEEPGRAM_API_KEY="test-deepgram-key",
     )
     service = build_voice_service(configured)
-    assert service.provider_name == "gemini->groq"
+    assert service.provider_name == "gemini->elevenlabs->deepgram"
 
     expected_keywords = (
         "Thứ 2",
@@ -183,33 +243,37 @@ def test_default_settings_auto_provider_and_vietnamese_prompt_keywords() -> None
 
 
 @pytest.mark.asyncio
-async def test_groq_verbose_json_sends_prompt_and_temperature_zero() -> None:
-    """GroqWhisperSttProvider.transcribe_verbose gửi response_format='verbose_json', temperature=0.0 và prompt."""
-    groq_create = AsyncMock(
-        return_value={
-            "text": "Họp nhóm thứ 5 lúc 19h30",
-            "segments": [{"no_speech_prob": 0.05, "avg_logprob": -0.2}],
-        }
-    )
-    service, gemini_mock = _build_auto_voice_service(groq_create)
+async def test_elevenlabs_multipart_sends_scribe_v2_vi_params_cleanly() -> None:
+    """ElevenLabsSttProvider gửi model_id='scribe_v2', language_code='vi', tag_audio_events='false', diarize='false'."""
+    captured_requests: list[httpx.Request] = []
 
-    result = await service.transcribe(
-        b"RIFF-audio-bytes",
-        content_type="audio/wav",
-        filename="sample.wav",
-    )
+    def _handler(request: httpx.Request) -> httpx.Response:
+        captured_requests.append(request)
+        return httpx.Response(200, json={"text": "Họp nhóm thứ 5 lúc 19h30"})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(_handler)) as http_client:
+        el = ElevenLabsSttProvider(
+            api_key="el_test_key",
+            model="scribe_v2",
+            language_code="vi-VN",
+            http_client=http_client,
+        )
+        service = VoiceService(el, timeout_seconds=5.0, max_audio_bytes=1024 * 1024)
+        result = await service.transcribe(
+            b"RIFF-audio-bytes",
+            content_type="audio/wav",
+            filename="sample.wav",
+        )
 
     assert result.text == "Họp nhóm thứ 5 lúc 19h30"
-    assert result.provider == "groq"
+    assert result.provider == "elevenlabs"
     assert result.low_confidence is False
-    gemini_mock.assert_not_awaited()
-
-    groq_create.assert_awaited_once()
-    kwargs = groq_create.await_args.kwargs
-    assert kwargs["response_format"] == "verbose_json"
-    assert kwargs["temperature"] == 0.0
-    assert kwargs["language"] == "vi"
-    assert kwargs["prompt"] == _DEFAULT_STT_PROMPT
+    assert len(captured_requests) == 1
+    body_bytes = captured_requests[0].content
+    assert b"scribe_v2" in body_bytes
+    assert b'"language_code"\r\n\r\nvi' in body_bytes
+    assert b'"tag_audio_events"\r\n\r\nfalse' in body_bytes
+    assert b'"diarize"\r\n\r\nfalse' in body_bytes
 
 
 @pytest.mark.parametrize(
@@ -225,20 +289,20 @@ async def test_groq_verbose_json_sends_prompt_and_temperature_zero() -> None:
     ],
 )
 @pytest.mark.asyncio
-async def test_groq_hallucinations_raise_no_speech_and_return_422_without_gemini_fallback(
+async def test_details_hallucinations_raise_no_speech_and_return_422_without_gemini_fallback(
     voice_api_client, hallucinated_text: str
 ) -> None:
     """Các câu ảo giác Whisper -> SttError(NO_SPEECH) và HTTP 422 NO_SPEECH_DETECTED, không gọi Gemini."""
     assert _is_whisper_hallucination(hallucinated_text) is True
     client, _, _ = voice_api_client
 
-    groq_create = AsyncMock(
+    primary_create = AsyncMock(
         return_value={
             "text": hallucinated_text,
             "segments": [{"no_speech_prob": 0.1, "avg_logprob": -0.25}],
         }
     )
-    service, gemini_mock = _build_auto_voice_service(groq_create)
+    service, gemini_mock = _build_auto_voice_service(primary_create)
 
     with pytest.raises(SttError) as exc_info:
         await service.transcribe(b"dummy-audio", content_type="audio/wav", filename="h.wav")
@@ -276,13 +340,13 @@ async def test_non_hallucination_sentences_pass_through(
     assert _is_whisper_hallucination(valid_text) is False
     client, _, _ = voice_api_client
 
-    groq_create = AsyncMock(
+    primary_create = AsyncMock(
         return_value={
             "text": valid_text,
             "segments": [{"no_speech_prob": 0.12, "avg_logprob": -0.3}],
         }
     )
-    service, gemini_mock = _build_auto_voice_service(groq_create)
+    service, gemini_mock = _build_auto_voice_service(primary_create)
 
     with patch.object(voice_router_mod, "get_voice_service", return_value=service):
         resp = await client.post(
@@ -300,19 +364,19 @@ async def test_non_hallucination_sentences_pass_through(
 
 
 @pytest.mark.asyncio
-async def test_groq_acoustic_rejection_returns_422_without_gemini_fallback(
+async def test_details_acoustic_rejection_returns_422_without_gemini_fallback(
     voice_api_client,
 ) -> None:
     """no_speech_prob=0.92 & avg_logprob=-1.4 -> HTTP 422 NO_SPEECH_DETECTED, không fallback Gemini."""
     client, _, _ = voice_api_client
 
-    groq_create = AsyncMock(
+    primary_create = AsyncMock(
         return_value={
             "text": "alo",
             "segments": [{"no_speech_prob": 0.92, "avg_logprob": -1.4}],
         }
     )
-    service, gemini_mock = _build_auto_voice_service(groq_create)
+    service, gemini_mock = _build_auto_voice_service(primary_create)
 
     with pytest.raises(SttError) as exc_info:
         await service.transcribe(b"RIFF-noise", content_type="audio/wav", filename="noise.wav")
@@ -341,19 +405,19 @@ async def test_groq_acoustic_rejection_returns_422_without_gemini_fallback(
     ],
 )
 @pytest.mark.asyncio
-async def test_groq_low_confidence_and_idempotent_replay_preserves_flag(
+async def test_details_low_confidence_and_idempotent_replay_preserves_flag(
     voice_api_client, no_speech_prob: float, avg_logprob: float
 ) -> None:
     """low_confidence=True trả 200 OK và giữ nguyên qua cả in-memory cache lẫn DB command_receipts."""
     client, factory, user_id = voice_api_client
 
-    groq_create = AsyncMock(
+    primary_create = AsyncMock(
         return_value={
             "text": "Làm đề cương khóa luận trước tối thứ 6",
             "segments": [{"no_speech_prob": no_speech_prob, "avg_logprob": avg_logprob}],
         }
     )
-    service, gemini_mock = _build_auto_voice_service(groq_create)
+    service, gemini_mock = _build_auto_voice_service(primary_create)
 
     audio_bytes = b"RIFF-low-conf-audio"
     key_mem = f"low-conf-mem-{uuid4()}"
@@ -369,7 +433,7 @@ async def test_groq_low_confidence_and_idempotent_replay_preserves_flag(
         data1 = resp1.json()["data"]
         assert data1["text"] == "Làm đề cương khóa luận trước tối thứ 6"
         assert data1["low_confidence"] is True
-        assert groq_create.await_count == 1
+        assert primary_create.await_count == 1
 
         # Xóa DB CommandReceipt nhưng giữ _VOICE_IDEMPOTENCY_STORE để kiểm tra nhánh in-memory hit.
         async with factory() as db:
@@ -386,7 +450,7 @@ async def test_groq_low_confidence_and_idempotent_replay_preserves_flag(
         assert resp_mem_replay.status_code == 200, resp_mem_replay.text
         assert resp_mem_replay.json()["data"] == data1
         assert resp_mem_replay.json()["data"]["low_confidence"] is True
-        assert groq_create.await_count == 1
+        assert primary_create.await_count == 1
 
         # Bây giờ gọi với key mới để ghi DB CommandReceipt, sau đó xóa RAM cache -> kiểm tra DB hit.
         key_db = f"low-conf-db-{uuid4()}"
@@ -398,7 +462,7 @@ async def test_groq_low_confidence_and_idempotent_replay_preserves_flag(
         )
         assert resp2.status_code == 200, resp2.text
         assert resp2.json()["data"]["low_confidence"] is True
-        assert groq_create.await_count == 2
+        assert primary_create.await_count == 2
 
         voice_router_mod._VOICE_IDEMPOTENCY_STORE.clear()
         resp_db_replay = await client.post(
@@ -410,14 +474,14 @@ async def test_groq_low_confidence_and_idempotent_replay_preserves_flag(
         assert resp_db_replay.status_code == 200, resp_db_replay.text
         assert resp_db_replay.json()["data"] == resp2.json()["data"]
         assert resp_db_replay.json()["data"]["low_confidence"] is True
-        assert groq_create.await_count == 2
+        assert primary_create.await_count == 2
 
     gemini_mock.assert_not_awaited()
 
 
 @pytest.mark.parametrize("segment_style", ["dict", "attr"])
 @pytest.mark.asyncio
-async def test_groq_clean_metrics_dict_and_attr_segments_low_confidence_false(
+async def test_details_clean_metrics_dict_and_attr_segments_low_confidence_false(
     voice_api_client, segment_style: str
 ) -> None:
     """Segment dạng dict lẫn attribute-style với chỉ số sạch -> 200 OK và low_confidence=False."""
@@ -440,8 +504,8 @@ async def test_groq_clean_metrics_dict_and_attr_segments_low_confidence_false(
             ],
         )
 
-    groq_create = AsyncMock(return_value=payload)
-    service, gemini_mock = _build_auto_voice_service(groq_create)
+    primary_create = AsyncMock(return_value=payload)
+    service, gemini_mock = _build_auto_voice_service(primary_create)
 
     with patch.object(voice_router_mod, "get_voice_service", return_value=service):
         resp = await client.post(
@@ -459,28 +523,28 @@ async def test_groq_clean_metrics_dict_and_attr_segments_low_confidence_false(
 
 
 @pytest.mark.parametrize(
-    "groq_exception",
+    "provider_exception",
     [
-        SttError(SttErrorCode.PROVIDER_UNAVAILABLE, "missing_groq_api_key"),
+        SttError(SttErrorCode.PROVIDER_UNAVAILABLE, "missing_api_key"),
         _StatusCodeError(401, "unauthorized"),
         SttError(SttErrorCode.RATE_LIMITED, "http_429"),
         _StatusCodeError(429, "rate_limited"),
         SttError(SttErrorCode.TIMEOUT, "ReadTimeout"),
-        TimeoutError("groq timeout"),
+        TimeoutError("provider timeout"),
         SttError(SttErrorCode.PROVIDER_ERROR, "http_503"),
         _StatusCodeError(503, "upstream_503"),
     ],
 )
 @pytest.mark.asyncio
-async def test_auto_failover_groq_retryable_errors_to_gemini(
-    voice_api_client, groq_exception: Exception
+async def test_auto_failover_primary_retryable_errors_to_gemini(
+    voice_api_client, provider_exception: Exception
 ) -> None:
-    """Khi Groq gặp PROVIDER_UNAVAILABLE / RATE_LIMITED / TIMEOUT / PROVIDER_ERROR, auto failover sang Gemini 200 OK."""
+    """Khi nhánh chính gặp PROVIDER_UNAVAILABLE / RATE_LIMITED / TIMEOUT / PROVIDER_ERROR, auto failover sang Gemini 200 OK."""
     client, _, _ = voice_api_client
 
-    groq_create = AsyncMock(side_effect=groq_exception)
+    primary_create = AsyncMock(side_effect=provider_exception)
     gemini_mock = AsyncMock(return_value="Soạn slide báo cáo trước thứ 6 lúc 20h")
-    service, _ = _build_auto_voice_service(groq_create, gemini_transcribe_mock=gemini_mock)
+    service, _ = _build_auto_voice_service(primary_create, gemini_transcribe_mock=gemini_mock)
 
     with patch.object(voice_router_mod, "get_voice_service", return_value=service):
         resp = await client.post(
@@ -494,7 +558,7 @@ async def test_auto_failover_groq_retryable_errors_to_gemini(
     data = resp.json()["data"]
     assert data["text"] == "Soạn slide báo cáo trước thứ 6 lúc 20h"
     assert data["low_confidence"] is False
-    groq_create.assert_awaited_once()
+    primary_create.assert_awaited_once()
     gemini_mock.assert_awaited_once()
 
 
@@ -536,7 +600,7 @@ async def test_auto_failover_groq_retryable_errors_to_gemini(
     ],
 )
 @pytest.mark.asyncio
-async def test_groq_multisegment_silence_and_confidence_aggregation(
+async def test_details_multisegment_silence_and_confidence_aggregation(
     voice_api_client,
     segments: list[dict[str, float]],
     expected_status: int,
@@ -544,13 +608,13 @@ async def test_groq_multisegment_silence_and_confidence_aggregation(
 ) -> None:
     """Đánh giá im lặng theo từng segment và tính low_confidence trên các segment không im lặng."""
     client, _, _ = voice_api_client
-    groq_create = AsyncMock(
+    primary_create = AsyncMock(
         return_value={
             "text": "Làm báo cáo môn học máy trước thứ 6",
             "segments": segments,
         }
     )
-    service, gemini_mock = _build_auto_voice_service(groq_create)
+    service, gemini_mock = _build_auto_voice_service(primary_create)
 
     with patch.object(voice_router_mod, "get_voice_service", return_value=service):
         resp = await client.post(
@@ -572,20 +636,20 @@ async def test_groq_multisegment_silence_and_confidence_aggregation(
 
 @pytest.mark.parametrize("punct_text", ["...", ", . ! ?", "…"])
 @pytest.mark.asyncio
-async def test_groq_punctuation_only_artifact_returns_422_without_gemini_fallback(
+async def test_details_punctuation_only_artifact_returns_422_without_gemini_fallback(
     voice_api_client, punct_text: str
 ) -> None:
     """Chuỗi chỉ có dấu câu (vd '...') -> SttError(NO_SPEECH) và HTTP 422 NO_SPEECH_DETECTED, không fallback Gemini."""
     assert _is_whisper_hallucination(punct_text) is True
     client, _, _ = voice_api_client
 
-    groq_create = AsyncMock(
+    primary_create = AsyncMock(
         return_value={
             "text": punct_text,
             "segments": [{"no_speech_prob": 0.1, "avg_logprob": -0.2}],
         }
     )
-    service, gemini_mock = _build_auto_voice_service(groq_create)
+    service, gemini_mock = _build_auto_voice_service(primary_create)
 
     with pytest.raises(SttError) as exc_info:
         await service.transcribe(b"RIFF-punct", content_type="audio/wav", filename="punct.wav")
@@ -667,3 +731,169 @@ async def test_risk03_legacy_receipt_without_low_confidence_backward_compatible(
         "thought_id": None,
         "low_confidence": False,
     }
+
+
+# ==============================================================================
+# Trụ cột 1a — Pure-Python ADTS (.aac -> .m4a) Remuxer
+# ==============================================================================
+
+
+def _build_synthetic_adts_stream(
+    *,
+    profile_minus_1: int = 1,
+    freq_idx: int = 4,
+    chan_cfg: int = 1,
+    payloads: tuple[bytes, ...] = (b"\x21\x10\x04\x60\x8c\x1c", b"\x21\x10\x04\x60\x8c\x1d"),
+    include_id3v2: bool = False,
+) -> bytes:
+    """Tạo luồng ADTS AAC hợp lệ thuần byte cho unit test (không phụ thuộc file ngoài)."""
+    frames = bytearray()
+    for raw_frame in payloads:
+        frame_len = 7 + len(raw_frame)
+        header = bytearray(7)
+        header[0] = 0xFF
+        header[1] = 0xF1  # MPEG-4 ADTS, protection_absent=1
+        header[2] = ((profile_minus_1 & 0x03) << 6) | ((freq_idx & 0x0F) << 2) | ((chan_cfg >> 2) & 0x01)
+        header[3] = ((chan_cfg & 0x03) << 6) | ((frame_len >> 11) & 0x03)
+        header[4] = (frame_len >> 3) & 0xFF
+        header[5] = ((frame_len & 0x07) << 5) | 0x1F
+        header[6] = 0xFC
+        frames.extend(header)
+        frames.extend(raw_frame)
+
+    if include_id3v2:
+        tag_body = b"TIT2\x00\x00\x00\x04\x00\x00\x00abc"
+        size = len(tag_body)
+        syncsafe = bytes(
+            [
+                (size >> 21) & 0x7F,
+                (size >> 14) & 0x7F,
+                (size >> 7) & 0x7F,
+                size & 0x7F,
+            ]
+        )
+        return b"ID3\x03\x00\x00" + syncsafe + tag_body + bytes(frames)
+    return bytes(frames)
+
+
+def _find_mp4_box(data: bytes, target_type: bytes) -> tuple[int, int] | None:
+    """Tìm atom ISO BMFF cấp trên trong buffer, trả về (start_offset, box_size)."""
+    pos = 0
+    while pos + 8 <= len(data):
+        size = int.from_bytes(data[pos : pos + 4], "big")
+        box_type = data[pos + 4 : pos + 8]
+        if size < 8:
+            break
+        if box_type == target_type:
+            return pos, size
+        pos += size
+    return None
+
+
+def test_adts_aac_detection_and_pure_python_m4a_remuxer() -> None:
+    aac_44k = _build_synthetic_adts_stream(freq_idx=4, chan_cfg=1, include_id3v2=True)
+    aac_16k = _build_synthetic_adts_stream(freq_idx=8, chan_cfg=1, include_id3v2=False)
+
+    assert _is_adts_aac(aac_44k) is True
+    assert _is_adts_aac(aac_16k) is True
+    assert _is_adts_aac(b"RIFF\x24\x00\x00\x00WAVE") is False
+
+    for freq_idx, raw_aac, expected_asc in (
+        (4, aac_44k, bytes([0x12, 0x08])),  # AAC-LC (2), 44100Hz (4), mono (1)
+        (8, aac_16k, bytes([0x14, 0x08])),  # AAC-LC (2), 16000Hz (8), mono (1)
+    ):
+        remuxed, mime = _ensure_container_compatible_audio(raw_aac, "audio/aac")
+        assert mime == "audio/m4a"
+        assert remuxed[:8] == int.to_bytes(_find_mp4_box(remuxed, b"ftyp")[1], 4, "big") + b"ftyp"
+        assert b"M4A " in remuxed[:24]
+        for box_name in (b"moov", b"mvhd", b"trak", b"mdia", b"hdlr", b"soun", b"stsd", b"mp4a", b"esds", b"stco", b"mdat"):
+            assert box_name in remuxed, (freq_idx, box_name)
+        assert expected_asc in remuxed
+
+        # Kiểm tra offset stco trỏ chính xác vào đầu payload của mdat
+        mdat_pos, _ = _find_mp4_box(remuxed, b"mdat")
+        stco_idx = remuxed.index(b"stco")
+        stco_offset = int.from_bytes(remuxed[stco_idx + 12 : stco_idx + 16], "big")
+        assert stco_offset == mdat_pos + 8
+
+        # Kiểm tra không còn header ADTS lọt vào bên trong payload mdat
+        mdat_payload = remuxed[stco_offset:]
+        assert mdat_payload == b"\x21\x10\x04\x60\x8c\x1c\x21\x10\x04\x60\x8c\x1d"
+
+
+def test_adts_remuxer_high_sample_rates_96khz_88_2khz_and_7_1_channel_mapping() -> None:
+    # freq_idx=0 -> 96000Hz, chan_cfg=7 -> 7.1 (8 channels)
+    aac_96k_7_1 = _build_synthetic_adts_stream(freq_idx=0, chan_cfg=7)
+    # freq_idx=1 -> 88200Hz, chan_cfg=0 -> fallback 2 channels in mp4a
+    aac_88k_cfg0 = _build_synthetic_adts_stream(freq_idx=1, chan_cfg=0)
+
+    for raw_aac, expected_sr, expected_ch, expected_asc in (
+        (aac_96k_7_1, 96000, 8, bytes([0x10, 0x38])),
+        (aac_88k_cfg0, 88200, 2, bytes([0x10, 0x80])),
+    ):
+        remuxed, mime = _ensure_container_compatible_audio(raw_aac, "audio/aac")
+        assert mime == "audio/m4a"
+        assert expected_asc in remuxed
+
+        # mp4a: offset +8 (header) +6 (reserved) +2 (dref_idx) +8 (reserved) = +24 -> channels (uint16)
+        # offset +32 -> samplerate 16.16 fixed-point capped at 65535 << 16
+        mp4a_idx = remuxed.index(b"mp4a") - 4
+        channels_written = int.from_bytes(remuxed[mp4a_idx + 24 : mp4a_idx + 26], "big")
+        sr_fixed_written = int.from_bytes(remuxed[mp4a_idx + 32 : mp4a_idx + 36], "big")
+        assert channels_written == expected_ch
+        assert sr_fixed_written == (65535 << 16)
+
+        # mdhd (FullBox v0): box_start + 12 (header+ver/flags) + 8 (ctime+mtime) = +20 -> timescale (uint32)
+        mdhd_idx = remuxed.index(b"mdhd") - 4
+        mdhd_timescale = int.from_bytes(remuxed[mdhd_idx + 20 : mdhd_idx + 24], "big")
+        assert mdhd_timescale == expected_sr
+
+
+def test_adts_remuxer_malformed_bytes_fallback_safely() -> None:
+    malformed = b"NOT-VALID-ADTS-BYTES"
+    out_bytes, out_mime = _ensure_container_compatible_audio(malformed, "audio/aac")
+    assert out_bytes == malformed
+    assert out_mime == "audio/aac"
+
+    with pytest.raises(ValueError):
+        _remux_adts_aac_to_m4a(b"\xFF\xF1\x50")
+
+
+@pytest.mark.asyncio
+async def test_deepgram_transcribe_verbose_remuxes_adts_aac_and_safely_passes_malformed() -> None:
+    observed_requests: list[tuple[str | None, bytes]] = []
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        observed_requests.append((request.headers.get("content-type"), request.content))
+        return httpx.Response(
+            200,
+            json={
+                "results": {
+                    "channels": [
+                        {"alternatives": [{"transcript": "Họp nhóm lúc 19:00 tối mai", "confidence": 0.94}]}
+                    ]
+                }
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(_handler)) as http_client:
+        provider = DeepgramSttProvider(
+            api_key="dg_test",
+            model="nova-3",
+            language_code="vi-VN",
+            timeout_seconds=5.0,
+            http_client=http_client,
+        )
+
+        adts_audio = _build_synthetic_adts_stream(freq_idx=8, chan_cfg=1)
+        res_ok = await provider.transcribe_verbose(adts_audio, "audio/aac")
+        assert res_ok.text == "Họp nhóm lúc 19:00 tối mai"
+        assert res_ok.low_confidence is False
+        assert observed_requests[0][0] == "audio/mp4"
+        assert _find_mp4_box(observed_requests[0][1], b"ftyp") is not None
+
+        # Nếu byte audio giả/lỗi không đúng ADTS -> không crash, truyền nguyên gốc
+        bad_audio = b"synthetic-invalid-aac-bytes"
+        await provider.transcribe_verbose(bad_audio, "audio/aac")
+        assert observed_requests[1][0] == "audio/aac"
+        assert observed_requests[1][1] == bad_audio

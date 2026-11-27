@@ -84,7 +84,9 @@ class ApiClient {
     final body = error.response?.data;
     if (body is! Map) return false;
     final details = body['error'];
-    return details is Map && details['code'] == 'CALENDAR_AUTH_REQUIRED';
+    return details is Map &&
+        (details['code'] == 'CALENDAR_AUTH_REQUIRED' ||
+            details['next_action'] == 'reconnect_google_calendar');
   }
 
   static const _configuredBaseUrl = String.fromEnvironment('API_BASE_URL');
@@ -242,6 +244,7 @@ class ApiClient {
   Future<Map<String, dynamic>> deleteData(
     String path, {
     Object? data,
+    Map<String, dynamic>? queryParameters,
     String? idempotencyKey,
     bool idempotent = false,
   }) async {
@@ -249,6 +252,7 @@ class ApiClient {
       final response = await dio.delete<Map<String, dynamic>>(
         path,
         data: data,
+        queryParameters: queryParameters,
         options: Options(
           headers: idempotent
               ? {
@@ -298,6 +302,7 @@ class ApiException implements Exception {
     this.fieldErrors = const [],
     this.currentRevisions = const {},
     this.nextAction,
+    this.retryable = false,
   });
 
   final String message;
@@ -306,6 +311,29 @@ class ApiException implements Exception {
   final List<Map<String, dynamic>> fieldErrors;
   final Map<String, int> currentRevisions;
   final String? nextAction;
+  final bool retryable;
+
+  bool get isRevisionConflict => code == 'REVISION_CONFLICT';
+  bool get requiresProposalRebuild =>
+      code == 'SOURCE_CHANGED' ||
+      code == 'PREVIEW_STALE' ||
+      nextAction == 'rebuild_and_review';
+  bool get isActiveRunExists =>
+      code == 'ACTIVE_RUN_EXISTS' || nextAction == 'finish_active_run';
+  bool get isSessionStillRunning =>
+      code == 'SESSION_STILL_RUNNING' || nextAction == 'wait_for_session_end';
+  bool get isThoughtAlreadyLinked =>
+      code == 'THOUGHT_ALREADY_LINKED' || nextAction == 'open_linked_draft';
+  bool get isConfirmedDraftTransition =>
+      code == 'INVALID_STATE_TRANSITION' &&
+      (nextAction == 'review_task' || nextAction == 'reload_and_review');
+  bool get isStartRequiresReplan => code == 'START_REQUIRES_REPLAN';
+  bool get isJobCancelled => code == 'JOB_CANCELLED';
+  bool get requiresCalendarReconnect =>
+      code == 'CALENDAR_DISCONNECTED' ||
+      code == 'CALENDAR_AUTH_REQUIRED' ||
+      nextAction == 'reconnect_google_calendar';
+  bool get isNoSpeechDetected => code == 'NO_SPEECH_DETECTED';
 
   factory ApiException.fromDio(DioException error) {
     final body = error.response?.data;
@@ -341,6 +369,7 @@ class ApiException implements Exception {
         detail?['current_revisions'] as Map<String, dynamic>? ?? const {},
       ),
       nextAction: detail?['next_action'] as String?,
+      retryable: detail?['retryable'] == true,
     );
   }
 

@@ -7,6 +7,7 @@ from uuid import uuid4
 
 import httpx
 import pytest
+import sqlalchemy as sa
 from alembic.autogenerate import compare_metadata
 from alembic.migration import MigrationContext
 from pydantic import BaseModel
@@ -33,6 +34,7 @@ from app.models import (
     User,
     UserPreference,
 )
+from app.models.base import UTCDateTime
 from app.repositories import device_repository, run_repository, thought_repository
 from app.services import command_service, draft_service
 from tests.test_models import make_plan
@@ -611,15 +613,169 @@ async def test_analysis_blocks_live_source_before_provider(storage, http_client,
 @pytest.mark.asyncio
 async def test_device_migration_preserves_populated_database(sqlite_migration):
     url, alembic = sqlite_migration
-    # Fixture ORM hiện dùng C01; kiểm thêm DeviceState trên DB kế hoạch đã có dữ liệu.
+    # Chèn dữ liệu bằng SQLAlchemy Core khớp đúng schema 20261103_01 trước khi nâng lên head.
     alembic("upgrade", "20261103_01")
     engine = make_engine(url)
     try:
+        def _seed_20261103_plan(sync_db):
+            sync_conn = sync_db.connection()
+            meta = sa.MetaData()
+            users_t = sa.Table(
+                "users",
+                meta,
+                sa.Column("id", sa.Uuid(), primary_key=True),
+                sa.Column("created_at", UTCDateTime()),
+                sa.Column("updated_at", UTCDateTime()),
+                autoload_with=sync_conn,
+                extend_existing=True,
+            )
+            prefs_t = sa.Table(
+                "user_preferences",
+                meta,
+                sa.Column("id", sa.Uuid(), primary_key=True),
+                sa.Column("user_id", sa.Uuid()),
+                sa.Column("reminder_offsets", sa.JSON()),
+                sa.Column("created_at", UTCDateTime()),
+                sa.Column("updated_at", UTCDateTime()),
+                autoload_with=sync_conn,
+                extend_existing=True,
+            )
+            tasks_t = sa.Table(
+                "tasks",
+                meta,
+                sa.Column("id", sa.Uuid(), primary_key=True),
+                sa.Column("user_id", sa.Uuid()),
+                sa.Column("time_constraint", sa.JSON()),
+                sa.Column("created_at", UTCDateTime()),
+                sa.Column("updated_at", UTCDateTime()),
+                autoload_with=sync_conn,
+                extend_existing=True,
+            )
+            steps_t = sa.Table(
+                "steps",
+                meta,
+                sa.Column("id", sa.Uuid(), primary_key=True),
+                sa.Column("user_id", sa.Uuid()),
+                sa.Column("task_id", sa.Uuid()),
+                sa.Column("created_at", UTCDateTime()),
+                sa.Column("updated_at", UTCDateTime()),
+                autoload_with=sync_conn,
+                extend_existing=True,
+            )
+            sessions_t = sa.Table(
+                "sessions",
+                meta,
+                sa.Column("id", sa.Uuid(), primary_key=True),
+                sa.Column("user_id", sa.Uuid()),
+                sa.Column("step_id", sa.Uuid()),
+                sa.Column("scheduled_start", UTCDateTime()),
+                sa.Column("scheduled_end", UTCDateTime()),
+                sa.Column("segments", sa.JSON()),
+                sa.Column("created_at", UTCDateTime()),
+                sa.Column("updated_at", UTCDateTime()),
+                autoload_with=sync_conn,
+                extend_existing=True,
+            )
+
+            user_id = uuid4()
+            pref_id = uuid4()
+            task_id = uuid4()
+            step_id = uuid4()
+            session_id = uuid4()
+            now_dt = datetime.now(UTC)
+            start_dt = datetime(2026, 10, 30, 9, tzinfo=UTC)
+
+            sync_db.execute(
+                users_t.insert().values(
+                    id=user_id,
+                    email="tn@example.test",
+                    display_name="TN",
+                    is_active=True,
+                    current_streak_days=0,
+                    streak_frozen=False,
+                    streak_freeze_tokens=0,
+                    created_at=now_dt,
+                    updated_at=now_dt,
+                    revision=1,
+                )
+            )
+            sync_db.execute(
+                prefs_t.insert().values(
+                    id=pref_id,
+                    user_id=user_id,
+                    work_interval_seconds=1500,
+                    rest_interval_seconds=300,
+                    micro_task_seconds=120,
+                    reminder_offsets=[300],
+                    effective_revision=1,
+                    buffer_multiplier=1.2,
+                    reminder_style="gentle",
+                    created_at=now_dt,
+                    updated_at=now_dt,
+                    revision=1,
+                )
+            )
+            sync_db.execute(
+                tasks_t.insert().values(
+                    id=task_id,
+                    user_id=user_id,
+                    title="Báo cáo",
+                    time_constraint={"kind": "window"},
+                    status="pending",
+                    avoidance_count=0,
+                    decomposition_state="complete",
+                    created_at=now_dt,
+                    updated_at=now_dt,
+                    revision=1,
+                )
+            )
+            sync_db.execute(
+                steps_t.insert().values(
+                    id=step_id,
+                    user_id=user_id,
+                    task_id=task_id,
+                    title="Tìm tài liệu",
+                    order_index=0,
+                    estimated_base_seconds=3000,
+                    remaining_base_seconds=3000,
+                    buffer_multiplier=1.2,
+                    estimate_source="user_confirmed",
+                    status="pending",
+                    created_at=now_dt,
+                    updated_at=now_dt,
+                    revision=1,
+                )
+            )
+            sync_db.execute(
+                sessions_t.insert().values(
+                    id=session_id,
+                    user_id=user_id,
+                    step_id=step_id,
+                    scheduled_start=start_dt,
+                    scheduled_end=start_dt + timedelta(seconds=4200),
+                    work_seconds=3600,
+                    rest_seconds=600,
+                    duration_seconds=4200,
+                    segments=[
+                        {"order_index": 0, "kind": "work", "duration_seconds": 1500},
+                        {"order_index": 1, "kind": "rest", "duration_seconds": 300},
+                        {"order_index": 2, "kind": "work", "duration_seconds": 1500},
+                        {"order_index": 3, "kind": "rest", "duration_seconds": 300},
+                        {"order_index": 4, "kind": "work", "duration_seconds": 600},
+                    ],
+                    schedule_revision=1,
+                    status="scheduled",
+                    start_state="waiting",
+                    created_at=now_dt,
+                    updated_at=now_dt,
+                    revision=1,
+                )
+            )
+            return user_id, task_id, session_id
+
         async with session_factory(engine)() as db:
-            user, pref, task, _, session = await db.run_sync(make_plan)
-            pref.reminder_offsets = [300]
+            ids = await db.run_sync(_seed_20261103_plan)
             await db.commit()
-            ids = user.id, task.id, session.id
     finally:
         await engine.dispose()
     alembic("upgrade", "head")

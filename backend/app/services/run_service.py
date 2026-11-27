@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from itertools import groupby
 from typing import Any, cast
 from uuid import UUID
 
 from sqlalchemy import func, or_, select, update
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import AppError
-from app.models.calendar import CalendarEventLink, PlanningContext
+from app.models.calendar import CalendarConnection, CalendarEventLink, PlanningContext
 from app.models.execution import ActualCorrection, CheckIn, RunEvent, SessionRun
 from app.models.planning import ScheduleVersion as ScheduleVersionRow
 from app.models.schedule_proposal import RescheduleProposal
@@ -49,6 +51,11 @@ MIN_INTER_SESSION_GAP_SECONDS = 900
 START_GRACE_SECONDS = 900
 CHECKIN_TIMEOUT_SECONDS = 300
 MAX_CLOCK_SKEW_SECONDS = 300
+_PLACEHOLDER_CALENDAR_ACCOUNTS = {
+    "google_calendar_user",
+    "unknown@gmail.com",
+    "unknown@google.com",
+}
 ALLOWED_RUN_EVENT_TYPES = {
     "progress",
     "pause",
@@ -90,6 +97,10 @@ def _validation_error(message: str, field_path: str = "") -> AppError:
         field_errors=[FieldError(field_path=field_path, message=message)] if field_path else [],
         next_action="fix_fields",
     )
+
+
+def _to_utc(dt: datetime) -> datetime:
+    return dt.astimezone(UTC) if dt.utcoffset() is not None else dt.replace(tzinfo=UTC)
 
 
 def _current_utc_now(now: datetime | None = None) -> datetime:
@@ -167,6 +178,9 @@ async def _resolve_settings_snapshot(
             step_id=str(session.step_id),
             scheduled_start=session.scheduled_start,
             scheduled_end=session.scheduled_end,
+            title=session.title,
+            session_goal=session.session_goal,
+            expected_output=session.expected_output,
             micro_task_text=session.micro_task_text or "Chuẩn bị cho phiên làm việc",
             micro_task_seconds=session.micro_task_seconds,
             work_seconds=session.work_seconds,
@@ -188,6 +202,9 @@ async def _resolve_settings_snapshot(
             step_id=str(run.session_id),
             scheduled_start=started,
             scheduled_end=ended,
+            title=None,
+            session_goal=None,
+            expected_output=None,
             micro_task_text="Chuẩn bị cho phiên làm việc",
             micro_task_seconds=120,
             work_seconds=dur,
@@ -203,12 +220,63 @@ async def _resolve_settings_snapshot(
     return SettingsSnapshot(effective_revision=effective_rev, session=snap)
 
 
+async def _compute_paused_seconds(
+    db: AsyncSession,
+    run: SessionRun,
+    *,
+    now: datetime | None = None,
+) -> int:
+    events = list(
+        await db.scalars(
+            select(RunEvent)
+            .where(
+                RunEvent.user_id == run.user_id,
+                RunEvent.run_id == run.id,
+                RunEvent.event_type.in_(("pause", "resume")),
+            )
+            .order_by(RunEvent.occurred_at.asc())
+        )
+    )
+    sorted_events = sorted(events, key=lambda ev: _to_utc(ev.occurred_at))
+    paused_total = 0
+    open_pause_at: datetime | None = None
+    for occ, group in groupby(sorted_events, key=lambda ev: _to_utc(ev.occurred_at)):
+        n_pause = 0
+        n_resume = 0
+        for ev in group:
+            if ev.event_type == "pause":
+                n_pause += 1
+            elif ev.event_type == "resume":
+                n_resume += 1
+
+        while True:
+            if open_pause_at is None and n_pause > 0:
+                open_pause_at = occ
+                n_pause -= 1
+            elif open_pause_at is not None and n_resume > 0:
+                paused_total += max(0, int((occ - open_pause_at).total_seconds()))
+                open_pause_at = None
+                n_resume -= 1
+            else:
+                break
+
+    if open_pause_at is not None:
+        if run.ended_at is not None:
+            paused_total += max(0, int((_to_utc(run.ended_at) - open_pause_at).total_seconds()))
+        elif run.run_state == "paused":
+            paused_total += max(0, int((_current_utc_now(now) - open_pause_at).total_seconds()))
+
+    return paused_total
+
+
 async def _run_to_schema(
     db: AsyncSession,
     run: SessionRun,
     *,
     settings_snapshot: SettingsSnapshot | None = None,
     check_in: CheckIn | CheckInData | None = None,
+    paused_seconds: int | None = None,
+    now: datetime | None = None,
 ) -> SessionRunData:
     resolved_snapshot = settings_snapshot or await _resolve_settings_snapshot(db, run)
     resolved_checkin: CheckInData | None
@@ -220,6 +288,22 @@ async def _run_to_schema(
         resolved_checkin = None
 
     session_snap = resolved_snapshot.session if resolved_snapshot is not None else None
+    planned_ends_at: datetime | None = None
+    if session_snap is not None:
+        resolved_paused = (
+            paused_seconds
+            if paused_seconds is not None
+            else await _compute_paused_seconds(db, run, now=now)
+        )
+        base_started = (
+            run.started_at
+            if run.started_at.utcoffset() is not None
+            else run.started_at.replace(tzinfo=UTC)
+        )
+        planned_ends_at = base_started + timedelta(
+            seconds=session_snap.duration_seconds + resolved_paused
+        )
+
     return SessionRunData(
         run_id=str(run.id),
         session_id=str(run.session_id),
@@ -244,6 +328,7 @@ async def _run_to_schema(
         continuation_of_run_id=(run.settings_snapshot or {}).get("_continuation_of_run_id")
         if isinstance(run.settings_snapshot, dict)
         else None,
+        planned_ends_at=planned_ends_at,
     )
 
 
@@ -279,39 +364,50 @@ async def reconcile_expired_checkins(
     )
 
     overdue_session_ids: list[UUID] = []
-    waiting_sessions = list(
-        await db.scalars(
-            select(SessionRow).where(
+    waiting_rows = (
+        await db.execute(
+            select(
+                SessionRow.id,
+                SessionRow.scheduled_start,
+                SessionRow.start_decision_due_at,
+            ).where(
                 SessionRow.user_id == user_uuid,
                 SessionRow.status == "scheduled",
                 SessionRow.start_state == "waiting",
             )
         )
-    )
-    if waiting_sessions:
+    ).all()
+    if waiting_rows:
         started_session_ids = set(
             await db.scalars(
                 select(SessionRun.session_id).where(
                     SessionRun.user_id == user_uuid,
-                    SessionRun.session_id.in_([s.id for s in waiting_sessions]),
+                    SessionRun.session_id.in_([row.id for row in waiting_rows]),
                 )
             )
         )
-        for s in waiting_sessions:
-            if s.id in started_session_ids:
+        for row in waiting_rows:
+            if row.id in started_session_ids:
                 continue
-            due_at = s.start_decision_due_at or (
-                s.scheduled_start + timedelta(seconds=START_GRACE_SECONDS)
+            due_at = row.start_decision_due_at or (
+                row.scheduled_start + timedelta(seconds=START_GRACE_SECONDS)
             )
             if due_at.astimezone(UTC) <= ref_now:
-                overdue_session_ids.append(s.id)
+                overdue_session_ids.append(row.id)
 
     if not expired_checkin_ids and not overdue_session_ids:
         return False
 
     in_command_tx = bool(db.info.get("defer_command_commit"))
     if not in_command_tx:
-        await command_service.lock_owner(db, user_id)
+        if db.in_transaction() and not db.identity_map:
+            await db.rollback()
+        try:
+            await command_service.lock_owner(db, user_id)
+        except OperationalError:
+            if db.in_transaction():
+                await db.rollback()
+            await command_service.lock_owner(db, user_id)
 
     changed = False
     if expired_checkin_ids:
@@ -371,6 +467,10 @@ async def _validate_start_feasibility(
     req_start: datetime,
 ) -> None:
     req_end = req_start + timedelta(seconds=session.duration_seconds)
+    sched_start_utc = session.scheduled_start.astimezone(UTC)
+    sched_end_utc = session.scheduled_end.astimezone(UTC)
+    early_grace_bound_utc = sched_start_utc - timedelta(seconds=START_GRACE_SECONDS)
+    is_within_early_grace = early_grace_bound_utc <= req_start < sched_start_utc
 
     # 1. Trạng thái Session / Step / Task không được ở trạng thái kết thúc
     if session.status != "scheduled":
@@ -390,16 +490,71 @@ async def _validate_start_feasibility(
         raise _require_replan("Phiên tập trung này đã có lượt thực hiện.")
 
     # 2. Thứ tự phụ thuộc Step trong cùng Task & các Session đứng trước trong cùng Step
-    earlier_incomplete_step = await db.scalar(
-        select(StepRow.id).where(
-            StepRow.user_id == user_uuid,
-            StepRow.task_id == task.id,
-            StepRow.order_index < step.order_index,
-            StepRow.status.notin_(("completed", "skipped")),
+    earlier_incomplete_steps = list(
+        await db.scalars(
+            select(StepRow).where(
+                StepRow.user_id == user_uuid,
+                StepRow.task_id == task.id,
+                StepRow.order_index < step.order_index,
+                StepRow.status.notin_(("completed", "skipped")),
+            )
         )
     )
-    if earlier_incomplete_step is not None:
-        raise _require_replan("Bước trước đó của công việc chưa hoàn thành. Cần xếp lại lịch.")
+    if earlier_incomplete_steps:
+        earlier_step_ids = [s.id for s in earlier_incomplete_steps]
+        earlier_sessions = list(
+            await db.scalars(
+                select(SessionRow).where(
+                    SessionRow.user_id == user_uuid,
+                    SessionRow.step_id.in_(earlier_step_ids),
+                    SessionRow.status != "cancelled",
+                )
+            )
+        )
+        earlier_sess_ids = [s.id for s in earlier_sessions]
+        active_run_session_ids: set[UUID] = set()
+        ended_no_respond_session_ids: set[UUID] = set()
+        if earlier_sess_ids:
+            active_run_session_ids = set(
+                await db.scalars(
+                    select(SessionRun.session_id).where(
+                        SessionRun.user_id == user_uuid,
+                        SessionRun.session_id.in_(earlier_sess_ids),
+                        SessionRun.ended_at.is_(None),
+                    )
+                )
+            )
+            ended_no_respond_session_ids = set(
+                await db.scalars(
+                    select(SessionRun.session_id)
+                    .join(CheckIn, CheckIn.run_id == SessionRun.id)
+                    .where(
+                        SessionRun.user_id == user_uuid,
+                        SessionRun.session_id.in_(earlier_sess_ids),
+                        SessionRun.ended_at.is_not(None),
+                        CheckIn.user_id == user_uuid,
+                        CheckIn.kind == "final",
+                        CheckIn.response_state == "no_respond",
+                    )
+                )
+            )
+        sessions_by_step: dict[UUID, list[SessionRow]] = {sid: [] for sid in earlier_step_ids}
+        for s_row in earlier_sessions:
+            sessions_by_step.setdefault(s_row.step_id, []).append(s_row)
+
+        for prev_step in earlier_incomplete_steps:
+            st_sessions = sessions_by_step.get(prev_step.id, [])
+            if not st_sessions or any(
+                (
+                    s_row.status not in ("completed", "skipped")
+                    and s_row.id not in ended_no_respond_session_ids
+                )
+                or s_row.id in active_run_session_ids
+                for s_row in st_sessions
+            ):
+                raise _require_replan(
+                    "Bước trước đó của công việc chưa hoàn thành. Cần xếp lại lịch."
+                )
 
     earlier_step_sessions = list(
         await db.scalars(
@@ -439,10 +594,17 @@ async def _validate_start_feasibility(
                 "Thời điểm bắt đầu mới khiến phiên vượt quá hạn chót của công việc. Cần xếp lại lịch."
             )
         start_bound_dt = _parse_iso_datetime(tc.get("start_at"))
-        if start_bound_dt is not None and req_start < start_bound_dt.astimezone(UTC):
-            raise _require_replan(
-                "Thời điểm bắt đầu nằm trước mốc mở công việc. Cần xếp lại lịch."
+        if start_bound_dt is not None:
+            start_bound_utc = start_bound_dt.astimezone(UTC)
+            min_allowed_start = (
+                start_bound_utc - timedelta(seconds=START_GRACE_SECONDS)
+                if is_within_early_grace and sched_start_utc >= start_bound_utc
+                else start_bound_utc
             )
+            if req_start < min_allowed_start:
+                raise _require_replan(
+                    "Thời điểm bắt đầu nằm trước mốc mở công việc. Cần xếp lại lịch."
+                )
 
     # 4. Kiểm tra khung giờ rảnh hiệu lực (Task.availability hoặc Availability của user)
     avail_schema: Availability | DraftAvailability | None = None
@@ -479,23 +641,33 @@ async def _validate_start_feasibility(
     if avail_schema is not None:
         free_intervals = compute_effective_free_intervals(
             avail_schema,
-            window_start=req_start,
-            window_end=req_end,
+            window_start=min(req_start, sched_start_utc),
+            window_end=max(req_end, sched_end_utc),
             task_id=str(task.id),
         )
-        covered = any(
-            iv.start_at.astimezone(UTC) <= req_start and iv.end_at.astimezone(UTC) >= req_end
-            for iv in free_intervals
-        )
+        covered = False
+        for iv in free_intervals:
+            iv_start = iv.start_at.astimezone(UTC)
+            iv_end = iv.end_at.astimezone(UTC)
+            if iv_end < req_end:
+                continue
+            if iv_start <= req_start or (
+                is_within_early_grace
+                and iv_start <= sched_start_utc
+                and iv_start - timedelta(seconds=START_GRACE_SECONDS) <= req_start
+            ):
+                covered = True
+                break
         if not covered:
             raise _require_replan(
                 "Thời điểm bắt đầu mới khiến phiên vượt khỏi giờ rảnh. Cần xếp lại lịch."
             )
 
-    # Kiểm tra lịch bận từ PlanningContext hợp lệ (nếu có)
+    # Kiểm tra lịch bận từ PlanningContext hợp lệ mới nhất (D2-Safe: thuần DB nội bộ < 30ms)
     contexts = list(
         await db.scalars(
-            select(PlanningContext).where(
+            select(PlanningContext)
+            .where(
                 PlanningContext.user_id == user_uuid,
                 PlanningContext.sync_state == "valid",
                 PlanningContext.query_start < req_end,
@@ -505,29 +677,82 @@ async def _validate_start_feasibility(
                     PlanningContext.expires_at > req_start,
                 ),
             )
-            .order_by(PlanningContext.created_at.desc())
+            .order_by(PlanningContext.created_at.desc(), PlanningContext.id.desc())
         )
     )
-    for ctx in contexts:
-        if (
-            task.source_draft_id is not None
-            and ctx.source_draft_id is not None
-            and ctx.source_draft_id != task.source_draft_id
-        ):
-            continue
-        for busy in (ctx.busy_intervals or []) + (ctx.manual_busy_intervals or []):
-            if not isinstance(busy, dict):
+    if contexts:
+        connected_calendars = list(
+            await db.scalars(
+                select(CalendarConnection).where(
+                    CalendarConnection.user_id == user_uuid,
+                    CalendarConnection.connection_state == "connected",
+                )
+            )
+        )
+        connected_conn_ids: set[str] = {str(c.id) for c in connected_calendars}
+        non_primary_write_pairs: set[tuple[str, str]] = set()
+        for c in connected_calendars:
+            wcal = (c.write_calendar_id or "").strip()
+            if not wcal or wcal.lower() == "primary" or wcal in ("provision_new", "create_new"):
                 continue
-            source = busy.get("source") or {}
-            if isinstance(source, dict) and source.get("session_id") == str(session.id):
+            acct = (c.account_ref or "").strip()
+            if (
+                acct
+                and acct.lower() not in _PLACEHOLDER_CALENDAR_ACCOUNTS
+                and wcal.lower() == acct.lower()
+            ):
                 continue
-            b_start = _parse_iso_datetime(busy.get("start_at"))
-            b_end = _parse_iso_datetime(busy.get("end_at"))
-            if b_start is not None and b_end is not None:
-                if b_start.astimezone(UTC) < req_end and b_end.astimezone(UTC) > req_start:
-                    raise _require_replan(
-                        "Thời điểm thực hiện trùng với sự kiện bận trên lịch. Cần xếp lại lịch."
-                    )
+            non_primary_write_pairs.add((str(c.id), wcal))
+        non_primary_write_cal_ids = {cal_id for _, cal_id in non_primary_write_pairs}
+
+        for ctx in contexts:
+            if (
+                task.source_draft_id is not None
+                and ctx.source_draft_id is not None
+                and ctx.source_draft_id != task.source_draft_id
+            ):
+                continue
+            interval_groups = (
+                (ctx.busy_intervals or [], False),
+                (ctx.manual_busy_intervals or [], True),
+            )
+            for intervals, is_manual in interval_groups:
+                for busy in intervals:
+                    if not isinstance(busy, dict):
+                        continue
+                    source = busy.get("source") or {}
+                    if isinstance(source, dict):
+                        if source.get("session_id") == str(session.id):
+                            continue
+                        source_kind = source.get("kind")
+                        raw_conn_id = source.get("connection_id")
+                        conn_id = str(raw_conn_id).strip() if raw_conn_id is not None else None
+                        if (
+                            not is_manual
+                            and source_kind in (None, "calendar_event")
+                            and conn_id
+                            and conn_id not in connected_conn_ids
+                        ):
+                            continue
+                        raw_gcal_id = source.get("google_calendar_id")
+                        if (
+                            source_kind in (None, "calendar_event")
+                            and isinstance(raw_gcal_id, str)
+                            and raw_gcal_id.strip()
+                        ):
+                            gcal_id = raw_gcal_id.strip()
+                            if (conn_id and (conn_id, gcal_id) in non_primary_write_pairs) or (
+                                not conn_id and gcal_id in non_primary_write_cal_ids
+                            ):
+                                continue
+                    b_start = _parse_iso_datetime(busy.get("start_at"))
+                    b_end = _parse_iso_datetime(busy.get("end_at"))
+                    if b_start is not None and b_end is not None:
+                        if b_start.astimezone(UTC) < req_end and b_end.astimezone(UTC) > req_start:
+                            raise _require_replan(
+                                "Thời điểm thực hiện trùng với sự kiện bận trên lịch. Cần xếp lại lịch."
+                            )
+            break
 
     # 5. Kiểm tra chồng lấn (Collision) & khoảng cách tối thiểu >= 900s trên TẤT CẢ các Task của user
     other_sessions = list(
@@ -827,6 +1052,9 @@ async def start_session_run(
         step_id=str(session.step_id),
         scheduled_start=session.scheduled_start,
         scheduled_end=session.scheduled_end,
+        title=session.title,
+        session_goal=session.session_goal,
+        expected_output=session.expected_output,
         micro_task_text=session.micro_task_text or "Chuẩn bị cho phiên làm việc",
         micro_task_seconds=session.micro_task_seconds,
         work_seconds=session.work_seconds,
@@ -882,6 +1110,7 @@ async def start_session_run(
         run,
         settings_snapshot=settings_snapshot,
         check_in=None,
+        paused_seconds=0,
     )
 
 
@@ -898,7 +1127,7 @@ async def get_active_run(
     if run is None:
         return None
     final_checkin = await run_repository.get_final_checkin(db, user_uuid, run.id)
-    return await _run_to_schema(db, run, check_in=final_checkin)
+    return await _run_to_schema(db, run, check_in=final_checkin, now=now)
 
 
 async def get_run_detail(
@@ -921,7 +1150,7 @@ async def get_run_detail(
             next_action="reload",
         )
     final_checkin = await run_repository.get_final_checkin(db, user_uuid, run.id)
-    return await _run_to_schema(db, run, check_in=final_checkin)
+    return await _run_to_schema(db, run, check_in=final_checkin, now=now)
 
 
 @command_service.durable_command(
@@ -1271,8 +1500,12 @@ async def end_session_run(
     run.run_state = "awaiting_checkin"
     run.work_elapsed_seconds = payload.work_elapsed_seconds
     run.rest_elapsed_seconds = payload.rest_elapsed_seconds
-    run.actual_work_seconds = payload.work_elapsed_seconds
-    run.actual_source = "timer_proxy"
+    if payload.end_reason == "cancelled":
+        run.actual_work_seconds = None
+        run.actual_source = None
+    else:
+        run.actual_work_seconds = payload.work_elapsed_seconds
+        run.actual_source = "timer_proxy"
     run.outcome = "unknown"
     run.checkin_timeout_at = timeout_at
     run.dnd_release_at = timeout_at
@@ -1306,6 +1539,7 @@ async def end_session_run(
         db,
         run,
         check_in=checkin,
+        now=now,
     )
 
 
@@ -1392,6 +1626,9 @@ async def record_actual_correction(
     run.actual_source = "self_report"
     run.updated_at = datetime.now(UTC)
     await db.flush()
+    from app.services import streak_service
+
+    await streak_service.sync_streak_for_run(db, user_uuid=user_uuid, run=run)
 
     return ActualCorrectionData(
         run_id=str(run.id),

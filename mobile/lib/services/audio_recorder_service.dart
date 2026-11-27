@@ -2,6 +2,7 @@
 import 'dart:async';
 import 'dart:io';
 
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:path_provider/path_provider.dart';
 import 'package:record/record.dart';
 
@@ -20,12 +21,19 @@ class ThoughtRecording {
 
 /// Lỗi thu/lưu. [message] là microcopy tiếng Việt, hiển thị được cho user.
 class RecorderException implements Exception {
-  const RecorderException(this.message, {this.countsAsFailure = true});
+  const RecorderException(
+    this.message, {
+    this.countsAsFailure = true,
+    this.errorCode = 'MIC_WRITE_FAILED',
+  });
 
   final String message;
 
   /// false = không tính vào bộ đếm 3 lần (ví dụ: lỡ chạm quá ngắn).
   final bool countsAsFailure;
+
+  /// Mã lỗi chuẩn hóa gửi telemetry không PII (`^[A-Z0-9_]{2,64}$`).
+  final String errorCode;
 
   @override
   String toString() => message;
@@ -74,7 +82,10 @@ class AudioRecorderService {
     String? path;
     try {
       if (!await _recorder.hasPermission()) {
-        throw const RecorderException('Chưa có quyền dùng micro.');
+        throw const RecorderException(
+          'Chưa có quyền dùng micro.',
+          errorCode: 'MIC_PERMISSION_DENIED',
+        );
       }
       path = await _newRecordingPath();
       await _recorder.start(
@@ -94,7 +105,11 @@ class AudioRecorderService {
       _maxDurationTimer = Timer(maxDuration, _autoStop);
     } catch (error) {
       if (path != null) await _deleteIfExists(path);
-      throw _recordFailure(error, fallback: 'Chưa bắt đầu thu được.');
+      throw _recordFailure(
+        error,
+        fallback: 'Chưa bắt đầu thu được.',
+        errorCode: 'MIC_START_FAILED',
+      );
     }
   }
 
@@ -125,18 +140,28 @@ class AudioRecorderService {
       }
       final file = File(path);
       if (!await file.exists()) {
-        throw const RecorderException('Chưa lưu được tệp ghi âm.');
+        throw const RecorderException(
+          'Chưa lưu được tệp ghi âm.',
+          errorCode: 'AUDIO_FILE_MISSING',
+        );
       }
       final size = await file.length();
       if (size == 0) {
         await _deleteIfExists(path);
-        throw const RecorderException('Tệp ghi âm bị rỗng.');
+        throw const RecorderException(
+          'Tệp ghi âm bị rỗng.',
+          errorCode: 'AUDIO_FILE_EMPTY',
+        );
       }
       _failedAttempts = 0;
       return ThoughtRecording(path: path, duration: duration, sizeBytes: size);
     } catch (error) {
       await _deleteIfExists(expectedPath);
-      throw _recordFailure(error, fallback: 'Chưa lưu được tệp ghi âm.');
+      throw _recordFailure(
+        error,
+        fallback: 'Chưa lưu được tệp ghi âm.',
+        errorCode: 'MIC_WRITE_FAILED',
+      );
     }
   }
 
@@ -158,6 +183,41 @@ class AudioRecorderService {
   /// Xóa file của một suy nghĩ đã cất (dùng cho Undo / xóa trong Hộp nháp).
   Future<void> deleteRecording(String path) => _deleteIfExists(path);
 
+  /// Dọn an toàn các file `thought_*.m4a` rỗng (0 byte) quá [emptyFileMaxAge]
+  /// bị kẹt lại sau lỗi ghi âm/tắt app đột ngột. Không chạm tới file có nội
+  /// dung của người dùng hay tài khoản khác.
+  static Future<int> cleanupStaleRecordings({
+    Duration emptyFileMaxAge = const Duration(hours: 1),
+    Directory? directoryOverride,
+    DateTime? nowOverride,
+  }) async {
+    if (kIsWeb && directoryOverride == null) return 0;
+    try {
+      final folder = directoryOverride ??
+          Directory('${(await getApplicationDocumentsDirectory()).path}/thoughts');
+      if (!await folder.exists()) return 0;
+      final cutoff = (nowOverride ?? DateTime.now()).subtract(emptyFileMaxAge);
+      var deleted = 0;
+      await for (final entity in folder.list(followLinks: false)) {
+        if (entity is! File) continue;
+        final name = entity.path.split(RegExp(r'[/\\]')).last;
+        if (!name.startsWith('thought_') || !name.endsWith('.m4a')) continue;
+        try {
+          final stat = await entity.stat();
+          if (stat.size == 0 && stat.modified.isBefore(cutoff)) {
+            await entity.delete();
+            deleted++;
+          }
+        } catch (_) {
+          // Bỏ qua file đang mở hoặc không xóa được.
+        }
+      }
+      return deleted;
+    } catch (_) {
+      return 0;
+    }
+  }
+
   /// Gọi khi user đã chuyển sang nhập chữ hoặc bắt đầu phiên mới.
   void resetFailures() => _failedAttempts = 0;
 
@@ -175,9 +235,14 @@ class AudioRecorderService {
     }
   }
 
-  RecorderException _recordFailure(Object error, {required String fallback}) {
-    final exception =
-        error is RecorderException ? error : RecorderException(fallback);
+  RecorderException _recordFailure(
+    Object error, {
+    required String fallback,
+    String errorCode = 'MIC_WRITE_FAILED',
+  }) {
+    final exception = error is RecorderException
+        ? error
+        : RecorderException(fallback, errorCode: errorCode);
     if (exception.countsAsFailure) _failedAttempts++;
     return exception;
   }

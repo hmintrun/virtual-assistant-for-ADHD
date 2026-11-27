@@ -248,13 +248,6 @@ class CandidateReviewScreen extends StatelessWidget {
                               color: palette.onAmberSoft,
                             ),
                           ),
-                          const SizedBox(height: 4),
-                          Text(
-                            'Chỉ 2 phút để vào nhịp · không tính vào thời lượng phiên chính',
-                            style: textTheme.bodySmall?.copyWith(
-                              color: palette.onAmberSoft.withValues(alpha: 0.78),
-                            ),
-                          ),
                         ],
                       ),
                     ),
@@ -373,7 +366,7 @@ class CandidateReviewScreen extends StatelessWidget {
               MelbelCard(
                 tone: MelbelCardTone.muted,
                 child: Text(
-                  'Phần còn lại sẽ được chia bước khi bạn cập nhật kế hoạch.',
+                  'Phần còn lại sẽ chia tiếp khi cập nhật.',
                   style: textTheme.bodySmall?.copyWith(
                     color: palette.onSurfaceVariant,
                   ),
@@ -442,7 +435,7 @@ class CandidateReviewScreen extends StatelessWidget {
         'feasible' => 'Đủ thời gian trước hạn chót',
         'infeasible' => 'Chưa đủ thời gian trước hạn chót',
         'search_inconclusive' => 'Chưa thể kết luận khả năng xếp lịch',
-        _ => 'Trạng thái khả thi: $status',
+        _ => 'Cần kiểm tra lại khả năng xếp lịch.',
       };
 
   static int _minutes(int seconds) => (seconds / 60).ceil();
@@ -543,7 +536,7 @@ class CandidateReviewScreen extends StatelessWidget {
                 ),
               MelbelStatusPill(
                 label:
-                    'Ước tính gốc: ${_minutes(seconds)} phút · đệm ${step['buffer_multiplier'] ?? '—'}',
+                    '${_minutes(seconds)} phút · đệm ×${step['buffer_multiplier'] ?? '—'}',
                 tone: MelbelCardTone.muted,
               ),
             ],

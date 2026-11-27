@@ -5,6 +5,7 @@ import 'package:provider/provider.dart';
 
 import '../core/api_client.dart';
 import '../core/theme.dart';
+import '../providers/streak_provider.dart';
 import '../providers/theme_provider.dart';
 import '../services/adaptation_api.dart';
 import '../services/pre_session_reminder_sync.dart';
@@ -105,6 +106,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
         annoyanceFeedback: annoyanceFeedback,
       );
       if (!mounted) return;
+      if (result['application_state'] == 'pending_review') {
+        _pendingChange = result;
+      }
       await _load();
       if (!mounted) return;
       if (result['pending_proposal_id'] case final String proposalId
@@ -112,10 +116,17 @@ class _SettingsScreenState extends State<SettingsScreen> {
         await _reviewProposal(proposalId);
         return;
       }
+      if (result['application_state'] == 'effective_from_next_session') {
+        unawaited(PreSessionReminderSync.instance.sync(api: _api));
+      }
       if (action == 'accept' || action == 'edit') {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Đã áp dụng gợi ý cho phiên sau.'),
+          SnackBar(
+            content: Text(
+              result['application_state'] == 'pending_review'
+                  ? 'Đã tạo yêu cầu thay đổi chờ duyệt lịch.'
+                  : 'Đã áp dụng gợi ý cho phiên sau.',
+            ),
             behavior: SnackBarBehavior.floating,
           ),
         );
@@ -253,8 +264,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       final text = raw.trim();
       if (text.isEmpty) return false;
       if (isList) {
-        final parts = text.split(',').map((v) => int.tryParse(v.trim()));
-        return parts.isNotEmpty && parts.every((v) => v != null && v >= 0);
+        return _parseReminderOffsetsSeconds(text) != null;
       }
       return _parseBuffer(text) != null;
     }
@@ -316,7 +326,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                           : 'Hệ số đệm',
                       errorText: !valid
                           ? (isList
-                              ? 'Nhập số phút >= 0, cách nhau bằng dấu phẩy.'
+                              ? 'Nhập 1–3 mốc giảm dần (vd: 15, 10, 5).'
                               : 'Nhập hệ số đệm từ 1,0 đến 2,0.')
                           : null,
                     ),
@@ -343,6 +353,23 @@ class _SettingsScreenState extends State<SettingsScreen> {
     return result;
   }
 
+  List<int>? _parseReminderOffsetsSeconds(String raw) {
+    final parts = raw
+        .split(',')
+        .map((v) => int.tryParse(v.trim()))
+        .toList(growable: false);
+    if (parts.isEmpty ||
+        parts.length > 3 ||
+        parts.any((v) => v == null || v < 0)) {
+      return null;
+    }
+    final minutes = parts.cast<int>();
+    for (var i = 0; i < minutes.length - 1; i++) {
+      if (minutes[i] <= minutes[i + 1]) return null;
+    }
+    return minutes.map((v) => v * 60).toList(growable: false);
+  }
+
   double? _parseBuffer(String text) {
     final value = double.tryParse(text.replaceAll(',', '.'));
     return value != null && value >= 1 && value <= 2 ? value : null;
@@ -363,11 +390,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     if (!mounted || result == null) return;
     Object? parsed;
     if (value is List) {
-      final minutes =
-          result.split(',').map((v) => int.tryParse(v.trim())).toList();
-      if (minutes.every((v) => v != null && v >= 0)) {
-        parsed = minutes.map((v) => v! * 60).toList();
-      }
+      parsed = _parseReminderOffsetsSeconds(result);
     } else {
       parsed = _parseBuffer(result);
     }
@@ -415,8 +438,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       final result = await _api.postData(
         '/settings/change-requests',
         data: payload,
-        idempotencyKey:
-            ApiClient.stableIdempotencyKey('preferences', payload.toString()),
+        idempotencyKey: ApiClient.newIdempotencyKey('settings_change'),
       );
       if (!mounted) return;
       _pendingChange = result;
@@ -456,6 +478,15 @@ class _SettingsScreenState extends State<SettingsScreen> {
   }
 
   Future<void> _handleCommandError(ApiException error) async {
+    if (error.isActiveRunExists) {
+      await _load();
+      if (!mounted) return;
+      setState(() {
+        _error =
+            'Đang có phiên tập trung hoạt động. Hãy hoàn tất check-in trước khi đổi lịch.';
+      });
+      return;
+    }
     if (error.statusCode == 409) {
       _pendingChange = null;
       await _load();
@@ -476,7 +507,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       await _api.postData(
         path,
         data: {'expected_request_revision': revision},
-        idempotencyKey: ApiClient.stableIdempotencyKey(path, '$revision'),
+        idempotencyKey: ApiClient.newIdempotencyKey('settings_cancel'),
       );
       _pendingChange = null;
       if (mounted) await _load();
@@ -526,20 +557,29 @@ class _SettingsScreenState extends State<SettingsScreen> {
   @override
   Widget build(BuildContext context) {
     final theme = context.watch<ThemeProvider>();
+    final streak = StreakProvider.maybeOf(context);
     final palette = context.melbel;
     final textTheme = Theme.of(context).textTheme;
-    final pending = _preferences?['pending_proposal_id'] as String?;
-    final change =
-        pending != null && pending == _pendingChange?['pending_proposal_id']
-            ? _pendingChange
-            : null;
+    final pendingProposalId = _preferences?['pending_proposal_id'] as String?;
+    final inMemoryChange = pendingProposalId != null &&
+            pendingProposalId == _pendingChange?['pending_proposal_id']
+        ? _pendingChange
+        : null;
+    final pendingRequestId =
+        (_preferences?['pending_change_request_id'] as String?) ??
+            inMemoryChange?['change_request_id'] as String?;
+    final pendingRequestRevision =
+        (_preferences?['pending_change_request_revision'] as num?)?.toInt() ??
+            (inMemoryChange?['request_revision'] as num?)?.toInt();
+    final hasPendingBanner =
+        pendingProposalId != null || pendingRequestId != null;
 
     return FocusReviewPage(
       title: 'Cài đặt',
       children: [
         const ReviewHeader(
-          'Nhịp làm việc của bạn',
-          'Chọn mục muốn chỉnh. Nhịp mới áp dụng từ phiên sau.',
+          'Nhịp làm việc',
+          'Áp dụng từ phiên sau.',
         ),
         if (_busy && _preferences == null)
           const MelbelLoadingSkeleton(
@@ -578,36 +618,43 @@ class _SettingsScreenState extends State<SettingsScreen> {
             onPressed: _load,
           ),
         if (_preferences != null) ...[
-          if (pending != null)
+          if (hasPendingBanner)
             MelbelCard(
               tone: MelbelCardTone.amber,
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Eyebrow('Chờ duyệt lịch', color: palette.amberInk),
+                  Eyebrow('Bạn đang có thay đổi lịch chờ duyệt',
+                      color: palette.amberInk),
                   const SizedBox(height: 6),
                   Text(
-                    'Thay đổi nhịp làm việc ảnh hưởng tới lịch tương lai.',
+                    'Ảnh hưởng tới lịch tương lai.',
                     style: textTheme.bodySmall?.copyWith(
                       color: palette.onAmberSoft,
                     ),
                   ),
-                  const SizedBox(height: 12),
-                  SecondaryCta(
-                    label: 'Xem thay đổi chờ duyệt',
-                    icon: Icons.event_repeat_rounded,
-                    onPressed: _busy ? null : () => _reviewProposal(pending),
-                  ),
-                  if (change?['change_request_id'] case final String id)
-                    if (change?['request_revision'] case final int revision)
-                      Padding(
-                        padding: const EdgeInsets.only(top: 6),
-                        child: TextButton(
-                          onPressed:
-                              _busy ? null : () => _cancelChange(id, revision),
-                          child: const Text('Hủy yêu cầu đổi cài đặt'),
-                        ),
+                  if (pendingProposalId != null) ...[
+                    const SizedBox(height: 12),
+                    SecondaryCta(
+                      label: 'Xem thay đổi chờ duyệt',
+                      icon: Icons.event_repeat_rounded,
+                      onPressed: _busy
+                          ? null
+                          : () => _reviewProposal(pendingProposalId),
+                    ),
+                  ],
+                  if (pendingRequestId != null &&
+                      pendingRequestRevision != null)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 6),
+                      child: TextButton(
+                        onPressed: _busy
+                            ? null
+                            : () => _cancelChange(
+                                pendingRequestId, pendingRequestRevision),
+                        child: const Text('Hủy yêu cầu đổi cài đặt'),
                       ),
+                    ),
                 ],
               ),
             ),
@@ -647,6 +694,16 @@ class _SettingsScreenState extends State<SettingsScreen> {
                       reason,
                       style: textTheme.bodySmall?.copyWith(
                         color: palette.onSageSoft.withValues(alpha: 0.9),
+                      ),
+                    ),
+                  ],
+                  if (pendingProposalId != null &&
+                      suggestion['status'] == 'pending') ...[
+                    const SizedBox(height: 6),
+                    Text(
+                      'Đang chờ duyệt lịch ở mục trên.',
+                      style: textTheme.bodySmall?.copyWith(
+                        color: palette.onSageSoft.withValues(alpha: 0.85),
                       ),
                     ),
                   ],
@@ -713,6 +770,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   for (final entry in const {
                     'gentle': 'Nhẹ nhàng',
                     'upbeat': 'Tươi vui',
+                    'encouraging': 'Khích lệ',
                   }.entries)
                     ChoiceChip(
                       label: Text(entry.value),
@@ -765,7 +823,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   contentPadding: EdgeInsets.zero,
                   leading: Icon(Icons.shield_outlined, color: palette.accentInk),
                   title: Text('Hệ số đệm: ×$buffer'),
-                  subtitle: const Text('Dự phòng thời gian khi xếp phiên'),
                   trailing: const MelbelStatusPill(
                     label: 'Chỉnh',
                     tone: MelbelCardTone.sage,
@@ -776,6 +833,17 @@ class _SettingsScreenState extends State<SettingsScreen> {
             ],
           ),
         ],
+        if (streak != null && !streak.isUnlocked)
+          MelbelCard(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+            child: SwitchListTile.adaptive(
+              contentPadding: EdgeInsets.zero,
+              title: const Text('Thẻ nhịp tập trung ở Trang chủ'),
+              value: !streak.introDismissed,
+              onChanged: (show) =>
+                  show ? streak.restoreIntro() : streak.dismissIntro(),
+            ),
+          ),
         MelbelDisclosure(
           title: 'Giao diện',
           icon: Icons.contrast_rounded,

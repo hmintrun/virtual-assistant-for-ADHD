@@ -175,6 +175,12 @@ abstract class LocalScheduleRepository {
 
   Future<void> clearUpcomingContext(String runId);
 
+  Future<int> pruneStaleUpcomingContexts({
+    Duration olderThan = const Duration(days: 14),
+    DateTime? asOf,
+  }) async =>
+      0;
+
   Future<void> clearAll();
 }
 
@@ -318,6 +324,21 @@ class SqliteScheduleRepository extends LocalScheduleRepository {
       'cached_upcoming_contexts',
       where: 'run_id = ?',
       whereArgs: [runId],
+    );
+  }
+
+  @override
+  Future<int> pruneStaleUpcomingContexts({
+    Duration olderThan = const Duration(days: 14),
+    DateTime? asOf,
+  }) async {
+    final db = await _getDb();
+    final cutoffIso =
+        (asOf ?? DateTime.now()).toUtc().subtract(olderThan).toIso8601String();
+    return await db.delete(
+      'cached_upcoming_contexts',
+      where: 'updated_at < ?',
+      whereArgs: [cutoffIso],
     );
   }
 

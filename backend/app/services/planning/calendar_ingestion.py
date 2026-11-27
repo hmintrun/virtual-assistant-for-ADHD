@@ -20,7 +20,7 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.calendar import CalendarEventLink
+from app.models.calendar import CalendarConnection, CalendarEventLink
 from app.models.session import Session
 from app.models.step import Step
 from app.schemas.calendar import (
@@ -278,12 +278,14 @@ async def ingest_calendar_sources(
             # Nguồn này người dùng đã xác nhận bỏ qua trong lần lập phương án này
             continue
 
+        conn_id_val: UUID | None = None
         try:
             conn = await cal_service.get_connection_by_id(uid, _resolve_uuid(src.connection_id))
             if not conn:
                 raise CalendarClientError(
                     f"Không tìm thấy kết nối {src.connection_id}", status_code=404
                 )
+            conn_id_val = conn.id
 
             access_token = await cal_service.get_valid_access_token(conn)
             raw_events = await client.list_events(
@@ -393,6 +395,17 @@ async def ingest_calendar_sources(
 
         except CalendarAuthError as exc:
             logger.warning("Auth error reading calendar %s: %s", src.google_calendar_id, exc)
+            if conn_id_val is not None:
+                current_state = await db.scalar(
+                    select(CalendarConnection.connection_state).where(
+                        CalendarConnection.id == conn_id_val
+                    )
+                )
+                if current_state not in (None, "disconnected", "needs_reconnect"):
+                    await cal_service.mark_connection_needs_reconnect(
+                        conn_id_val,
+                        commit=not bool(db.info.get("defer_command_commit")),
+                    )
             calendar_errors.append(
                 CalendarError(
                     connection_id=src.connection_id,

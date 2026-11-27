@@ -1099,6 +1099,12 @@ class TaskProvider extends ChangeNotifier {
       try {
         await _planningApi.deleteDraft(draft.draftId);
       } on ApiException catch (error) {
+        if (error.isConfirmedDraftTransition) {
+          _apiError = 'Bản nháp này đã được chốt thành công việc.';
+          notifyListeners();
+          unawaited(restoreBackendState());
+          return;
+        }
         if (error.statusCode != 404) {
           _isApiBusy = false;
           _apiError = error.message;
@@ -1110,6 +1116,101 @@ class TaskProvider extends ChangeNotifier {
       }
     }
     clearDraft();
+  }
+
+  void clearApiError() {
+    if (_apiError == null) return;
+    _apiError = null;
+    notifyListeners();
+  }
+
+  void clearConfirmedTaskIfMatches(String taskId) {
+    if (_confirmedTask?.taskId != taskId) return;
+    _confirmedTask = null;
+    _calendarSyncState = null;
+    _confirmedScheduleRevision = null;
+    _planLocked = false;
+    _confirmed = false;
+    unawaited(_persist());
+    notifyListeners();
+  }
+
+  Future<List<PlanningDraftModel>> fetchOpenDrafts() async {
+    final all = await _planningApi.listDrafts();
+    return all
+        .where((d) =>
+            (d.confirmedTaskId == null || d.confirmedTaskId!.isEmpty) &&
+            d.stage != 'confirmed' &&
+            d.stage != 'discarded')
+        .toList(growable: false);
+  }
+
+  Future<void> openServerDraft(PlanningDraftModel draft) async {
+    _editRevision++;
+    _activeOperation = null;
+    _isApiBusy = false;
+    _apiError = null;
+    _draft = draft;
+    _clientDraftId =
+        draft.clientDraftId.isNotEmpty ? draft.clientDraftId : null;
+    _clientDraftFingerprint = null;
+    _entrySource = draft.inputSource;
+    _rawInputText = draft.rawInput ?? '';
+    _title = draft.title.isNotEmpty ? draft.title : (draft.rawInput ?? '');
+    _scope = draft.scope;
+    _deadline = null;
+    _availability = null;
+    _availabilityCleared = false;
+    _applyDraftSummary();
+    _candidate = null;
+    _confirmedTask = null;
+    _calendarSyncState = null;
+    _confirmedScheduleRevision = null;
+    _planLocked = false;
+    _planSavedForLater = false;
+    _confirmed = false;
+    _draftSaved = true;
+    final candidateId = draft.candidateRef?['candidate_id'] as String?;
+    if (candidateId != null && candidateId.isNotEmpty) {
+      try {
+        _candidate = await _planningApi.getCandidate(candidateId);
+      } on ApiException {
+        // Keep draft usable even if candidate cannot be fetched.
+      }
+    }
+    await _persist();
+    notifyListeners();
+  }
+
+  Future<void> deleteDraftById(String draftId) async {
+    if (_isApiBusy) return;
+    _isApiBusy = true;
+    _apiError = null;
+    notifyListeners();
+    try {
+      try {
+        await _planningApi.deleteDraft(draftId);
+      } on ApiException catch (error) {
+        if (error.isConfirmedDraftTransition) {
+          _apiError = 'Bản nháp này đã được chốt thành công việc.';
+          unawaited(restoreBackendState());
+          notifyListeners();
+          rethrow;
+        }
+        if (error.statusCode != 404) {
+          _apiError = error.message;
+          notifyListeners();
+          rethrow;
+        }
+      }
+    } finally {
+      _isApiBusy = false;
+    }
+    if (_draft?.draftId == draftId) {
+      clearDraft();
+    } else {
+      notifyListeners();
+    }
   }
 
   void clearDraft() {

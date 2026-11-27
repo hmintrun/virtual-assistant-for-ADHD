@@ -202,12 +202,21 @@ class TestRequirementGapsAndADHDScenarios(unittest.TestCase):
 
     def test_gap_5_rolling_horizon_continuation_missing(self):
         """I03 & I07: Mở rộng chặng Rolling Horizon qua UF6 expand_next_horizon và cập nhật pending_notification_state."""
+        from unittest.mock import patch
+
         from app.schemas.reschedule import (
             ApproveProposalRequest,
             CreateProposalRequest,
             ProposalSourceRevisions,
         )
         from app.services import reschedule_service
+
+        async def _fake_decompose_task(**_kwargs):
+            return None
+
+        async def _fake_enrich_split_sessions(split_sessions, task_title=None):
+            del task_title
+            return reschedule_service.ai_service._fallback_enrich_split_sessions(split_sessions)
 
         async def run():
             engine, factory = await self._async_setup_db()
@@ -291,27 +300,41 @@ class TestRequirementGapsAndADHDScenarios(unittest.TestCase):
                 task_id = confirmed.task.task_id
                 self.assertEqual(confirmed.task.decomposition_state, "partial")
 
-                async with factory() as db:
-                    owner = draft_service.resolve_user_uuid("user_a")
-                    revs, _ = await reschedule_service._compute_db_source_revisions(
-                        db, owner, target_task_id=task_id
-                    )
-                    sched_rev = await reschedule_service._get_current_schedule_revision(db, owner)
-                    proposal = await reschedule_service.create_proposal(
-                        db,
-                        user_id="user_a",
-                        idempotency_key="gap5_prop_create",
-                        payload=CreateProposalRequest(
-                            trigger_reason="expand_next_horizon",
-                            target_task_id=task_id,
-                            allowed_task_ids=[task_id],
-                            expected_base_schedule_revision=sched_rev,
-                            expected_source_revisions=ProposalSourceRevisions.model_validate(
-                                revs.model_dump()
+                with (
+                    patch.object(
+                        reschedule_service.ai_service,
+                        "decompose_task",
+                        side_effect=_fake_decompose_task,
+                    ),
+                    patch.object(
+                        reschedule_service.ai_service,
+                        "enrich_split_sessions",
+                        side_effect=_fake_enrich_split_sessions,
+                    ),
+                ):
+                    async with factory() as db:
+                        owner = draft_service.resolve_user_uuid("user_a")
+                        revs, _ = await reschedule_service._compute_db_source_revisions(
+                            db, owner, target_task_id=task_id
+                        )
+                        sched_rev = await reschedule_service._get_current_schedule_revision(
+                            db, owner
+                        )
+                        proposal = await reschedule_service.create_proposal(
+                            db,
+                            user_id="user_a",
+                            idempotency_key="gap5_prop_create",
+                            payload=CreateProposalRequest(
+                                trigger_reason="expand_next_horizon",
+                                target_task_id=task_id,
+                                allowed_task_ids=[task_id],
+                                expected_base_schedule_revision=sched_rev,
+                                expected_source_revisions=ProposalSourceRevisions.model_validate(
+                                    revs.model_dump()
+                                ),
                             ),
-                        ),
-                        now=now + timedelta(days=1),
-                    )
+                            now=now + timedelta(days=1),
+                        )
                 # I07: Khi mới tạo, pending_notification_state == "pending" và chưa có sent_at
                 self.assertEqual(proposal.pending_notification_state, "pending")
                 self.assertIsNone(proposal.pending_notification_sent_at)

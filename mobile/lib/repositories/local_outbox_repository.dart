@@ -37,6 +37,12 @@ abstract class LocalOutboxRepository {
 
   Future<int> getPendingCount({DateTime? asOf});
 
+  Future<int> pruneSynced({
+    Duration olderThan = const Duration(days: 7),
+    DateTime? asOf,
+  }) async =>
+      0;
+
   Future<void> deleteRecord(String clientEventId);
 
   Future<void> clearAll();
@@ -228,6 +234,21 @@ class SqliteOutboxRepository extends LocalOutboxRepository {
   }
 
   @override
+  Future<int> pruneSynced({
+    Duration olderThan = const Duration(days: 7),
+    DateTime? asOf,
+  }) async {
+    final db = await _getDb();
+    final cutoffIso =
+        (asOf ?? DateTime.now()).toUtc().subtract(olderThan).toIso8601String();
+    return await db.delete(
+      'local_outbox',
+      where: 'status = ? AND COALESCE(synced_at, occurred_at, created_at) < ?',
+      whereArgs: [OutboxStatus.synced, cutoffIso],
+    );
+  }
+
+  @override
   Future<void> clearAll() async {
     final db = await _getDb();
     await db.delete('local_outbox');
@@ -343,6 +364,27 @@ class InMemoryOutboxRepository extends LocalOutboxRepository {
   @override
   Future<void> deleteRecord(String clientEventId) async {
     _storage.remove(clientEventId);
+  }
+
+  @override
+  Future<int> pruneSynced({
+    Duration olderThan = const Duration(days: 7),
+    DateTime? asOf,
+  }) async {
+    final cutoff = (asOf ?? DateTime.now()).toUtc().subtract(olderThan);
+    final toRemove = <String>[];
+    for (final entry in _storage.entries) {
+      final rec = entry.value;
+      if (rec.status != OutboxStatus.synced) continue;
+      final refTime = (rec.syncedAt ?? rec.occurredAt).toUtc();
+      if (refTime.isBefore(cutoff)) {
+        toRemove.add(entry.key);
+      }
+    }
+    for (final key in toRemove) {
+      _storage.remove(key);
+    }
+    return toRemove.length;
   }
 
   @override

@@ -11,6 +11,7 @@ import '../widgets/calendar_fallback.dart';
 import '../widgets/melbel_ui.dart';
 import 'candidate_review_screen.dart';
 import 'focus_screen.dart';
+import 'main_shell_screen.dart';
 
 // Helper for opening new screens
 Future<void> _open(BuildContext context, Widget page) => Navigator.push<void>(
@@ -476,8 +477,8 @@ class _FeasibilityScreenState extends State<FeasibilityScreen> {
                     Expanded(
                       child: Text(
                         deficit == null || deficit <= 0
-                            ? 'Phương án cần được điều chỉnh trước khi chốt.'
-                            : 'Cần thêm $deficit phút để xếp đủ các phiên.',
+                            ? 'Cần điều chỉnh lịch.'
+                            : 'Thiếu $deficit phút.',
                         style: textTheme.titleSmall?.copyWith(
                           color: palette.onAmberSoft,
                         ),
@@ -618,7 +619,16 @@ class _ExtendTimeScreenState extends State<ExtendTimeScreen> {
   Widget build(BuildContext context) {
     final task = context.watch<TaskProvider>();
     final displayTitle =
-        task.title.isEmpty ? 'Soạn báo cáo đánh giá quý 3' : task.title;
+        task.title.trim().isEmpty ? 'Công việc hiện tại' : task.title;
+    final currentDeadlineLabel = task.formatDeadline(task.deadline);
+    final candidateSteps = task.candidate?.steps ?? const [];
+    final totalMinutes = candidateSteps.fold<int>(
+      0,
+      (sum, step) => sum + ((step['estimated_base_seconds'] as num?)?.toInt() ?? 0),
+    );
+    final totalDurationLabel = totalMinutes > 0
+        ? 'Tổng cộng: ${(totalMinutes / 60).ceil()} phút'
+        : 'Tổng cộng: Đang cập nhật';
     final current = _options[_selectedOption];
 
     return MelbelPageBackdrop(
@@ -684,7 +694,7 @@ class _ExtendTimeScreenState extends State<ExtendTimeScreen> {
                         ),
                         const SizedBox(height: 4),
                         Text(
-                          'Hạn hiện tại: 17:00 hôm nay',
+                          'Hạn hiện tại: $currentDeadlineLabel',
                           style: TextStyle(
                             fontSize: 13,
                             color: MelbelColors.kOnSurfaceVariant,
@@ -816,7 +826,7 @@ class _ExtendTimeScreenState extends State<ExtendTimeScreen> {
                         ),
                       ),
                       Text(
-                        'Tổng cộng: 120 phút',
+                        totalDurationLabel,
                         style: TextStyle(
                           fontSize: 13,
                           color: MelbelColors.kOnSurfaceVariant,
@@ -1263,7 +1273,7 @@ class UnconfirmedPlanScreen extends StatelessWidget {
             SecondaryCta(
               label: 'Để sau',
               onPressed: () {
-                Navigator.of(context).popUntil((route) => route.isFirst);
+                MainShellScreen.returnHome(context);
               },
             ),
             const SizedBox(height: 20),
@@ -1378,6 +1388,8 @@ class PlanLockedScreen extends StatelessWidget {
     final firstMicroTask = firstSession?.microTaskText.trim() ?? '';
     final localizations = MaterialLocalizations.of(context);
     final firstStart = firstSession?.scheduledStart.toLocal();
+    final canStartNow = firstStart == null ||
+        !firstStart.isAfter(DateTime.now().add(const Duration(minutes: 15)));
     final deadlineAt =
         task.draft?.summary['time_constraint']?['deadline_at'] as String?;
     final confirmedDeadline = deadlineAt == null
@@ -1417,23 +1429,36 @@ class PlanLockedScreen extends StatelessWidget {
             mainAxisSize: MainAxisSize.min,
             children: [
               PrimaryCta(
-                label: firstMinutes > 0
-                    ? 'Bắt đầu đếm giờ ${firstMinutes}p ngay bây giờ'
-                    : 'Bắt đầu phiên đầu tiên',
-                icon: Icons.play_arrow_rounded,
-                onPressed: confirmedSessions.isEmpty
-                    ? null
-                    : () => _startFirstSession(context),
+                label: !canStartNow
+                    ? 'Về trang chủ, nhắc trước 15 phút'
+                    : firstMinutes > 0
+                        ? 'Bắt đầu đếm giờ ${firstMinutes}p ngay bây giờ'
+                        : 'Bắt đầu phiên đầu tiên',
+                icon: canStartNow
+                    ? Icons.play_arrow_rounded
+                    : Icons.notifications_active_outlined,
+                onPressed: !canStartNow
+                    ? () => MainShellScreen.returnHome(context)
+                    : confirmedSessions.isEmpty
+                        ? null
+                        : () => _startFirstSession(context),
               ),
               const SizedBox(height: 10),
               SecondaryCta(
-                label: 'Để sau, nhắc tôi trước 15 phút',
-                icon: Icons.notifications_active_outlined,
+                label: canStartNow
+                    ? 'Để sau, nhắc tôi trước 15 phút'
+                    : 'Xem phiên sắp tới',
+                icon: canStartNow
+                    ? Icons.notifications_active_outlined
+                    : Icons.schedule_rounded,
                 height: 50,
-                onPressed: () {
-                  Navigator.of(context)
-                      .pushNamedAndRemoveUntil('/home', (_) => false);
-                },
+                onPressed: !canStartNow
+                    ? (confirmedSessions.isEmpty
+                        ? null
+                        : () => _startFirstSession(context))
+                    : () {
+                        MainShellScreen.returnHome(context);
+                      },
               ),
             ],
           ),
@@ -1464,7 +1489,7 @@ class PlanLockedScreen extends StatelessWidget {
                         alignment: Alignment.center,
                         child: const MelbelMascot(
                           expression: CatExpression.happy,
-                          forceLightSvg: true,
+                          showBackdrop: false,
                           width: 94,
                           height: 84,
                         ),
@@ -1489,14 +1514,6 @@ class PlanLockedScreen extends StatelessWidget {
                     style: textTheme.headlineSmall?.copyWith(
                       fontWeight: FontWeight.w800,
                       color: palette.onSageSoft,
-                    ),
-                  ),
-                  const SizedBox(height: 6),
-                  Text(
-                    'Bạn đã vượt qua bước khó nhất: bắt đầu lập kế hoạch.',
-                    textAlign: TextAlign.center,
-                    style: textTheme.bodyMedium?.copyWith(
-                      color: palette.onSageSoft.withValues(alpha: 0.86),
                     ),
                   ),
                 ],
@@ -1803,12 +1820,16 @@ class AiFallbackScreen extends StatelessWidget {
                     ),
                   ),
                   const SizedBox(height: 6),
-                  Text(
-                    'Hệ thống chuẩn bị sẵn lịch mẫu tiêu chuẩn cho bạn',
-                    textAlign: TextAlign.center,
-                    style: TextStyle(
-                      fontSize: 14,
-                      color: MelbelColors.kOnSurfaceVariant,
+                  SizedBox(
+                    width: double.infinity,
+                    child: Text(
+                      'Hệ thống chuẩn bị sẵn lịch mẫu tiêu chuẩn cho bạn',
+                      textAlign: TextAlign.start,
+                      style: TextStyle(
+                        fontSize: 14,
+                        height: 1.5,
+                        color: MelbelColors.kOnSurfaceVariant,
+                      ),
                     ),
                   ),
                 ],

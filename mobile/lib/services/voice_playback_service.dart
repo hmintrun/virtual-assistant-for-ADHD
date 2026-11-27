@@ -22,6 +22,7 @@ import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:audioplayers/audioplayers.dart';
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter_tts/flutter_tts.dart';
 import 'package:path_provider/path_provider.dart';
 
@@ -135,12 +136,19 @@ class MemoryTtsAudioCache implements TtsAudioCache {
 }
 
 /// Cache trong thư mục cache của app (Android tự dọn khi thiếu bộ nhớ) +
-/// lớp RAM phía trước. Giữ tối đa [maxFiles] file, xóa file cũ nhất.
+/// lớp RAM phía trước. Giữ tối đa [maxFiles] file và [maxTotalBytes] bytes,
+/// tự dọn file rỗng hoặc cũ hơn [maxAge].
 class FileTtsAudioCache implements TtsAudioCache {
-  FileTtsAudioCache({this.maxFiles = 80, Future<Directory> Function()? dir})
-      : _dirProvider = dir ?? _defaultDir;
+  FileTtsAudioCache({
+    this.maxFiles = 80,
+    this.maxTotalBytes = defaultMaxTotalBytes,
+    Future<Directory> Function()? dir,
+  }) : _dirProvider = dir ?? _defaultDir;
+
+  static const int defaultMaxTotalBytes = 8 * 1024 * 1024;
 
   final int maxFiles;
+  final int maxTotalBytes;
   final Future<Directory> Function() _dirProvider;
   final MemoryTtsAudioCache _memory = MemoryTtsAudioCache(maxEntries: 16);
   Directory? _dir;
@@ -153,6 +161,79 @@ class FileTtsAudioCache implements TtsAudioCache {
     'audio/mp3': 'mp3',
     'audio/wav': 'wav',
   };
+
+  /// Dọn file cache rỗng, quá hạn [maxAge], hoặc vượt ngưỡng [maxFiles] / [maxTotalBytes].
+  static Future<int> pruneCache({
+    int maxFiles = 80,
+    int maxTotalBytes = defaultMaxTotalBytes,
+    Duration maxAge = const Duration(days: 14),
+    Directory? directoryOverride,
+    DateTime? nowOverride,
+  }) async {
+    if (kIsWeb && directoryOverride == null) return 0;
+    try {
+      final dir = directoryOverride ?? await _defaultDir();
+      if (!await dir.exists()) return 0;
+      return await _pruneDirectory(
+        dir,
+        maxFiles: maxFiles,
+        maxTotalBytes: maxTotalBytes,
+        maxAge: maxAge,
+        now: nowOverride ?? DateTime.now(),
+      );
+    } catch (_) {
+      return 0;
+    }
+  }
+
+  static Future<int> _pruneDirectory(
+    Directory dir, {
+    required int maxFiles,
+    required int maxTotalBytes,
+    Duration? maxAge,
+    DateTime? now,
+  }) async {
+    var deleted = 0;
+    final cutoff =
+        maxAge != null ? (now ?? DateTime.now()).subtract(maxAge) : null;
+    final kept = <({File file, DateTime modified, int size})>[];
+
+    await for (final entity in dir.list(followLinks: false)) {
+      if (entity is! File) continue;
+      try {
+        final stat = await entity.stat();
+        if (stat.size == 0 ||
+            (cutoff != null && stat.modified.isBefore(cutoff))) {
+          await entity.delete();
+          deleted++;
+          continue;
+        }
+        kept.add((file: entity, modified: stat.modified, size: stat.size));
+      } catch (_) {
+        // Bỏ qua file lỗi truy cập để không làm gián đoạn phát audio.
+      }
+    }
+
+    var totalBytes = kept.fold<int>(0, (sum, entry) => sum + entry.size);
+    if (kept.length <= maxFiles && totalBytes <= maxTotalBytes) {
+      return deleted;
+    }
+
+    kept.sort((a, b) => a.modified.compareTo(b.modified));
+    var remainingCount = kept.length;
+    for (final entry in kept) {
+      if (remainingCount <= maxFiles && totalBytes <= maxTotalBytes) break;
+      try {
+        await entry.file.delete();
+        deleted++;
+        remainingCount--;
+        totalBytes -= entry.size;
+      } catch (_) {
+        // Bỏ qua lỗi xóa file đơn lẻ.
+      }
+    }
+    return deleted;
+  }
 
   Future<Directory> _ensureDir() async {
     final dir = _dir ??= await _dirProvider();
@@ -172,7 +253,12 @@ class FileTtsAudioCache implements TtsAudioCache {
       ]) {
         final file = File('${dir.path}/$key.$ext');
         if (await file.exists()) {
-          final audio = CachedTtsAudio(await file.readAsBytes(), mime);
+          final bytes = await file.readAsBytes();
+          if (bytes.isEmpty) {
+            await file.delete().catchError((_) => file);
+            continue;
+          }
+          final audio = CachedTtsAudio(bytes, mime);
           await _memory.put(key, audio);
           return audio;
         }
@@ -187,19 +273,15 @@ class FileTtsAudioCache implements TtsAudioCache {
   Future<void> put(String key, CachedTtsAudio audio) async {
     await _memory.put(key, audio);
     final ext = _extOf[audio.mimeType];
-    if (ext == null) return; // định dạng lạ: chỉ giữ trong RAM
+    if (ext == null || audio.bytes.isEmpty) return;
     try {
       final dir = await _ensureDir();
       await File('${dir.path}/$key.$ext').writeAsBytes(audio.bytes);
-      final files = dir.listSync().whereType<File>().toList();
-      if (files.length > maxFiles) {
-        files.sort(
-          (a, b) => a.statSync().modified.compareTo(b.statSync().modified),
-        );
-        for (final old in files.take(files.length - maxFiles)) {
-          await old.delete().catchError((_) => old);
-        }
-      }
+      await _pruneDirectory(
+        dir,
+        maxFiles: maxFiles,
+        maxTotalBytes: maxTotalBytes,
+      );
     } catch (_) {
       // Ghi đĩa lỗi không ảnh hưởng việc phát.
     }

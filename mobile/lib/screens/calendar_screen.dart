@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart' show ValueListenable;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
@@ -15,12 +16,22 @@ import '../services/schedule_service.dart';
 import 'focus_screen.dart';
 import '../widgets/melbel_ui.dart';
 import '../widgets/streak_widgets.dart';
+import '../widgets/task_delete_sheet.dart';
 import 'support_screens.dart';
 import 'task_entry_screen.dart';
 
 class CalendarScreen extends StatefulWidget {
-  const CalendarScreen({super.key, this.client});
+  const CalendarScreen({
+    super.key,
+    this.client,
+    this.embeddedInShell = false,
+    this.refreshSignal,
+  });
+
   final ApiClient? client;
+  final bool embeddedInShell;
+  final ValueListenable<int>? refreshSignal;
+
   @override
   State<CalendarScreen> createState() => _CalendarScreenState();
 }
@@ -44,7 +55,28 @@ class _CalendarScreenState extends State<CalendarScreen> {
     final now = DateTime.now();
     _month = DateTime(now.year, now.month);
     _api = widget.client ?? ApiClient();
+    widget.refreshSignal?.addListener(_onShellRefresh);
     _load();
+  }
+
+  @override
+  void didUpdateWidget(covariant CalendarScreen oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (!identical(oldWidget.refreshSignal, widget.refreshSignal)) {
+      oldWidget.refreshSignal?.removeListener(_onShellRefresh);
+      widget.refreshSignal?.addListener(_onShellRefresh);
+    }
+  }
+
+  void _onShellRefresh() {
+    if (!mounted) return;
+    unawaited(_load());
+  }
+
+  @override
+  void dispose() {
+    widget.refreshSignal?.removeListener(_onShellRefresh);
+    super.dispose();
   }
 
   Future<void> _load() async {
@@ -137,11 +169,11 @@ class _CalendarScreenState extends State<CalendarScreen> {
                             child: Text(
                               switch (streakStatus) {
                                 StreakDayKind.done =>
-                                  'Đã giữ nhịp tập trung $streakMinutes phút cùng Melbel.',
+                                  'Đã giữ nhịp $streakMinutes phút cùng Melbel.',
                                 StreakDayKind.freeze =>
-                                  'Ngày Melbel ngủ nướng: Khiên tự động bật giúp chuỗi không bị đứt.',
+                                  'Khiên ngủ nướng đã giữ chuỗi ngày này.',
                                 StreakDayKind.repair =>
-                                  'Ngày đang chờ nối lại nhịp (24h). Hoàn thành ≥ 2 phút để nối lại chuỗi!',
+                                  'Chờ nối nhịp 24h · làm ≥ 2 phút để nối chuỗi.',
                               },
                               style: Theme.of(context).textTheme.bodySmall,
                             ),
@@ -178,7 +210,40 @@ class _CalendarScreenState extends State<CalendarScreen> {
                                             if (session['task_title'] is String)
                                               Text(session['task_title']
                                                   as String),
-                                          ])))),
+                                          ]),
+                                      trailing: !_cached &&
+                                              session['status'] == 'scheduled' &&
+                                              session['task_id'] is String &&
+                                              (session['task_id'] as String)
+                                                  .isNotEmpty
+                                          ? IconButton(
+                                              tooltip: 'Xóa công việc',
+                                              constraints: const BoxConstraints(
+                                                minWidth: 48,
+                                                minHeight: 48,
+                                              ),
+                                              padding: EdgeInsets.zero,
+                                              onPressed: () => Navigator.pop(
+                                                context,
+                                                _CalendarDeleteTaskRequest(
+                                                  taskId: session['task_id']
+                                                      as String,
+                                                  taskTitle: (session[
+                                                              'task_title']
+                                                          as String?) ??
+                                                      (session['step_title']
+                                                          as String?) ??
+                                                      'Công việc',
+                                                  taskRevision: (session[
+                                                          'task_revision']
+                                                      as num?)?.toInt(),
+                                                ),
+                                              ),
+                                              icon: const Icon(
+                                                Icons.delete_outline_rounded,
+                                              ),
+                                            )
+                                          : null))),
                       ])),
                   Padding(
                     padding: const EdgeInsets.all(16),
@@ -189,6 +254,17 @@ class _CalendarScreenState extends State<CalendarScreen> {
                   ),
                 ]))));
     if (!mounted) return;
+    if (selected is _CalendarDeleteTaskRequest) {
+      final deleted = await confirmAndDeleteTask(
+        context,
+        taskId: selected.taskId,
+        taskTitle: selected.taskTitle,
+        taskRevision: selected.taskRevision,
+        api: _api,
+      );
+      if (deleted && mounted) await _load();
+      return;
+    }
     if (selected is FocusSessionInfo) {
       final focus = context.read<FocusProvider>();
       if (!focus.isActiveRun && !focus.hasUnfinishedServerRun) {
@@ -253,6 +329,52 @@ class _CalendarScreenState extends State<CalendarScreen> {
     _load();
   }
 
+  Widget _quickHeaderPill({
+    required IconData icon,
+    required String label,
+    required String tooltip,
+    required Color bg,
+    required Color fg,
+    required Color borderColor,
+    required VoidCallback? onPressed,
+  }) =>
+      Tooltip(
+        message: tooltip,
+        child: Material(
+          color: bg,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(16),
+            side: BorderSide(color: borderColor),
+          ),
+          clipBehavior: Clip.antiAlias,
+          child: InkWell(
+            onTap: onPressed,
+            borderRadius: BorderRadius.circular(16),
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(minHeight: 48),
+              child: Padding(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(icon, size: 19, color: fg),
+                    const SizedBox(width: 6),
+                    Text(
+                      label,
+                      style: Theme.of(context).textTheme.labelMedium?.copyWith(
+                            color: fg,
+                            fontWeight: FontWeight.w700,
+                          ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
@@ -266,7 +388,7 @@ class _CalendarScreenState extends State<CalendarScreen> {
     final activeTint = palette.accentInk;
 
     return Scaffold(
-      appBar: const MelbelAppBar(title: 'Lịch', showBack: true),
+      appBar: MelbelAppBar(title: 'Lịch', showBack: !widget.embeddedInShell),
       body: SafeArea(
         child: ListView(
           padding: MelbelLayout.pageInsets(context, top: 4, bottom: 16),
@@ -302,7 +424,7 @@ class _CalendarScreenState extends State<CalendarScreen> {
                                 key: _melbelKey,
                                 width: 112,
                                 height: 102,
-                                forceLightSvg: true,
+                                showBackdrop: false,
                               ),
                             ),
                             Positioned(
@@ -387,36 +509,29 @@ class _CalendarScreenState extends State<CalendarScreen> {
                               ),
                             ],
                           ),
+                          const SizedBox(height: 8),
                           SizedBox(
                             width: double.infinity,
                             child: Wrap(
                               alignment: WrapAlignment.spaceBetween,
                               crossAxisAlignment: WrapCrossAlignment.center,
                               spacing: 8,
-                              runSpacing: 2,
+                              runSpacing: 6,
                               children: [
-                                TextButton.icon(
-                                  style: TextButton.styleFrom(
-                                    foregroundColor: activeTint,
-                                    tapTargetSize:
-                                        MaterialTapTargetSize.shrinkWrap,
-                                    padding: const EdgeInsets.symmetric(
-                                      horizontal: 4,
-                                      vertical: 2,
-                                    ),
-                                    minimumSize: const Size(48, 34),
-                                  ),
+                                _quickHeaderPill(
+                                  icon: Icons.today_rounded,
+                                  label: 'Hôm nay',
+                                  tooltip: 'Xem hôm nay',
+                                  bg: palette.sageSoft,
+                                  fg: palette.accentInk,
+                                  borderColor:
+                                      palette.sage.withValues(alpha: 0.25),
                                   onPressed: _loading ? null : _showToday,
-                                  icon: const Icon(
-                                    Icons.today_outlined,
-                                    size: 16,
-                                  ),
-                                  label: const Text('Xem hôm nay'),
                                 ),
                                 Wrap(
                                   crossAxisAlignment: WrapCrossAlignment.center,
-                                  spacing: 4,
-                                  runSpacing: 4,
+                                  spacing: 6,
+                                  runSpacing: 6,
                                   children: [
                                     if (streak != null)
                                       InkWell(
@@ -426,10 +541,10 @@ class _CalendarScreenState extends State<CalendarScreen> {
                                             context, streak),
                                         child: MelbelStatusPill(
                                           label: streak.repairPending
-                                              ? 'Chờ nối ${streak.effectiveDisplayStreak} ngày'
+                                              ? 'Nối ${streak.effectiveDisplayStreak} ngày'
                                               : !streak.isUnlocked
-                                                  ? 'Khởi động ${streak.effectiveDisplayStreak}/${StreakProvider.unlockDays}'
-                                                  : '${streak.effectiveDisplayStreak} ngày nối tiếp',
+                                                  ? '${streak.effectiveDisplayStreak}/${StreakProvider.unlockDays}'
+                                                  : '${streak.effectiveDisplayStreak} ngày',
                                           icon: streak.isUnlocked
                                               ? Icons
                                                   .local_fire_department_outlined
@@ -448,18 +563,14 @@ class _CalendarScreenState extends State<CalendarScreen> {
                                         icon: Icons.event_note_outlined,
                                         tone: MelbelCardTone.sage,
                                       ),
-                                    TextButton.icon(
-                                      style: TextButton.styleFrom(
-                                        foregroundColor:
-                                            palette.onSurfaceVariant,
-                                        tapTargetSize:
-                                            MaterialTapTargetSize.shrinkWrap,
-                                        padding: const EdgeInsets.symmetric(
-                                          horizontal: 6,
-                                          vertical: 2,
-                                        ),
-                                        minimumSize: const Size(48, 34),
-                                      ),
+                                    _quickHeaderPill(
+                                      icon: Icons.mic_none_rounded,
+                                      label: 'Hỏi',
+                                      tooltip: 'Hỏi lịch',
+                                      bg: palette.amberSoft,
+                                      fg: palette.amberInk,
+                                      borderColor:
+                                          palette.amber.withValues(alpha: 0.28),
                                       onPressed: () =>
                                           Navigator.of(context).push(
                                         MaterialPageRoute<void>(
@@ -467,18 +578,13 @@ class _CalendarScreenState extends State<CalendarScreen> {
                                               const CalendarVoiceQuestionScreen(),
                                         ),
                                       ),
-                                      icon: const Icon(
-                                        Icons.mic_none_rounded,
-                                        size: 16,
-                                      ),
-                                      label: const Text('Hỏi lịch'),
                                     ),
                                   ],
                                 ),
                               ],
                             ),
                           ),
-                          const SizedBox(height: 4),
+                          const SizedBox(height: 8),
                           Row(
                             children: [
                               for (final day in [
@@ -817,15 +923,11 @@ class _CalendarScreenState extends State<CalendarScreen> {
                 clipBehavior: Clip.none,
                 children: [
                   MelbelCard(
-                    color:
-                        isDark ? palette.amberSoft : const Color(0xFFFCF2D6),
-                    borderColor:
-                        isDark ? palette.hairline : const Color(0xFFF0DFB8),
-                    borderWidth: 1.0,
+                    tone: MelbelCardTone.neutral,
                     borderRadius: 24,
                     padding: const EdgeInsets.symmetric(
                       horizontal: 14,
-                      vertical: 2,
+                      vertical: 8,
                     ),
                     child: Row(
                       children: [
@@ -841,23 +943,17 @@ class _CalendarScreenState extends State<CalendarScreen> {
                             style: theme.textTheme.bodyMedium?.copyWith(
                               fontSize: 14.5,
                               fontWeight: FontWeight.w600,
-                              color: isDark
-                                  ? palette.onAmberSoft
-                                  : palette.onSurface,
+                              color: palette.onSurface,
                             ),
                           ),
                         ),
-                        TextButton(
+                        const SizedBox(width: 8),
+                        MelbelIconObjectButton(
+                          icon: Icons.refresh_rounded,
+                          tooltip: 'Thử tải lại',
+                          size: 48,
+                          tone: MelbelCardTone.neutral,
                           onPressed: _load,
-                          style: TextButton.styleFrom(
-                            foregroundColor: activeTint,
-                            visualDensity: VisualDensity.compact,
-                            padding: const EdgeInsets.symmetric(horizontal: 8),
-                          ),
-                          child: const Text(
-                            'Thử tải lại',
-                            style: TextStyle(fontWeight: FontWeight.w700),
-                          ),
                         ),
                       ],
                     ),
@@ -934,7 +1030,7 @@ class _CalendarScreenState extends State<CalendarScreen> {
               clipBehavior: Clip.none,
               children: [
                 PrimaryCta(
-                  label: 'Thêm việc cho ngày này',
+                  label: 'Thêm việc',
                   icon: Icons.add_rounded,
                   height: 52,
                   onPressed: () =>
@@ -1083,4 +1179,16 @@ class _CalendarPeekingPawsPainter extends CustomPainter {
   @override
   bool shouldRepaint(_CalendarPeekingPawsPainter oldDelegate) =>
       oldDelegate.isDark != isDark;
+}
+
+class _CalendarDeleteTaskRequest {
+  const _CalendarDeleteTaskRequest({
+    required this.taskId,
+    required this.taskTitle,
+    this.taskRevision,
+  });
+
+  final String taskId;
+  final String taskTitle;
+  final int? taskRevision;
 }

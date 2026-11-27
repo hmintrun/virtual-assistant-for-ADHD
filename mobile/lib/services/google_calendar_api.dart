@@ -2,6 +2,70 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../core/api_client.dart';
 
+enum CalendarSyncRetryStatus {
+  retried,
+  reloadRequired,
+  cancelled,
+  invalidState,
+  reconnectRequired,
+}
+
+class CalendarSyncRetryResult {
+  const CalendarSyncRetryResult({
+    required this.status,
+    this.syncJob,
+    this.message,
+  });
+
+  final CalendarSyncRetryStatus status;
+  final Map<String, dynamic>? syncJob;
+  final String? message;
+}
+
+Future<CalendarSyncRetryResult> executeCalendarSyncRetryWithHandling({
+  required Future<Map<String, dynamic>> Function() retryCall,
+  required Future<Map<String, dynamic>> Function() reloadCall,
+}) async {
+  try {
+    final data = await retryCall();
+    return CalendarSyncRetryResult(
+      status: CalendarSyncRetryStatus.retried,
+      syncJob: data,
+    );
+  } on ApiException catch (error) {
+    if (error.requiresCalendarReconnect) {
+      return CalendarSyncRetryResult(
+        status: CalendarSyncRetryStatus.reconnectRequired,
+        message: error.message,
+      );
+    }
+    if (error.isRevisionConflict) {
+      Map<String, dynamic>? latest;
+      try {
+        latest = await reloadCall();
+      } catch (_) {}
+      return CalendarSyncRetryResult(
+        status: CalendarSyncRetryStatus.reloadRequired,
+        syncJob: latest,
+        message: error.message,
+      );
+    }
+    if (error.isJobCancelled) {
+      return CalendarSyncRetryResult(
+        status: CalendarSyncRetryStatus.cancelled,
+        message: error.message,
+      );
+    }
+    if (error.code == 'INVALID_STATE_TRANSITION') {
+      return CalendarSyncRetryResult(
+        status: CalendarSyncRetryStatus.invalidState,
+        message: error.message,
+      );
+    }
+    rethrow;
+  }
+}
+
 class GoogleCalendarApi {
   GoogleCalendarApi(this._api);
 
@@ -122,5 +186,15 @@ class GoogleCalendarApi {
             'expected_job_revision': expectedJobRevision,
         },
         idempotent: false,
+      );
+
+  Future<CalendarSyncRetryResult> retrySyncJobWithHandling(
+    String jobId, {
+    int? expectedJobRevision,
+  }) =>
+      executeCalendarSyncRetryWithHandling(
+        retryCall: () =>
+            retrySyncJob(jobId, expectedJobRevision: expectedJobRevision),
+        reloadCall: () => getSyncJob(jobId),
       );
 }

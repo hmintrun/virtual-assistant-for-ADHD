@@ -2,7 +2,6 @@ import 'dart:async';
 
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:timezone/data/latest_all.dart' as tzdata;
 import 'package:timezone/timezone.dart' as tz;
 
 /// Một phiên sắp tới cần nhắc trước (UF3). Chỉ chứa dữ liệu hiển thị, không
@@ -99,7 +98,7 @@ class AlarmService {
   Stream<String> get notificationTaps => _taps.stream;
 
   Future<void> init() async {
-    tzdata.initializeTimeZones();
+    tz.setLocalLocation(tz.UTC);
     const android = AndroidInitializationSettings('@mipmap/ic_launcher');
     await _plugin.initialize(
       const InitializationSettings(android: android),
@@ -446,17 +445,25 @@ class AlarmService {
             now: now,
           ));
 
+  /// Đặt danh sách nhắc trước phiên đã được đối chiếu từ máy chủ (`GET /reminders`).
+  Future<int> scheduleExplicitReminders(List<PreSessionReminder> plan) =>
+      _exclusive(() => _applyPreSessionReminderPlan(plan));
+
   Future<int> _schedulePreSessionReminders({
     required List<ReminderSession> sessions,
     List<int>? offsetsSeconds,
     DateTime? now,
   }) async {
-    await _cancelPreSessionReminders();
     final plan = planPreSessionReminders(
       sessions: sessions,
       offsetsSeconds: offsetsSeconds,
       now: now ?? DateTime.now(),
     );
+    return _applyPreSessionReminderPlan(plan);
+  }
+
+  Future<int> _applyPreSessionReminderPlan(List<PreSessionReminder> plan) async {
+    await _cancelPreSessionReminders();
     final entries = <String>[];
     for (final reminder in plan) {
       final text = preSessionText(reminder);

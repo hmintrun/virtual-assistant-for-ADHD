@@ -37,7 +37,7 @@ void main() {
       await tester.pumpAndSettle();
       await tester.tap(find.byTooltip('Tháng sau'));
       await tester.pumpAndSettle();
-      await tester.tap(find.text('Xem hôm nay'));
+      await tester.tap(find.byTooltip('Xem hôm nay'));
       await tester.pumpAndSettle();
       expect(client.requestedMonths, [
         DateTime(today.year, today.month),

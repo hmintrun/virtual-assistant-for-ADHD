@@ -3,6 +3,42 @@
 import 'package:dio/dio.dart';
 
 import '../core/api_client.dart';
+import 'google_calendar_api.dart';
+
+export 'google_calendar_api.dart'
+    show CalendarSyncRetryResult, CalendarSyncRetryStatus;
+
+/// Returns true when [calendar] is the dedicated non-primary `ProPlan VA Focus`
+/// calendar used solely for writing scheduled focus sessions (should never be
+/// included as a busy read source).
+bool isDedicatedFocusWriteCalendar(
+  CalendarItem calendar, {
+  String? writeCalendarId,
+}) {
+  if (calendar.primary) return false;
+  if (writeCalendarId != null &&
+      writeCalendarId.isNotEmpty &&
+      calendar.id == writeCalendarId) {
+    return true;
+  }
+  final normalized = calendar.summary.trim().toLowerCase();
+  return normalized == 'proplan va focus' || normalized == 'proplan focus';
+}
+
+/// Formats a connected Google account label cleanly, hiding the backend
+/// placeholder `'google_calendar_user'` behind [fallbackEmail] or friendly text.
+String formatCalendarAccountLabel(
+  String? accountRef, {
+  String? fallbackEmail,
+}) {
+  final trimmed = accountRef?.trim() ?? '';
+  if (trimmed.isNotEmpty && trimmed.toLowerCase() != 'google_calendar_user') {
+    return trimmed;
+  }
+  final email = fallbackEmail?.trim() ?? '';
+  if (email.isNotEmpty) return email;
+  return 'Tài khoản Google đã liên kết';
+}
 
 /// Một lịch trong tài khoản Google (Lịch chính, Lịch học, ...).
 class CalendarItem {
@@ -208,6 +244,16 @@ class CalendarApi {
             'expected_job_revision': expectedJobRevision,
         },
         idempotent: false,
+      );
+
+  Future<CalendarSyncRetryResult> retrySyncJobWithHandling(
+    String jobId, {
+    int? expectedJobRevision,
+  }) =>
+      executeCalendarSyncRetryWithHandling(
+        retryCall: () =>
+            retrySyncJob(jobId, expectedJobRevision: expectedJobRevision),
+        reloadCall: () => getSyncJob(jobId),
       );
 
   /// UF2: chụp lịch bận của các lịch đã chọn cho một Draft, để thuật toán

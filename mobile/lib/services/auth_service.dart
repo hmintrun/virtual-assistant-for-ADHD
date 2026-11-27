@@ -184,10 +184,24 @@ class AuthService extends ChangeNotifier {
     }
   }
 
-  Future<void> signIn() => _signIn(() async {
-        await initializeGoogle();
-        return _google.authenticate();
-      });
+  Future<void> signIn() {
+    if (!kIsWeb && !configured) {
+      error = kDebugMode
+          ? 'Thiếu GOOGLE_SERVER_CLIENT_ID khi chạy Android. Truyền --dart-define=GOOGLE_SERVER_CLIENT_ID=<Web Client ID>.'
+          : 'Ứng dụng chưa được cấu hình đăng nhập Google trên thiết bị này.';
+      if (kDebugMode) {
+        debugPrint(
+          '[AuthService] Android signIn blocked: GOOGLE_SERVER_CLIENT_ID is empty.',
+        );
+      }
+      notifyListeners();
+      return Future<void>.value();
+    }
+    return _signIn(() async {
+      await initializeGoogle();
+      return _google.authenticate();
+    });
+  }
 
   Future<void> _signIn(
       Future<GoogleSignInAccount> Function() getAccount) async {
@@ -274,6 +288,17 @@ class AuthService extends ChangeNotifier {
   void _showError(Object failure) {
     if (failure is GoogleSignInException &&
         failure.code == GoogleSignInExceptionCode.canceled) return;
+    if (kDebugMode) {
+      debugPrint('[AuthService] Google Sign-In failed: $failure');
+      final raw = '$failure';
+      if (raw.contains('10') ||
+          raw.contains('DEVELOPER_ERROR') ||
+          raw.contains('UNREGISTERED_ON_API_CONSOLE')) {
+        debugPrint(
+          '[AuthService] Hint: Check Android SHA-1 fingerprint and GOOGLE_SERVER_CLIENT_ID (Web Client ID) in Google Cloud Console.',
+        );
+      }
+    }
     error = failure is ApiException
         ? failure.message
         : 'Chưa đăng nhập được với Google. Hãy kiểm tra cấu hình và thử lại.';

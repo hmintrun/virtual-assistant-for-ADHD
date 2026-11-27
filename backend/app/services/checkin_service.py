@@ -2,18 +2,20 @@
 
 from __future__ import annotations
 
+import copy
 from datetime import UTC, datetime, timedelta
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
-from sqlalchemy import select
+from sqlalchemy import exists, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import AppError
+from app.models.calendar import CalendarConnection, CalendarEventLink, CalendarSyncJob
 from app.models.execution import CheckIn, SessionRun
 from app.models.session import Session as SessionRow
 from app.models.step import Step as StepRow
-from app.models.system import CommandReceipt
+from app.models.system import CommandReceipt, Reminder
 from app.models.task import Task as TaskRow
 from app.repositories import run_repository
 from app.schemas.execution import (
@@ -23,9 +25,12 @@ from app.schemas.execution import (
     CheckInListResult,
     CheckInResponseRequest,
 )
-from app.services import command_service, run_service
+from app.services import command_service, run_service, streak_service
+from app.services.plan_service import build_calendar_event_text
+from app.services.reschedule_service import _next_session_google_event_id
 
 VALID_ANSWER_OUTCOMES = {"completed", "partial", "incomplete", "busy", "skipped"}
+TERMINAL_PARENT_STATUSES = ("completed", "skipped", "cancelled")
 
 
 async def list_run_checkins(
@@ -180,6 +185,27 @@ def _validate_completion_flags(payload: CheckInResponseRequest) -> None:
         )
 
 
+def _ensure_utc(dt: datetime) -> datetime:
+    """Chuẩn hóa datetime về UTC-aware để so sánh an toàn trên SQLite & PostgreSQL."""
+    return dt.astimezone(UTC) if dt.utcoffset() is not None else dt.replace(tzinfo=UTC)
+
+
+def _receipt_sort_key(receipt: CommandReceipt) -> tuple[int, datetime, datetime]:
+    """Khóa sắp xếp receipt mới nhất theo (response_revision, applied_at, created_at)."""
+    refs = receipt.result_reference or {}
+    proj = refs.get("_projection") if isinstance(refs, dict) else None
+    rev = 0
+    if isinstance(proj, dict):
+        try:
+            rev = int(proj.get("response_revision", 0))
+        except (TypeError, ValueError):
+            rev = 0
+    epoch = datetime.min.replace(tzinfo=UTC)
+    applied = _ensure_utc(receipt.applied_at) if receipt.applied_at is not None else epoch
+    created = _ensure_utc(receipt.created_at) if receipt.created_at is not None else epoch
+    return (rev, applied, created)
+
+
 async def _load_prior_projection_baseline(
     db: AsyncSession,
     *,
@@ -200,6 +226,7 @@ async def _load_prior_projection_baseline(
             .order_by(CommandReceipt.applied_at.desc(), CommandReceipt.created_at.desc())
         )
     )
+    prior_receipts.sort(key=_receipt_sort_key, reverse=True)
 
     for receipt in prior_receipts:
         refs = receipt.result_reference or {}
@@ -207,7 +234,10 @@ async def _load_prior_projection_baseline(
         if refs.get("checkin_id") == str(checkin_id) and isinstance(proj, dict):
             saved_baseline = proj.get("baseline")
             if isinstance(saved_baseline, dict):
-                return dict(saved_baseline)
+                cloned = copy.deepcopy(saved_baseline)
+                if not isinstance(cloned.get("auto_cancelled_sessions"), dict):
+                    cloned["auto_cancelled_sessions"] = {}
+                return cloned
 
     baseline_step_status = step.status if step is not None else None
     baseline_step_remaining = step.remaining_base_seconds if step is not None else None
@@ -249,7 +279,746 @@ async def _load_prior_projection_baseline(
         "step_remaining_base_seconds": baseline_step_remaining,
         "task_id": str(task.id) if task is not None else None,
         "task_status": baseline_task_status,
+        "auto_cancelled_sessions": {},
     }
+
+
+def _build_session_calendar_payload_snapshot(
+    sess: SessionRow,
+    *,
+    event_id: str,
+    step_title: str | None,
+) -> dict[str, Any]:
+    """Dựng payload_snapshot chuẩn Google Calendar cho phiên cần tạo/cập nhật lại."""
+    summary, description = build_calendar_event_text(
+        sess.title,
+        step_title,
+        sess.session_goal,
+        sess.expected_output,
+    )
+    payload_snapshot: dict[str, Any] = {
+        "id": event_id,
+        "summary": summary,
+        "start": {
+            "dateTime": _ensure_utc(sess.scheduled_start).isoformat(),
+            "timeZone": "Asia/Ho_Chi_Minh",
+        },
+        "end": {
+            "dateTime": _ensure_utc(sess.scheduled_end).isoformat(),
+            "timeZone": "Asia/Ho_Chi_Minh",
+        },
+        "transparency": "opaque",
+        "reminders": {"useDefault": False, "overrides": []},
+        "extendedProperties": {
+            "private": {
+                "proactive_session_id": str(sess.id),
+                "proactive_schedule_revision": str(sess.schedule_revision),
+            }
+        },
+    }
+    if description is not None:
+        payload_snapshot["description"] = description
+    return payload_snapshot
+
+
+async def _has_self_cancelled_step_sessions(
+    db: AsyncSession,
+    *,
+    user_uuid: UUID,
+    step_id: UUID,
+    current_session_id: UUID,
+    baseline: dict[str, Any],
+) -> bool:
+    """Kiểm tra Step có phiên scheduled nào tạm hủy bởi chính CheckIn này đang ở trạng thái cancelled."""
+    auto_cancelled = baseline.get("auto_cancelled_sessions")
+    if not isinstance(auto_cancelled, dict) or not auto_cancelled:
+        return False
+    expected_rev_by_id: dict[UUID, int | None] = {}
+    step_id_str = str(step_id)
+    for sid, snap in auto_cancelled.items():
+        if not isinstance(snap, dict):
+            continue
+        if snap.get("is_currently_cancelled", True) is False:
+            continue
+        if snap.get("step_id") != step_id_str or snap.get("status") != "scheduled":
+            continue
+        try:
+            su = UUID(str(sid))
+        except ValueError:
+            continue
+        if su == current_session_id:
+            continue
+        raw_rev = snap.get("schedule_revision")
+        expected_rev_by_id[su] = int(raw_rev) if raw_rev is not None else None
+    if not expected_rev_by_id:
+        return False
+    rows = (
+        await db.execute(
+            select(SessionRow.id, SessionRow.schedule_revision).where(
+                SessionRow.user_id == user_uuid,
+                SessionRow.id.in_(list(expected_rev_by_id.keys())),
+                SessionRow.status == "cancelled",
+            )
+        )
+    ).all()
+    for sess_id, sched_rev in rows:
+        expected_rev = expected_rev_by_id.get(sess_id)
+        if expected_rev is None or sched_rev == expected_rev:
+            return True
+    return False
+
+
+async def _compute_target_cancel_ids(
+    db: AsyncSession,
+    *,
+    user_uuid: UUID,
+    current_session_id: UUID,
+    step: StepRow | None,
+    task: TaskRow | None,
+) -> list[UUID]:
+    """Xác định danh sách phiên scheduled thừa (chưa từng có SessionRun) cần hủy."""
+    cancel_task = task is not None and task.status == "completed"
+    cancel_step = step is not None and step.status in ("completed", "skipped")
+    if not cancel_task and not cancel_step:
+        return []
+
+    no_run_exists = ~exists(
+        select(SessionRun.id).where(
+            SessionRun.user_id == user_uuid,
+            SessionRun.session_id == SessionRow.id,
+        )
+    )
+    if cancel_task and task is not None:
+        stmt = (
+            select(SessionRow.id)
+            .join(StepRow, StepRow.id == SessionRow.step_id)
+            .where(
+                SessionRow.user_id == user_uuid,
+                StepRow.user_id == user_uuid,
+                StepRow.task_id == task.id,
+                SessionRow.id != current_session_id,
+                SessionRow.status == "scheduled",
+                no_run_exists,
+            )
+            .order_by(SessionRow.scheduled_start.asc(), SessionRow.id.asc())
+        )
+    elif step is not None:
+        stmt = (
+            select(SessionRow.id)
+            .where(
+                SessionRow.user_id == user_uuid,
+                SessionRow.step_id == step.id,
+                SessionRow.id != current_session_id,
+                SessionRow.status == "scheduled",
+                no_run_exists,
+            )
+            .order_by(SessionRow.scheduled_start.asc(), SessionRow.id.asc())
+        )
+    else:
+        return []
+    return list(await db.scalars(stmt))
+
+
+async def _restore_calendar_link_for_session(
+    db: AsyncSession,
+    *,
+    user_uuid: UUID,
+    checkin: CheckIn,
+    sess: SessionRow,
+    sess_step: StepRow,
+    cal_snap: dict[str, Any],
+    now_utc: datetime,
+) -> None:
+    """Khôi phục CalendarEventLink & CalendarSyncJob theo State Machine 3 nhánh."""
+    raw_link_id = cal_snap.get("link_id")
+    if not raw_link_id:
+        return
+    try:
+        link_uuid = UUID(str(raw_link_id))
+    except ValueError:
+        return
+
+    link = await db.scalar(
+        select(CalendarEventLink)
+        .where(
+            CalendarEventLink.id == link_uuid,
+            CalendarEventLink.user_id == user_uuid,
+        )
+        .execution_options(populate_existing=True)
+    )
+    if link is None:
+        return
+
+    del_job: CalendarSyncJob | None = None
+    raw_del_id = cal_snap.get("enqueued_delete_job_id")
+    if raw_del_id:
+        try:
+            del_job = await db.scalar(
+                select(CalendarSyncJob)
+                .where(
+                    CalendarSyncJob.id == UUID(str(raw_del_id)),
+                    CalendarSyncJob.user_id == user_uuid,
+                )
+                .execution_options(populate_existing=True)
+            )
+        except ValueError:
+            del_job = None
+
+    del_job_is_queued = del_job is not None and del_job.job_state == "queued"
+    del_job_is_leased = (
+        del_job is not None
+        and del_job_is_queued
+        and del_job.lease_expires_at is not None
+        and _ensure_utc(del_job.lease_expires_at) > now_utc
+    )
+    del_job_is_unleased = del_job is not None and del_job_is_queued and not del_job_is_leased
+    del_job_finished = del_job is not None and not del_job_is_queued
+    closed_job_ops = [
+        str(op) for op in (cal_snap.get("closed_job_ops") or []) if isinstance(op, str)
+    ]
+    has_closed_write_op = any(op in ("create", "update") for op in closed_job_ops)
+
+    other_current_link = await db.scalar(
+        select(CalendarEventLink.id).where(
+            CalendarEventLink.user_id == user_uuid,
+            CalendarEventLink.session_id == sess.id,
+            CalendarEventLink.connection_id == link.connection_id,
+            CalendarEventLink.google_calendar_id == link.google_calendar_id,
+            CalendarEventLink.is_current.is_(True),
+            CalendarEventLink.id != link.id,
+        )
+    )
+
+    needs_new_link = (
+        del_job_is_leased
+        or del_job_finished
+        or (link.synced_schedule_revision is not None and link.sync_state == "deleted")
+        or (not link.is_current and other_current_link is not None)
+    )
+
+    if needs_new_link:
+        # Nhánh (iii): Job delete đang leased hoặc đã chạy/link đã deleted -> đóng link cũ, tạo link mới.
+        if link.is_current:
+            link.is_current = False
+            link.updated_at = now_utc
+            link.revision += 1
+            await db.flush()
+
+        conn = await db.scalar(
+            select(CalendarConnection)
+            .where(
+                CalendarConnection.id == link.connection_id,
+                CalendarConnection.user_id == user_uuid,
+                CalendarConnection.connection_state == "connected",
+                CalendarConnection.write_calendar_id.is_not(None),
+            )
+            .limit(1)
+        )
+        if conn is not None and conn.write_calendar_id:
+            existing_target_current = await db.scalar(
+                select(CalendarEventLink)
+                .where(
+                    CalendarEventLink.user_id == user_uuid,
+                    CalendarEventLink.session_id == sess.id,
+                    CalendarEventLink.connection_id == conn.id,
+                    CalendarEventLink.google_calendar_id == conn.write_calendar_id,
+                    CalendarEventLink.is_current.is_(True),
+                    CalendarEventLink.id != link.id,
+                )
+                .execution_options(populate_existing=True)
+            )
+            if existing_target_current is not None:
+                cal_snap["link_id"] = str(existing_target_current.id)
+                cal_snap["prev_is_current"] = existing_target_current.is_current
+                cal_snap["prev_sync_state"] = existing_target_current.sync_state
+                cal_snap["prev_synced_schedule_revision"] = (
+                    existing_target_current.synced_schedule_revision
+                )
+                cal_snap["closed_job_ids"] = []
+                cal_snap["closed_job_ops"] = []
+                cal_snap["enqueued_delete_job_id"] = None
+                return
+
+            new_event_id = await _next_session_google_event_id(
+                db,
+                connection_id=conn.id,
+                calendar_id=conn.write_calendar_id,
+                session_id=sess.id,
+            )
+            new_link = CalendarEventLink(
+                id=uuid4(),
+                user_id=user_uuid,
+                session_id=sess.id,
+                connection_id=conn.id,
+                google_calendar_id=conn.write_calendar_id,
+                google_event_id=new_event_id,
+                google_etag=None,
+                desired_schedule_revision=sess.schedule_revision,
+                synced_schedule_revision=None,
+                sync_state="pending",
+                is_current=True,
+            )
+            db.add(new_link)
+            await db.flush()
+
+            payload_snapshot = _build_session_calendar_payload_snapshot(
+                sess, event_id=new_event_id, step_title=sess_step.title
+            )
+            db.add(
+                CalendarSyncJob(
+                    id=uuid4(),
+                    user_id=user_uuid,
+                    connection_id=conn.id,
+                    event_link_id=new_link.id,
+                    target_kind="session_event",
+                    target_ref=str(sess.id),
+                    operation="create",
+                    target_schedule_revision=sess.schedule_revision,
+                    expected_google_etag=None,
+                    payload_snapshot=payload_snapshot,
+                    idempotency_key=(
+                        f"checkin_restore:{sess.id}:ci{checkin.id.hex[:8]}"
+                        f":r{checkin.response_revision}:{new_link.id.hex[:8]}"
+                    ),
+                    job_state="queued",
+                    attempt_count=0,
+                )
+            )
+            cal_snap["link_id"] = str(new_link.id)
+            cal_snap["prev_is_current"] = True
+            cal_snap["prev_sync_state"] = "pending"
+            cal_snap["prev_synced_schedule_revision"] = None
+            cal_snap["closed_job_ids"] = []
+            cal_snap["closed_job_ops"] = []
+            cal_snap["enqueued_delete_job_id"] = None
+        return
+
+    if link.synced_schedule_revision is None or has_closed_write_op:
+        # Nhánh (ii): Chưa sync lần nào hoặc từng đóng job create/update chưa chạy -> xếp lại create/update.
+        if del_job_is_unleased and del_job is not None:
+            del_job.job_state = "completed"
+            del_job.last_error_code = None
+            del_job.lease_expires_at = None
+            del_job.updated_at = now_utc
+            del_job.revision += 1
+
+        conn = await db.scalar(
+            select(CalendarConnection)
+            .where(
+                CalendarConnection.id == link.connection_id,
+                CalendarConnection.user_id == user_uuid,
+                CalendarConnection.connection_state == "connected",
+                CalendarConnection.write_calendar_id.is_not(None),
+            )
+            .limit(1)
+        )
+        if conn is not None and conn.write_calendar_id and other_current_link is None:
+            event_id = (
+                link.google_event_id
+                if link.google_event_id is not None
+                else await _next_session_google_event_id(
+                    db,
+                    connection_id=link.connection_id,
+                    calendar_id=link.google_calendar_id,
+                    session_id=sess.id,
+                )
+            )
+            link.google_event_id = event_id
+            link.is_current = True
+            link.sync_state = "pending"
+            link.updated_at = now_utc
+            link.revision += 1
+
+            op = "create" if link.synced_schedule_revision is None else "update"
+            payload_snapshot = _build_session_calendar_payload_snapshot(
+                sess, event_id=event_id, step_title=sess_step.title
+            )
+            db.add(
+                CalendarSyncJob(
+                    id=uuid4(),
+                    user_id=user_uuid,
+                    connection_id=link.connection_id,
+                    event_link_id=link.id,
+                    target_kind="session_event",
+                    target_ref=str(sess.id),
+                    operation=op,
+                    target_schedule_revision=sess.schedule_revision,
+                    expected_google_etag=link.google_etag if op == "update" else None,
+                    payload_snapshot=payload_snapshot,
+                    idempotency_key=(
+                        f"checkin_restore:{sess.id}:ci{checkin.id.hex[:8]}"
+                        f":r{checkin.response_revision}:{link.id.hex[:8]}"
+                    ),
+                    job_state="queued",
+                    attempt_count=0,
+                )
+            )
+            cal_snap["closed_job_ids"] = []
+            cal_snap["closed_job_ops"] = []
+            cal_snap["enqueued_delete_job_id"] = None
+        return
+
+    # Nhánh (i): Đã sync trước đó, delete job còn queued & unleased -> đóng delete job, hồi sync_state cũ.
+    if del_job_is_unleased and del_job is not None:
+        del_job.job_state = "completed"
+        del_job.last_error_code = None
+        del_job.lease_expires_at = None
+        del_job.updated_at = now_utc
+        del_job.revision += 1
+
+    link.sync_state = str(cal_snap.get("prev_sync_state") or "synced")
+    link.is_current = bool(cal_snap.get("prev_is_current", True))
+    link.updated_at = now_utc
+    link.revision += 1
+    cal_snap["enqueued_delete_job_id"] = None
+
+
+async def _restore_auto_cancelled_sessions(
+    db: AsyncSession,
+    *,
+    user_uuid: UUID,
+    checkin: CheckIn,
+    baseline: dict[str, Any],
+    target_cancel_ids: set[UUID],
+    now_utc: datetime,
+) -> None:
+    """Khôi phục các phiên tự động hủy nếu Step & Task của từng phiên đều không còn kết thúc."""
+    auto_cancelled = baseline.get("auto_cancelled_sessions")
+    if not isinstance(auto_cancelled, dict) or not auto_cancelled:
+        return
+
+    restore_candidates: list[tuple[UUID, dict[str, Any]]] = []
+    for sid, snap in auto_cancelled.items():
+        if not isinstance(snap, dict):
+            continue
+        if snap.get("is_currently_cancelled", True) is False:
+            continue
+        try:
+            su = UUID(str(sid))
+        except ValueError:
+            continue
+        if su in target_cancel_ids:
+            continue
+        restore_candidates.append((su, snap))
+
+    if not restore_candidates:
+        return
+
+    candidate_uuids = [su for su, _ in restore_candidates]
+    snap_by_id = {su: snap for su, snap in restore_candidates}
+    sessions = list(
+        await db.scalars(
+            select(SessionRow)
+            .where(
+                SessionRow.user_id == user_uuid,
+                SessionRow.id.in_(candidate_uuids),
+                SessionRow.status == "cancelled",
+            )
+            .order_by(SessionRow.scheduled_start.asc(), SessionRow.id.asc())
+            .execution_options(populate_existing=True)
+        )
+    )
+    if not sessions:
+        return
+
+    step_ids = list({s.step_id for s in sessions})
+    steps_map = {
+        st.id: st
+        for st in (
+            await db.scalars(
+                select(StepRow)
+                .where(StepRow.user_id == user_uuid, StepRow.id.in_(step_ids))
+                .execution_options(populate_existing=True)
+            )
+        ).all()
+    }
+    task_ids = list({st.task_id for st in steps_map.values()})
+    tasks_map = (
+        {
+            tk.id: tk
+            for tk in (
+                await db.scalars(
+                    select(TaskRow)
+                    .where(TaskRow.user_id == user_uuid, TaskRow.id.in_(task_ids))
+                    .execution_options(populate_existing=True)
+                )
+            ).all()
+        }
+        if task_ids
+        else {}
+    )
+
+    for sess in sessions:
+        sess_step = steps_map.get(sess.step_id)
+        sess_task = tasks_map.get(sess_step.task_id) if sess_step is not None else None
+        if sess_step is None or sess_step.status in TERMINAL_PARENT_STATUSES:
+            continue
+        if sess_task is None or sess_task.status in TERMINAL_PARENT_STATUSES:
+            continue
+
+        snap = snap_by_id[sess.id]
+        expected_sched_rev = snap.get("schedule_revision")
+        if expected_sched_rev is not None and sess.schedule_revision != int(expected_sched_rev):
+            continue
+        sess.status = str(snap.get("status") or "scheduled")
+        sess.start_state = str(snap.get("start_state") or "waiting")
+        sess.updated_at = now_utc
+        sess.revision += 1
+        snap["is_currently_cancelled"] = False
+
+        rem_state_map: dict[UUID, str] = {}
+        for rem_item in snap.get("cancelled_reminders") or []:
+            if not isinstance(rem_item, dict) or not rem_item.get("reminder_id"):
+                continue
+            try:
+                ru = UUID(str(rem_item["reminder_id"]))
+            except ValueError:
+                continue
+            orig_state = str(rem_item.get("delivery_state") or "scheduled")
+            if orig_state not in ("scheduled", "snoozed"):
+                orig_state = "scheduled"
+            rem_state_map[ru] = orig_state
+
+        if rem_state_map:
+            rems = list(
+                await db.scalars(
+                    select(Reminder)
+                    .where(
+                        Reminder.user_id == user_uuid,
+                        Reminder.id.in_(list(rem_state_map.keys())),
+                        Reminder.delivery_state == "cancelled",
+                    )
+                    .execution_options(populate_existing=True)
+                )
+            )
+            for rem in rems:
+                rem.delivery_state = rem_state_map.get(rem.id, "scheduled")
+                rem.updated_at = now_utc
+                rem.revision += 1
+
+        cal_snap = snap.get("calendar_snapshot")
+        if isinstance(cal_snap, dict):
+            await _restore_calendar_link_for_session(
+                db,
+                user_uuid=user_uuid,
+                checkin=checkin,
+                sess=sess,
+                sess_step=sess_step,
+                cal_snap=cal_snap,
+                now_utc=now_utc,
+            )
+
+
+async def _cancel_surplus_scheduled_sessions(
+    db: AsyncSession,
+    *,
+    user_uuid: UUID,
+    checkin: CheckIn,
+    target_cancel_ids: list[UUID],
+    baseline: dict[str, Any],
+    now_utc: datetime,
+) -> None:
+    """Hủy các phiên scheduled thừa, Reminder liên quan và cập nhật Google Calendar outbox."""
+    if not target_cancel_ids:
+        return
+
+    sessions_to_cancel = list(
+        await db.scalars(
+            select(SessionRow)
+            .where(
+                SessionRow.user_id == user_uuid,
+                SessionRow.id.in_(target_cancel_ids),
+                SessionRow.status == "scheduled",
+            )
+            .order_by(SessionRow.scheduled_start.asc(), SessionRow.id.asc())
+            .execution_options(populate_existing=True)
+        )
+    )
+    if not sessions_to_cancel:
+        return
+
+    auto_cancelled = baseline.setdefault("auto_cancelled_sessions", {})
+    cancelled_uuids: list[UUID] = []
+    session_by_id: dict[UUID, SessionRow] = {}
+    for sess in sessions_to_cancel:
+        sid = str(sess.id)
+        snap = auto_cancelled.get(sid)
+        if not isinstance(snap, dict):
+            snap = {
+                "session_id": sid,
+                "step_id": str(sess.step_id),
+                "status": sess.status,
+                "start_state": sess.start_state,
+                "schedule_revision": int(sess.schedule_revision),
+                "is_currently_cancelled": True,
+                "cancelled_reminders": [],
+                "calendar_snapshot": None,
+            }
+            auto_cancelled[sid] = snap
+        else:
+            snap.setdefault("session_id", sid)
+            snap.setdefault("step_id", str(sess.step_id))
+            snap["schedule_revision"] = int(sess.schedule_revision)
+            snap["is_currently_cancelled"] = True
+            snap.setdefault("cancelled_reminders", [])
+            snap.setdefault("calendar_snapshot", None)
+
+        sess.status = "cancelled"
+        sess.start_state = "superseded"
+        sess.updated_at = now_utc
+        sess.revision += 1
+        cancelled_uuids.append(sess.id)
+        session_by_id[sess.id] = sess
+
+    reminder_rows = list(
+        await db.scalars(
+            select(Reminder)
+            .where(
+                Reminder.user_id == user_uuid,
+                Reminder.session_id.in_(cancelled_uuids),
+                Reminder.delivery_state.in_(("scheduled", "snoozed")),
+            )
+            .order_by(Reminder.id.asc())
+            .execution_options(populate_existing=True)
+        )
+    )
+    for rem in reminder_rows:
+        snap = auto_cancelled[str(rem.session_id)]
+        existing_rems = snap.setdefault("cancelled_reminders", [])
+        seen_rem_ids = {
+            item.get("reminder_id") for item in existing_rems if isinstance(item, dict)
+        }
+        rem_id_str = str(rem.id)
+        if rem_id_str not in seen_rem_ids:
+            existing_rems.append(
+                {
+                    "reminder_id": rem_id_str,
+                    "delivery_state": rem.delivery_state,
+                }
+            )
+        rem.delivery_state = "cancelled"
+        rem.updated_at = now_utc
+        rem.revision += 1
+
+    links = list(
+        await db.scalars(
+            select(CalendarEventLink)
+            .where(
+                CalendarEventLink.user_id == user_uuid,
+                CalendarEventLink.session_id.in_(cancelled_uuids),
+                CalendarEventLink.is_current.is_(True),
+            )
+            .order_by(CalendarEventLink.id.asc())
+            .execution_options(populate_existing=True)
+        )
+    )
+    conn_ids = {link.connection_id for link in links}
+    connected_conn_ids = (
+        set(
+            await db.scalars(
+                select(CalendarConnection.id).where(
+                    CalendarConnection.user_id == user_uuid,
+                    CalendarConnection.id.in_(conn_ids),
+                    CalendarConnection.connection_state == "connected",
+                )
+            )
+        )
+        if conn_ids
+        else set()
+    )
+    for link in links:
+        queued_jobs = list(
+            await db.scalars(
+                select(CalendarSyncJob)
+                .where(
+                    CalendarSyncJob.user_id == user_uuid,
+                    CalendarSyncJob.event_link_id == link.id,
+                    CalendarSyncJob.job_state == "queued",
+                )
+                .order_by(CalendarSyncJob.created_at.asc(), CalendarSyncJob.id.asc())
+                .execution_options(populate_existing=True)
+            )
+        )
+        unleased_jobs = [
+            job
+            for job in queued_jobs
+            if job.lease_expires_at is None or _ensure_utc(job.lease_expires_at) <= now_utc
+        ]
+        leased_jobs = [
+            job
+            for job in queued_jobs
+            if job.lease_expires_at is not None and _ensure_utc(job.lease_expires_at) > now_utc
+        ]
+
+        prev_is_current = link.is_current
+        prev_sync_state = link.sync_state
+        prev_synced_schedule_revision = link.synced_schedule_revision
+
+        closed_job_ids: list[str] = []
+        closed_job_ops: list[str] = []
+        for job in unleased_jobs:
+            closed_job_ids.append(str(job.id))
+            closed_job_ops.append(job.operation)
+            job.job_state = "completed"
+            job.last_error_code = None
+            job.lease_expires_at = None
+            job.updated_at = now_utc
+            job.revision += 1
+
+        is_unattempted_create = (
+            link.synced_schedule_revision is None
+            and not leased_jobs
+            and any(job.operation == "create" for job in unleased_jobs)
+            and all(job.attempt_count == 0 for job in unleased_jobs if job.operation == "create")
+        )
+
+        enqueued_delete_job_id: str | None = None
+        if is_unattempted_create or link.google_event_id is None:
+            link.is_current = False
+            link.sync_state = "deleted"
+            link.updated_at = now_utc
+            link.revision += 1
+        elif link.connection_id not in connected_conn_ids:
+            # Kết nối lịch đã ngắt -> không enqueue delete job và giữ nguyên sync_state
+            enqueued_delete_job_id = None
+        else:
+            link.sync_state = "pending"
+            link.updated_at = now_utc
+            link.revision += 1
+            sess_obj = session_by_id[link.session_id]
+            del_job = CalendarSyncJob(
+                id=uuid4(),
+                user_id=user_uuid,
+                connection_id=link.connection_id,
+                event_link_id=link.id,
+                target_kind="session_event",
+                target_ref=str(link.session_id),
+                operation="delete",
+                target_schedule_revision=sess_obj.schedule_revision,
+                expected_google_etag=link.google_etag,
+                payload_snapshot={
+                    "id": link.google_event_id,
+                    "google_calendar_id": link.google_calendar_id,
+                },
+                idempotency_key=(
+                    f"checkin_cancel:{link.session_id}:ci{checkin.id.hex[:8]}"
+                    f":r{checkin.response_revision}:{link.id.hex[:8]}"
+                ),
+                job_state="queued",
+                attempt_count=0,
+            )
+            db.add(del_job)
+            enqueued_delete_job_id = str(del_job.id)
+
+        auto_cancelled[str(link.session_id)]["calendar_snapshot"] = {
+            "link_id": str(link.id),
+            "prev_is_current": prev_is_current,
+            "prev_sync_state": prev_sync_state,
+            "prev_synced_schedule_revision": prev_synced_schedule_revision,
+            "closed_job_ids": closed_job_ids,
+            "closed_job_ops": closed_job_ops,
+            "enqueued_delete_job_id": enqueued_delete_job_id,
+        }
 
 
 async def _apply_final_checkin_projection(
@@ -317,6 +1086,7 @@ async def _apply_final_checkin_projection(
     await db.flush()
 
     if step is not None:
+        # Pha 1: Tính all_step_sessions_completed (coi phiên tạm hủy bởi chính CheckIn này là chưa xong).
         step_sessions = list(
             await db.scalars(
                 select(SessionRow)
@@ -328,10 +1098,20 @@ async def _apply_final_checkin_projection(
                 .execution_options(populate_existing=True)
             )
         )
-        all_step_sessions_completed = bool(step_sessions) and all(
-            s.status == "completed" for s in step_sessions
+        has_self_cancelled = await _has_self_cancelled_step_sessions(
+            db,
+            user_uuid=user_uuid,
+            step_id=step.id,
+            current_session_id=session.id,
+            baseline=baseline,
+        )
+        all_step_sessions_completed = (
+            bool(step_sessions)
+            and (not has_self_cancelled)
+            and all(s.status == "completed" for s in step_sessions)
         )
 
+        # Pha 2: Projection Step -> Task (giữ bảo vệ xác nhận mới hơn từ Run khác).
         other_step_rows = list(
             await db.execute(
                 select(CheckIn, SessionRun)
@@ -396,12 +1176,15 @@ async def _apply_final_checkin_projection(
 
         if other_step_wins_completed or (
             not other_step_wins_deny
+            and not other_step_wins_skipped
             and not this_explicit_step_deny
             and (this_explicit_step_complete or this_auto_step_complete)
         ):
             step.status = "completed"
             step.remaining_base_seconds = 0
-        elif other_step_wins_skipped or this_explicit_step_skip:
+        elif other_step_wins_skipped or (
+            this_explicit_step_skip and not other_step_wins_deny
+        ):
             step.status = "skipped"
             step.remaining_base_seconds = 0
         elif step.status in ("completed", "skipped"):
@@ -526,6 +1309,33 @@ async def _apply_final_checkin_projection(
                 else:
                     task.status = "in_progress"
             await db.flush()
+
+    # Pha 3: Tính target_cancel_ids 1 lần rồi khôi phục & hủy phiên thừa (0 churn, không tăng ScheduleVersion).
+    now_utc = datetime.now(UTC)
+    target_cancel_ids = await _compute_target_cancel_ids(
+        db,
+        user_uuid=user_uuid,
+        current_session_id=session.id,
+        step=step,
+        task=task,
+    )
+    await _restore_auto_cancelled_sessions(
+        db,
+        user_uuid=user_uuid,
+        checkin=checkin,
+        baseline=baseline,
+        target_cancel_ids=set(target_cancel_ids),
+        now_utc=now_utc,
+    )
+    await _cancel_surplus_scheduled_sessions(
+        db,
+        user_uuid=user_uuid,
+        checkin=checkin,
+        target_cancel_ids=target_cancel_ids,
+        baseline=baseline,
+        now_utc=now_utc,
+    )
+    await db.flush()
 
     after_state = {
         "session_status": session.status,
@@ -665,4 +1475,6 @@ async def respond_to_checkin(
         )
 
     await db.flush()
+    if checkin.kind == "final":
+        await streak_service.sync_streak_for_run(db, user_uuid=user_uuid, run=run)
     return run_service._checkin_to_schema(checkin)

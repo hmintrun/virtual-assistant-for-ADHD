@@ -110,6 +110,10 @@ def current_user(user: User) -> CurrentUser:
         email=user.email,
         display_name=user.display_name,
         is_active=user.is_active,
+        current_streak_days=user.current_streak_days,
+        streak_frozen=user.streak_frozen,
+        streak_freeze_tokens=user.streak_freeze_tokens,
+        last_streak_date=user.last_streak_date,
     )
 
 

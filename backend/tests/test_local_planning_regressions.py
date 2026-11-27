@@ -531,7 +531,7 @@ async def test_fallback_review_chat_keep_old_and_short_update_and_unrelated_foll
         json={
             "client_draft_id": uuid4().hex,
             "input_source": "text",
-            "raw_input": "Viết báo cáo 2 trang",
+            "raw_input": "Viết báo cáo 2 trang, rảnh 09:00-18:00",
         },
     )
     assert raw_draft_res.status_code == 201, raw_draft_res.text
@@ -979,7 +979,7 @@ async def test_uf1_scope_choice_same_value_selection_and_non_scope_availability_
         json={
             "client_draft_id": uuid4().hex,
             "input_source": "text",
-            "raw_input": "Viết báo cáo 2 trang",
+            "raw_input": "Viết báo cáo 2 trang, rảnh 09:00-18:00",
         },
         headers=headers(),
     )

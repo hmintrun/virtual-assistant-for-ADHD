@@ -8,7 +8,8 @@ import '../services/calendar_api.dart';
 
 bool isCalendarUnavailable(Object error) =>
     error is ApiException &&
-    error.code == CalendarApi.calendarUnavailableCode;
+    (error.code == CalendarApi.calendarUnavailableCode ||
+        error.requiresCalendarReconnect);
 
 void showCalendarFallbackSnackBar(
   BuildContext context, {

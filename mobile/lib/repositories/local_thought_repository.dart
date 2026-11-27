@@ -37,6 +37,9 @@ abstract class LocalThoughtRepository {
 
   /// Lấy toàn bộ Thought của người dùng (kể cả tombstone - dùng cho kiểm thử và gỡ lỗi).
   Future<List<LocalThought>> getAllThoughts(String ownerId);
+
+  /// Xóa tham chiếu tệp ghi âm cục bộ sau khi thought đã chuyển thành draft.
+  Future<void> clearAudioPath(String id, {DateTime? asOf}) async {}
 }
 
 /// Hiện thực hóa `LocalThoughtRepository` lưu trữ bền vững trên SQLite theo từng tài khoản.
@@ -202,6 +205,21 @@ class SqliteThoughtRepository extends LocalThoughtRepository {
     );
     return rows.map(LocalThought.fromMap).toList();
   }
+
+  @override
+  Future<void> clearAudioPath(String id, {DateTime? asOf}) async {
+    final db = await _getDb();
+    final nowUtc = (asOf ?? DateTime.now()).toUtc().toIso8601String();
+    await db.update(
+      'local_thoughts',
+      {
+        'audio_path': '',
+        'updated_at': nowUtc,
+      },
+      where: 'id = ? OR server_thought_id = ?',
+      whereArgs: [id, id],
+    );
+  }
 }
 
 /// Hiện thực hóa `LocalThoughtRepository` trong bộ nhớ phục vụ Unit Test và Fast Mocking.
@@ -337,5 +355,18 @@ class InMemoryThoughtRepository extends LocalThoughtRepository {
     final items = _thoughts.values.where((t) => t.ownerId == ownerId).toList();
     items.sort((a, b) => b.createdAt.compareTo(a.createdAt));
     return items;
+  }
+
+  @override
+  Future<void> clearAudioPath(String id, {DateTime? asOf}) async {
+    final nowUtc = (asOf ?? DateTime.now()).toUtc();
+    for (final entry in _thoughts.entries.toList()) {
+      if (entry.key == id || entry.value.serverThoughtId == id) {
+        _thoughts[entry.key] = entry.value.copyWith(
+          audioPath: '',
+          updatedAt: nowUtc,
+        );
+      }
+    }
   }
 }

@@ -471,3 +471,121 @@ async def test_itn_turn2_spoken_duration_completes_open_ended_window_and_preserv
         assert row is not None
         assert preserved_phrase in row.raw_input
         assert turn1_raw in row.raw_input
+
+
+# ==============================================================================
+# Trụ cột 2a — ITN v2 (Pure Syntactic, Zero Overfitting)
+# ==============================================================================
+
+
+class TestVietnameseItnV2SyntacticRules:
+    def test_numeric_colon_kem_expression(self) -> None:
+        assert normalize_vietnamese_transcript("nộp bài 8:00 kém 15 tối") == "nộp bài 19:45"
+        assert (
+            normalize_vietnamese_transcript("sáng mai lúc 8:00 kém 15")
+            == "sáng mai lúc 07:45"
+        )
+        assert normalize_vietnamese_transcript("họp lúc 20:00 kém 10") == "họp lúc 19:50"
+        # Không tự đoán sáng/tối khi không có buổi và giờ <= 12
+        assert normalize_vietnamese_transcript("họp lúc 8:00 kém 10") == "họp lúc 8:00 kém 10"
+
+    def test_approximation_modifier_inside_time_range(self) -> None:
+        assert (
+            normalize_vietnamese_transcript("7:00 đến khoảng 9:30 tối")
+            == "19:00 đến khoảng 21:30"
+        )
+        assert (
+            normalize_vietnamese_transcript("từ 2 giờ tới tầm 4 giờ chiều")
+            == "từ 14:00 tới tầm 16:00"
+        )
+        assert (
+            normalize_vietnamese_transcript("rảnh 7h đến cỡ 9h tối")
+            == "rảnh 19:00 đến cỡ 21:00"
+        )
+
+    def test_subclause_leading_period_propagation_and_negative_controls(self) -> None:
+        # Lan truyền cùng tiểu mệnh đề khi vế số chưa có buổi hậu tố
+        assert (
+            normalize_vietnamese_transcript("sáng mai từ 7:00 đến 9:00")
+            == "sáng mai từ 07:00 đến 09:00"
+        )
+        assert (
+            normalize_vietnamese_transcript("tối Thứ 4 từ 7:00 đến 9:00")
+            == "tối Thứ 4 từ 19:00 đến 21:00"
+        )
+        assert (
+            normalize_vietnamese_transcript("chiều thứ 5 từ 2:00 đến 4:30")
+            == "chiều thứ 5 từ 14:00 đến 16:30"
+        )
+
+        # Kiểm soát âm tính: KHÔNG lan truyền qua dấu phẩy hoặc dấu chuyển "hạn", "trước", "trừ"
+        assert (
+            normalize_vietnamese_transcript("sáng Thứ 4 từ 7:00 đến 9:00, tối Thứ 4 bận họp")
+            == "sáng Thứ 4 từ 07:00 đến 09:00, tối Thứ 4 bận họp"
+        )
+        assert (
+            normalize_vietnamese_transcript("tối Thứ 4 từ 7:00 đến 9:00 hạn 10:00 đến 11:00")
+            == "tối Thứ 4 từ 19:00 đến 21:00 hạn 10:00 đến 11:00"
+        )
+        # Không lan truyền từ từ ghép "sáng tạo", "tối đa"
+        assert normalize_vietnamese_transcript("sáng tạo 7:00 đến 9:00") == "sáng tạo 7:00 đến 9:00"
+        assert normalize_vietnamese_transcript("tối đa 7:00 đến 9:00") == "tối đa 7:00 đến 9:00"
+
+    def test_collapse_strictly_increasing_three_point_clock_stutters(self) -> None:
+        assert normalize_vietnamese_transcript("19:00 đến 20:00 đến 21:00") == "19:00 đến 21:00"
+        assert (
+            normalize_vietnamese_transcript("từ 7 giờ đến 8 giờ đến 9 giờ tối")
+            == "từ 19:00 đến 21:00"
+        )
+        # Không rút gọn nếu 3 mốc không tăng nghiêm ngặt
+        assert (
+            normalize_vietnamese_transcript("21:00 đến 19:00 đến 20:00")
+            == "21:00 đến 19:00 đến 20:00"
+        )
+
+    def test_zero_overfitting_preserves_unmodified_tech_and_homophones(self) -> None:
+        # Tuyệt đối không có bảng thay thế từ kỹ thuật hay tự sửa "hẹn"/"hạng" thành "hạn"
+        text = "hẹn tối nay trao đổi về flast api, không phải hạng chót"
+        assert normalize_vietnamese_transcript(text) == text
+
+    def test_phase1_review_subclause_boundaries_noon_and_midnight_kem(self) -> None:
+        # Không rò rỉ buổi qua ranh giới "còn/nhưng/rồi/và <ngày>", "riêng", "nộp <mốc>"
+        assert (
+            normalize_vietnamese_transcript("tối Thứ 2 7:00 đến 9:00 còn Thứ 4 8:00 đến 10:00")
+            == "tối Thứ 2 19:00 đến 21:00 còn Thứ 4 8:00 đến 10:00"
+        )
+        assert (
+            normalize_vietnamese_transcript("tối nay 7:00 đến 9:00 và mai 8:00 đến 10:00")
+            == "tối nay 19:00 đến 21:00 và mai 8:00 đến 10:00"
+        )
+        assert (
+            normalize_vietnamese_transcript("tối Thứ 2 7:00 đến 9:00 riêng Thứ 5 8:00 đến 10:00")
+            == "tối Thứ 2 19:00 đến 21:00 riêng Thứ 5 8:00 đến 10:00"
+        )
+        assert (
+            normalize_vietnamese_transcript("tối nay 7:00 đến 9:00 nộp lúc 10:00")
+            == "tối nay 19:00 đến 21:00 nộp lúc 10:00"
+        )
+
+        # Hỗ trợ "trưa 12:00 đến 2:00" mà không làm hỏng 12:xx ở buổi tối/chiều
+        assert normalize_vietnamese_transcript("trưa 12:00 đến 2:00") == "trưa 12:00 đến 14:00"
+        assert (
+            normalize_vietnamese_transcript("tối nay 12:00 đến 13:30")
+            == "tối nay 12:00 đến 13:30"
+        )
+
+        # "24:00 kém 15" / "0:00 kém 15" và "tối 8 giờ kém 15"
+        assert normalize_vietnamese_transcript("nộp trước 24:00 kém 15") == "nộp trước 23:45"
+        assert normalize_vietnamese_transcript("nộp trước 0:00 kém 15") == "nộp trước 23:45"
+        assert normalize_vietnamese_transcript("tối 8 giờ kém 15") == "tối 19:45"
+
+        # Chống dương tính giả cho "phương án/ý/hạng/tập/vị trí thứ N" và "5G"
+        for phrase in (
+            "phương án thứ hai",
+            "ý thứ ba",
+            "hạng thứ tư",
+            "tập thứ năm",
+            "vị trí thứ sáu",
+            "mạng 5G tối nay",
+        ):
+            assert normalize_vietnamese_transcript(phrase) == phrase

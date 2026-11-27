@@ -83,6 +83,9 @@ class ProposalSessionData(ApiModel):
     step_id: str = Field(min_length=1)
     scheduled_start: datetime
     scheduled_end: datetime
+    title: str | None = None
+    session_goal: str | None = None
+    expected_output: str | None = None
     micro_task_text: str | None = None
     micro_task_seconds: int | None = Field(default=None, ge=0)
     work_seconds: int = Field(gt=0)
@@ -218,6 +221,9 @@ class ProposedSessionAddAfter(ApiModel):
     step_id: str = Field(min_length=1)
     start: datetime
     end: datetime
+    title: str | None = None
+    session_goal: str | None = None
+    expected_output: str | None = None
     work_seconds: int = Field(gt=0)
     rest_seconds: int = Field(ge=0)
     duration_seconds: int = Field(gt=0)
@@ -271,6 +277,7 @@ class ProposedStepItem(ApiModel):
     task_id: str = Field(min_length=1)
     order_index: int = Field(ge=0)
     title: str = Field(min_length=1)
+    expected_output: str | None = None
     estimated_base_seconds: int = Field(gt=0)
 
 

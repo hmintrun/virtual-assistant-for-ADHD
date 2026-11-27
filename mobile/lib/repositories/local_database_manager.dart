@@ -73,6 +73,7 @@ class LocalDatabaseManager {
         dbPath,
         options: OpenDatabaseOptions(
           version: 3,
+          onConfigure: _onConfigure,
           onCreate: _onCreate,
           onUpgrade: _onUpgrade,
         ),
@@ -133,6 +134,29 @@ class LocalDatabaseManager {
     await factory.deleteDatabase(dbPath);
   }
 
+  /// Giải phóng trang trống SQLite bằng incremental auto_vacuum
+  /// (tự nâng cấp một lần từ mode 0 -> INCREMENTAL cho DB đã tạo trước đó).
+  Future<void> runMaintenanceVacuum({int pages = 200}) async {
+    try {
+      final db = await getDatabase();
+      final rows = await db.rawQuery('PRAGMA auto_vacuum');
+      final currentMode = rows.isNotEmpty && rows.first.values.isNotEmpty
+          ? (rows.first.values.first as num?)?.toInt() ?? 0
+          : 0;
+      if (currentMode == 0) {
+        await db.rawQuery('PRAGMA auto_vacuum = INCREMENTAL');
+        await db.execute('VACUUM');
+        return;
+      }
+      if (currentMode == 2) {
+        final safePages = pages < 1 ? 1 : pages;
+        await db.rawQuery('PRAGMA incremental_vacuum($safePages)');
+      }
+    } catch (_) {
+      // Bảo trì nền an toàn: không làm gián đoạn luồng khởi tạo chính.
+    }
+  }
+
   Future<String> _resolveDatabasePath(String ownerId) async {
     final fileName = databaseFileName(ownerId);
     final customPath = _customDatabasesPath;
@@ -142,6 +166,14 @@ class LocalDatabaseManager {
     final factory = _databaseFactory ?? databaseFactory;
     final baseDir = await factory.getDatabasesPath();
     return p.join(baseDir, fileName);
+  }
+
+  Future<void> _onConfigure(Database db) async {
+    try {
+      await db.execute('PRAGMA auto_vacuum = INCREMENTAL');
+    } catch (_) {
+      // Bỏ qua nếu nền tảng SQLite không hỗ trợ đặt auto_vacuum trong onConfigure.
+    }
   }
 
   Future<void> _onCreate(Database db, int version) async {

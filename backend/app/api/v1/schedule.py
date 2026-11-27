@@ -32,7 +32,7 @@ async def get_schedule(
     db: DbSessionDep,
     limit: Annotated[
         int,
-        Query(gt=0, description="Số phiên tối đa trả về trong một trang (ví dụ: 50)"),
+        Query(gt=0, le=100, description="Số phiên tối đa trả về trong một trang (ví dụ: 50)"),
     ] = 50,
     cursor: Annotated[
         str | None,

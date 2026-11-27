@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from datetime import date, datetime, timedelta
 from typing import Any, Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.schemas.availability import DraftAvailability
 from app.schemas.common import (
@@ -18,6 +19,7 @@ from app.schemas.common import (
     TimeConstraint,
 )
 from app.schemas.draft import TaskSummary
+from app.schemas.reschedule import ProposalSourceRevisions
 
 GenerationTier = Literal["tier_1_gemini", "tier_2_groq", "tier_3_rule_based"]
 CognitiveLoad = Literal["light", "medium", "heavy"]
@@ -87,11 +89,19 @@ _ALL_DAY_TOKENS: tuple[str, ...] = (
 )
 
 
+_REPLACED_WEEKDAY_COMPARAND_RE = re.compile(
+    r"\bthay\s+vì\s+(?:(?:buổi\s+)?(?:sáng|trưa|chiều|tối|đêm|khuya)\s+)?"
+    r"(?:thứ\s*(?:[2-7]|hai|ba|tư|bốn|năm|sáu|bảy|bẩy)|chủ\s*nhật|cn)\b",
+    re.IGNORECASE,
+)
+
+
 def _extract_single_spoken_weekday(phrase: str) -> int | None:
     """Trích xuất thứ đơn lẻ từ câu nói nếu câu không phải dạng khoảng 'từ ... đến ...'."""
+    cleaned = _REPLACED_WEEKDAY_COMPARAND_RE.sub(" ", phrase)
     matched: list[int] = []
     for pattern, wd in _SPOKEN_WEEKDAY_PATTERNS:
-        if pattern.search(phrase) and wd not in matched:
+        if pattern.search(cleaned) and wd not in matched:
             matched.append(wd)
     return matched[0] if len(matched) == 1 else None
 
@@ -100,15 +110,16 @@ def _extract_single_word_weekday(phrase: str | None) -> int | None:
     """Chỉ bắt thứ viết bằng chữ tiếng Việt đơn lẻ (không bắt số 'thứ 2..7')."""
     if not phrase:
         return None
+    cleaned = _REPLACED_WEEKDAY_COMPARAND_RE.sub(" ", phrase)
     word_matched: list[int] = []
     for pattern, wd in _WORD_WEEKDAY_PATTERNS:
-        if pattern.search(phrase) and wd not in word_matched:
+        if pattern.search(cleaned) and wd not in word_matched:
             word_matched.append(wd)
     if len(word_matched) != 1:
         return None
     spoken_matched: list[int] = []
     for pattern, wd in _SPOKEN_WEEKDAY_PATTERNS:
-        if pattern.search(phrase) and wd not in spoken_matched:
+        if pattern.search(cleaned) and wd not in spoken_matched:
             spoken_matched.append(wd)
     if len(spoken_matched) > 1:
         return None
@@ -165,6 +176,9 @@ class Session(ApiModel):
     step_id: str = Field(min_length=1)
     scheduled_start: datetime
     scheduled_end: datetime
+    title: str | None = None
+    session_goal: str | None = None
+    expected_output: str | None = None
     micro_task_seconds: int | None = Field(default=None, ge=0)
     micro_task_text: str = Field(min_length=1)
     work_seconds: int = Field(gt=0)
@@ -212,9 +226,11 @@ class Task(ApiModel):
     source_summary_revision: int | None = None
     source_planning_input_revision: int | None = None
     unexpanded_scope: str | None = None
+    extension_candidate_at: datetime | None = None
     steps: list[Step]
     sessions: list[Session]
     source_summary: TaskSummary
+    source_revisions: ProposalSourceRevisions | None = None
 
 
 class TaskListData(ApiModel):
@@ -222,6 +238,21 @@ class TaskListData(ApiModel):
 
     items: list[Task]
     next_cursor: str | None = None
+
+
+class TaskDeleteResult(ApiModel):
+    """Kết quả hủy/xóa mềm công việc chính thức (DELETE /api/v1/tasks/{task_id})."""
+
+    task_id: str = Field(min_length=1)
+    deleted: bool = True
+    status: Literal["cancelled"] = "cancelled"
+    task_revision: int = Field(ge=1)
+    schedule_revision: int = Field(ge=1)
+    cancelled_session_ids: list[str] = Field(default_factory=list)
+    alarm_sync_state: Literal["pending", "not_required"] = "pending"
+    calendar_sync_summary: Literal["not_integrated", "pending", "synced", "failed"] = (
+        "not_integrated"
+    )
 
 
 class ExtractedFreeWindowSchema(BaseModel):
@@ -590,10 +621,10 @@ class TimeConstraintSchema(BaseModel):
         return self
 
 
-def _normalize_sequential_steps(steps: list[StepPromptItem]) -> list[StepPromptItem]:
+def _normalize_sequential_steps[StepT: StepPromptItem](steps: Sequence[StepT]) -> list[StepT]:
     """Chuẩn hóa lại order_index của danh sách Step liên tục 1..N (tránh LLM đánh số nhảy/trùng)."""
     indexed = sorted(enumerate(steps), key=lambda item: (item[1].order_index, item[0]))
-    normalized: list[StepPromptItem] = []
+    normalized: list[StepT] = []
     for seq_idx, (_, step) in enumerate(indexed, start=1):
         step.order_index = seq_idx
         normalized.append(step)
@@ -690,8 +721,28 @@ class LLMTaskExtractionPayload(BaseModel):
     extra_requirements: list[str] = Field(default_factory=list)
     is_complete: bool = Field(default=False)
     has_conflict: bool = Field(default=False)
+    turn_intent: Literal["create_task", "update_draft", "clarify_only"] = Field(
+        default="create_task"
+    )
+    abandoned_phrases: list[str] = Field(default_factory=list)
     summary: str = Field(..., min_length=1)
     clarification_questions: list[str] = Field(default_factory=list)
+
+    @field_validator("turn_intent", mode="before")
+    @classmethod
+    def _coerce_turn_intent(cls, value: Any) -> Any:
+        if value is None or (isinstance(value, str) and not value.strip()):
+            return "create_task"
+        return value
+
+    @field_validator("abandoned_phrases", mode="before")
+    @classmethod
+    def _coerce_abandoned_phrases(cls, value: Any) -> list[str]:
+        if value is None:
+            return []
+        if isinstance(value, (list, tuple)):
+            return [str(item).strip() for item in value if isinstance(item, str) and item.strip()]
+        return []
 
     @model_validator(mode="after")
     def inherit_same_time_windows(self) -> LLMTaskExtractionPayload:
@@ -729,6 +780,23 @@ class LLMTaskExtractionPayload(BaseModel):
             resolved.append(item)
         self.structured_free_windows = resolved
         return self
+
+
+class AudioNativeExtractionPayload(LLMTaskExtractionPayload):
+    """Schema 1-Hop Audio-Native UF1 (chép lời trung thực kèm trích xuất 4 trường UF1)."""
+
+    model_config = ConfigDict(json_schema_extra=_strip_schema_titles)
+
+    verbatim_transcript: str = Field(default="")
+
+    @field_validator("verbatim_transcript", mode="before")
+    @classmethod
+    def _coerce_verbatim_transcript(cls, value: Any) -> Any:
+        if value is None:
+            return ""
+        if isinstance(value, str):
+            return " ".join(value.split())
+        return value
 
 
 class TaskExtractionResult(LLMTaskExtractionPayload):
@@ -971,43 +1039,217 @@ class TaskDecompositionResult(LLMTaskDecompositionPayload):
 TaskDecompositionProposal = TaskDecompositionResult
 
 
+class LLMStrictStepPromptItem(StepPromptItem):
+    """Phiên bản wire schema nghiêm ngặt cho LLM ở UF2: bắt buộc có `expected_output` cụ thể."""
+
+    expected_output: str = Field(  # ty: ignore[invalid-mutable-override]
+        ...,
+        min_length=3,
+        max_length=500,
+        description="Đầu ra cụ thể bắt buộc có để cuối phiên kiểm chứng bước đã xong hay chưa (O08).",
+    )
+
+    @model_validator(mode="after")
+    def validate_strict_expected_output(self) -> LLMStrictStepPromptItem:
+        """Cắt khoảng trắng và cấm `expected_output` rỗng."""
+        self.expected_output = self.expected_output.strip()
+        if not self.expected_output:
+            raise ValueError("Đầu ra kỳ vọng (expected_output) không được để trống.")
+        if len(self.expected_output) < 3:
+            raise ValueError("Đầu ra kỳ vọng (expected_output) cần ít nhất 3 ký tự.")
+        return self
+
+
+class LLMStrictTaskDecompositionPayload(LLMTaskDecompositionPayload):
+    """Wire schema nghiêm ngặt cho LLM khi sinh Default Decomposition Proposal ở UF2."""
+
+    steps: list[LLMStrictStepPromptItem] = Field(  # ty: ignore[invalid-attribute-override]
+        ...,
+        max_length=20,
+        description="Danh sách Steps; chỉ để rỗng khi cần làm rõ ý tưởng chia bước.",
+    )
+
+
+def _sync_duration_minutes_seconds(
+    estimated_minutes: int | None,
+    estimated_base_seconds: int | None,
+    *,
+    derive_minutes: bool = False,
+) -> tuple[int | None, int | None]:
+    """Đồng bộ hai trường thời lượng phút/giây nguyên và chặn sai khớp."""
+    if estimated_minutes is not None:
+        minutes_in_sec = estimated_minutes * 60
+        if estimated_base_seconds is None:
+            return estimated_minutes, minutes_in_sec
+        if estimated_base_seconds != minutes_in_sec:
+            raise ValueError("estimated_minutes và estimated_base_seconds không khớp.")
+        return estimated_minutes, estimated_base_seconds
+    if derive_minutes and estimated_base_seconds is not None and estimated_base_seconds % 60 == 0:
+        return estimated_base_seconds // 60, estimated_base_seconds
+    return estimated_minutes, estimated_base_seconds
+
+
 class CandidateStepAdjustment(ApiModel):
     """Edit ngữ nghĩa trên một Step đã có; giữ nguyên client key của Candidate."""
 
     client_step_key: str = Field(min_length=1)
     title: str | None = Field(default=None, min_length=1, max_length=255)
     expected_output: str | None = Field(default=None, min_length=1)
-    estimated_base_seconds: int | None = Field(default=None, gt=0)
+    estimated_base_seconds: int | None = Field(default=None, ge=300, le=28800)
+    estimated_minutes: int | None = Field(default=None, ge=5, le=480)
     order_index: int | None = Field(default=None, ge=0)
+    micro_task_text: str | None = Field(default=None, min_length=3, max_length=300)
 
     @model_validator(mode="after")
     def valid_edit(self) -> CandidateStepAdjustment:
-        if not self.client_step_key.strip():
+        self.client_step_key = self.client_step_key.strip()
+        if not self.client_step_key:
             raise ValueError("Cần client_step_key của Step hiện có.")
-        for field in ("title", "expected_output"):
+        for field in ("title", "expected_output", "micro_task_text"):
             value = getattr(self, field)
             if value is not None:
                 value = value.strip()
                 if not value:
                     raise ValueError(f"{field} không được rỗng.")
+                if field == "micro_task_text" and len(value) < 3:
+                    raise ValueError("micro_task_text cần ít nhất 3 ký tự.")
                 setattr(self, field, value)
+        self.estimated_minutes, self.estimated_base_seconds = _sync_duration_minutes_seconds(
+            self.estimated_minutes, self.estimated_base_seconds
+        )
         if all(
             getattr(self, field) is None
-            for field in ("title", "expected_output", "estimated_base_seconds", "order_index")
+            for field in (
+                "title",
+                "expected_output",
+                "estimated_base_seconds",
+                "order_index",
+                "micro_task_text",
+            )
         ):
             raise ValueError("Edit cần ít nhất một trường được hỗ trợ.")
+        return self
+
+
+class NLCandidateStepAdd(ApiModel):
+    """Yêu cầu thêm một Step mới vào Candidate bằng ngôn ngữ tự nhiên (UF2)."""
+
+    title: str = Field(min_length=1, max_length=255)
+    expected_output: str = Field(min_length=3, max_length=500)
+    estimated_minutes: int | None = Field(default=None, ge=5, le=480)
+    estimated_base_seconds: int | None = Field(default=None, ge=300, le=28800)
+    micro_task_prompt: str = Field(min_length=3, max_length=300)
+    insert_at_index: int | None = Field(default=None, ge=0)
+
+    @model_validator(mode="after")
+    def validate_new_step(self) -> NLCandidateStepAdd:
+        self.title = self.title.strip()
+        self.expected_output = self.expected_output.strip()
+        self.micro_task_prompt = self.micro_task_prompt.strip()
+        if not self.title:
+            raise ValueError("Tiêu đề bước mới (title) không được để trống.")
+        if len(self.expected_output) < 3:
+            raise ValueError("Đầu ra kỳ vọng (expected_output) cần ít nhất 3 ký tự.")
+        if len(self.micro_task_prompt) < 3:
+            raise ValueError("Việc khởi động 2 phút (micro_task_prompt) cần ít nhất 3 ký tự.")
+        if self.estimated_minutes is None and self.estimated_base_seconds is None:
+            raise ValueError("Cần estimated_minutes hoặc estimated_base_seconds cho bước mới.")
+        self.estimated_minutes, self.estimated_base_seconds = _sync_duration_minutes_seconds(
+            self.estimated_minutes, self.estimated_base_seconds, derive_minutes=True
+        )
+        return self
+
+    @property
+    def resolved_base_seconds(self) -> int:
+        """Trả về thời lượng gốc tính bằng giây của bước mới."""
+        if self.estimated_base_seconds is not None:
+            return self.estimated_base_seconds
+        return (self.estimated_minutes or 0) * 60
+
+
+class NLCandidateStepMerge(ApiModel):
+    """Yêu cầu gộp từ 2 Step hiện có trở lên thành một Step mới (UF2)."""
+
+    source_step_keys: list[str] = Field(min_length=2, max_length=20)
+    title: str = Field(min_length=1, max_length=255)
+    expected_output: str = Field(min_length=3, max_length=500)
+    estimated_minutes: int | None = Field(default=None, ge=5, le=480)
+    estimated_base_seconds: int | None = Field(default=None, ge=300, le=28800)
+    micro_task_prompt: str | None = Field(default=None, min_length=3, max_length=300)
+
+    @model_validator(mode="after")
+    def validate_merge_op(self) -> NLCandidateStepMerge:
+        cleaned_keys = [key.strip() for key in self.source_step_keys]
+        if any(not key for key in cleaned_keys):
+            raise ValueError("source_step_keys không được chứa key rỗng.")
+        if len(set(cleaned_keys)) != len(cleaned_keys):
+            raise ValueError("source_step_keys không được trùng lặp.")
+        self.source_step_keys = cleaned_keys
+        self.title = self.title.strip()
+        self.expected_output = self.expected_output.strip()
+        if not self.title:
+            raise ValueError("Tiêu đề bước gộp (title) không được để trống.")
+        if len(self.expected_output) < 3:
+            raise ValueError("Đầu ra bước gộp (expected_output) cần ít nhất 3 ký tự.")
+        if self.micro_task_prompt is not None:
+            self.micro_task_prompt = self.micro_task_prompt.strip()
+            if len(self.micro_task_prompt) < 3:
+                raise ValueError("micro_task_prompt cần ít nhất 3 ký tự.")
+        self.estimated_minutes, self.estimated_base_seconds = _sync_duration_minutes_seconds(
+            self.estimated_minutes, self.estimated_base_seconds, derive_minutes=True
+        )
+        return self
+
+
+class NLCandidateStepSplit(ApiModel):
+    """Yêu cầu tách 1 Step hiện có thành >= 2 Step mới (UF2)."""
+
+    source_step_key: str = Field(min_length=1)
+    new_steps: list[NLCandidateStepAdd] = Field(min_length=2, max_length=10)
+
+    @model_validator(mode="after")
+    def validate_split_op(self) -> NLCandidateStepSplit:
+        self.source_step_key = self.source_step_key.strip()
+        if not self.source_step_key:
+            raise ValueError("source_step_key không được để trống.")
         return self
 
 
 class LLMCandidateAdjustmentPayload(ApiModel):
     """Đề xuất có giới hạn; Backend kiểm nguồn và áp edit, AI không ghi lịch."""
 
-    step_edits: list[CandidateStepAdjustment]
+    step_edits: list[CandidateStepAdjustment] = Field(default_factory=list)
+    add_steps: list[NLCandidateStepAdd] = Field(default_factory=list)
+    delete_step_keys: list[str] = Field(default_factory=list)
+    merge_steps: list[NLCandidateStepMerge] = Field(default_factory=list)
+    split_steps: list[NLCandidateStepSplit] = Field(default_factory=list)
     requires_clarification: bool
     clarification_question: str | None = Field(max_length=350)
     requires_draft_update: bool
     unsupported_changes: list[str]
     assistant_note: str = Field(min_length=1, max_length=400)
+
+    @model_validator(mode="before")
+    @classmethod
+    def clean_blocked_raw_edits(cls, data: Any) -> Any:
+        """Chạy trước child validators để xóa sạch cả 5 mảng thao tác khi request bị chặn/cần làm rõ."""
+        if not isinstance(data, dict):
+            return data
+        is_blocked = (
+            bool(data.get("requires_clarification"))
+            or bool(data.get("requires_draft_update"))
+            or bool(data.get("unsupported_changes"))
+            or bool(str(data.get("clarification_question") or "").strip())
+        )
+        if not is_blocked:
+            return data
+        copied = dict(data)
+        copied["step_edits"] = []
+        copied["add_steps"] = []
+        copied["delete_step_keys"] = []
+        copied["merge_steps"] = []
+        copied["split_steps"] = []
+        return copied
 
     @model_validator(mode="after")
     def mark_blocked_request(self) -> LLMCandidateAdjustmentPayload:
@@ -1015,17 +1257,29 @@ class LLMCandidateAdjustmentPayload(ApiModel):
         self.unsupported_changes = [item.strip() for item in self.unsupported_changes]
         if any(not item for item in self.unsupported_changes):
             raise ValueError("Thao tác chưa hỗ trợ cần được mô tả rõ.")
+        self.delete_step_keys = [key.strip() for key in self.delete_step_keys]
+        if any(not key for key in self.delete_step_keys):
+            raise ValueError("delete_step_keys không được chứa key rỗng.")
+        if len(set(self.delete_step_keys)) != len(self.delete_step_keys):
+            raise ValueError("delete_step_keys không được trùng lặp.")
         self.assistant_note = self.assistant_note.strip()
         if not self.assistant_note:
             raise ValueError("Cần phản hồi ngắn cho người dùng.")
         if self.requires_draft_update or self.unsupported_changes or self.clarification_question:
             self.requires_clarification = True
-        if self.requires_clarification or not self.step_edits:
+        has_any_change = bool(
+            self.step_edits
+            or self.add_steps
+            or self.delete_step_keys
+            or self.merge_steps
+            or self.split_steps
+        )
+        if self.requires_clarification or not has_any_change:
             self.requires_clarification = True
             self.clarification_question = self.clarification_question or (
                 "Hãy sửa thời gian hoặc giờ rảnh trên bản tóm tắt rồi xác nhận lại UF1."
                 if self.requires_draft_update
-                else "Bạn muốn sửa tên, đầu ra, thời lượng hay thứ tự của bước nào?"
+                else "Bạn muốn sửa, thêm, xóa, gộp hay tách bước nào?"
             )
             self.assistant_note = "Mình chưa thay đổi phương án hiện tại."
         return self
@@ -1040,11 +1294,17 @@ class CandidateAdjustmentResult(LLMCandidateAdjustmentPayload):
     def keep_blocked_request_atomic(self) -> CandidateAdjustmentResult:
         if self.requires_clarification:
             self.step_edits = []
+            self.add_steps = []
+            self.delete_step_keys = []
+            self.merge_steps = []
+            self.split_steps = []
         return self
 
 
 class LLMPlanAdjustmentPayload(BaseModel):
     """
+    [DEPRECATED - Legacy UF2 path; active production flow uses LLMCandidateAdjustmentPayload & AIService.adjust_candidate_by_nl]
+
     Schema JSON ép kiểu trực tiếp cho LLM ở UF2 Bước 4 khi người dùng bấm 'Tùy chỉnh theo ý tôi'
     hoặc yêu cầu sửa kế hoạch/khung giờ/deadline bằng ngôn ngữ tự nhiên.
     Tuyệt đối KHÔNG chứa giờ bắt đầu/kết thúc Session (phép toán thời gian do scheduler_engine đảm nhận).
@@ -1115,7 +1375,7 @@ class LLMPlanAdjustmentPayload(BaseModel):
 
 
 class PlanAdjustmentResult(LLMPlanAdjustmentPayload):
-    """Kết quả phân tích yêu cầu chỉnh sửa tự nhiên ở UF2 Bước 4 để nạp lại cho scheduler_engine."""
+    """[DEPRECATED - Legacy UF2 path; active production flow uses CandidateAdjustmentResult & AIService.adjust_candidate_by_nl]"""
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -1126,7 +1386,7 @@ class PlanAdjustmentResult(LLMPlanAdjustmentPayload):
 
 
 class PlanAdjustmentRequest(BaseModel):
-    """Payload đầu vào cho API chỉnh sửa phương án chia việc/lịch bằng ngôn ngữ tự nhiên ở UF2."""
+    """[DEPRECATED - Legacy UF2 path; active production flow uses LLMCandidateAdjustmentPayload & AIService.adjust_candidate_by_nl]"""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -1156,4 +1416,83 @@ class PlanAdjustmentRequest(BaseModel):
     timezone: str = Field(
         default="Asia/Ho_Chi_Minh",
         description="Múi giờ IANA của người dùng.",
+    )
+
+
+class SplitSessionInputItem(ApiModel):
+    """Mô tả ngữ cảnh một phiên thuộc Step đã bị tách >= 2 phiên (UF2 Nhịp 1B)."""
+
+    client_session_key: str = Field(min_length=1)
+    client_step_key: str = Field(min_length=1)
+    step_title: str = Field(min_length=1, max_length=255)
+    step_expected_output: str = Field(min_length=1, max_length=500)
+    step_micro_task_prompt: str | None = Field(default=None, max_length=300)
+    session_index: int = Field(ge=1, le=50)
+    total_sessions_in_step: int = Field(ge=2, le=50)
+    work_minutes: int = Field(ge=1, le=480)
+
+    @model_validator(mode="after")
+    def validate_session_slice(self) -> SplitSessionInputItem:
+        self.client_session_key = self.client_session_key.strip()
+        self.client_step_key = self.client_step_key.strip()
+        self.step_title = self.step_title.strip()
+        self.step_expected_output = self.step_expected_output.strip()
+        if not self.client_session_key:
+            raise ValueError("client_session_key không được rỗng.")
+        if not self.client_step_key:
+            raise ValueError("client_step_key không được rỗng.")
+        if not self.step_title:
+            raise ValueError("step_title không được rỗng.")
+        if not self.step_expected_output:
+            raise ValueError("step_expected_output không được rỗng.")
+        if self.step_micro_task_prompt is not None:
+            self.step_micro_task_prompt = self.step_micro_task_prompt.strip() or None
+        if self.session_index > self.total_sessions_in_step:
+            raise ValueError("session_index không được vượt quá total_sessions_in_step.")
+        return self
+
+
+class LLMSessionEnrichmentItem(ApiModel):
+    """Nội dung làm giàu ngữ nghĩa cho một phiên tập trung (không chứa lịch/giờ)."""
+
+    client_session_key: str = Field(min_length=1)
+    title: str = Field(min_length=3, max_length=160)
+    session_goal: str = Field(min_length=3, max_length=300)
+    expected_output: str = Field(min_length=3, max_length=300)
+    micro_task_text: str = Field(min_length=3, max_length=300)
+
+    @model_validator(mode="after")
+    def validate_enrichment_item(self) -> LLMSessionEnrichmentItem:
+        self.client_session_key = self.client_session_key.strip()
+        if not self.client_session_key:
+            raise ValueError("client_session_key không được rỗng.")
+        for field in ("title", "session_goal", "expected_output", "micro_task_text"):
+            cleaned = getattr(self, field).strip()
+            if not cleaned:
+                raise ValueError(f"{field} không được rỗng.")
+            if len(cleaned) < 3:
+                raise ValueError(f"{field} cần ít nhất 3 ký tự.")
+            setattr(self, field, cleaned)
+        return self
+
+
+class LLMSessionEnrichmentPayload(ApiModel):
+    """Schema JSON ép kiểu cho LLM khi làm giàu các phiên tách từ cùng một Step (UF2 Nhịp 1B)."""
+
+    sessions: list[LLMSessionEnrichmentItem] = Field(default_factory=list, max_length=60)
+
+    @model_validator(mode="after")
+    def validate_unique_session_keys(self) -> LLMSessionEnrichmentPayload:
+        keys = [item.client_session_key for item in self.sessions]
+        if len(set(keys)) != len(keys):
+            raise ValueError("client_session_key trong sessions không được trùng lặp.")
+        return self
+
+
+class SessionEnrichmentResult(LLMSessionEnrichmentPayload):
+    """Kết quả làm giàu phiên UF2 Nhịp 1B kèm tầng xử lý thực tế."""
+
+    generation_tier: GenerationTier = Field(
+        default="tier_1_gemini",
+        description="Tầng AI hoặc Rule-based đã sinh nội dung làm giàu cho các phiên.",
     )

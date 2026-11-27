@@ -10,55 +10,60 @@ class MelbelColors {
   static bool isDark = false;
   static Color _pick(int day, int night) => Color(isDark ? night : day);
 
-  static const Color kBrandLavender = Color(0xFF7A5EBD);
-  static const Color kOnBrandLavender = Color(0xFFFFFDFB);
+  static const Color kBrandLavender = Color(0xFF6D48C7);
+  static const Color kOnBrandLavender = Color(0xFFFFFDFA);
+  static const Color kBrandLavenderDark = Color(0xFF9F82E8);
+  static const Color kOnBrandLavenderDark = Color(0xFF131118);
   static const Color kBrandHoney = Color(0xFFD9AE48);
   static const Color kOnBrandHoney = Color(0xFF2B2212);
-  static const Color kBrandRose = Color(0xFFAA545E);
+  static const Color kBrandSage = Color(0xFF3E7A5F);
+  static const Color kBrandCoral = Color(0xFFB84A47);
 
-  static Color get kBackground => _pick(0xFFFBF5EC, 0xFF1A1523);
-  static Color get kSurface => _pick(0xFFFFFDFB, 0xFF282235);
+  static Color get kBackground => _pick(0xFFF8F5EE, 0xFF131118);
+  static Color get kSurface => _pick(0xFFFFFDFA, 0xFF1E1A27);
   static Color get kSurfaceDim => kBackground;
   static Color get kSurfaceBright => kSurfaceContainerHigh;
   static Color get kSurfaceContainerLowest => kBackground;
   static Color get kSurfaceContainerLow => kMutedSurface;
   static Color get kSurfaceContainer => kSurface;
-  static Color get kSurfaceContainerHigh => kMutedSurface;
+  static Color get kSurfaceContainerHigh => _pick(0xFFFFFDFA, 0xFF2A2438);
   static Color get kSurfaceContainerHighest => kSelectedSurface;
-  static Color get kOnSurface => _pick(0xFF2B2338, 0xFFF5F1FA);
-  static Color get kOnSurfaceVariant => _pick(0xFF6B607C, 0xFFBFB7CE);
+  static Color get kOnSurface => _pick(0xFF1E1A26, 0xFFF4F1FA);
+  static Color get kOnSurfaceVariant => _pick(0xFF686273, 0xFFA69EB5);
   static Color get kTextPrimary => kOnSurface;
   static Color get kTextSecondary => kOnSurfaceVariant;
 
-  static Color get kPrimary => kBrandLavender;
-  static Color get kOnPrimary => kOnBrandLavender;
+  static Color get kPrimary => _pick(0xFF6D48C7, 0xFF9F82E8);
+  static Color get kOnPrimary => _pick(0xFFFFFDFA, 0xFF131118);
   static Color get kPrimaryContainer => kPrimary;
   static Color get kOnPrimaryContainer => kOnPrimary;
 
-  static Color get kSecondary => kBrandLavender;
-  static Color get kOnSecondary => kOnBrandLavender;
-  static Color get kSecondaryContainer => _pick(0xFFECE3FA, 0xFF3D3252);
-  static Color get kOnSecondaryContainer => _pick(0xFF2B2338, 0xFFF5F1FA);
+  static Color get kSecondary => kPrimary;
+  static Color get kOnSecondary => kOnPrimary;
+  static Color get kSecondaryContainer => _pick(0xFFEAE1FC, 0xFF2E2540);
+  static Color get kOnSecondaryContainer => _pick(0xFF1E1A26, 0xFFF4F1FA);
   static Color get kSage => kPrimary;
 
-  static Color get kTertiary => kBrandHoney;
+  static Color get kTertiary => _pick(0xFFD9AE48, 0xFFDDB657);
   static Color get kOnTertiary => kOnBrandHoney;
-  static Color get kTertiaryContainer => _pick(0xFFFCF6EA, 0xFF3D352E);
-  static Color get kOnTertiaryContainer => _pick(0xFF3E3018, 0xFFF6E7C3);
+  static Color get kTertiaryContainer => _pick(0xFFFCF5E6, 0xFF332C24);
+  static Color get kOnTertiaryContainer => _pick(0xFF3B2E14, 0xFFF5E6C4);
   static Color get kTertiaryFixedDim => kTertiary;
   static Color get kAmber => kTertiary;
 
-  static Color get kOutline => _pick(0xFFECE2D4, 0xFF3C334F);
+  static Color get kOutline => isDark
+      ? const Color.fromRGBO(255, 255, 255, 0.08)
+      : const Color.fromRGBO(30, 26, 38, 0.06);
   static Color get kOutlineVariant => kOutline;
-  static Color get kMutedSurface => _pick(0xFFF1EAE0, 0xFF302940);
-  static Color get kSelectedSurface => _pick(0xFFE9DFFA, 0xFF534273);
-  static Color get kControlOutline => _pick(0xFF9387A6, 0xFF8C80A3);
+  static Color get kMutedSurface => _pick(0xFFEFECE5, 0xFF272233);
+  static Color get kSelectedSurface => _pick(0xFFE7DEFA, 0xFF3A3152);
+  static Color get kControlOutline => _pick(0xFF847C94, 0xFF8F86A3);
   static Color get kShadow => const Color(0xFF000000);
 
-  static Color get kError => kBrandRose;
-  static Color get kOnError => kOnBrandLavender;
-  static Color get kErrorContainer => _pick(0xFFFAEEF0, 0xFF382429);
-  static Color get kOnErrorContainer => _pick(0xFF612830, 0xFFF6D8DC);
+  static Color get kError => _pick(0xFFB84A47, 0xFFDF7F7B);
+  static Color get kOnError => _pick(0xFFFFFDFA, 0xFF1A0D0D);
+  static Color get kErrorContainer => _pick(0xFFFBECEB, 0xFF382224);
+  static Color get kOnErrorContainer => _pick(0xFF4D1E1D, 0xFFFADCD9);
 }
 
 @immutable
@@ -66,6 +71,8 @@ class MelbelPalette extends ThemeExtension<MelbelPalette> {
   const MelbelPalette({
     required this.background,
     required this.surface,
+    required this.elevatedSurface,
+    required this.heroSurface,
     required this.mutedSurface,
     required this.selectedSurface,
     required this.onSurface,
@@ -77,7 +84,13 @@ class MelbelPalette extends ThemeExtension<MelbelPalette> {
     required this.amber,
     required this.amberSoft,
     required this.onAmberSoft,
+    required this.success,
+    required this.onSuccess,
+    required this.successSoft,
+    required this.onSuccessSoft,
+    required this.successInk,
     required this.softError,
+    required this.onError,
     required this.softErrorSoft,
     required this.onSoftErrorSoft,
     required this.accentInk,
@@ -89,6 +102,8 @@ class MelbelPalette extends ThemeExtension<MelbelPalette> {
 
   final Color background;
   final Color surface;
+  final Color elevatedSurface;
+  final Color heroSurface;
   final Color mutedSurface;
   final Color selectedSurface;
   final Color onSurface;
@@ -100,7 +115,13 @@ class MelbelPalette extends ThemeExtension<MelbelPalette> {
   final Color amber;
   final Color amberSoft;
   final Color onAmberSoft;
+  final Color success;
+  final Color onSuccess;
+  final Color successSoft;
+  final Color onSuccessSoft;
+  final Color successInk;
   final Color softError;
+  final Color onError;
   final Color softErrorSoft;
   final Color onSoftErrorSoft;
   final Color accentInk;
@@ -110,99 +131,131 @@ class MelbelPalette extends ThemeExtension<MelbelPalette> {
   final Color controlOutline;
 
   static const light = MelbelPalette(
-    background: Color(0xFFFBF5EC),
-    surface: Color(0xFFFFFDFB),
-    mutedSurface: Color(0xFFF1EAE0),
-    selectedSurface: Color(0xFFE9DFFA),
-    onSurface: Color(0xFF2B2338),
-    onSurfaceVariant: Color(0xFF6B607C),
-    sage: MelbelColors.kBrandLavender,
-    onSage: MelbelColors.kOnBrandLavender,
-    sageSoft: Color(0xFFECE3FA),
-    onSageSoft: Color(0xFF2B2338),
-    amber: MelbelColors.kBrandHoney,
-    amberSoft: Color(0xFFFCF6EA),
-    onAmberSoft: Color(0xFF3E3018),
-    softError: MelbelColors.kBrandRose,
-    softErrorSoft: Color(0xFFFAEEF0),
-    onSoftErrorSoft: Color(0xFF612830),
-    accentInk: Color(0xFF6449A6),
-    amberInk: Color(0xFF876010),
-    errorInk: Color(0xFF943F4A),
-    hairline: Color(0xFFECE2D4),
-    controlOutline: Color(0xFF9387A6),
+    background: Color(0xFFF8F5EE),
+    surface: Color(0xFFFFFDFA),
+    elevatedSurface: Color(0xFFFFFDFA),
+    heroSurface: Color(0xFFEAE1FC),
+    mutedSurface: Color(0xFFEFECE5),
+    selectedSurface: Color(0xFFE7DEFA),
+    onSurface: Color(0xFF1E1A26),
+    onSurfaceVariant: Color(0xFF686273),
+    sage: Color(0xFF6D48C7),
+    onSage: Color(0xFFFFFDFA),
+    sageSoft: Color(0xFFEAE1FC),
+    onSageSoft: Color(0xFF1E1A26),
+    amber: Color(0xFFD9AE48),
+    amberSoft: Color(0xFFFCF5E6),
+    onAmberSoft: Color(0xFF3B2E14),
+    success: Color(0xFF3E7A5F),
+    onSuccess: Color(0xFFFFFDFA),
+    successSoft: Color(0xFFE8F4EE),
+    onSuccessSoft: Color(0xFF1D3B2D),
+    successInk: Color(0xFF2F664D),
+    softError: Color(0xFFB84A47),
+    onError: Color(0xFFFFFDFA),
+    softErrorSoft: Color(0xFFFBECEB),
+    onSoftErrorSoft: Color(0xFF4D1E1D),
+    accentInk: Color(0xFF5A38B0),
+    amberInk: Color(0xFF7D590E),
+    errorInk: Color(0xFF963633),
+    hairline: Color.fromRGBO(30, 26, 38, 0.06),
+    controlOutline: Color(0xFF847C94),
   );
 
   static const dark = MelbelPalette(
-    background: Color(0xFF1A1523),
-    surface: Color(0xFF282235),
-    mutedSurface: Color(0xFF302940),
-    selectedSurface: Color(0xFF534273),
-    onSurface: Color(0xFFF5F1FA),
-    onSurfaceVariant: Color(0xFFBFB7CE),
-    sage: MelbelColors.kBrandLavender,
-    onSage: MelbelColors.kOnBrandLavender,
-    sageSoft: Color(0xFF3D3252),
-    onSageSoft: Color(0xFFF5F1FA),
-    amber: MelbelColors.kBrandHoney,
-    amberSoft: Color(0xFF3D352E),
-    onAmberSoft: Color(0xFFF6E7C3),
-    softError: MelbelColors.kBrandRose,
-    softErrorSoft: Color(0xFF382429),
-    onSoftErrorSoft: Color(0xFFF6D8DC),
-    accentInk: Color(0xFFC7B6F2),
-    amberInk: Color(0xFFE8C468),
-    errorInk: Color(0xFFEDA1AA),
-    hairline: Color(0xFF3C334F),
-    controlOutline: Color(0xFF8C80A3),
+    background: Color(0xFF131118),
+    surface: Color(0xFF1E1A27),
+    elevatedSurface: Color(0xFF2A2438),
+    heroSurface: Color(0xFF2E2540),
+    mutedSurface: Color(0xFF272233),
+    selectedSurface: Color(0xFF3A3152),
+    onSurface: Color(0xFFF4F1FA),
+    onSurfaceVariant: Color(0xFFA69EB5),
+    sage: Color(0xFF9F82E8),
+    onSage: Color(0xFF131118),
+    sageSoft: Color(0xFF2E2540),
+    onSageSoft: Color(0xFFF4F1FA),
+    amber: Color(0xFFDDB657),
+    amberSoft: Color(0xFF332C24),
+    onAmberSoft: Color(0xFFF5E6C4),
+    success: Color(0xFF7BC4A1),
+    onSuccess: Color(0xFF131118),
+    successSoft: Color(0xFF1F332B),
+    onSuccessSoft: Color(0xFFDCF3E7),
+    successInk: Color(0xFF8BD0AF),
+    softError: Color(0xFFDF7F7B),
+    onError: Color(0xFF1A0D0D),
+    softErrorSoft: Color(0xFF382224),
+    onSoftErrorSoft: Color(0xFFFADCD9),
+    accentInk: Color(0xFFB8A1F5),
+    amberInk: Color(0xFFEBC76D),
+    errorInk: Color(0xFFF09B97),
+    hairline: Color.fromRGBO(255, 255, 255, 0.08),
+    controlOutline: Color(0xFF8F86A3),
   );
 
   static const lightHighContrast = MelbelPalette(
-    background: Color(0xFFFBF5EC),
-    surface: Color(0xFFFFFDFB),
-    mutedSurface: Color(0xFFF1EAE0),
-    selectedSurface: Color(0xFFE9DFFA),
-    onSurface: Color(0xFF2B2338),
-    onSurfaceVariant: Color(0xFF4A4158),
-    sage: MelbelColors.kBrandLavender,
-    onSage: MelbelColors.kOnBrandLavender,
-    sageSoft: Color(0xFFECE3FA),
-    onSageSoft: Color(0xFF2B2338),
-    amber: MelbelColors.kBrandHoney,
-    amberSoft: Color(0xFFFCF6EA),
-    onAmberSoft: Color(0xFF3E3018),
-    softError: MelbelColors.kBrandRose,
-    softErrorSoft: Color(0xFFFAEEF0),
-    onSoftErrorSoft: Color(0xFF612830),
-    accentInk: Color(0xFF4E348F),
-    amberInk: Color(0xFF6E4C08),
-    errorInk: Color(0xFF7B2B36),
+    background: Color(0xFFF8F5EE),
+    surface: Color(0xFFFFFDFA),
+    elevatedSurface: Color(0xFFFFFDFA),
+    heroSurface: Color(0xFFEAE1FC),
+    mutedSurface: Color(0xFFEFECE5),
+    selectedSurface: Color(0xFFE7DEFA),
+    onSurface: Color(0xFF1E1A26),
+    onSurfaceVariant: Color(0xFF4A4456),
+    sage: Color(0xFF5635AD),
+    onSage: Color(0xFFFFFDFA),
+    sageSoft: Color(0xFFEAE1FC),
+    onSageSoft: Color(0xFF1E1A26),
+    amber: Color(0xFFD9AE48),
+    amberSoft: Color(0xFFFCF5E6),
+    onAmberSoft: Color(0xFF3B2E14),
+    success: Color(0xFF2E664D),
+    onSuccess: Color(0xFFFFFDFA),
+    successSoft: Color(0xFFE8F4EE),
+    onSuccessSoft: Color(0xFF1D3B2D),
+    successInk: Color(0xFF22523D),
+    softError: Color(0xFF9B3734),
+    onError: Color(0xFFFFFDFA),
+    softErrorSoft: Color(0xFFFBECEB),
+    onSoftErrorSoft: Color(0xFF4D1E1D),
+    accentInk: Color(0xFF492B96),
+    amberInk: Color(0xFF664708),
+    errorInk: Color(0xFF7D2623),
     hairline: Color(0xFF8F82A6),
-    controlOutline: Color(0xFF5D5270),
+    controlOutline: Color(0xFF5C546B),
   );
 
   static const darkHighContrast = MelbelPalette(
-    background: Color(0xFF1A1523),
-    surface: Color(0xFF282235),
-    mutedSurface: Color(0xFF302940),
-    selectedSurface: Color(0xFF534273),
-    onSurface: Color(0xFFF5F1FA),
-    onSurfaceVariant: Color(0xFFDFD8EB),
-    sage: MelbelColors.kBrandLavender,
-    onSage: MelbelColors.kOnBrandLavender,
-    sageSoft: Color(0xFF3D3252),
-    onSageSoft: Color(0xFFF5F1FA),
-    amber: MelbelColors.kBrandHoney,
-    amberSoft: Color(0xFF3D352E),
-    onAmberSoft: Color(0xFFF6E7C3),
-    softError: MelbelColors.kBrandRose,
-    softErrorSoft: Color(0xFF382429),
-    onSoftErrorSoft: Color(0xFFF6D8DC),
-    accentInk: Color(0xFFDDD0FA),
-    amberInk: Color(0xFFF4D88A),
-    errorInk: Color(0xFFF6BCC3),
+    background: Color(0xFF131118),
+    surface: Color(0xFF1E1A27),
+    elevatedSurface: Color(0xFF2A2438),
+    heroSurface: Color(0xFF2E2540),
+    mutedSurface: Color(0xFF272233),
+    selectedSurface: Color(0xFF3A3152),
+    onSurface: Color(0xFFF4F1FA),
+    onSurfaceVariant: Color(0xFFD6CFE3),
+    sage: Color(0xFFB8A1F5),
+    onSage: Color(0xFF131118),
+    sageSoft: Color(0xFF2E2540),
+    onSageSoft: Color(0xFFF4F1FA),
+    amber: Color(0xFFE6C36A),
+    amberSoft: Color(0xFF332C24),
+    onAmberSoft: Color(0xFFF5E6C4),
+    success: Color(0xFF94D8B7),
+    onSuccess: Color(0xFF131118),
+    successSoft: Color(0xFF1F332B),
+    onSuccessSoft: Color(0xFFDCF3E7),
+    successInk: Color(0xFFA7E3C6),
+    softError: Color(0xFFF09B97),
+    onError: Color(0xFF1A0D0D),
+    softErrorSoft: Color(0xFF382224),
+    onSoftErrorSoft: Color(0xFFFADCD9),
+    accentInk: Color(0xFFD0C0FA),
+    amberInk: Color(0xFFF5D98E),
+    errorInk: Color(0xFFF7B8B5),
     hairline: Color(0xFF80749B),
-    controlOutline: Color(0xFFB8AECB),
+    controlOutline: Color(0xFFB5ACC9),
   );
 
   static MelbelPalette of(BuildContext context) {
@@ -226,6 +279,8 @@ class MelbelPalette extends ThemeExtension<MelbelPalette> {
   MelbelPalette copyWith({
     Color? background,
     Color? surface,
+    Color? elevatedSurface,
+    Color? heroSurface,
     Color? mutedSurface,
     Color? selectedSurface,
     Color? onSurface,
@@ -237,7 +292,13 @@ class MelbelPalette extends ThemeExtension<MelbelPalette> {
     Color? amber,
     Color? amberSoft,
     Color? onAmberSoft,
+    Color? success,
+    Color? onSuccess,
+    Color? successSoft,
+    Color? onSuccessSoft,
+    Color? successInk,
     Color? softError,
+    Color? onError,
     Color? softErrorSoft,
     Color? onSoftErrorSoft,
     Color? accentInk,
@@ -249,6 +310,8 @@ class MelbelPalette extends ThemeExtension<MelbelPalette> {
       MelbelPalette(
         background: background ?? this.background,
         surface: surface ?? this.surface,
+        elevatedSurface: elevatedSurface ?? this.elevatedSurface,
+        heroSurface: heroSurface ?? this.heroSurface,
         mutedSurface: mutedSurface ?? this.mutedSurface,
         selectedSurface: selectedSurface ?? this.selectedSurface,
         onSurface: onSurface ?? this.onSurface,
@@ -260,7 +323,13 @@ class MelbelPalette extends ThemeExtension<MelbelPalette> {
         amber: amber ?? this.amber,
         amberSoft: amberSoft ?? this.amberSoft,
         onAmberSoft: onAmberSoft ?? this.onAmberSoft,
+        success: success ?? this.success,
+        onSuccess: onSuccess ?? this.onSuccess,
+        successSoft: successSoft ?? this.successSoft,
+        onSuccessSoft: onSuccessSoft ?? this.onSuccessSoft,
+        successInk: successInk ?? this.successInk,
         softError: softError ?? this.softError,
+        onError: onError ?? this.onError,
         softErrorSoft: softErrorSoft ?? this.softErrorSoft,
         onSoftErrorSoft: onSoftErrorSoft ?? this.onSoftErrorSoft,
         accentInk: accentInk ?? this.accentInk,
@@ -276,6 +345,8 @@ class MelbelPalette extends ThemeExtension<MelbelPalette> {
     return MelbelPalette(
       background: Color.lerp(background, other.background, t)!,
       surface: Color.lerp(surface, other.surface, t)!,
+      elevatedSurface: Color.lerp(elevatedSurface, other.elevatedSurface, t)!,
+      heroSurface: Color.lerp(heroSurface, other.heroSurface, t)!,
       mutedSurface: Color.lerp(mutedSurface, other.mutedSurface, t)!,
       selectedSurface: Color.lerp(selectedSurface, other.selectedSurface, t)!,
       onSurface: Color.lerp(onSurface, other.onSurface, t)!,
@@ -288,7 +359,13 @@ class MelbelPalette extends ThemeExtension<MelbelPalette> {
       amber: Color.lerp(amber, other.amber, t)!,
       amberSoft: Color.lerp(amberSoft, other.amberSoft, t)!,
       onAmberSoft: Color.lerp(onAmberSoft, other.onAmberSoft, t)!,
+      success: Color.lerp(success, other.success, t)!,
+      onSuccess: Color.lerp(onSuccess, other.onSuccess, t)!,
+      successSoft: Color.lerp(successSoft, other.successSoft, t)!,
+      onSuccessSoft: Color.lerp(onSuccessSoft, other.onSuccessSoft, t)!,
+      successInk: Color.lerp(successInk, other.successInk, t)!,
       softError: Color.lerp(softError, other.softError, t)!,
+      onError: Color.lerp(onError, other.onError, t)!,
       softErrorSoft: Color.lerp(softErrorSoft, other.softErrorSoft, t)!,
       onSoftErrorSoft: Color.lerp(onSoftErrorSoft, other.onSoftErrorSoft, t)!,
       accentInk: Color.lerp(accentInk, other.accentInk, t)!,
@@ -346,28 +423,28 @@ class MelbelTheme {
       ),
       titleMedium: baseTextTheme.titleMedium?.copyWith(
         fontSize: 16,
-        fontWeight: FontWeight.w600,
-        height: 1.4,
+        fontWeight: FontWeight.w700,
+        height: 1.45,
       ),
       titleSmall: baseTextTheme.titleSmall?.copyWith(
         fontSize: 14,
         fontWeight: FontWeight.w600,
-        height: 1.4,
+        height: 1.45,
       ),
       bodyLarge: baseTextTheme.bodyLarge?.copyWith(
-        fontSize: 16,
-        height: 1.55,
-        fontWeight: FontWeight.w400,
-      ),
-      bodyMedium: baseTextTheme.bodyMedium?.copyWith(
         fontSize: 16,
         height: 1.5,
         fontWeight: FontWeight.w400,
       ),
+      bodyMedium: baseTextTheme.bodyMedium?.copyWith(
+        fontSize: 15.5,
+        height: 1.5,
+        fontWeight: FontWeight.w400,
+      ),
       bodySmall: baseTextTheme.bodySmall?.copyWith(
-        fontSize: 13,
-        height: 1.45,
-        fontWeight: FontWeight.w500,
+        fontSize: 13.5,
+        height: 1.5,
+        fontWeight: FontWeight.w400,
         color: palette.onSurfaceVariant,
       ),
       labelLarge: baseTextTheme.labelLarge?.copyWith(
@@ -406,13 +483,13 @@ class MelbelTheme {
       tertiaryContainer: palette.amberSoft,
       onTertiaryContainer: palette.onAmberSoft,
       error: palette.softError,
-      onError: MelbelColors.kOnError,
+      onError: palette.onError,
       errorContainer: palette.softErrorSoft,
       onErrorContainer: palette.onSoftErrorSoft,
       surfaceContainerLowest: palette.background,
       surfaceContainerLow: palette.mutedSurface,
       surfaceContainer: palette.surface,
-      surfaceContainerHigh: palette.mutedSurface,
+      surfaceContainerHigh: palette.elevatedSurface,
       surfaceContainerHighest: palette.selectedSurface,
       outline: palette.controlOutline,
       outlineVariant: palette.hairline,
@@ -502,7 +579,7 @@ class MelbelTheme {
         elevation: 2,
       ),
       bottomSheetTheme: BottomSheetThemeData(
-        backgroundColor: palette.surface,
+        backgroundColor: palette.elevatedSurface,
         surfaceTintColor: Colors.transparent,
         dragHandleColor: palette.controlOutline.withValues(alpha: 0.55),
         shape: const RoundedRectangleBorder(
@@ -533,14 +610,12 @@ class MelbelTheme {
       ),
       outlinedButtonTheme: OutlinedButtonThemeData(
         style: OutlinedButton.styleFrom(
-          backgroundColor: dark ? const Color(0xFF231D2E) : palette.surface,
+          backgroundColor: palette.surface,
           foregroundColor: palette.onSurface,
           minimumSize: const Size(48, 48),
           side: highContrast
               ? BorderSide(color: palette.controlOutline, width: 1.5)
-              : dark
-                  ? BorderSide(color: palette.hairline, width: 1.0)
-                  : BorderSide.none,
+              : BorderSide(color: palette.hairline, width: 1.0),
           shape: const StadiumBorder(),
           textStyle: textTheme.labelLarge?.copyWith(
             fontWeight: FontWeight.w700,

@@ -20,6 +20,9 @@ RescheduleTriggerReason = Literal[
     "deadline_risk",
     "skipped",
     "manual",
+    "missed_session",
+    "step_completed_early",
+    "expand_horizon",
 ]
 FeasibilityStatus = Literal[
     "valid",

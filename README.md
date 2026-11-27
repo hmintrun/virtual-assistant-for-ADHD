@@ -30,9 +30,9 @@ Dự án áp dụng chiến lược **Feature-First (Planning $\rightarrow$ Exec
 | :--- | :--- | :--- |
 | **Mobile App** | **Flutter SDK (Dart)** | Đa nền tảng Android, Theme chuẩn W3C COGA dịu mắt, `provider`, `dio`, `flutter_dnd`, `wakelock_plus`, Exact Alarms. |
 | **Backend Server** | **Python 3.12 (FastAPI + Uvicorn)** | Xử lý bất đồng bộ `async/await`, API CRUD $\le 300\text{ms}$, tích hợp thuật toán lập lịch `scheduler_engine.py`. |
-| **AI / LLM Engine** | **Gemini 2.5 Flash** (Google AI Studio) | Phân tích ngữ nghĩa, trích xuất thực thể (UF1), sinh phương án chia bước & Micro-task 2p (UF2), sinh lời động viên thấu cảm (UF6). |
-| **Cơ chế Dự phòng AI** | **3-Tier Fallback** ($\le 2.5\text{s}$) | Tầng 1: Gemini Flash $\rightarrow$ Tầng 2: Llama-3 qua Groq Cloud $\rightarrow$ Tầng 3: Thuật toán Python chia cố định 20–25p. |
-| **Giọng nói (Voice)** | **Groq Whisper** & **edge-tts** | Nhận diện tiếng Việt siêu tốc (STT) và đọc giọng nói tự nhiên (TTS); fallback on-device STT/TTS khi offline. |
+| **AI / LLM Engine** | **`gemini-3.5-flash-lite`** (Google AI Studio / Vertex AI) | Phân tích ngữ nghĩa, trích xuất thực thể (UF1), sinh phương án chia bước & Micro-task 2p (UF2), chọn câu động viên không phán xét (UF6). |
+| **Cơ chế Dự phòng AI** | **3-Tier Fallback** ($\le 2.5\text{s}$) | Tầng 1: Gemini 3.5 Flash-Lite $\rightarrow$ Tầng 2: Groq Cloud (`qwen/qwen3.8-27b` + `openai/gpt-oss-20b`) $\rightarrow$ Tầng 3: Thuật toán Python chia cố định 20–25p. |
+| **Giọng nói (Voice)** | **Gemini 3.5 Transcribe / ElevenLabs Scribe v2 / Deepgram Nova-3** & **edge-tts** | STT đa tầng tiếng Việt (7s / 5s / 5s; `uf5_checkin` ưu tiên ElevenLabs) và đọc giọng nói tự nhiên (TTS); fallback on-device STT/TTS khi offline. |
 | **Cơ sở Dữ liệu** | **SQLAlchemy 2.0 ORM** | Tương thích kép 100%: SQLite (Local Dev) và PostgreSQL (Cloud Production), lưu cache cục bộ bằng `sqflite`. |
 | **Lịch Ngoại vi** | **Google Calendar MCP** | Đọc sự kiện bận ($T_{\text{busy}}$) và đồng bộ 2 chiều các khối sự kiện (`Focus Blocks`) sau khi người dùng chốt lịch. |
 
@@ -70,5 +70,5 @@ Dự án áp dụng chiến lược **Feature-First (Planning $\rightarrow$ Exec
 
 ## 🔒 Quy tắc An toàn & Bảo mật (Strict Security Rules)
 
-- **TUYỆT ĐỐI KHÔNG** commit file `.env`, API Keys (`GEMINI_API_KEY`, `GROQ_API_KEY`), file database cục bộ (`.db`, `test.db`) hoặc file âm thanh thử nghiệm lên Git repository.
+- **TUYỆT ĐỐI KHÔNG** commit file `.env`, API Keys (`GEMINI_API_KEY`, `GROQ_API_KEY`, `ELEVENLABS_API_KEY`, `DEEPGRAM_API_KEY`), file database cục bộ (`.db`, `test.db`) hoặc file âm thanh thử nghiệm lên Git repository.
 - Mọi nhánh tính năng phải tuân thủ quy chuẩn `feat/<userflow>-<tên-ngắn>` và commit message theo chuẩn **Conventional Commits**.

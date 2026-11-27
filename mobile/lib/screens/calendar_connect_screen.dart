@@ -6,11 +6,13 @@ import 'dart:async';
 import 'package:app_links/app_links.dart';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
+import 'package:provider/provider.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../core/api_client.dart';
 import '../core/responsive_layout.dart';
 import '../core/theme.dart';
+import '../services/auth_service.dart';
 import '../services/calendar_api.dart';
 import '../widgets/melbel_ui.dart';
 import '../widgets/shimmer_loading.dart';
@@ -36,6 +38,7 @@ class _CalendarConnectScreenState extends State<CalendarConnectScreen>
   bool _loading = true;
   bool _working = false;
   bool _waitingForBrowser = false;
+  bool _needsReconnect = false;
   String? _error;
   CalendarConnection? _connection;
   List<CalendarItem> _calendars = const [];
@@ -78,6 +81,7 @@ class _CalendarConnectScreenState extends State<CalendarConnectScreen>
     setState(() {
       _loading = true;
       _error = null;
+      _needsReconnect = false;
     });
     try {
       // Kết nối đã ngắt thì coi như chưa kết nối; needs_reconnect (quyền bị
@@ -100,14 +104,27 @@ class _CalendarConnectScreenState extends State<CalendarConnectScreen>
         calendars = await _api.listCalendars(connection.connectionId);
       }
       if (!mounted) return;
+      final writeId = connection?.writeCalendarId;
+      final dedicatedIds = calendars
+          .where((c) => isDedicatedFocusWriteCalendar(c, writeCalendarId: writeId))
+          .map((c) => c.id)
+          .toSet();
       setState(() {
         _connection = connection;
         _calendars = calendars;
-        _selectedReadIds = {...?connection?.readCalendarIds};
+        _selectedReadIds = {
+          ...?connection?.readCalendarIds
+              .where((id) => !dedicatedIds.contains(id)),
+        };
       });
       await _loadBusyEvents();
     } on ApiException catch (e) {
-      if (mounted) setState(() => _error = e.message);
+      if (mounted) {
+        setState(() {
+          _error = e.message;
+          _needsReconnect = e.requiresCalendarReconnect;
+        });
+      }
     } finally {
       if (mounted) setState(() => _loading = false);
     }
@@ -117,6 +134,7 @@ class _CalendarConnectScreenState extends State<CalendarConnectScreen>
     setState(() {
       _working = true;
       _error = null;
+      _needsReconnect = false;
     });
     try {
       final authUrl = await _api.startAuthorization();
@@ -128,7 +146,12 @@ class _CalendarConnectScreenState extends State<CalendarConnectScreen>
         setState(() => _error = 'Chưa mở được trình duyệt. Thử lại nhé.');
       }
     } on ApiException catch (e) {
-      if (mounted) setState(() => _error = e.message);
+      if (mounted) {
+        setState(() {
+          _error = e.message;
+          _needsReconnect = e.requiresCalendarReconnect;
+        });
+      }
     } finally {
       if (mounted) setState(() => _working = false);
     }
@@ -140,12 +163,20 @@ class _CalendarConnectScreenState extends State<CalendarConnectScreen>
     setState(() {
       _working = true;
       _error = null;
+      _needsReconnect = false;
     });
     try {
+      final writeId = _pickWriteCalendarId();
+      final dedicatedIds = _calendars
+          .where((c) => isDedicatedFocusWriteCalendar(c, writeCalendarId: writeId))
+          .map((c) => c.id)
+          .toSet();
+      final filteredReadIds =
+          _selectedReadIds.where((id) => !dedicatedIds.contains(id)).toList();
       final updated = await _api.saveSelection(
         connectionId: connection.connectionId,
-        readCalendarIds: _selectedReadIds.toList(),
-        writeCalendarId: _pickWriteCalendarId(),
+        readCalendarIds: filteredReadIds,
+        writeCalendarId: writeId,
       );
       if (!mounted) return;
       setState(() => _connection = updated);
@@ -156,7 +187,12 @@ class _CalendarConnectScreenState extends State<CalendarConnectScreen>
         );
       }
     } on ApiException catch (e) {
-      if (mounted) setState(() => _error = e.message);
+      if (mounted) {
+        setState(() {
+          _error = e.message;
+          _needsReconnect = e.requiresCalendarReconnect;
+        });
+      }
     } finally {
       if (mounted) setState(() => _working = false);
     }
@@ -170,6 +206,7 @@ class _CalendarConnectScreenState extends State<CalendarConnectScreen>
     setState(() {
       _working = true;
       _error = null;
+      _needsReconnect = false;
     });
     try {
       await _api.disconnect(connection.connectionId);
@@ -192,7 +229,12 @@ class _CalendarConnectScreenState extends State<CalendarConnectScreen>
         ),
       );
     } on ApiException catch (e) {
-      if (mounted) setState(() => _error = e.message);
+      if (mounted) {
+        setState(() {
+          _error = e.message;
+          _needsReconnect = e.requiresCalendarReconnect;
+        });
+      }
     } finally {
       if (mounted) setState(() => _working = false);
     }
@@ -209,9 +251,22 @@ class _CalendarConnectScreenState extends State<CalendarConnectScreen>
     if (current != null) return current;
     final writable = _calendars.where((c) => c.canWrite).toList();
     if (writable.isEmpty) return null;
+    final dedicated = writable
+        .where((c) => isDedicatedFocusWriteCalendar(c))
+        .firstOrNull;
+    if (dedicated != null) return dedicated.id;
     return writable
         .firstWhere((c) => c.primary, orElse: () => writable.first)
         .id;
+  }
+
+  String? _safeFallbackEmail(BuildContext context) {
+    try {
+      return Provider.of<AuthService>(context, listen: false).user?['email']
+          as String?;
+    } on ProviderNotFoundException {
+      return null;
+    }
   }
 
   Future<void> _loadBusyEvents() async {
@@ -222,10 +277,24 @@ class _CalendarConnectScreenState extends State<CalendarConnectScreen>
       if (mounted) setState(() => _busyEvents = const []);
       return;
     }
+    final dedicatedIds = _calendars
+        .where((c) => isDedicatedFocusWriteCalendar(
+              c,
+              writeCalendarId: connection.writeCalendarId,
+            ))
+        .map((c) => c.id)
+        .toSet();
+    final readIds = connection.readCalendarIds
+        .where((id) => !dedicatedIds.contains(id))
+        .toList(growable: false);
+    if (readIds.isEmpty) {
+      if (mounted) setState(() => _busyEvents = const []);
+      return;
+    }
     final from = DateTime.now();
     final to = from.add(_busyWindow);
     final all = <CalendarBusyEvent>[];
-    for (final calendarId in connection.readCalendarIds) {
+    for (final calendarId in readIds) {
       all.addAll(await _api.listBusyEvents(
         connectionId: connection.connectionId,
         googleCalendarId: calendarId,
@@ -284,10 +353,21 @@ class _CalendarConnectScreenState extends State<CalendarConnectScreen>
                       ),
                     ),
                     const SizedBox(height: 6),
-                    TextButton.icon(
-                      icon: const Icon(Icons.refresh_rounded),
-                      onPressed: _working ? null : _refresh,
-                      label: const Text('Tải lại kết nối'),
+                    Wrap(
+                      spacing: 8,
+                      children: [
+                        if (_needsReconnect)
+                          TextButton.icon(
+                            icon: const Icon(Icons.link_rounded),
+                            onPressed: _working ? null : _connect,
+                            label: const Text('Kết nối lại Google Calendar'),
+                          ),
+                        TextButton.icon(
+                          icon: const Icon(Icons.refresh_rounded),
+                          onPressed: _working ? null : _refresh,
+                          label: const Text('Tải lại kết nối'),
+                        ),
+                      ],
                     ),
                     const SizedBox(height: 12),
                   ],
@@ -302,7 +382,6 @@ class _CalendarConnectScreenState extends State<CalendarConnectScreen>
   }
 
   List<Widget> _buildNotConnected(BuildContext context) {
-    final palette = context.melbel;
     return [
       MelbelEntrance(
         child: MelbelCard(
@@ -317,16 +396,8 @@ class _CalendarConnectScreenState extends State<CalendarConnectScreen>
               ),
               const SizedBox(height: 12),
               Text(
-                'ProPlan VA xem giờ bận để tránh xếp phiên trùng lịch.',
+                'Tránh xếp trùng lịch bận · chỉ ghi phiên sau khi bạn duyệt.',
                 style: Theme.of(context).textTheme.bodyMedium,
-              ),
-              const SizedBox(height: 8),
-              Text(
-                'Phiên chỉ được ghi lên lịch sau khi bạn duyệt kế hoạch.',
-                style: Theme.of(context)
-                    .textTheme
-                    .bodySmall
-                    ?.copyWith(color: palette.onSurfaceVariant),
               ),
             ],
           ),
@@ -347,6 +418,10 @@ class _CalendarConnectScreenState extends State<CalendarConnectScreen>
   ) {
     final textTheme = Theme.of(context).textTheme;
     final palette = context.melbel;
+    final accountLabel = formatCalendarAccountLabel(
+      connection.accountRef,
+      fallbackEmail: _safeFallbackEmail(context),
+    );
     if (connection.state != 'connected') {
       return [
         MelbelCard(
@@ -355,15 +430,14 @@ class _CalendarConnectScreenState extends State<CalendarConnectScreen>
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Text(
-                'Mất quyền đọc lịch: ${connection.accountRef}',
+                'Mất quyền đọc lịch: $accountLabel',
                 style: textTheme.titleMedium?.copyWith(
                   color: palette.onAmberSoft,
                 ),
               ),
               const SizedBox(height: 8),
               Text(
-                'ProPlan chưa đọc được giờ bận từ tài khoản này. Khi lập kế hoạch, '
-                'bạn có thể dùng giờ rảnh nhập tay.',
+                'Chưa đọc được giờ bận · bạn vẫn có thể nhập giờ rảnh tay.',
                 style: textTheme.bodySmall?.copyWith(
                   color: palette.onAmberSoft,
                 ),
@@ -386,6 +460,18 @@ class _CalendarConnectScreenState extends State<CalendarConnectScreen>
         ),
       ];
     }
+    final readCalendars = _calendars
+        .where((c) => !isDedicatedFocusWriteCalendar(
+              c,
+              writeCalendarId: connection.writeCalendarId,
+            ))
+        .toList(growable: false);
+    final writeCalendars = _calendars
+        .where((c) => isDedicatedFocusWriteCalendar(
+              c,
+              writeCalendarId: connection.writeCalendarId,
+            ))
+        .toList(growable: false);
     return [
       MelbelCard(
         tone: MelbelCardTone.sage,
@@ -396,7 +482,7 @@ class _CalendarConnectScreenState extends State<CalendarConnectScreen>
             const SizedBox(width: 10),
             Expanded(
               child: Text(
-                'Đã kết nối: ${connection.accountRef}',
+                'Đã kết nối: $accountLabel',
                 style: textTheme.titleSmall?.copyWith(
                   color: palette.onSageSoft,
                 ),
@@ -412,7 +498,7 @@ class _CalendarConnectScreenState extends State<CalendarConnectScreen>
         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
         child: Column(
           children: [
-            for (final calendar in _calendars)
+            for (final calendar in readCalendars)
               CheckboxListTile(
                 contentPadding: EdgeInsets.zero,
                 value: _selectedReadIds.contains(calendar.id),
@@ -429,6 +515,41 @@ class _CalendarConnectScreenState extends State<CalendarConnectScreen>
           ],
         ),
       ),
+      if (writeCalendars.isNotEmpty) ...[
+        const SizedBox(height: 10),
+        MelbelCard(
+          tone: MelbelCardTone.muted,
+          borderRadius: 18,
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+          child: Row(
+            children: [
+              Icon(Icons.event_available_outlined,
+                  size: 20, color: palette.accentInk),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Lịch ghi phiên: ${writeCalendars.map((c) => c.summary).join(', ')}',
+                      style: textTheme.labelLarge?.copyWith(
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      'Lịch này tự động lưu các phiên ProPlan VA nên không tính là giờ bận.',
+                      style: textTheme.bodySmall?.copyWith(
+                        color: palette.onSurfaceVariant,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+      ],
       const SizedBox(height: 14),
       PrimaryCta(
         label: 'Lưu lịch đọc giờ bận',

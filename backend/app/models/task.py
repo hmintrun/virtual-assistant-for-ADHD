@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+from datetime import datetime
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 from sqlalchemy import JSON, CheckConstraint, ForeignKey, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from app.models.base import Base, RecordMixin
+from app.models.base import Base, RecordMixin, UTCDateTime
 
 if TYPE_CHECKING:
     from app.models.step import Step
@@ -36,6 +37,7 @@ class Task(RecordMixin, Base):
     source_planning_input_revision: Mapped[int | None]
     decomposition_state: Mapped[str] = mapped_column(String(32), default="complete")
     unexpanded_scope: Mapped[str | None] = mapped_column(Text)
+    extension_candidate_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
     avoidance_count: Mapped[int] = mapped_column(default=0)
     user: Mapped[User] = relationship(back_populates="tasks", lazy="raise", foreign_keys=[user_id])
     steps: Mapped[list[Step]] = relationship(

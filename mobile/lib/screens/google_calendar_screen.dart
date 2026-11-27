@@ -2,11 +2,14 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../core/api_client.dart';
 import '../core/responsive_layout.dart';
 import '../core/theme.dart';
+import '../services/auth_service.dart';
+import '../services/calendar_api.dart';
 import '../services/google_calendar_api.dart';
 import '../widgets/melbel_ui.dart';
 
@@ -23,6 +26,7 @@ class _GoogleCalendarScreenState extends State<GoogleCalendarScreen>
   List<Map<String, dynamic>> _connections = [];
   bool _loading = false;
   bool _pendingConsent = false;
+  bool _needsReconnect = false;
   String? _error;
 
   @override
@@ -48,14 +52,24 @@ class _GoogleCalendarScreenState extends State<GoogleCalendarScreen>
     setState(() {
       _loading = true;
       _error = null;
+      _needsReconnect = false;
     });
     try {
       await operation();
     } on ApiException catch (error) {
-      if (mounted) setState(() => _error = error.message);
+      if (mounted) {
+        setState(() {
+          _error = error.message;
+          _needsReconnect = error.requiresCalendarReconnect;
+        });
+      }
     } catch (_) {
-      if (mounted)
-        setState(() => _error = 'Chưa mở được Google Calendar. Hãy thử lại.');
+      if (mounted) {
+        setState(() {
+          _error = 'Chưa mở được Google Calendar. Hãy thử lại.';
+          _needsReconnect = false;
+        });
+      }
     } finally {
       if (mounted) setState(() => _loading = false);
     }
@@ -114,6 +128,15 @@ class _GoogleCalendarScreenState extends State<GoogleCalendarScreen>
     }
   }
 
+  String? _safeEmail(BuildContext context) {
+    try {
+      return Provider.of<AuthService>(context, listen: false).user?['email']
+          as String?;
+    } on ProviderNotFoundException {
+      return null;
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final palette = context.melbel;
@@ -143,11 +166,27 @@ class _GoogleCalendarScreenState extends State<GoogleCalendarScreen>
                 MelbelCard(
                   borderRadius: 22,
                   tone: MelbelCardTone.amber,
-                  child: Row(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Icon(Icons.cloud_off_outlined, color: palette.amberInk),
-                      const SizedBox(width: 10),
-                      Expanded(child: Text(_error!)),
+                      Row(
+                        children: [
+                          Icon(
+                            Icons.cloud_off_outlined,
+                            color: palette.amberInk,
+                          ),
+                          const SizedBox(width: 10),
+                          Expanded(child: Text(_error!)),
+                        ],
+                      ),
+                      if (_needsReconnect) ...[
+                        const SizedBox(height: 8),
+                        TextButton.icon(
+                          onPressed: _loading ? null : _connect,
+                          icon: const Icon(Icons.link_rounded),
+                          label: const Text('Kết nối lại Google Calendar'),
+                        ),
+                      ],
                     ],
                   ),
                 ),
@@ -201,7 +240,10 @@ class _GoogleCalendarScreenState extends State<GoogleCalendarScreen>
                         ),
                       ),
                       title: Text(
-                        connection['account_ref'] as String? ?? 'Google Calendar',
+                        formatCalendarAccountLabel(
+                          connection['account_ref'] as String?,
+                          fallbackEmail: _safeEmail(context),
+                        ),
                         style: Theme.of(context)
                             .textTheme
                             .titleSmall
@@ -275,6 +317,7 @@ class _GoogleCalendarAccountState extends State<_GoogleCalendarAccount> {
   late String? _writeId = widget.connection['write_calendar_id'] as String?;
   String? _error;
   bool _busy = false;
+  bool _needsReconnect = false;
   bool _loadedEvents = false;
   late DateTime _day;
 
@@ -291,18 +334,45 @@ class _GoogleCalendarAccountState extends State<_GoogleCalendarAccount> {
     setState(() {
       _busy = true;
       _error = null;
+      _needsReconnect = false;
     });
     try {
       await operation();
     } on ApiException catch (error) {
-      if (mounted) setState(() => _error = error.message);
+      if (mounted) {
+        setState(() {
+          _error = error.message;
+          _needsReconnect = error.requiresCalendarReconnect;
+        });
+      }
     } catch (_) {
-      if (mounted)
-        setState(() => _error = 'Chưa tải được dữ liệu lịch. Hãy thử lại.');
+      if (mounted) {
+        setState(() {
+          _error = 'Chưa tải được dữ liệu lịch. Hãy thử lại.';
+          _needsReconnect = false;
+        });
+      }
     } finally {
       if (mounted) setState(() => _busy = false);
     }
   }
+
+  Future<void> _reconnect() => _perform(() async {
+        final uri = await widget.api.authorize(
+          returnTarget: kIsWeb
+              ? Uri.base
+                  .replace(query: '', fragment: '/google-calendar')
+                  .toString()
+              : null,
+        );
+        if (!await launchUrl(
+          uri,
+          mode: LaunchMode.externalApplication,
+          webOnlyWindowName: '_self',
+        )) {
+          throw const ApiException('Chưa mở được trang cấp quyền Google.');
+        }
+      });
 
   Future<void> _loadCalendars() => _perform(_readCalendars);
 
@@ -382,10 +452,19 @@ class _GoogleCalendarAccountState extends State<_GoogleCalendarAccount> {
     if (!mounted || choice == null || choice.$1 == _writeId && _writeId != null)
       return;
     await _perform(() async {
+      final dedicatedIds = {
+        for (final item in _calendars)
+          if (item['primary'] != true &&
+              ((choice.$1 != null && item['id'] == choice.$1) ||
+                  isDedicatedFocusWriteCalendar(
+                    CalendarItem.fromJson(item),
+                  )))
+            item['id'] as String,
+      };
       final readIds = [
         for (final id
             in (widget.connection['read_calendar_ids'] as List? ?? []))
-          if (id is String) id,
+          if (id is String && !dedicatedIds.contains(id)) id,
       ];
       final preview = await widget.api.previewWriteCalendar(
         _id,
@@ -472,9 +551,20 @@ class _GoogleCalendarAccountState extends State<_GoogleCalendarAccount> {
                     children: [
                       Text(_error!),
                       const SizedBox(height: 6),
-                      TextButton(
-                        onPressed: _busy ? null : _loadCalendars,
-                        child: const Text('Thử lại'),
+                      Wrap(
+                        spacing: 8,
+                        children: [
+                          if (_needsReconnect)
+                            TextButton.icon(
+                              onPressed: _busy ? null : _reconnect,
+                              icon: const Icon(Icons.link_rounded),
+                              label: const Text('Kết nối lại Google Calendar'),
+                            ),
+                          TextButton(
+                            onPressed: _busy ? null : _loadCalendars,
+                            child: const Text('Thử lại'),
+                          ),
+                        ],
                       ),
                     ],
                   ),

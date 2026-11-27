@@ -163,6 +163,7 @@ class PlanningApi {
   }) async {
     final json = await _client.postData(
       '/drafts/${Uri.encodeComponent(draft.draftId)}/analyze',
+      receiveTimeout: const Duration(seconds: 35),
       idempotencyKey: ApiClient.stableIdempotencyKey(
         'analyze_${draft.draftId}',
         '${draft.summaryRevision}_${draft.planningInputRevision}_${draft.rawInput}_${message ?? ''}',
@@ -317,6 +318,19 @@ class PlanningApi {
   Future<void> deleteDraft(String draftId) async {
     await _client.deleteData('/drafts/${Uri.encodeComponent(draftId)}');
   }
+
+  Future<JsonMap> deleteTask(
+    String taskId, {
+    int? expectedTaskRevision,
+  }) =>
+      _client.deleteData(
+        '/tasks/${Uri.encodeComponent(taskId)}',
+        queryParameters: expectedTaskRevision != null
+            ? {'expected_task_revision': expectedTaskRevision}
+            : null,
+        idempotent: true,
+        idempotencyKey: ApiClient.newIdempotencyKey('task_delete'),
+      );
 
   Future<PlanCandidateModel> updateCandidateStep({
     required PlanCandidateModel candidate,

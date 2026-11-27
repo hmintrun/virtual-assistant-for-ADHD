@@ -19,7 +19,7 @@ from zoneinfo import ZoneInfo
 import pytest
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select, text, update
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from app.api.deps import CurrentUser, get_current_user
 from app.core.database import get_db, make_engine, session_factory
@@ -69,6 +69,17 @@ def _auth_headers(user_id: UUID, idempotency_key: str | None = None) -> dict[str
     return headers
 
 
+async def _truncate_pg_tables(engine: AsyncEngine) -> None:
+    preparer = engine.dialect.identifier_preparer
+    table_names = [preparer.format_table(table) for table in reversed(Base.metadata.sorted_tables)]
+    if not table_names:
+        return
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(f"TRUNCATE TABLE {', '.join(table_names)} RESTART IDENTITY CASCADE")
+        )
+
+
 @asynccontextmanager
 async def _regression_db_env() -> AsyncGenerator[async_sessionmaker[AsyncSession], None]:
     pg_url = (
@@ -78,6 +89,8 @@ async def _regression_db_env() -> AsyncGenerator[async_sessionmaker[AsyncSession
     engine = make_engine(url)
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+    if pg_url:
+        await _truncate_pg_tables(engine)
 
     sf = session_factory(engine)
 
@@ -100,8 +113,7 @@ async def _regression_db_env() -> AsyncGenerator[async_sessionmaker[AsyncSession
         else:
             app.dependency_overrides.pop(get_current_user, None)
         if pg_url:
-            async with engine.begin() as conn:
-                await conn.execute(text("SELECT 1"))
+            await _truncate_pg_tables(engine)
         await engine.dispose()
 
 
@@ -3959,3 +3971,287 @@ async def test_reconcile_skips_deleted_externally_when_create_job_still_pending(
                 assert deleted_link.sync_state == "deleted_externally"
     finally:
         reset_fake_calendar_client()
+
+
+@pytest.mark.asyncio
+async def test_dedicated_proplan_va_focus_calendar_excluded_from_read_calendars() -> None:
+    """Phase 3: Lịch ghi chuyên dụng ProPlan VA Focus luôn bị loại khỏi read_calendar_ids
+    trên provision_new, update_calendar_selection, configuration-previews/confirm và tự chữa lành
+    dữ liệu cũ trên GET /calendars mà không làm tăng revision với kết nối đã sạch.
+    Đồng thời vẫn cho phép lịch primary làm cả read lẫn write calendar.
+    """
+    reset_fake_calendar_client()
+    try:
+        fake_client = get_calendar_client()
+        assert isinstance(fake_client, FakeCalendarClient)
+        focus_cal_id = "proplan_focus@group.calendar.google.com"
+        primary_email = "mock_user@gmail.com"
+        work_cal_id = "work_calendar_123@group.calendar.google.com"
+
+        async with _regression_db_env() as sf:
+            user_id = uuid4()
+            conn_id = uuid4()
+            async with sf() as db:
+                db.add(
+                    User(
+                        id=user_id,
+                        email=f"cal_excl_{user_id.hex[:8]}@example.com",
+                        display_name="Focus Cal Exclusion",
+                    )
+                )
+                await db.flush()
+                creds = encrypt_credentials(
+                    {
+                        "access_token": "acc_focus_excl",
+                        "refresh_token": "ref_focus_excl",
+                        "expires_in": 3600,
+                        "stored_at": datetime.now(UTC).isoformat(),
+                        "user_id": str(user_id),
+                        "connection_id": str(conn_id),
+                    }
+                )
+                db.add(
+                    CalendarConnection(
+                        id=conn_id,
+                        user_id=user_id,
+                        provider="google",
+                        account_ref=primary_email,
+                        connection_state="connected",
+                        read_calendar_ids=["primary"],
+                        write_calendar_id="primary",
+                        granted_scopes=["https://www.googleapis.com/auth/calendar"],
+                        credential_ref=creds,
+                    )
+                )
+                await db.commit()
+
+            async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+                headers = _auth_headers(user_id)
+
+                # 1. provision_new qua configuration-previews + confirm ngay cả khi client gửi kèm focus_cal_id trong read_calendar_ids
+                prev_prov = await client.post(
+                    f"/api/v1/calendar/connections/{conn_id}/configuration-previews",
+                    headers=headers,
+                    json={
+                        "read_calendar_ids": ["primary", primary_email, work_cal_id, focus_cal_id],
+                        "write_calendar_id": "provision_new",
+                        "existing_event_action": "provision_new",
+                    },
+                )
+                assert prev_prov.status_code == 200, prev_prov.text
+                prov_pid = prev_prov.json()["data"]["preview_id"]
+
+                conf_prov = await client.post(
+                    f"/api/v1/calendar/configuration-previews/{prov_pid}/confirm",
+                    headers=headers,
+                    json={"expected_preview_revision": 1},
+                )
+                assert conf_prov.status_code == 200, conf_prov.text
+                conf_prov_data = conf_prov.json()["data"]
+                assert conf_prov_data["write_calendar_id"] == focus_cal_id
+                assert conf_prov_data["read_calendar_ids"] == ["primary", primary_email, work_cal_id]
+
+                # 2. update_calendar_selection: loại focus_cal_id, khử trùng, bỏ chuỗi rỗng
+                sel_focus = await client.patch(
+                    f"/api/v1/calendar/{conn_id}/selection",
+                    headers=headers,
+                    json={
+                        "read_calendar_ids": ["primary", focus_cal_id, work_cal_id, "primary", ""],
+                        "write_calendar_id": focus_cal_id,
+                    },
+                )
+                assert sel_focus.status_code == 200, sel_focus.text
+                assert sel_focus.json()["data"]["read_calendar_ids"] == ["primary", work_cal_id]
+
+                # primary làm write_calendar_id vẫn được phép nằm trong read_calendar_ids
+                sel_primary = await client.patch(
+                    f"/api/v1/calendar/{conn_id}/selection",
+                    headers=headers,
+                    json={
+                        "read_calendar_ids": ["primary", primary_email],
+                        "write_calendar_id": "primary",
+                    },
+                )
+                assert sel_primary.status_code == 200, sel_primary.text
+                assert sel_primary.json()["data"]["read_calendar_ids"] == ["primary", primary_email]
+
+                sel_acct_primary = await client.patch(
+                    f"/api/v1/calendar/{conn_id}/selection",
+                    headers=headers,
+                    json={
+                        "read_calendar_ids": [primary_email, work_cal_id],
+                        "write_calendar_id": primary_email,
+                    },
+                )
+                assert sel_acct_primary.status_code == 200, sel_acct_primary.text
+                assert sel_acct_primary.json()["data"]["read_calendar_ids"] == [primary_email, work_cal_id]
+
+                # 3. configuration-previews + confirm với explicit focus_cal_id -> HTTP response preview, preview.payload & confirm đều loại focus_cal_id
+                prev_explicit = await client.post(
+                    f"/api/v1/calendar/connections/{conn_id}/configuration-previews",
+                    headers=headers,
+                    json={
+                        "read_calendar_ids": ["primary", focus_cal_id],
+                        "write_calendar_id": focus_cal_id,
+                    },
+                )
+                assert prev_explicit.status_code == 200, prev_explicit.text
+                assert prev_explicit.json()["data"]["read_calendar_ids"] == ["primary"]
+                exp_pid = prev_explicit.json()["data"]["preview_id"]
+
+                async with sf() as db:
+                    prev_row = await db.get(CalendarPreview, UUID(exp_pid))
+                    assert prev_row is not None
+                    assert (prev_row.payload or {}).get("read_calendar_ids") == ["primary"]
+
+                conf_explicit = await client.post(
+                    f"/api/v1/calendar/configuration-previews/{exp_pid}/confirm",
+                    headers=headers,
+                    json={"expected_preview_revision": 1},
+                )
+                assert conf_explicit.status_code == 200, conf_explicit.text
+                assert conf_explicit.json()["data"]["write_calendar_id"] == focus_cal_id
+                assert conf_explicit.json()["data"]["read_calendar_ids"] == ["primary"]
+
+                # Case A: write_calendar_id="primary" & read_calendar_ids=["primary", focus_cal_id]
+                # Cả PATCH /selection lẫn POST /configuration-previews + confirm đều loại focus_cal_id ngay lập tức (không đợi GET /calendars)
+                sel_case_a = await client.patch(
+                    f"/api/v1/calendar/{conn_id}/selection",
+                    headers=headers,
+                    json={
+                        "read_calendar_ids": ["primary", focus_cal_id],
+                        "write_calendar_id": "primary",
+                    },
+                )
+                assert sel_case_a.status_code == 200, sel_case_a.text
+                assert sel_case_a.json()["data"]["read_calendar_ids"] == ["primary"]
+
+                prev_case_a = await client.post(
+                    f"/api/v1/calendar/connections/{conn_id}/configuration-previews",
+                    headers=headers,
+                    json={
+                        "read_calendar_ids": ["primary", focus_cal_id],
+                        "write_calendar_id": "primary",
+                    },
+                )
+                assert prev_case_a.status_code == 200, prev_case_a.text
+                assert prev_case_a.json()["data"]["read_calendar_ids"] == ["primary"]
+                case_a_pid = prev_case_a.json()["data"]["preview_id"]
+
+                conf_case_a = await client.post(
+                    f"/api/v1/calendar/configuration-previews/{case_a_pid}/confirm",
+                    headers=headers,
+                    json={"expected_preview_revision": 1},
+                )
+                assert conf_case_a.status_code == 200, conf_case_a.text
+                assert conf_case_a.json()["data"]["read_calendar_ids"] == ["primary"]
+
+                # 4. GET /calendars trên kết nối ĐÃ SẠCH không làm tăng conn.revision
+                async with sf() as db:
+                    conn_clean = await db.get(CalendarConnection, conn_id)
+                    assert conn_clean is not None
+                    clean_revision = conn_clean.revision
+
+                list_clean = await client.get(
+                    f"/api/v1/calendar/connections/{conn_id}/calendars",
+                    headers=headers,
+                )
+                assert list_clean.status_code == 200, list_clean.text
+                async with sf() as db:
+                    conn_after_clean = await db.get(CalendarConnection, conn_id)
+                    assert conn_after_clean is not None
+                    assert conn_after_clean.revision == clean_revision
+
+                # 5. Self-healing: dòng DB cũ bị dính focus_cal_id trong read_calendar_ids (kể cả khi write_calendar_id='primary')
+                async with sf() as db:
+                    conn_dirty = await db.get(CalendarConnection, conn_id)
+                    assert conn_dirty is not None
+                    conn_dirty.read_calendar_ids = [primary_email, focus_cal_id]
+                    conn_dirty.write_calendar_id = "primary"
+                    await db.commit()
+
+                list_healed = await client.get(
+                    f"/api/v1/calendar/connections/{conn_id}/calendars",
+                    headers=headers,
+                )
+                assert list_healed.status_code == 200, list_healed.text
+                items_by_id = {it["id"]: it for it in list_healed.json()["data"]["items"]}
+                assert items_by_id[primary_email]["selected_for_read"] is True
+                assert items_by_id[focus_cal_id]["selected_for_read"] is False
+
+                async with sf() as db:
+                    conn_healed = await db.get(CalendarConnection, conn_id)
+                    assert conn_healed is not None
+                    assert conn_healed.read_calendar_ids == [primary_email]
+
+                # Case B: account_ref chưa phân giải ("unknown@gmail.com") nhưng mock_calendars có primary id="primary_user@gmail.com"
+                # Cả PATCH /selection lẫn POST /configuration-previews + confirm đều giữ nguyên "primary_user@gmail.com" trong read_calendar_ids
+                async with sf() as db:
+                    conn_unk = await db.get(CalendarConnection, conn_id)
+                    assert conn_unk is not None
+                    conn_unk.account_ref = "unknown@gmail.com"
+                    conn_unk.read_calendar_ids = ["primary"]
+                    conn_unk.write_calendar_id = "primary"
+                    await db.commit()
+
+                fake_client.mock_calendars = [
+                    {
+                        "id": "primary_user@gmail.com",
+                        "summary": "Primary User",
+                        "primary": True,
+                        "accessRole": "owner",
+                        "backgroundColor": "#9a9cff",
+                    },
+                    {
+                        "id": focus_cal_id,
+                        "summary": "ProPlan VA Focus",
+                        "primary": False,
+                        "accessRole": "owner",
+                        "backgroundColor": "#5484ed",
+                    },
+                ]
+
+                sel_case_b = await client.patch(
+                    f"/api/v1/calendar/{conn_id}/selection",
+                    headers=headers,
+                    json={
+                        "read_calendar_ids": ["primary_user@gmail.com"],
+                        "write_calendar_id": "primary_user@gmail.com",
+                    },
+                )
+                assert sel_case_b.status_code == 200, sel_case_b.text
+                assert sel_case_b.json()["data"]["read_calendar_ids"] == ["primary_user@gmail.com"]
+                assert sel_case_b.json()["data"]["write_calendar_id"] == "primary_user@gmail.com"
+
+                prev_case_b = await client.post(
+                    f"/api/v1/calendar/connections/{conn_id}/configuration-previews",
+                    headers=headers,
+                    json={
+                        "read_calendar_ids": ["primary_user@gmail.com"],
+                        "write_calendar_id": "primary_user@gmail.com",
+                    },
+                )
+                assert prev_case_b.status_code == 200, prev_case_b.text
+                assert prev_case_b.json()["data"]["read_calendar_ids"] == ["primary_user@gmail.com"]
+                case_b_pid = prev_case_b.json()["data"]["preview_id"]
+
+                conf_case_b = await client.post(
+                    f"/api/v1/calendar/configuration-previews/{case_b_pid}/confirm",
+                    headers=headers,
+                    json={"expected_preview_revision": 1},
+                )
+                assert conf_case_b.status_code == 200, conf_case_b.text
+                assert conf_case_b.json()["data"]["read_calendar_ids"] == ["primary_user@gmail.com"]
+                assert conf_case_b.json()["data"]["write_calendar_id"] == "primary_user@gmail.com"
+
+                # Placeholder account_ref không được xem là primary_ids
+                for placeholder in ("google_calendar_user", "unknown@gmail.com", "UNKNOWN@GOOGLE.COM"):
+                    assert (
+                        CalendarService._sanitize_read_calendar_ids(
+                            [placeholder], placeholder, account_ref=placeholder
+                        )
+                        == []
+                    )
+    finally:
+        reset_fake_calendar_client()
+
