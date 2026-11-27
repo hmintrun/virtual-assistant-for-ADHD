@@ -28,6 +28,25 @@ android {
         // flag during build.
         versionCode = flutter.versionCode
         versionName = flutter.versionName
+        resourceConfigurations += listOf("vi", "en")
+    }
+
+    packaging {
+        jniLibs {
+            excludes += listOf("**/libsqlite3.so")
+            useLegacyPackaging = true
+        }
+        resources {
+            excludes += listOf(
+                "/META-INF/{AL2.0,LGPL2.1}",
+                "/META-INF/LICENSE*",
+                "/META-INF/NOTICE*",
+                "/META-INF/androidx/**",
+                "DebugProbesKt.bin",
+                "kotlin-tooling-metadata.json",
+                "META-INF/*.version",
+            )
+        }
     }
 
     buildTypes {
@@ -35,6 +54,12 @@ android {
             // TODO: Add your own signing config for the release build.
             // Signing with the debug keys for now, so `flutter run --release` works.
             signingConfig = signingConfigs.getByName("debug")
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro",
+            )
         }
     }
 }
