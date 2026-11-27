@@ -477,8 +477,8 @@ class _FeasibilityScreenState extends State<FeasibilityScreen> {
                     Expanded(
                       child: Text(
                         deficit == null || deficit <= 0
-                            ? 'Phương án cần được điều chỉnh trước khi chốt.'
-                            : 'Cần thêm $deficit phút để xếp đủ các phiên.',
+                            ? 'Cần điều chỉnh lịch.'
+                            : 'Thiếu $deficit phút.',
                         style: textTheme.titleSmall?.copyWith(
                           color: palette.onAmberSoft,
                         ),
@@ -1489,7 +1489,7 @@ class PlanLockedScreen extends StatelessWidget {
                         alignment: Alignment.center,
                         child: const MelbelMascot(
                           expression: CatExpression.happy,
-                          forceLightSvg: true,
+                          showBackdrop: false,
                           width: 94,
                           height: 84,
                         ),
@@ -1514,14 +1514,6 @@ class PlanLockedScreen extends StatelessWidget {
                     style: textTheme.headlineSmall?.copyWith(
                       fontWeight: FontWeight.w800,
                       color: palette.onSageSoft,
-                    ),
-                  ),
-                  const SizedBox(height: 6),
-                  Text(
-                    'Bạn đã vượt qua bước khó nhất: bắt đầu lập kế hoạch.',
-                    textAlign: TextAlign.center,
-                    style: textTheme.bodyMedium?.copyWith(
-                      color: palette.onSageSoft.withValues(alpha: 0.86),
                     ),
                   ),
                 ],
@@ -1828,12 +1820,16 @@ class AiFallbackScreen extends StatelessWidget {
                     ),
                   ),
                   const SizedBox(height: 6),
-                  Text(
-                    'Hệ thống chuẩn bị sẵn lịch mẫu tiêu chuẩn cho bạn',
-                    textAlign: TextAlign.center,
-                    style: TextStyle(
-                      fontSize: 14,
-                      color: MelbelColors.kOnSurfaceVariant,
+                  SizedBox(
+                    width: double.infinity,
+                    child: Text(
+                      'Hệ thống chuẩn bị sẵn lịch mẫu tiêu chuẩn cho bạn',
+                      textAlign: TextAlign.start,
+                      style: TextStyle(
+                        fontSize: 14,
+                        height: 1.5,
+                        color: MelbelColors.kOnSurfaceVariant,
+                      ),
                     ),
                   ),
                 ],

@@ -26,6 +26,7 @@ class _GoogleCalendarScreenState extends State<GoogleCalendarScreen>
   List<Map<String, dynamic>> _connections = [];
   bool _loading = false;
   bool _pendingConsent = false;
+  bool _needsReconnect = false;
   String? _error;
 
   @override
@@ -51,14 +52,24 @@ class _GoogleCalendarScreenState extends State<GoogleCalendarScreen>
     setState(() {
       _loading = true;
       _error = null;
+      _needsReconnect = false;
     });
     try {
       await operation();
     } on ApiException catch (error) {
-      if (mounted) setState(() => _error = error.message);
+      if (mounted) {
+        setState(() {
+          _error = error.message;
+          _needsReconnect = error.requiresCalendarReconnect;
+        });
+      }
     } catch (_) {
-      if (mounted)
-        setState(() => _error = 'Chưa mở được Google Calendar. Hãy thử lại.');
+      if (mounted) {
+        setState(() {
+          _error = 'Chưa mở được Google Calendar. Hãy thử lại.';
+          _needsReconnect = false;
+        });
+      }
     } finally {
       if (mounted) setState(() => _loading = false);
     }
@@ -155,11 +166,27 @@ class _GoogleCalendarScreenState extends State<GoogleCalendarScreen>
                 MelbelCard(
                   borderRadius: 22,
                   tone: MelbelCardTone.amber,
-                  child: Row(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Icon(Icons.cloud_off_outlined, color: palette.amberInk),
-                      const SizedBox(width: 10),
-                      Expanded(child: Text(_error!)),
+                      Row(
+                        children: [
+                          Icon(
+                            Icons.cloud_off_outlined,
+                            color: palette.amberInk,
+                          ),
+                          const SizedBox(width: 10),
+                          Expanded(child: Text(_error!)),
+                        ],
+                      ),
+                      if (_needsReconnect) ...[
+                        const SizedBox(height: 8),
+                        TextButton.icon(
+                          onPressed: _loading ? null : _connect,
+                          icon: const Icon(Icons.link_rounded),
+                          label: const Text('Kết nối lại Google Calendar'),
+                        ),
+                      ],
                     ],
                   ),
                 ),
@@ -290,6 +317,7 @@ class _GoogleCalendarAccountState extends State<_GoogleCalendarAccount> {
   late String? _writeId = widget.connection['write_calendar_id'] as String?;
   String? _error;
   bool _busy = false;
+  bool _needsReconnect = false;
   bool _loadedEvents = false;
   late DateTime _day;
 
@@ -306,18 +334,45 @@ class _GoogleCalendarAccountState extends State<_GoogleCalendarAccount> {
     setState(() {
       _busy = true;
       _error = null;
+      _needsReconnect = false;
     });
     try {
       await operation();
     } on ApiException catch (error) {
-      if (mounted) setState(() => _error = error.message);
+      if (mounted) {
+        setState(() {
+          _error = error.message;
+          _needsReconnect = error.requiresCalendarReconnect;
+        });
+      }
     } catch (_) {
-      if (mounted)
-        setState(() => _error = 'Chưa tải được dữ liệu lịch. Hãy thử lại.');
+      if (mounted) {
+        setState(() {
+          _error = 'Chưa tải được dữ liệu lịch. Hãy thử lại.';
+          _needsReconnect = false;
+        });
+      }
     } finally {
       if (mounted) setState(() => _busy = false);
     }
   }
+
+  Future<void> _reconnect() => _perform(() async {
+        final uri = await widget.api.authorize(
+          returnTarget: kIsWeb
+              ? Uri.base
+                  .replace(query: '', fragment: '/google-calendar')
+                  .toString()
+              : null,
+        );
+        if (!await launchUrl(
+          uri,
+          mode: LaunchMode.externalApplication,
+          webOnlyWindowName: '_self',
+        )) {
+          throw const ApiException('Chưa mở được trang cấp quyền Google.');
+        }
+      });
 
   Future<void> _loadCalendars() => _perform(_readCalendars);
 
@@ -496,9 +551,20 @@ class _GoogleCalendarAccountState extends State<_GoogleCalendarAccount> {
                     children: [
                       Text(_error!),
                       const SizedBox(height: 6),
-                      TextButton(
-                        onPressed: _busy ? null : _loadCalendars,
-                        child: const Text('Thử lại'),
+                      Wrap(
+                        spacing: 8,
+                        children: [
+                          if (_needsReconnect)
+                            TextButton.icon(
+                              onPressed: _busy ? null : _reconnect,
+                              icon: const Icon(Icons.link_rounded),
+                              label: const Text('Kết nối lại Google Calendar'),
+                            ),
+                          TextButton(
+                            onPressed: _busy ? null : _loadCalendars,
+                            child: const Text('Thử lại'),
+                          ),
+                        ],
                       ),
                     ],
                   ),

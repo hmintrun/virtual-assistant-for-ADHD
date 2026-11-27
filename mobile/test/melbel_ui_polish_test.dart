@@ -1,19 +1,31 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:provider/provider.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:proplan_va/core/api_client.dart';
 import 'package:proplan_va/core/theme.dart';
+import 'package:proplan_va/models/planning_models.dart';
 import 'package:proplan_va/providers/focus_provider.dart';
+import 'package:proplan_va/providers/streak_provider.dart';
 import 'package:proplan_va/providers/task_provider.dart';
 import 'package:proplan_va/providers/theme_provider.dart';
 import 'package:proplan_va/screens/calendar_screen.dart';
+import 'package:proplan_va/screens/focus_review_screens.dart';
+import 'package:proplan_va/screens/focus_screen.dart';
+import 'package:proplan_va/screens/settings_screen.dart';
 import 'package:proplan_va/screens/splash_screen.dart';
 import 'package:proplan_va/screens/support_screens.dart';
 import 'package:proplan_va/screens/task_entry_screen.dart';
+import 'package:proplan_va/screens/task_summary_screen.dart';
+import 'package:proplan_va/services/adaptation_api.dart';
 import 'package:proplan_va/services/auth_service.dart';
 import 'package:proplan_va/widgets/countdown_timer_widget.dart';
+import 'package:proplan_va/widgets/focus_stage_widgets.dart';
 import 'package:proplan_va/widgets/melbel_ui.dart';
+import 'package:proplan_va/widgets/undo_snackbar.dart';
 
 class _OfflineCalendarClient extends ApiClient {
   _OfflineCalendarClient() : super(bindSession: false);
@@ -22,6 +34,39 @@ class _OfflineCalendarClient extends ApiClient {
   Future<Map<String, dynamic>> getData(String path,
       {Map<String, dynamic>? queryParameters}) async {
     throw const ApiException('Offline');
+  }
+}
+
+class _LocalValidationSummaryTask extends TaskProvider {
+  _LocalValidationSummaryTask(this.testDraft);
+
+  final PlanningDraftModel testDraft;
+  int clarificationCalls = 0;
+
+  @override
+  String get title => testDraft.title;
+
+  @override
+  String get scope => testDraft.scope;
+
+  @override
+  DateTime? get deadline => DateTime(2027, 1, 15, 18);
+
+  @override
+  String get availabilitySummary => 'Chưa chọn khung giờ rảnh.';
+
+  @override
+  PlanningDraftModel? get draft => testDraft;
+
+  @override
+  bool get canPlan => false;
+
+  @override
+  bool get isApiBusy => false;
+
+  @override
+  Future<void> submitClarification(String answer) async {
+    clarificationCalls++;
   }
 }
 
@@ -216,12 +261,29 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  test('Unified lavender and honey brand accents stay identical in light/dark',
+  test('Dark mode adapts primary and semantic accents with dark-ink pastel contrast',
       () {
-    expect(MelbelPalette.light.sage, MelbelPalette.dark.sage);
-    expect(MelbelPalette.light.onSage, MelbelPalette.dark.onSage);
-    expect(MelbelPalette.light.amber, MelbelPalette.dark.amber);
-    expect(MelbelPalette.light.softError, MelbelPalette.dark.softError);
+    expect(MelbelPalette.dark.sage, isNot(MelbelPalette.light.sage));
+    expect(
+      MelbelPalette.dark.sage.computeLuminance(),
+      greaterThan(MelbelPalette.light.sage.computeLuminance()),
+    );
+    expect(
+      MelbelPalette.dark.onSage.computeLuminance(),
+      lessThan(MelbelPalette.light.onSage.computeLuminance()),
+    );
+    expect(
+      MelbelPalette.dark.success.computeLuminance(),
+      greaterThan(MelbelPalette.light.success.computeLuminance()),
+    );
+    expect(
+      MelbelPalette.dark.softError.computeLuminance(),
+      greaterThan(MelbelPalette.light.softError.computeLuminance()),
+    );
+    expect(
+      MelbelPalette.dark.amber.computeLuminance(),
+      greaterThan(MelbelPalette.light.amber.computeLuminance()),
+    );
   });
 
   testWidgets('MelbelChatBlock renders cleanly on narrow screens and pets',
@@ -362,12 +424,14 @@ void main() {
       expect(find.text('Chưa tải được lịch.'), findsOneWidget);
       expect(find.text('Google Calendar'), findsOneWidget);
       expect(find.text('Đổi lịch'), findsOneWidget);
-      expect(find.text('Thêm việc cho ngày này'), findsOneWidget);
+      expect(find.text('Thêm việc'), findsOneWidget);
+      expect(find.byTooltip('Xem hôm nay'), findsOneWidget);
+      expect(find.byTooltip('Hỏi lịch'), findsOneWidget);
       expect(tester.takeException(), isNull);
     });
 
     testWidgets(
-        'HelpScreen renders banners, doodle rays and pill CTA cleanly (dark=$isDark)',
+        'HelpScreen renders banners and top back button cleanly without duplicate bottom CTA (dark=$isDark)',
         (tester) async {
       tester.view.physicalSize = const Size(390, 844);
       tester.view.devicePixelRatio = 1;
@@ -387,9 +451,8 @@ void main() {
       expect(find.byType(MelbelSectionBanner), findsNWidgets(2));
       expect(find.text('Các thao tác thường dùng'), findsOneWidget);
       expect(find.text('Câu hỏi thường gặp'), findsOneWidget);
-      await tester.scrollUntilVisible(find.text('Quay lại'), 200);
-      await tester.pumpAndSettle();
-      expect(find.widgetWithText(SecondaryCta, 'Quay lại'), findsOneWidget);
+      expect(find.byTooltip('Quay lại'), findsOneWidget);
+      expect(find.widgetWithText(SecondaryCta, 'Quay lại'), findsNothing);
       expect(tester.takeException(), isNull);
     });
 
@@ -420,7 +483,8 @@ void main() {
         expect(find.byType(MelbelCushionAvatar), findsOneWidget);
         expect(find.byType(MelbelDoodleRays), findsWidgets);
         expect(find.text('Chạm để nói'), findsOneWidget);
-        expect(find.text('Nhập bằng bàn phím'), findsOneWidget);
+        expect(find.text('Gõ phím'), findsOneWidget);
+        expect(find.byTooltip('Nhập bằng bàn phím'), findsOneWidget);
         expect(tester.takeException(), isNull);
       } finally {
         await tester.pumpWidget(const SizedBox.shrink());
@@ -478,4 +542,324 @@ void main() {
       }
     });
   }
+
+  testWidgets(
+      'MelbelHeroBanner omits message cleanly when null and reveals whisper when petted',
+      (tester) async {
+    String? whisper;
+    await tester.pumpWidget(MaterialApp(
+      theme: MelbelTheme.currentTheme,
+      home: Scaffold(
+        body: StatefulBuilder(
+          builder: (context, setState) => MelbelHeroBanner(
+            badge: '26/11/2026',
+            title: 'Chào buổi tối',
+            message: whisper,
+            onPetted: (value) => setState(() => whisper = value),
+          ),
+        ),
+      ),
+    ));
+
+    expect(find.text('Chào buổi tối'), findsOneWidget);
+    expect(find.text('Hôm nay đi từng bước nhỏ nhé.'), findsNothing);
+
+    await tester.tap(find.byType(MelbelMascot));
+    await tester.pump(const Duration(seconds: 2));
+    await tester.pumpAndSettle();
+
+    expect(find.text(MelbelMascot.companionWhispers.first), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets(
+      'FocusInfoCard and ReviewHeader render cleanly when subtitle is null',
+      (tester) async {
+    await tester.pumpWidget(MaterialApp(
+      theme: MelbelTheme.currentTheme,
+      home: const Scaffold(
+        body: Column(
+          children: [
+            ReviewHeader('Hộp suy nghĩ', null),
+            SizedBox(height: 12),
+            FocusInfoCard(
+              icon: Icons.schedule_outlined,
+              title: 'Nhắc chuẩn bị lúc 20:45',
+            ),
+          ],
+        ),
+      ),
+    ));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Hộp suy nghĩ'), findsOneWidget);
+    expect(find.text('Nhắc chuẩn bị lúc 20:45'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets(
+      'ThoughtInboxScreen quick-captures thought without mutating FocusStage',
+      (tester) async {
+    FlutterSecureStorage.setMockInitialValues({});
+    final focus = FocusProvider();
+    final task = TaskProvider();
+    final stageBefore = focus.stage;
+    try {
+      await tester.pumpWidget(
+        MultiProvider(
+          providers: [
+            ChangeNotifierProvider<FocusProvider>.value(value: focus),
+            ChangeNotifierProvider<TaskProvider>.value(value: task),
+          ],
+          child: MaterialApp(
+            theme: MelbelTheme.currentTheme,
+            home: const ThoughtInboxScreen(),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text('Hộp suy nghĩ'), findsOneWidget);
+      await tester.enterText(
+        find.byWidgetPredicate(
+          (w) =>
+              w is TextField &&
+              w.decoration?.hintText == 'Ghi nhanh ý chợt nảy ra...',
+        ),
+        'Nhớ mua nước uống',
+      );
+      await tester.tap(find.byTooltip('Cất suy nghĩ'));
+      await tester.pumpAndSettle();
+
+      expect(focus.thoughts.map((t) => t.text), contains('Nhớ mua nước uống'));
+      expect(focus.stage, stageBefore);
+      expect(focus.stage, isNot(FocusStage.thoughtSaved));
+      expect(find.text('Nhớ mua nước uống'), findsOneWidget);
+      expect(tester.takeException(), isNull);
+    } finally {
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pump(const Duration(milliseconds: 200));
+      focus.dispose();
+      task.dispose();
+    }
+  });
+
+  testWidgets(
+      'TaskSummaryScreen deduplicates field blockers and validates empty submit locally',
+      (tester) async {
+    tester.view.physicalSize = const Size(900, 1800);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    FlutterSecureStorage.setMockInitialValues({});
+    final task = _LocalValidationSummaryTask(
+      const PlanningDraftModel(
+        draftId: 'draft-val',
+        stage: 'summary',
+        summary: <String, dynamic>{
+          'title': 'Soạn đề cương',
+          'scope': '3 chương',
+          'can_plan': false,
+          'clarification_issues': <Map<String, dynamic>>[
+            <String, dynamic>{
+              'code': 'MISSING_AVAILABILITY',
+              'field_path': 'availability',
+              'blocking': true,
+              'question': 'Bạn rảnh vào khung giờ nào?',
+            },
+            <String, dynamic>{
+              'code': 'AI_AVAILABILITY_INCOMPLETE',
+              'field_path': 'availability_ref',
+              'blocking': true,
+              'question': 'Bạn có thể làm việc khung giờ nào trong tuần?',
+            },
+          ],
+        },
+        summaryRevision: 1,
+        planningInputRevision: 1,
+        inputSource: 'text',
+      ),
+    );
+    try {
+      await tester.pumpWidget(
+        ChangeNotifierProvider<TaskProvider>.value(
+          value: task,
+          child: MaterialApp(
+            theme: MelbelTheme.currentTheme,
+            home: const TaskSummaryScreen(),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text('Bạn rảnh vào khung giờ nào?'), findsNothing);
+      expect(
+        find.text('Bạn có thể làm việc khung giờ nào trong tuần?'),
+        findsOneWidget,
+      );
+      expect(find.text('Tối nay 20:00–22:00'), findsOneWidget);
+
+      await tester.ensureVisible(
+        find.widgetWithText(PrimaryCta, 'Bổ sung thông tin'),
+      );
+      await tester.tap(find.widgetWithText(PrimaryCta, 'Bổ sung thông tin'));
+      await tester.pumpAndSettle();
+
+      expect(task.clarificationCalls, 0);
+      expect(
+        find.text('Nhập ngắn gọn hoặc chọn 1 gợi ý ở trên nhé.'),
+        findsOneWidget,
+      );
+      expect(tester.takeException(), isNull);
+    } finally {
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pump(const Duration(milliseconds: 200));
+      task.dispose();
+    }
+  });
+
+  testWidgets(
+      'SettingsScreen exposes Home Streak visibility switch and showMelbelUndoSnackBar sets close icon',
+      (tester) async {
+    SharedPreferences.setMockInitialValues({});
+    FlutterSecureStorage.setMockInitialValues({});
+    final theme = ThemeProvider();
+    final streak = StreakProvider(ownerId: 'settings_streak_toggle');
+    await streak.restore();
+    final offlineClient = _OfflineCalendarClient();
+    try {
+      await tester.pumpWidget(
+        MultiProvider(
+          providers: [
+            ChangeNotifierProvider<ThemeProvider>.value(value: theme),
+            ChangeNotifierProvider<StreakProvider>.value(value: streak),
+          ],
+          child: MaterialApp(
+            theme: MelbelTheme.currentTheme,
+            home: SettingsScreen(
+              api: offlineClient,
+              adaptation: AdaptationApi(offlineClient),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final switchFinder = find.text('Thẻ nhịp tập trung ở Trang chủ');
+      expect(switchFinder, findsOneWidget);
+      expect(streak.introDismissed, isFalse);
+
+      await tester.ensureVisible(switchFinder);
+      await tester.tap(switchFinder);
+      await tester.pumpAndSettle();
+      expect(streak.introDismissed, isTrue);
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: Builder(
+              builder: (ctx) => TextButton(
+                onPressed: () => showMelbelUndoSnackBar(
+                  ctx,
+                  message: 'Đã ẩn',
+                  onUndo: () {},
+                ),
+                child: const Text('Trigger'),
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.tap(find.text('Trigger'));
+      await tester.pumpAndSettle();
+
+      final bar = tester.widget<SnackBar>(find.byType(SnackBar));
+      expect(bar.showCloseIcon, isTrue);
+      expect(tester.takeException(), isNull);
+    } finally {
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pump(const Duration(milliseconds: 200));
+      theme.dispose();
+      streak.dispose();
+    }
+  });
+
+  test('Only black Melbel SVG assets exist (white cat_dark variants removed)',
+      () {
+    for (final expr in ['happy', 'neutral', 'sleepy']) {
+      expect(
+        File('assets/melbel_svg/cat_dark_$expr.svg').existsSync(),
+        isFalse,
+      );
+      expect(
+        File('assets/melbel_svg/cat_light_$expr.svg').existsSync(),
+        isTrue,
+      );
+    }
+  });
+
+  testWidgets(
+      'MelbelMascot always renders black cat SVG with theme-aware contrast backdrop',
+      (tester) async {
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: ThemeData.dark(),
+        home: const Scaffold(
+          body: Center(
+            child: MelbelMascot(),
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const ValueKey('black_neutral')), findsOneWidget);
+    expect(find.byKey(const ValueKey('dark_neutral')), findsNothing);
+    final darkBackdrop = tester.widget<Container>(
+      find.byKey(const ValueKey('melbel_mascot_backdrop')),
+    );
+    final darkDeco = darkBackdrop.decoration! as BoxDecoration;
+    expect(darkDeco.shape, BoxShape.circle);
+    expect(darkDeco.color, MelbelMascot.darkBackdropColor);
+
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: ThemeData.dark(),
+        home: const Scaffold(
+          body: Center(
+            child: MelbelMascot(showBackdrop: false),
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const ValueKey('black_neutral')), findsOneWidget);
+    expect(
+      find.byKey(const ValueKey('melbel_mascot_backdrop')),
+      findsNothing,
+    );
+
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: ThemeData.light(),
+        home: const Scaffold(
+          body: Center(
+            child: MelbelMascot(),
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const ValueKey('black_neutral')), findsOneWidget);
+    final lightBackdrop = tester.widget<Container>(
+      find.byKey(const ValueKey('melbel_mascot_backdrop')),
+    );
+    final lightDeco = lightBackdrop.decoration! as BoxDecoration;
+    expect(lightDeco.shape, BoxShape.circle);
+    expect(lightDeco.color, MelbelMascot.lightBackdropColor);
+    expect(tester.takeException(), isNull);
+  });
 }

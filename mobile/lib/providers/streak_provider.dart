@@ -632,12 +632,16 @@ class StreakProvider extends ChangeNotifier {
     notifyListeners();
   }
 
-  Future<void> dismissIntro() async {
-    if (_introDismissed) return;
-    _introDismissed = true;
+  Future<void> setIntroDismissed(bool dismissed) async {
+    if (_introDismissed == dismissed) return;
+    _introDismissed = dismissed;
     await _persist();
     notifyListeners();
   }
+
+  Future<void> dismissIntro() => setIntroDismissed(true);
+
+  Future<void> restoreIntro() => setIntroDismissed(false);
 
   void _notifySafe() {
     if (!_disposed) notifyListeners();
@@ -751,7 +755,7 @@ class StreakProvider extends ChangeNotifier {
       _repairPendingDateKey = null;
     }
     if (longest != null) {
-      _longestStreak = math.max(_longestStreak, longest);
+      _longestStreak = longest;
     }
     if (freeze != null) {
       _freezeCount = freeze.clamp(0, maxFreeze);
@@ -760,8 +764,9 @@ class StreakProvider extends ChangeNotifier {
       _repairsUsedThisMonth = repairsUsed.clamp(0, maxRepairsPerMonth);
       _repairMonthKey = mKey;
     }
-    if (lastDate != null && lastDate.isNotEmpty) {
-      _lastActiveDateKey = lastDate;
+    if (data.containsKey('last_streak_date')) {
+      _lastActiveDateKey =
+          (lastDate != null && lastDate.isNotEmpty) ? lastDate : null;
     }
     _repairWindowEndsAt = repairWindowRaw != null
         ? DateTime.tryParse(repairWindowRaw)?.toLocal()

@@ -79,11 +79,14 @@ class _LoginScreenState extends State<LoginScreen> {
                       const GoogleLoginButton(),
                       if (auth.error != null) ...[
                         const SizedBox(height: 12),
-                        Text(
-                          auth.error!,
-                          textAlign: TextAlign.center,
-                          style: textTheme.bodySmall?.copyWith(
-                            color: palette.amberInk,
+                        SizedBox(
+                          width: double.infinity,
+                          child: Text(
+                            auth.error!,
+                            textAlign: TextAlign.start,
+                            style: textTheme.bodySmall?.copyWith(
+                              color: palette.amberInk,
+                            ),
                           ),
                         ),
                       ],
@@ -126,6 +129,7 @@ class _SetupFlowScreenState extends State<SetupFlowScreen>
   Map<String, dynamic>? _serverPreferences;
   final _api = ApiClient();
   bool _waitingForDndSettings = false;
+  bool _saveFailedOnce = false;
 
   bool get _isAndroid =>
       !kIsWeb && defaultTargetPlatform == TargetPlatform.android;
@@ -236,6 +240,8 @@ class _SetupFlowScreenState extends State<SetupFlowScreen>
         if (microTask is num) _microTask = microTask > 0;
         if (preferences['reminder_style'] == 'encouraging') {
           _reminderStyle = 'Nhắc khích lệ';
+        } else if (preferences['reminder_style'] == 'upbeat') {
+          _reminderStyle = 'Tươi vui';
         } else if (preferences['reminder_style'] == 'gentle') {
           _reminderStyle = 'Hỏi tiến độ';
         }
@@ -337,8 +343,9 @@ class _SetupFlowScreenState extends State<SetupFlowScreen>
       }
       if (!mounted || !_preferencesLoaded || _serverPreferences == null) {
         if (mounted) {
+          setState(() => _saveFailedOnce = true);
           _showPermissionMessage(
-              'Chưa tải được cài đặt đã lưu. Hãy thử tải lại trước khi tiếp tục.');
+              'Chưa tải được cài đặt đã lưu. Hãy thử tải lại hoặc vào trang chủ trước.');
         }
         return;
       }
@@ -361,9 +368,11 @@ class _SetupFlowScreenState extends State<SetupFlowScreen>
       if (currentOffsets is! List || !listEquals(currentOffsets, offsets)) {
         preferenceChanges['reminder_offsets'] = offsets;
       }
-      final desiredStyle = _reminderStyle == 'Nhắc khích lệ'
-          ? 'encouraging'
-          : 'gentle';
+      final desiredStyle = switch (_reminderStyle) {
+        'Nhắc khích lệ' => 'encouraging',
+        'Tươi vui' => 'upbeat',
+        _ => 'gentle',
+      };
       if (preferences['reminder_style'] != desiredStyle) {
         preferenceChanges['reminder_style'] = desiredStyle;
       }
@@ -375,8 +384,8 @@ class _SetupFlowScreenState extends State<SetupFlowScreen>
         await _api.postData(
           '/settings/change-requests',
           data: payload,
-          idempotencyKey: ApiClient.stableIdempotencyKey(
-              'onboarding_preferences', payload.toString()),
+          idempotencyKey:
+              ApiClient.newIdempotencyKey('onboarding_preferences'),
         );
       }
       await auth?.completeOnboarding();
@@ -388,9 +397,24 @@ class _SetupFlowScreenState extends State<SetupFlowScreen>
       );
     } on ApiException catch (error) {
       if (error.code == 'REVISION_CONFLICT') unawaited(_restoreSetup());
-      if (mounted)
-        _showPermissionMessage('Chưa lưu thiết lập: ${error.message}');
+      if (mounted) {
+        setState(() => _saveFailedOnce = true);
+        _showPermissionMessage(
+            'Chưa lưu thiết lập (${error.message}). Bạn vẫn có thể vào trang chủ trước.');
+      }
       return;
+    } finally {
+      if (mounted) setState(() => _savingPreferences = false);
+    }
+    if (!mounted) return;
+    Navigator.of(context).pushNamedAndRemoveUntil('/home', (_) => false);
+  }
+
+  Future<void> _skipSaveAndEnterHome() async {
+    if (_savingPreferences) return;
+    setState(() => _savingPreferences = true);
+    try {
+      await _maybeAuth()?.completeOnboarding();
     } finally {
       if (mounted) setState(() => _savingPreferences = false);
     }
@@ -568,6 +592,13 @@ class _SetupFlowScreenState extends State<SetupFlowScreen>
                               : _next,
                       child: Text(_step == 3 ? 'Vào trang chủ' : 'Để sau'),
                     ),
+                  if (_saveFailedOnce && (_step == 3 || _step >= 6))
+                    TextButton(
+                      onPressed: _savingPreferences
+                          ? null
+                          : _skipSaveAndEnterHome,
+                      child: const Text('Vào trang chủ không cần lưu'),
+                    ),
                 ],
               ),
             ),
@@ -604,12 +635,15 @@ class _SetupFlowScreenState extends State<SetupFlowScreen>
             onTap: () => _selectAppearance('system'),
           ),
           const SizedBox(height: 10),
-          Text(
-            'Tự động bật chế độ tối từ 18:00 đến 06:00.',
-            textAlign: TextAlign.center,
-            style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                  color: context.melbel.onSurfaceVariant,
-                ),
+          SizedBox(
+            width: double.infinity,
+            child: Text(
+              'Tối từ 18:00–06:00.',
+              textAlign: TextAlign.start,
+              style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                    color: context.melbel.onSurfaceVariant,
+                  ),
+            ),
           ),
         ],
       );
@@ -666,8 +700,6 @@ class _SetupFlowScreenState extends State<SetupFlowScreen>
                     ))
                 .toList(),
           ),
-          const SizedBox(height: 14),
-          const Text('Áp dụng từ phiên sau.'),
         ],
       );
 
@@ -698,7 +730,6 @@ class _SetupFlowScreenState extends State<SetupFlowScreen>
           ExpansionTile(
             tilePadding: EdgeInsets.zero,
             title: const Text('Tùy chọn bổ sung'),
-            subtitle: const Text('Áp dụng trong màn thiết lập này'),
             children: [
               Align(
                   alignment: Alignment.centerLeft,
@@ -706,7 +737,7 @@ class _SetupFlowScreenState extends State<SetupFlowScreen>
                       style: Theme.of(context).textTheme.titleMedium)),
               Wrap(
                 spacing: 8,
-                children: ['Hỏi tiến độ', 'Nhắc khích lệ']
+                children: ['Hỏi tiến độ', 'Tươi vui', 'Nhắc khích lệ']
                     .map((style) => ChoiceChip(
                           label: Text(style),
                           selected: _reminderStyle == style,
@@ -744,18 +775,12 @@ class _SetupFlowScreenState extends State<SetupFlowScreen>
               ),
             ],
           ),
-          const SizedBox(height: 12),
-          const _NoticeCard(
-            icon: Icons.spa_outlined,
-            title: 'Mỗi bước nhỏ đều là tiến bộ.',
-            message: 'Các lựa chọn được giữ trong phiên demo trên thiết bị.',
-          ),
         ],
       );
 
   Widget _guideStep(BuildContext context) => Column(
         children: [
-          const MelbelMascot(),
+          const MelbelCushionAvatar(width: 112, height: 98),
           const SizedBox(height: 12),
           Text('Melbel luôn đồng hành cùng bạn',
               style: Theme.of(context).textTheme.titleMedium),
@@ -775,7 +800,7 @@ class _SetupFlowScreenState extends State<SetupFlowScreen>
           const _GuideTile(
               number: '4',
               title: 'Giữ nhịp 3 ngày mở Streak',
-              detail: 'Chỉ cần ≥ 2 phút/ngày, có Khiên ngủ nướng giữ chuỗi.'),
+              detail: '≥ 2 phút/ngày · có Khiên giữ chuỗi.'),
         ],
       );
 
@@ -794,18 +819,24 @@ class _SetupFlowScreenState extends State<SetupFlowScreen>
           child: Icon(_permissionIcons[index], size: 60, color: palette.sage),
         ),
         const SizedBox(height: 28),
-        Text(
-          _permissionTitles[index],
-          textAlign: TextAlign.center,
-          style: Theme.of(context).textTheme.headlineSmall,
+        SizedBox(
+          width: double.infinity,
+          child: Text(
+            _permissionTitles[index],
+            textAlign: TextAlign.start,
+            style: Theme.of(context).textTheme.headlineSmall,
+          ),
         ),
         const SizedBox(height: 8),
-        Text(
-          _permissionSubtitles[index],
-          textAlign: TextAlign.center,
-          style: Theme.of(context).textTheme.bodyLarge?.copyWith(
-                color: palette.onSurfaceVariant,
-              ),
+        SizedBox(
+          width: double.infinity,
+          child: Text(
+            _permissionSubtitles[index],
+            textAlign: TextAlign.start,
+            style: Theme.of(context).textTheme.bodyLarge?.copyWith(
+                  color: palette.onSurfaceVariant,
+                ),
+          ),
         ),
         const SizedBox(height: 32),
         _NoticeCard(

@@ -48,6 +48,18 @@ class FocusSessionSummaryCard extends StatelessWidget {
                   color: palette.onSurfaceVariant,
                 )),
           ],
+          if ((session.sessionGoal?.trim().isNotEmpty ?? false) &&
+              session.sessionGoal!.trim() != session.stepTitle.trim()) ...[
+            const SizedBox(height: 4),
+            Text(
+              session.sessionGoal!.trim(),
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: text.bodySmall?.copyWith(
+                color: palette.onSurfaceVariant,
+              ),
+            ),
+          ],
           const SizedBox(height: 10),
           Wrap(
             spacing: 12,
@@ -351,6 +363,7 @@ class FocusThoughtTile extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final palette = context.melbel;
+    final text = Theme.of(context).textTheme;
     return MelbelCard(
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
       child: Row(
@@ -366,10 +379,23 @@ class FocusThoughtTile extends StatelessWidget {
             ),
           ),
           Expanded(
-            child: Text(
-              thought.text ?? 'Ghi âm · ${formatFocusClock(thought.createdAt)}',
-              maxLines: 3,
-              overflow: TextOverflow.ellipsis,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  thought.text ?? 'Ghi âm suy nghĩ',
+                  maxLines: 3,
+                  overflow: TextOverflow.ellipsis,
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  formatFocusThoughtTime(thought.createdAt),
+                  style: text.bodySmall?.copyWith(
+                    color: palette.onSurfaceVariant,
+                  ),
+                ),
+              ],
             ),
           ),
           IconButton(
@@ -388,20 +414,21 @@ class FocusInfoCard extends StatelessWidget {
   const FocusInfoCard({
     required this.icon,
     required this.title,
-    required this.subtitle,
+    this.subtitle,
     this.tone = MelbelCardTone.neutral,
     super.key,
   });
 
   final IconData icon;
   final String title;
-  final String subtitle;
+  final String? subtitle;
   final MelbelCardTone tone;
 
   @override
   Widget build(BuildContext context) {
     final palette = context.melbel;
     final text = Theme.of(context).textTheme;
+    final hasSubtitle = subtitle != null && subtitle!.trim().isNotEmpty;
     final (accent, titleColor, subtitleColor) = switch (tone) {
       MelbelCardTone.amber => (
           palette.amber,
@@ -418,13 +445,19 @@ class FocusInfoCard extends StatelessWidget {
           palette.onSoftErrorSoft,
           palette.onSoftErrorSoft.withValues(alpha: 0.85),
         ),
+      MelbelCardTone.success => (
+          palette.success,
+          palette.onSuccessSoft,
+          palette.onSuccessSoft.withValues(alpha: 0.85),
+        ),
       _ => (palette.sage, palette.onSurface, palette.onSurfaceVariant),
     };
 
     return MelbelCard(
       tone: tone,
       child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
+        crossAxisAlignment:
+            hasSubtitle ? CrossAxisAlignment.start : CrossAxisAlignment.center,
         children: [
           Icon(icon, color: accent, size: 22),
           const SizedBox(width: 12),
@@ -436,11 +469,13 @@ class FocusInfoCard extends StatelessWidget {
                   title,
                   style: text.titleSmall?.copyWith(color: titleColor),
                 ),
-                const SizedBox(height: 4),
-                Text(
-                  subtitle,
-                  style: text.bodySmall?.copyWith(color: subtitleColor),
-                ),
+                if (hasSubtitle) ...[
+                  const SizedBox(height: 4),
+                  Text(
+                    subtitle!,
+                    style: text.bodySmall?.copyWith(color: subtitleColor),
+                  ),
+                ],
               ],
             ),
           ),
@@ -476,6 +511,18 @@ String formatFocusClock(DateTime date) {
 String formatFocusDateTime(DateTime date) {
   final local = date.toLocal();
   return '${formatFocusClock(local)} ${local.day}/${local.month}';
+}
+
+String formatFocusThoughtTime(DateTime date, {DateTime? now}) {
+  final local = date.toLocal();
+  final ref = (now ?? DateTime.now()).toLocal();
+  final sameDay = local.year == ref.year &&
+      local.month == ref.month &&
+      local.day == ref.day;
+  if (sameDay) {
+    return 'Hôm nay · ${formatFocusClock(local)}';
+  }
+  return '${local.day.toString().padLeft(2, '0')}/${local.month.toString().padLeft(2, '0')} · ${formatFocusClock(local)}';
 }
 
 String formatFocusWeekday(DateTime date) {

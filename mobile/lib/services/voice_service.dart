@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:record/record.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -274,6 +275,59 @@ class Uf1VoiceRecorderService {
       if (await file.exists()) await file.delete();
     } on FileSystemException {
       // Không xóa được tệp tạm thì bỏ qua, không làm gãy luồng chính.
+    }
+  }
+
+  /// Xóa các file ghi âm tạm trong `<temp>/uf1_voice/` cũ hơn [maxAge]
+  /// (ví dụ do app bị tắt đột ngột trước khi UF4 kịp xử lý hoặc dọn dẹp).
+  static Future<int> cleanupOrphanRecordings({
+    Duration maxAge = const Duration(hours: 24),
+    Directory? directoryOverride,
+    DateTime? nowOverride,
+  }) async {
+    if (kIsWeb && directoryOverride == null) return 0;
+    try {
+      final Directory voiceDir;
+      if (directoryOverride != null) {
+        voiceDir = directoryOverride;
+      } else {
+        final tempDir = await getTemporaryDirectory();
+        voiceDir = Directory('${tempDir.path}/uf1_voice');
+      }
+      if (!await voiceDir.exists()) return 0;
+
+      final cutoff = (nowOverride ?? DateTime.now()).subtract(maxAge);
+      var deleted = 0;
+      await for (final entity in voiceDir.list(followLinks: false)) {
+        if (entity is! File) continue;
+        try {
+          final stat = await entity.stat();
+          if (stat.modified.isBefore(cutoff)) {
+            await entity.delete();
+            deleted += 1;
+          }
+        } on FileSystemException {
+          // Bỏ qua file đang được giữ khóa hoặc vừa bị xóa.
+        }
+      }
+      return deleted;
+    } on MissingPluginException {
+      return 0;
+    } on FileSystemException {
+      return 0;
+    }
+  }
+
+  /// Xóa tệp ghi âm cục bộ nếu tồn tại (an toàn trên Web và thiết bị thật).
+  static Future<void> deleteLocalAudioFile(String? path) async {
+    if (kIsWeb || path == null || path.trim().isEmpty) return;
+    try {
+      final file = File(path);
+      if (await file.exists()) {
+        await file.delete();
+      }
+    } on FileSystemException {
+      // Bỏ qua lỗi xóa file tạm để không làm gián đoạn luồng chính.
     }
   }
 }

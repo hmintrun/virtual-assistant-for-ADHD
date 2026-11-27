@@ -3,6 +3,10 @@
 import 'package:dio/dio.dart';
 
 import '../core/api_client.dart';
+import 'google_calendar_api.dart';
+
+export 'google_calendar_api.dart'
+    show CalendarSyncRetryResult, CalendarSyncRetryStatus;
 
 /// Returns true when [calendar] is the dedicated non-primary `ProPlan VA Focus`
 /// calendar used solely for writing scheduled focus sessions (should never be
@@ -240,6 +244,16 @@ class CalendarApi {
             'expected_job_revision': expectedJobRevision,
         },
         idempotent: false,
+      );
+
+  Future<CalendarSyncRetryResult> retrySyncJobWithHandling(
+    String jobId, {
+    int? expectedJobRevision,
+  }) =>
+      executeCalendarSyncRetryWithHandling(
+        retryCall: () =>
+            retrySyncJob(jobId, expectedJobRevision: expectedJobRevision),
+        reloadCall: () => getSyncJob(jobId),
       );
 
   /// UF2: chụp lịch bận của các lịch đã chọn cho một Draft, để thuật toán

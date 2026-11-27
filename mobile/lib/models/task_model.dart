@@ -143,6 +143,8 @@ class TaskModel {
     this.description,
     this.scope,
     this.status = 'confirmed',
+    this.revision = 1,
+    this.sourceRevisions,
     this.steps = const [],
     this.sessions = const [],
     this.createdAt,
@@ -153,17 +155,30 @@ class TaskModel {
   final String? description;
   final String? scope;
   final String status;
+  final int revision;
+  final Map<String, int>? sourceRevisions;
   final List<StepModel> steps;
   final List<SessionModel> sessions;
   final DateTime? createdAt;
 
   factory TaskModel.fromJson(Map<String, dynamic> json) {
+    final rawRevisions = json['source_revisions'];
+    Map<String, int>? parsedRevisions;
+    if (rawRevisions is Map) {
+      parsedRevisions = <String, int>{
+        for (final entry in rawRevisions.entries)
+          if (entry.key is String && entry.value is num)
+            entry.key as String: (entry.value as num).toInt(),
+      };
+    }
     return TaskModel(
       taskId: json['task_id'] as String? ?? '',
       title: json['title'] as String? ?? '',
       description: json['description'] as String?,
       scope: json['scope'] as String?,
       status: json['status'] as String? ?? 'confirmed',
+      revision: (json['revision'] as num?)?.toInt() ?? 1,
+      sourceRevisions: parsedRevisions,
       steps: (json['steps'] as List<dynamic>?)
               ?.map((e) => StepModel.fromJson(e as Map<String, dynamic>))
               .toList() ??
@@ -184,6 +199,8 @@ class TaskModel {
         if (description != null) 'description': description,
         if (scope != null) 'scope': scope,
         'status': status,
+        'revision': revision,
+        if (sourceRevisions != null) 'source_revisions': sourceRevisions,
         'steps': steps.map((e) => e.toJson()).toList(),
         'sessions': sessions.map((e) => e.toJson()).toList(),
         if (createdAt != null) 'created_at': createdAt!.toIso8601String(),

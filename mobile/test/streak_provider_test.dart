@@ -324,7 +324,7 @@ void main() {
         ),
       ));
       await tester.pumpAndSettle();
-      expect(find.text('3 ngày nối tiếp'), findsOneWidget);
+      expect(find.text('3 ngày'), findsOneWidget);
       expect(find.text('Khiên ngủ nướng'), findsOneWidget);
       expect(tester.takeException(), isNull);
     });
@@ -351,7 +351,7 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('Giữ 3 ngày liên tiếp để mở Streak'), findsOneWidget);
-    await tester.tap(find.text('Xem giới thiệu'));
+    await tester.tap(find.byTooltip('Xem giới thiệu'));
     await tester.pumpAndSettle();
 
     expect(find.text('Nhịp cùng Melbel (Streak)'), findsOneWidget);
@@ -403,4 +403,132 @@ void main() {
     expect(find.text('Nhịp cùng Melbel (Streak)'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
+
+  testWidgets(
+      'showMelbelStreakSheet switch restores hidden Home Streak card and persists',
+      (tester) async {
+    final streak = StreakProvider(ownerId: 'restore_intro_sheet');
+    await streak.restore();
+    await streak.dismissIntro();
+    expect(streak.introDismissed, isTrue);
+
+    await tester.pumpWidget(MaterialApp(
+      theme: MelbelTheme.themeFor(isDark: false),
+      home: Builder(
+        builder: (context) => Scaffold(
+          body: Center(
+            child: ElevatedButton(
+              onPressed: () => showMelbelStreakSheet(context, streak),
+              child: const Text('Mở sheet'),
+            ),
+          ),
+        ),
+      ),
+    ));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('Mở sheet'));
+    await tester.pumpAndSettle();
+
+    final toggleFinder = find.text('Hiện thẻ ở Trang chủ');
+    await tester.scrollUntilVisible(
+      toggleFinder,
+      200,
+      scrollable: find.byType(Scrollable).last,
+    );
+    await tester.pumpAndSettle();
+
+    var tile = tester.widget<SwitchListTile>(
+      find.ancestor(of: toggleFinder, matching: find.byType(SwitchListTile)),
+    );
+    expect(tile.value, isFalse);
+
+    await tester.tap(toggleFinder);
+    await tester.pumpAndSettle();
+
+    expect(streak.introDismissed, isFalse);
+    tile = tester.widget<SwitchListTile>(
+      find.ancestor(of: toggleFinder, matching: find.byType(SwitchListTile)),
+    );
+    expect(tile.value, isTrue);
+
+    final reloaded = StreakProvider(ownerId: 'restore_intro_sheet');
+    await reloaded.restore();
+    expect(reloaded.introDismissed, isFalse);
+    expect(tester.takeException(), isNull);
+  });
+
+  for (final isDark in [false, true]) {
+    testWidgets(
+        'Streak sheet stays theme-synced and compact without overflow at 320x640 1.3x (dark=$isDark) and toggles tiers',
+        (tester) async {
+      tester.view.physicalSize = const Size(320, 640);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+
+      final streak = StreakProvider(ownerId: 'storybook_$isDark');
+      await streak.restore();
+
+      await tester.pumpWidget(
+        MediaQuery(
+          data: const MediaQueryData(
+            size: Size(320, 640),
+            textScaler: TextScaler.linear(1.3),
+          ),
+          child: MaterialApp(
+            theme: MelbelTheme.themeFor(isDark: isDark),
+            home: Builder(
+              builder: (context) => Scaffold(
+                body: Center(
+                  child: ElevatedButton(
+                    onPressed: () => showMelbelStreakSheet(context, streak),
+                    child: const Text('Mở Streak'),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text('Mở Streak'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Chuỗi tập trung'), findsOneWidget);
+      expect(find.byKey(const ValueKey('black_neutral')), findsWidgets);
+      expect(find.byType(MelbelCard), findsAtLeastNWidgets(4));
+
+      await tester.scrollUntilVisible(
+        find.text('Khiên'),
+        180,
+        scrollable: find.byType(Scrollable).last,
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('Khiên'), findsOneWidget);
+      expect(find.text('Tháng này'), findsOneWidget);
+      expect(find.text('Kỷ lục'), findsOneWidget);
+
+      final tiersHeader = find.text('Các chặng tiến hoá cùng Melbel');
+      await tester.scrollUntilVisible(
+        tiersHeader,
+        180,
+        scrollable: find.byType(Scrollable).last,
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('Lv.1 · Mở chuỗi · Vào guồng'), findsNothing);
+
+      await tester.tap(tiersHeader);
+      await tester.pumpAndSettle();
+
+      await tester.scrollUntilVisible(
+        find.text('Lv.1 · Mở chuỗi · Vào guồng'),
+        140,
+        scrollable: find.byType(Scrollable).last,
+      );
+      expect(find.text('Lv.1 · Mở chuỗi · Vào guồng'), findsOneWidget);
+      expect(tester.takeException(), isNull);
+    });
+  }
 }

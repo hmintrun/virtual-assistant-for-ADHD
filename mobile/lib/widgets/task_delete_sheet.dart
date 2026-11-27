@@ -5,7 +5,9 @@ import 'package:provider/provider.dart';
 
 import '../core/api_client.dart';
 import '../core/theme.dart';
+import '../providers/focus_provider.dart';
 import '../providers/task_provider.dart';
+import '../screens/focus_screen.dart';
 import '../services/planning_api.dart';
 import '../services/pre_session_reminder_sync.dart';
 import 'melbel_ui.dart';
@@ -18,6 +20,7 @@ Future<bool> confirmAndDeleteTask(
   required String taskTitle,
   int? taskRevision,
   ApiClient? api,
+  PreSessionReminderSync? reminderSync,
 }) async {
   final deleted = await showModalBottomSheet<bool>(
     context: context,
@@ -28,6 +31,7 @@ Future<bool> confirmAndDeleteTask(
       taskTitle: taskTitle,
       taskRevision: taskRevision,
       api: api,
+      reminderSync: reminderSync,
     ),
   );
   return deleted == true;
@@ -39,12 +43,14 @@ class _TaskDeleteSheet extends StatefulWidget {
     required this.taskTitle,
     this.taskRevision,
     this.api,
+    this.reminderSync,
   });
 
   final String taskId;
   final String taskTitle;
   final int? taskRevision;
   final ApiClient? api;
+  final PreSessionReminderSync? reminderSync;
 
   @override
   State<_TaskDeleteSheet> createState() => _TaskDeleteSheetState();
@@ -52,20 +58,31 @@ class _TaskDeleteSheet extends StatefulWidget {
 
 class _TaskDeleteSheetState extends State<_TaskDeleteSheet> {
   bool _busy = false;
+  bool _showOpenActiveRun = false;
   String? _error;
 
   Future<void> _deleteTask() async {
     if (_busy) return;
     setState(() {
       _busy = true;
+      _showOpenActiveRun = false;
       _error = null;
     });
     final client = widget.api ?? ApiClient();
+    final reminderSync = widget.reminderSync ?? PreSessionReminderSync.instance;
     try {
-      await PlanningApi(client: client).deleteTask(
+      final result = await PlanningApi(client: client).deleteTask(
         widget.taskId,
         expectedTaskRevision: widget.taskRevision,
       );
+      final cancelledIds =
+          (result['cancelled_session_ids'] as List<dynamic>? ?? const [])
+              .whereType<String>()
+              .where((id) => id.isNotEmpty)
+              .toList(growable: false);
+      if (cancelledIds.isNotEmpty) {
+        await reminderSync.cancelForSessions(cancelledIds);
+      }
       if (!mounted) return;
       try {
         Provider.of<TaskProvider>(context, listen: false)
@@ -73,7 +90,7 @@ class _TaskDeleteSheetState extends State<_TaskDeleteSheet> {
       } on ProviderNotFoundException {
         // Optional when invoked from a test tree without TaskProvider.
       }
-      unawaited(PreSessionReminderSync.instance.sync(api: client));
+      unawaited(reminderSync.sync(api: client));
       final messenger = ScaffoldMessenger.maybeOf(context);
       Navigator.of(context).pop(true);
       messenger?.showSnackBar(
@@ -81,16 +98,32 @@ class _TaskDeleteSheetState extends State<_TaskDeleteSheet> {
       );
     } on ApiException catch (error) {
       if (!mounted) return;
+      final isActiveRun = error.isActiveRunExists;
+      final message = isActiveRun
+          ? 'Đang có phiên tập trung hoạt động hoặc chờ check-in. Hãy hoàn tất check-in trước khi xóa công việc này.'
+          : error.isRevisionConflict
+              ? 'Công việc vừa thay đổi. Hãy tải lại lịch rồi thử lại.'
+              : error.message;
       setState(() {
         _busy = false;
-        _error = error.message;
+        _showOpenActiveRun = isActiveRun;
+        _error = message;
       });
     } catch (_) {
       if (!mounted) return;
       setState(() {
         _busy = false;
+        _showOpenActiveRun = false;
         _error = 'Chưa xóa được công việc này. Vui lòng thử lại.';
       });
+    }
+  }
+
+  FocusProvider? _maybeFocus(BuildContext context) {
+    try {
+      return Provider.of<FocusProvider>(context, listen: false);
+    } on ProviderNotFoundException {
+      return null;
     }
   }
 
@@ -133,7 +166,7 @@ class _TaskDeleteSheetState extends State<_TaskDeleteSheet> {
             ),
             const SizedBox(height: 12),
             Text(
-              'Các phiên chưa thực hiện và lời nhắc sắp tới của công việc này sẽ bị hủy. Lịch Google Calendar liên kết (nếu có) cũng sẽ tự động cập nhật.',
+              'Các phiên chưa làm và lời nhắc sẽ bị hủy; Google Calendar (nếu có) sẽ tự cập nhật.',
               style: theme.textTheme.bodyMedium?.copyWith(
                 color: palette.onSurfaceVariant,
                 height: 1.45,
@@ -145,12 +178,43 @@ class _TaskDeleteSheetState extends State<_TaskDeleteSheet> {
                 tone: MelbelCardTone.amber,
                 borderRadius: 16,
                 padding: const EdgeInsets.all(12),
-                child: Text(
-                  _error!,
-                  style: theme.textTheme.bodySmall?.copyWith(
-                    color: palette.onAmberSoft,
-                    fontWeight: FontWeight.w600,
-                  ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      _error!,
+                      style: theme.textTheme.bodySmall?.copyWith(
+                        color: palette.onAmberSoft,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                    if (_showOpenActiveRun)
+                      Builder(
+                        builder: (context) {
+                          final focus = _maybeFocus(context);
+                          final hasRun = focus != null &&
+                              (focus.isActiveRun ||
+                                  focus.hasUnfinishedServerRun ||
+                                  focus.session != null);
+                          if (!hasRun) return const SizedBox.shrink();
+                          return Padding(
+                            padding: const EdgeInsets.only(top: 6),
+                            child: TextButton(
+                              onPressed: () {
+                                final nav = Navigator.of(context);
+                                nav.pop(false);
+                                nav.push(
+                                  MaterialPageRoute<void>(
+                                    builder: (_) => const FocusScreen(),
+                                  ),
+                                );
+                              },
+                              child: const Text('Mở phiên đang chạy'),
+                            ),
+                          );
+                        },
+                      ),
+                  ],
                 ),
               ),
             ],

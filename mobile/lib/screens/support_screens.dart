@@ -31,7 +31,6 @@ class HelpScreen extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final palette = context.melbel;
     return MelbelPageBackdrop(
       showTopCloud: true,
       showBottomClouds: true,
@@ -54,22 +53,21 @@ class HelpScreen extends StatelessWidget {
             const _HelpRow(
               icon: Icons.mic_none_rounded,
               title: 'Cất suy nghĩ',
-              subtitle: 'Trong phiên, dùng mic để ghi lại ý vừa nghĩ tới.',
+              subtitle: 'Giữ mic trong phiên để lưu ý nhanh.',
               useHoney: false,
               showRays: true,
             ),
             const _HelpRow(
               icon: Icons.nightlight_outlined,
               title: 'Phiên tập trung',
-              subtitle: 'Theo dõi phiên làm việc hiện tại.',
+              subtitle: 'Đếm giờ tập trung và check-in.',
               useHoney: true,
               showRays: true,
             ),
             _HelpRow(
               icon: Icons.pets_rounded,
               title: 'Nhịp tập trung (Streak)',
-              subtitle:
-                  'Giữ 3 ngày liên tiếp (≥ 2 phút/ngày) để mở chuỗi, nhận Khiên ngủ nướng và tiến hoá Melbel.',
+              subtitle: '3 ngày liên tiếp (≥ 2 phút/ngày) mở chuỗi & Khiên.',
               useHoney: false,
               showRays: true,
               onTap: () => showMelbelStreakGuide(
@@ -81,7 +79,7 @@ class HelpScreen extends StatelessWidget {
             const _HelpRow(
               icon: Icons.calendar_month_outlined,
               title: 'Duyệt thay đổi lịch',
-              subtitle: 'Melbel đề xuất lịch mới để bạn duyệt.',
+              subtitle: 'Xem trước lịch đề xuất rồi mới duyệt.',
               useHoney: true,
               showRays: true,
             ),
@@ -94,29 +92,20 @@ class HelpScreen extends StatelessWidget {
             const _Faq(
               question: 'Chuỗi tập trung (Streak) hoạt động thế nào?',
               answer:
-                  'Chỉ cần hoàn thành ít nhất 2 phút tập trung mỗi ngày trong 3 ngày liên tiếp để mở chuỗi. Sau khi mở, lỡ 1 ngày sẽ tự bật Khiên ngủ nướng hoặc mở 24h nối lại nhịp; nghỉ dài vẫn giữ nguyên kỷ lục và tổng ngày tháng này.',
+                  'Làm ≥ 2 phút/ngày trong 3 ngày liên tiếp để mở chuỗi. Lỡ 1 ngày sẽ tự bật Khiên hoặc mở 24h nối nhịp; kỷ lục luôn được giữ.',
             ),
             const _Faq(
               question: 'Nếu tôi trễ giờ hẹn thì sao?',
-              answer:
-                  'Mở phiên khi bạn sẵn sàng. Nếu cần đổi lịch, bạn sẽ xem đề xuất trước khi duyệt.',
+              answer: 'Bắt đầu khi sẵn sàng, hoặc duyệt đề xuất đổi lịch.',
             ),
             const _Faq(
               question: 'Dữ liệu của tôi được lưu ở đâu?',
               answer:
-                  'Suy nghĩ vừa cất được lưu trên thiết bị. Mở Tài khoản → Suy nghĩ đã cất để xem lại.',
+                  'Lưu trên thiết bị · xem lại tại Tài khoản → Suy nghĩ đã cất.',
             ),
             const _Faq(
               question: 'Tôi có thể bỏ qua quyền hệ thống không?',
-              answer:
-                  'Có. Bạn có thể dùng app và bật quyền sau trong cài đặt Android.',
-            ),
-            const SizedBox(height: 8),
-            SecondaryCta(
-              label: 'Quay lại',
-              height: 50,
-              backgroundColor: palette.sageSoft,
-              onPressed: () => Navigator.maybePop(context),
+              answer: 'Có, bạn có thể bật sau trong Cài đặt Android.',
             ),
           ],
         ),
@@ -204,7 +193,7 @@ class _AccountScreenState extends State<AccountScreen> {
     final palette = context.melbel;
     final theme = Theme.of(context);
     final isDark = theme.brightness == Brightness.dark;
-    final heroBg = isDark ? const Color(0xFF332947) : const Color(0xFFF1E8FD);
+    final heroBg = palette.heroSurface;
 
     return MelbelPageBackdrop(
       showTopCloud: true,
@@ -225,12 +214,7 @@ class _AccountScreenState extends State<AccountScreen> {
               decoration: BoxDecoration(
                 color: heroBg,
                 borderRadius: BorderRadius.circular(28),
-                border: isDark
-                    ? Border.all(
-                        color: palette.hairline.withValues(alpha: 0.55),
-                        width: 1.0,
-                      )
-                    : null,
+                border: Border.all(color: palette.hairline, width: 1.0),
                 boxShadow: isDark
                     ? [
                         BoxShadow(
@@ -242,9 +226,9 @@ class _AccountScreenState extends State<AccountScreen> {
                     : [
                         BoxShadow(
                           color:
-                              const Color(0xFF534070).withValues(alpha: 0.06),
-                          blurRadius: 20,
-                          offset: const Offset(0, 7),
+                              const Color(0xFF1E1A26).withValues(alpha: 0.03),
+                          blurRadius: 14,
+                          offset: const Offset(0, 4),
                         ),
                       ],
               ),
@@ -355,7 +339,7 @@ class _AccountScreenState extends State<AccountScreen> {
                   ),
                   _GroupedAccountTile(
                     icon: Icons.inbox_outlined,
-                    title: 'Suy nghĩ đã cất',
+                    title: 'Hộp suy nghĩ',
                     useHoney: true,
                     onTap: () => Navigator.of(context).pushNamed('/thoughts'),
                   ),
@@ -391,7 +375,7 @@ class _AccountScreenState extends State<AccountScreen> {
                               : snapshot.hasError
                                   ? 'Chưa kết nối được'
                                   : dbOk
-                                      ? 'Đã kết nối · CSDL ổn định'
+                                      ? 'Đã kết nối'
                                       : 'Đã kết nối';
                       return _GroupedAccountTile(
                         icon: Icons.cloud_outlined,
@@ -418,24 +402,13 @@ class _AccountScreenState extends State<AccountScreen> {
                     icon: Icons.pets_rounded,
                     title: 'Chuỗi ngày',
                     subtitle: streak == null
-                        ? '— · Chưa có dữ liệu'
+                        ? 'Chưa có dữ liệu'
                         : streak.isUnlocked
-                            ? '${streak.effectiveDisplayStreak} ngày liên tiếp · Kỷ lục ${streak.longestStreak} ngày'
-                            : 'Khởi động ${streak.effectiveDisplayStreak}/${StreakProvider.unlockDays} ngày · Chạm để xem hướng dẫn',
+                            ? '${streak.effectiveDisplayStreak} ngày · Kỷ lục ${streak.longestStreak} ngày'
+                            : 'Khởi động ${streak.effectiveDisplayStreak}/${StreakProvider.unlockDays} ngày',
                     onTap: streak == null
                         ? () => showMelbelStreakGuide(context)
                         : () => showMelbelStreakSheet(context, streak),
-                  ),
-                  const _HelpRow(
-                    icon: Icons.hourglass_top,
-                    title: 'Thời gian tập trung',
-                    subtitle: '— · Chưa có dữ liệu',
-                    useHoney: true,
-                  ),
-                  const _HelpRow(
-                    icon: Icons.all_inbox_outlined,
-                    title: 'Hòm thư nháp',
-                    subtitle: '— · Chưa có dữ liệu tài khoản',
                   ),
                 ]),
             const SizedBox(height: 14),
@@ -487,56 +460,61 @@ class _AppearanceSettingsPanel extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = context.watch<ThemeProvider>();
-    final palette = context.melbel;
     return MelbelDisclosure(
       title: 'Giao diện',
       icon: Icons.contrast_rounded,
       summary: switch (theme.appearance) {
         'light' => 'Sáng',
         'dark' => 'Tối',
-        _ => 'Tự động theo giờ địa phương',
+        _ => 'Tự động',
       },
       children: [
-        for (final option in const [
-          ('light', 'Sáng', Icons.light_mode_outlined),
-          ('dark', 'Tối', Icons.dark_mode_outlined),
-          ('system', 'Theo giờ địa phương', Icons.brightness_auto_outlined),
-        ])
-          Padding(
-            padding: const EdgeInsets.only(bottom: 8),
-            child: MelbelCard(
-              tone: theme.appearance == option.$1
-                  ? MelbelCardTone.sage
-                  : MelbelCardTone.neutral,
-              borderColor: theme.appearance == option.$1
-                  ? palette.sage
-                  : palette.hairline,
-              borderWidth: theme.appearance == option.$1 ? 1.5 : 1.0,
-              padding: EdgeInsets.zero,
-              child: ListTile(
-                leading: Icon(
-                  option.$3,
-                  color: theme.appearance == option.$1
-                      ? palette.sage
-                      : palette.onSurfaceVariant,
-                ),
-                title: Text(option.$2),
-                selected: theme.appearance == option.$1,
-                selectedColor: palette.onSageSoft,
-                trailing: Icon(
-                  theme.appearance == option.$1
-                      ? Icons.radio_button_checked_rounded
-                      : Icons.radio_button_unchecked_rounded,
-                  color: theme.appearance == option.$1
-                      ? palette.sage
-                      : palette.controlOutline,
-                ),
-                onTap: () => theme.setAppearance(option.$1),
+        Row(
+          children: [
+            Expanded(
+              child: MelbelIconObjectButton(
+                icon: Icons.light_mode_rounded,
+                label: 'Sáng',
+                tooltip: 'Giao diện sáng',
+                selected: theme.appearance == 'light',
+                tone: theme.appearance == 'light'
+                    ? MelbelCardTone.sage
+                    : MelbelCardTone.neutral,
+                onPressed: () => theme.setAppearance('light'),
               ),
             ),
-          ),
+            const SizedBox(width: 8),
+            Expanded(
+              child: MelbelIconObjectButton(
+                icon: Icons.dark_mode_rounded,
+                label: 'Tối',
+                tooltip: 'Giao diện tối',
+                selected: theme.appearance == 'dark',
+                tone: theme.appearance == 'dark'
+                    ? MelbelCardTone.sage
+                    : MelbelCardTone.neutral,
+                onPressed: () => theme.setAppearance('dark'),
+              ),
+            ),
+            const SizedBox(width: 8),
+            Expanded(
+              child: MelbelIconObjectButton(
+                icon: Icons.brightness_auto_rounded,
+                label: 'Tự động',
+                tooltip: 'Tự động theo giờ địa phương',
+                selected:
+                    theme.appearance != 'light' && theme.appearance != 'dark',
+                tone: theme.appearance != 'light' && theme.appearance != 'dark'
+                    ? MelbelCardTone.sage
+                    : MelbelCardTone.neutral,
+                onPressed: () => theme.setAppearance('system'),
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 8),
         Text(
-          'Tự động chuyển tối từ 18:00 đến 06:00.',
+          'Tự động đổi màu tối từ 18:00–06:00.',
           style: Theme.of(context).textTheme.bodySmall,
         ),
       ],

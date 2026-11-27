@@ -142,7 +142,9 @@ class _TaskEntryScreenState extends State<TaskEntryScreen> {
         helpText: 'Chọn ngày hạn chót');
     if (day == null || !mounted) return;
     final time = await showMelbelTimePicker(
-        context: context, initialTime: TimeOfDay.fromDateTime(initial));
+        context: context,
+        helpText: 'Giờ hạn chót',
+        initialTime: TimeOfDay.fromDateTime(initial));
     if (time == null || !mounted) return;
     final deadline =
         DateTime(day.year, day.month, day.day, time.hour, time.minute);
@@ -283,9 +285,15 @@ class _TaskEntryScreenState extends State<TaskEntryScreen> {
       if (mounted) {
         setState(() {
           _isListening = false;
-          _voiceFailures++;
-          if (_voiceFailures >= 3) _showEditor = true;
-          _voiceHint = error.message;
+          if (error.isNoSpeechDetected) {
+            _showEditor = true;
+            _voiceHint =
+                'Chưa nghe rõ giọng nói. Bạn có thể chạm mic nói lại hoặc gõ bên dưới.';
+          } else {
+            _voiceFailures++;
+            if (_voiceFailures >= 3) _showEditor = true;
+            _voiceHint = error.message;
+          }
         });
       }
     } catch (_) {
@@ -422,7 +430,7 @@ class _TaskEntryScreenState extends State<TaskEntryScreen> {
                   },
                 ),
               ),
-              const SizedBox(height: 16),
+              SizedBox(height: _showEditor ? 10 : 16),
               MelbelCard(
                 borderRadius: 28,
                 padding: EdgeInsets.zero,
@@ -440,9 +448,9 @@ class _TaskEntryScreenState extends State<TaskEntryScreen> {
                         ),
                       ),
                       Padding(
-                        padding: const EdgeInsets.symmetric(
+                        padding: EdgeInsets.symmetric(
                           horizontal: 20,
-                          vertical: 40,
+                          vertical: _showEditor ? 18 : 40,
                         ),
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -465,7 +473,7 @@ class _TaskEntryScreenState extends State<TaskEntryScreen> {
                                   liveRegion: true,
                                   child: Text(
                                     _voiceHint!,
-                                    textAlign: TextAlign.center,
+                                    textAlign: TextAlign.start,
                                     style: textTheme.bodySmall?.copyWith(
                                       color: palette.amberInk,
                                       fontWeight: FontWeight.w500,
@@ -474,12 +482,12 @@ class _TaskEntryScreenState extends State<TaskEntryScreen> {
                                 ),
                               ),
                             if (_showEditor) ...[
-                              const SizedBox(height: 16),
+                              const SizedBox(height: 14),
                               TextField(
                                 controller: _titleController,
                                 focusNode: _titleFocusNode,
-                                minLines: 3,
-                                maxLines: 6,
+                                minLines: 2,
+                                maxLines: 5,
                                 textCapitalization:
                                     TextCapitalization.sentences,
                                 decoration: InputDecoration(
@@ -547,7 +555,7 @@ class _TaskEntryScreenState extends State<TaskEntryScreen> {
                                             const SizedBox(width: 10),
                                             Expanded(
                                               child: Text(
-                                                'Mình nghe chưa thật rõ (âm thanh nhỏ hoặc có tạp âm). Bạn kiểm tra hoặc chạm vào ô chữ ở trên để sửa trước khi phân tích nhé.',
+                                                'Nghe chưa rõ — chạm ô trên để sửa trước khi phân tích.',
                                                 style: textTheme.bodyMedium
                                                     ?.copyWith(
                                                   color: palette.onAmberSoft,
@@ -602,11 +610,19 @@ class _TaskEntryScreenState extends State<TaskEntryScreen> {
             ),
             if (!_showEditor) ...[
               const SizedBox(height: 16),
-              SecondaryCta(
-                label: 'Nhập bằng bàn phím',
-                icon: Icons.keyboard_alt_outlined,
-                height: 56,
-                onPressed: busy ? null : () => setState(() => _showEditor = true),
+              Center(
+                child: SizedBox(
+                  width: 112,
+                  child: MelbelIconObjectButton(
+                    icon: Icons.keyboard_alt_outlined,
+                    label: 'Gõ phím',
+                    tooltip: 'Nhập bằng bàn phím',
+                    tone: MelbelCardTone.neutral,
+                    onPressed: busy
+                        ? null
+                        : () => setState(() => _showEditor = true),
+                  ),
+                ),
               ),
             ],
             if (_showEditor) ...[
@@ -631,16 +647,14 @@ class _TaskEntryScreenState extends State<TaskEntryScreen> {
                       'Hạn chót',
                       style: textTheme.titleSmall,
                     ),
-                    subtitle: Text(
-                      task.deadline == null
-                          ? 'Có thể nêu hạn ngay trong câu'
-                          : task.formatDeadline(task.deadline),
-                      style: textTheme.bodySmall?.copyWith(
-                        color: task.deadline != null
-                            ? palette.sage
-                            : palette.onSurfaceVariant,
-                      ),
-                    ),
+                    subtitle: task.deadline == null
+                        ? null
+                        : Text(
+                            task.formatDeadline(task.deadline),
+                            style: textTheme.bodySmall?.copyWith(
+                              color: palette.sage,
+                            ),
+                          ),
                     children: [
                       Align(
                         alignment: Alignment.centerLeft,
@@ -678,16 +692,25 @@ class _TaskEntryScreenState extends State<TaskEntryScreen> {
                 ),
               ),
               const SizedBox(height: 16),
-              PrimaryCta(
-                label: 'Phân tích công việc',
-                icon: Icons.auto_awesome_rounded,
-                onPressed: canSubmit ? _continue : null,
-              ),
-              const SizedBox(height: 10),
-              SecondaryCta(
-                label: 'Lưu vào Hộp nháp',
-                icon: Icons.drafts_outlined,
-                onPressed: canSubmit ? _saveDraft : null,
+              Row(
+                children: [
+                  MelbelIconObjectButton(
+                    icon: Icons.drafts_outlined,
+                    tooltip: 'Lưu vào Hộp nháp',
+                    size: 56,
+                    tone: MelbelCardTone.muted,
+                    onPressed: canSubmit ? _saveDraft : null,
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: PrimaryCta(
+                      label: 'Phân tích',
+                      icon: Icons.auto_awesome_rounded,
+                      height: 56,
+                      onPressed: canSubmit ? _continue : null,
+                    ),
+                  ),
+                ],
               ),
             ],
           ],
@@ -966,6 +989,7 @@ class _AiLoadingScreenState extends State<AiLoadingScreen> {
                     borderRadius: 26,
                     padding: const EdgeInsets.all(22),
                     child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         Container(
                           width: 48,
@@ -977,13 +1001,13 @@ class _AiLoadingScreenState extends State<AiLoadingScreen> {
                           child: Icon(
                             Icons.cloud_off_outlined,
                             size: 26,
-                            color: palette.amber,
+                            color: palette.amberInk,
                           ),
                         ),
                         const SizedBox(height: 14),
                         Text(
                           'Chưa gửi được công việc lên máy chủ.',
-                          textAlign: TextAlign.center,
+                          textAlign: TextAlign.start,
                           style: Theme.of(context).textTheme.titleMedium?.copyWith(
                                 fontWeight: FontWeight.w700,
                               ),
@@ -991,7 +1015,7 @@ class _AiLoadingScreenState extends State<AiLoadingScreen> {
                         const SizedBox(height: 6),
                         Text(
                           'Bạn có thể thử lại hoặc tiếp tục với bản nháp.',
-                          textAlign: TextAlign.center,
+                          textAlign: TextAlign.start,
                           style: Theme.of(context).textTheme.bodyMedium?.copyWith(
                                 color: palette.onSurfaceVariant,
                               ),
@@ -1044,10 +1068,11 @@ class _AiLoadingScreenState extends State<AiLoadingScreen> {
                   borderRadius: 26,
                   padding: const EdgeInsets.all(20),
                   child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       Text(
                         'AI đang phân tích và gom thông tin',
-                        textAlign: TextAlign.center,
+                        textAlign: TextAlign.start,
                         style: Theme.of(context).textTheme.titleMedium?.copyWith(
                               fontWeight: FontWeight.w700,
                             ),
@@ -1057,7 +1082,7 @@ class _AiLoadingScreenState extends State<AiLoadingScreen> {
                         _isLongPlanHint
                             ? 'Kế hoạch dài hạn đang được sắp theo từng cột mốc cho bạn...'
                             : 'Chờ Melbel một chút nhé...',
-                        textAlign: TextAlign.center,
+                        textAlign: TextAlign.start,
                         style: Theme.of(context).textTheme.bodyMedium?.copyWith(
                               color: context.melbel.onSurfaceVariant,
                             ),
@@ -1134,7 +1159,7 @@ class _BreathingCircleState extends State<_BreathingCircle>
           child: const MelbelMascot(
             expression: CatExpression.sleepy,
             interactive: false,
-            forceLightSvg: true,
+            showBackdrop: false,
             width: 82,
             height: 74,
           ),

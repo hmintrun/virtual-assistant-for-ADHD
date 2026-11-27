@@ -12,6 +12,7 @@ import '../core/theme.dart';
 import '../models/focus_session_model.dart';
 import '../models/planning_models.dart';
 import '../providers/focus_provider.dart';
+import '../providers/streak_provider.dart';
 import '../providers/task_provider.dart';
 import '../services/audio_recorder_service.dart';
 import '../services/voice_service.dart';
@@ -417,8 +418,10 @@ class _FocusScreenState extends State<FocusScreen> with WidgetsBindingObserver {
                   icon: Icons.event_repeat_rounded,
                   onPressed: () => Navigator.of(context).push(
                     MaterialPageRoute<void>(
-                      builder: (_) =>
-                          ScheduleChangeReasonScreen(session: session),
+                      builder: (_) => ScheduleChangeReasonScreen(
+                        session: session,
+                        initialReason: 'missed_start',
+                      ),
                     ),
                   ),
                 ),
@@ -560,43 +563,52 @@ class _FocusScreenState extends State<FocusScreen> with WidgetsBindingObserver {
             'Sắp đến lúc bắt đầu',
             style: text.headlineSmall?.copyWith(color: palette.onSurface),
           ),
-          const SizedBox(height: 6),
-          Text(
-            'Bạn có thể chuẩn bị từ từ. Không cần bắt đầu ngay.',
-            style: text.bodyLarge?.copyWith(color: palette.onSurfaceVariant),
-          ),
           const SizedBox(height: 18),
           FocusSessionSummaryCard(session: session),
           const SizedBox(height: 12),
           FocusInfoCard(
             icon: Icons.schedule_outlined,
             title: 'Nhắc chuẩn bị lúc ${formatFocusClock(reminderAt)}',
-            subtitle: 'Trước giờ hẹn 15 phút',
           ),
           const SizedBox(height: 20),
           PrimaryCta(
-            label: 'Bắt đầu phiên ${focusMinutes(session.workSeconds)} phút',
+            label: 'Bắt đầu · ${focusMinutes(session.workSeconds)}p',
             icon: Icons.play_arrow_rounded,
             onPressed: focus.runCommandBusy ? null : focus.startRun,
           ),
-          const SizedBox(height: 10),
-          SecondaryCta(
-            label: 'Xem việc khởi động 2 phút',
-            icon: Icons.spa_outlined,
-            onPressed: focus.showMicroTask,
-          ),
-          const SizedBox(height: 8),
-          SecondaryCta(
-            label: 'Xem thông báo màn khóa',
-            icon: Icons.lock_outline_rounded,
-            onPressed: focus.showLockPreview,
-          ),
-          const SizedBox(height: 6),
-          Center(
-            child: TextButton(
-              onPressed: focus.skipMicroTask,
-              child: const Text('Đến màn bắt đầu phiên'),
-            ),
+          const SizedBox(height: 12),
+          Row(
+            children: [
+              Expanded(
+                child: MelbelIconObjectButton(
+                  icon: Icons.spa_outlined,
+                  label: 'Khởi động',
+                  tooltip: 'Xem việc khởi động 2 phút',
+                  tone: MelbelCardTone.sage,
+                  onPressed: focus.showMicroTask,
+                ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: MelbelIconObjectButton(
+                  icon: Icons.lock_outline_rounded,
+                  label: 'Màn khóa',
+                  tooltip: 'Xem thông báo màn khóa',
+                  tone: MelbelCardTone.muted,
+                  onPressed: focus.showLockPreview,
+                ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: MelbelIconObjectButton(
+                  icon: Icons.fast_forward_rounded,
+                  label: 'Vào ngay',
+                  tooltip: 'Đến màn bắt đầu phiên',
+                  tone: MelbelCardTone.neutral,
+                  onPressed: focus.skipMicroTask,
+                ),
+              ),
+            ],
           ),
         ],
       ),
@@ -676,8 +688,6 @@ class _FocusScreenState extends State<FocusScreen> with WidgetsBindingObserver {
             session.microTaskText,
             style: text.headlineSmall?.copyWith(color: palette.onSurface),
           ),
-          const SizedBox(height: 8),
-          Text('Khởi động 2 phút trước phiên chính.', style: text.bodyMedium),
           if (focus.isMicroTaskRunning) ...[
             const SizedBox(height: 12),
             MelbelCard(
@@ -760,8 +770,8 @@ class _FocusScreenState extends State<FocusScreen> with WidgetsBindingObserver {
                   ? 'Quyền Không làm phiền đã sẵn sàng'
                   : 'Chưa cấp quyền Không làm phiền',
               subtitle: focus.dndPermission
-                  ? 'Khi bắt đầu, Melbel sẽ bật chế độ tập trung.'
-                  : 'Bạn vẫn có thể bắt đầu. Có thể cấp quyền trong Cài đặt Android.',
+                  ? null
+                  : 'Vẫn bắt đầu được · bật sau trong Cài đặt.',
               tone: focus.dndPermission
                   ? MelbelCardTone.sage
                   : MelbelCardTone.muted,
@@ -832,33 +842,17 @@ class _FocusScreenState extends State<FocusScreen> with WidgetsBindingObserver {
     FocusProvider focus,
     FocusSessionInfo session,
   ) {
-    final palette = context.melbel;
     final segment = focus.currentSegment;
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Row(
-          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-          children: [
-            Flexible(
-              child: MelbelStatusPill(
-                label: focus.dndApplied ? 'DND BẬT' : 'Đang tập trung',
-                icon: focus.dndApplied
-                    ? Icons.do_not_disturb_on_rounded
-                    : Icons.circle,
-                tone: MelbelCardTone.sage,
-              ),
-            ),
-            IconButton(
-              tooltip: 'Mở hộp suy nghĩ',
-              onPressed: () => _showThoughts(context, focus),
-              icon: Icon(
-                Icons.inbox_outlined,
-                color: palette.onSurfaceVariant,
-              ),
-            ),
-          ],
+        MelbelStatusPill(
+          label: focus.dndApplied ? 'DND BẬT' : 'Đang tập trung',
+          icon: focus.dndApplied
+              ? Icons.do_not_disturb_on_rounded
+              : Icons.circle,
+          tone: MelbelCardTone.sage,
         ),
         const SizedBox(height: 10),
         FocusSessionSummaryCard(session: session, compact: true),
@@ -893,20 +887,22 @@ class _FocusScreenState extends State<FocusScreen> with WidgetsBindingObserver {
         Row(
           children: [
             Expanded(
-              child: SecondaryCta(
-                label: 'Kết thúc phiên sớm',
+              child: MelbelIconObjectButton(
                 icon: Icons.stop_circle_outlined,
-                height: 50,
+                label: 'Kết thúc',
+                tooltip: 'Kết thúc phiên sớm',
+                tone: MelbelCardTone.neutral,
                 onPressed: () => _endEarly(context, focus),
               ),
             ),
             const SizedBox(width: 12),
             Expanded(
-              child: SecondaryCta(
-                label: 'Hộp suy nghĩ',
+              child: MelbelIconObjectButton(
                 icon: Icons.inbox_outlined,
-                height: 50,
-                backgroundColor: palette.sageSoft,
+                label: 'Suy nghĩ',
+                tooltip: 'Mở hộp suy nghĩ',
+                badgeCount: focus.thoughts.length,
+                tone: MelbelCardTone.sage,
                 onPressed: () => _showThoughts(context, focus),
               ),
             ),
@@ -937,11 +933,6 @@ class _FocusScreenState extends State<FocusScreen> with WidgetsBindingObserver {
           Text(
             'Nghỉ một chút nhé',
             style: text.headlineSmall?.copyWith(color: palette.onSurface),
-          ),
-          const SizedBox(height: 6),
-          Text(
-            'Thời gian nghỉ được tính riêng.',
-            style: text.bodyLarge?.copyWith(color: palette.onSurfaceVariant),
           ),
           const SizedBox(height: 16),
           FocusTimerProgressCard(
@@ -1040,8 +1031,7 @@ class _FocusScreenState extends State<FocusScreen> with WidgetsBindingObserver {
           const FocusInfoCard(
             icon: Icons.check_circle_outline_rounded,
             title: 'Đã cất suy nghĩ',
-            subtitle:
-                'Đã lưu trên thiết bị. Bạn có thể quay lại bước đang làm.',
+            subtitle: 'Đã lưu trên thiết bị.',
             tone: MelbelCardTone.sage,
           ),
           if (focus.canUndoThought) ...[
@@ -1107,8 +1097,6 @@ class _FocusScreenState extends State<FocusScreen> with WidgetsBindingObserver {
     FocusProvider focus,
     FocusSessionInfo session,
   ) {
-    final palette = context.melbel;
-
     return MelbelEntrance(
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -1126,7 +1114,6 @@ class _FocusScreenState extends State<FocusScreen> with WidgetsBindingObserver {
           const FocusInfoCard(
             icon: Icons.edit_note_outlined,
             title: 'Chưa thu được sau 3 lần',
-            subtitle: 'Gõ suy nghĩ để lưu vào hộp nháp.',
             tone: MelbelCardTone.sage,
           ),
           const SizedBox(height: 12),
@@ -1162,15 +1149,6 @@ class _FocusScreenState extends State<FocusScreen> with WidgetsBindingObserver {
               child: const Text('Bỏ qua'),
             ),
           ),
-          Center(
-            child: Text(
-              'Ghi chú được lưu trên thiết bị.',
-              textAlign: TextAlign.center,
-              style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                    color: palette.onSurfaceVariant,
-                  ),
-            ),
-          ),
         ],
       ),
     );
@@ -1182,6 +1160,10 @@ class _FocusScreenState extends State<FocusScreen> with WidgetsBindingObserver {
     FocusSessionInfo session,
   ) {
     final palette = context.melbel;
+    final showVoiceDock =
+        focus.canAnswerCheckIn && !focus.hasPendingCheckInResponse;
+    final isSpeaking = _speakingCheckIn ||
+        (focus.hasVoicePlayback && focus.voicePlayback.isSpeaking);
 
     return MelbelEntrance(
       child: Column(
@@ -1211,10 +1193,10 @@ class _FocusScreenState extends State<FocusScreen> with WidgetsBindingObserver {
                     ? 'Bạn làm đến đâu rồi?'
                     : 'Phiên đã dừng',
             focus.missedCheckIn
-                ? 'Bạn có thể ghi nhận kết quả phiên khi sẵn sàng.'
+                ? 'Ghi nhận kết quả khi sẵn sàng.'
                 : focus.hasOpenCheckIn
-                    ? (_spokenPromptText ?? 'Chọn kết quả của phiên vừa rồi.')
-                    : 'Xem thời gian đã làm bên dưới.',
+                    ? _spokenPromptText
+                    : null,
             expression: focus.missedCheckIn
                 ? CatExpression.sleepy
                 : CatExpression.neutral,
@@ -1224,18 +1206,96 @@ class _FocusScreenState extends State<FocusScreen> with WidgetsBindingObserver {
             session: session,
             actualSeconds: focus.actualWorkSeconds,
           ),
-          if (focus.serverRunId != null)
-            Align(
-              alignment: Alignment.centerRight,
-              child: TextButton.icon(
-                onPressed: focus.runCommandBusy
-                    ? null
-                    : () => _openActualCorrectionSheet(focus),
-                icon: const Icon(Icons.edit_outlined, size: 18),
-                label: const Text('Sửa thời gian thực tế'),
+          if (showVoiceDock || focus.serverRunId != null) ...[
+            const SizedBox(height: 12),
+            MelbelCard(
+              borderRadius: 22,
+              tone: MelbelCardTone.muted,
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Wrap(
+                    spacing: 10,
+                    runSpacing: 10,
+                    alignment: WrapAlignment.center,
+                    crossAxisAlignment: WrapCrossAlignment.center,
+                    children: [
+                      if (showVoiceDock) ...[
+                        SizedBox(
+                          width: 96,
+                          child: MelbelIconObjectButton(
+                            icon: _checkInListening
+                                ? Icons.stop_rounded
+                                : Icons.mic_rounded,
+                            label: _checkInListening
+                                ? 'Dừng'
+                                : _checkInTranscribing
+                                    ? 'Đang nghe…'
+                                    : 'Nói',
+                            tooltip: _checkInListening
+                                ? 'Dừng nghe'
+                                : _checkInTranscribing
+                                    ? 'Đang chuyển lời…'
+                                    : _checkInOnDeviceOnly
+                                        ? 'Nói trên máy để trả lời'
+                                        : 'Trả lời bằng giọng nói',
+                            tone: _checkInListening
+                                ? MelbelCardTone.amber
+                                : MelbelCardTone.sage,
+                            onPressed: focus.runCommandBusy ||
+                                    _checkInTranscribing
+                                ? null
+                                : () => _toggleCheckInVoice(focus, session),
+                          ),
+                        ),
+                        MelbelIconObjectButton(
+                          icon: isSpeaking
+                              ? Icons.volume_off_rounded
+                              : Icons.volume_up_rounded,
+                          tooltip: isSpeaking ? 'Dừng đọc' : 'Nghe lại',
+                          size: 52,
+                          tone: MelbelCardTone.muted,
+                          onPressed: focus.runCommandBusy
+                              ? null
+                              : () => _replayOrStopPrompt(focus, session),
+                        ),
+                        if (_checkInTranscribing)
+                          MelbelIconObjectButton(
+                            icon: Icons.close_rounded,
+                            tooltip: 'Hủy chuyển lời',
+                            size: 52,
+                            tone: MelbelCardTone.muted,
+                            onPressed: () => _checkInStt?.cancel(),
+                          ),
+                      ],
+                      if (focus.serverRunId != null)
+                        MelbelIconObjectButton(
+                          icon: Icons.edit_outlined,
+                          tooltip: 'Sửa thời gian thực tế',
+                          size: 52,
+                          tone: MelbelCardTone.muted,
+                          onPressed: focus.runCommandBusy
+                              ? null
+                              : () => _openActualCorrectionSheet(focus),
+                        ),
+                    ],
+                  ),
+                  if (showVoiceDock && _checkInVoiceHint != null) ...[
+                    const SizedBox(height: 8),
+                    Text(
+                      _checkInVoiceHint!,
+                      textAlign: TextAlign.start,
+                      style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                            color: palette.onSurfaceVariant,
+                          ),
+                    ),
+                  ],
+                ],
               ),
             ),
-          const SizedBox(height: 16),
+          ],
+          const SizedBox(height: 14),
           if (focus.needsEndSync) ...[
             PrimaryCta(
               label: 'Đồng bộ kết thúc phiên',
@@ -1258,164 +1318,61 @@ class _FocusScreenState extends State<FocusScreen> with WidgetsBindingObserver {
             ),
             const SizedBox(height: 10),
           ],
-          if (focus.canAnswerCheckIn && !focus.hasPendingCheckInResponse) ...[
-            MelbelCard(
-              borderRadius: 22,
-              tone: MelbelCardTone.muted,
-              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  Wrap(
-                    spacing: 8,
-                    runSpacing: 8,
-                    alignment: WrapAlignment.spaceBetween,
-                    crossAxisAlignment: WrapCrossAlignment.center,
-                    children: [
-                      FilledButton.tonalIcon(
-                        onPressed: focus.runCommandBusy || _checkInTranscribing
-                            ? null
-                            : () => _toggleCheckInVoice(focus, session),
-                        icon: Icon(
-                          _checkInListening
-                              ? Icons.stop_rounded
-                              : Icons.mic_rounded,
-                        ),
-                        label: Text(
-                          _checkInListening
-                              ? 'Dừng nghe'
-                              : _checkInTranscribing
-                                  ? 'Đang chuyển lời…'
-                                  : _checkInOnDeviceOnly
-                                      ? 'Nói trên máy để trả lời'
-                                      : 'Trả lời bằng giọng nói',
-                        ),
-                      ),
-                      if (_checkInTranscribing)
-                        TextButton(
-                          onPressed: () => _checkInStt?.cancel(),
-                          child: const Text('Hủy chuyển lời'),
-                        ),
-                      TextButton.icon(
-                        onPressed: focus.runCommandBusy
-                            ? null
-                            : () => _replayOrStopPrompt(focus, session),
-                        icon: Icon(
-                          (_speakingCheckIn ||
-                                  (focus.hasVoicePlayback &&
-                                      focus.voicePlayback.isSpeaking))
-                              ? Icons.volume_off_rounded
-                              : Icons.volume_up_rounded,
-                        ),
-                        label: Text(
-                          (_speakingCheckIn ||
-                                  (focus.hasVoicePlayback &&
-                                      focus.voicePlayback.isSpeaking))
-                              ? 'Dừng đọc'
-                              : 'Nghe lại',
-                        ),
-                      ),
-                    ],
-                  ),
-                  if (_checkInVoiceHint != null) ...[
-                    const SizedBox(height: 8),
-                    Text(
-                      _checkInVoiceHint!,
-                      style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                            color: palette.onSurfaceVariant,
-                          ),
-                    ),
-                  ],
-                ],
-              ),
-            ),
-            const SizedBox(height: 12),
-            for (final (label, outcome, icon, toneAmber) in const [
-              (
-                'Hoàn thành phiên',
-                'completed',
-                Icons.check_circle_outline_rounded,
-                false,
-              ),
-              (
-                'Chưa xong',
-                'incomplete',
-                Icons.timelapse_outlined,
-                true,
-              ),
-              (
-                'Việc đột xuất',
-                'busy',
-                Icons.pause_circle_outline_rounded,
-                true,
-              ),
-              (
-                'Bỏ qua phiên',
-                'skipped',
-                Icons.skip_next_outlined,
-                false,
-              ),
-            ])
-              Padding(
-                padding: const EdgeInsets.only(bottom: 10),
-                child: MelbelCard(
-                  borderRadius: 24,
-                  padding: EdgeInsets.zero,
-                  child: ListTile(
-                    contentPadding: const EdgeInsets.symmetric(
-                      horizontal: 16,
-                      vertical: 4,
-                    ),
-                    leading: Container(
-                      width: 42,
-                      height: 42,
-                      decoration: BoxDecoration(
-                        color: toneAmber
-                            ? palette.amberSoft
-                            : palette.sageSoft,
-                        borderRadius: BorderRadius.circular(14),
-                      ),
-                      alignment: Alignment.center,
-                      child: Icon(
-                        icon,
-                        size: 21,
-                        color: toneAmber ? palette.amberInk : palette.accentInk,
-                      ),
-                    ),
-                    title: Text(
-                      label,
-                      style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                            fontWeight: FontWeight.w700,
-                          ),
-                    ),
-                    trailing: Icon(
-                      Icons.chevron_right_rounded,
-                      color: palette.onSurfaceVariant,
-                    ),
-                    enabled: !focus.runCommandBusy,
-                    onTap: focus.runCommandBusy
+          if (showVoiceDock) ...[
+            Row(
+              children: [
+                Expanded(
+                  child: MelbelIconObjectButton(
+                    icon: Icons.check_circle_outline_rounded,
+                    label: 'Hoàn thành',
+                    tooltip: 'Hoàn thành phiên',
+                    tone: MelbelCardTone.success,
+                    onPressed: focus.runCommandBusy
                         ? null
-                        : () => outcome == 'skipped'
-                            ? _chooseSkip(focus)
-                            : _reviewOutcome(focus, session, outcome),
+                        : () => _reviewOutcome(focus, session, 'completed'),
                   ),
                 ),
-              ),
-            Center(
-              child: TextButton(
-                onPressed: focus.runCommandBusy
-                    ? null
-                    : () async {
-                        await focus.restAfterCheckIn();
-                        if (!context.mounted) return;
-                        await Navigator.of(context).push(
-                          MaterialPageRoute<void>(
-                            builder: (_) => const FocusRestScreen(),
-                          ),
-                        );
-                      },
-                child: const Text('Nghỉ giải lao'),
-              ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: MelbelIconObjectButton(
+                    icon: Icons.timelapse_outlined,
+                    label: 'Chưa xong',
+                    tooltip: 'Chưa xong',
+                    tone: MelbelCardTone.amber,
+                    onPressed: focus.runCommandBusy
+                        ? null
+                        : () => _reviewOutcome(focus, session, 'incomplete'),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 10),
+            Row(
+              children: [
+                Expanded(
+                  child: MelbelIconObjectButton(
+                    icon: Icons.pause_circle_outline_rounded,
+                    label: 'Đột xuất',
+                    tooltip: 'Việc đột xuất',
+                    tone: MelbelCardTone.amber,
+                    onPressed: focus.runCommandBusy
+                        ? null
+                        : () => _reviewOutcome(focus, session, 'busy'),
+                  ),
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: MelbelIconObjectButton(
+                    icon: Icons.skip_next_outlined,
+                    label: 'Bỏ qua',
+                    tooltip: 'Bỏ qua phiên',
+                    tone: MelbelCardTone.neutral,
+                    onPressed: focus.runCommandBusy
+                        ? null
+                        : () => _chooseSkip(focus),
+                  ),
+                ),
+              ],
             ),
           ],
           if (!focus.canAnswerCheckIn && focus.serverRunId != null) ...[
@@ -1430,19 +1387,52 @@ class _FocusScreenState extends State<FocusScreen> with WidgetsBindingObserver {
                 ),
               ),
             ),
-            const SizedBox(height: 10),
           ],
-          PrimaryCta(
-            label: 'Quay về trang trước',
-            onPressed: () => Navigator.of(context).pop(),
-          ),
-          if (focus.thoughts.isNotEmpty)
+          if (showVoiceDock || focus.thoughts.isNotEmpty) ...[
+            const SizedBox(height: 14),
             Center(
-              child: TextButton(
-                onPressed: () => _showThoughts(context, focus),
-                child: const Text('Mở hộp suy nghĩ'),
+              child: Wrap(
+                spacing: 12,
+                runSpacing: 10,
+                alignment: WrapAlignment.center,
+                children: [
+                  if (showVoiceDock)
+                    SizedBox(
+                      width: 136,
+                      child: MelbelIconObjectButton(
+                        icon: Icons.coffee_outlined,
+                        label: 'Nghỉ',
+                        tooltip: 'Nghỉ giải lao',
+                        tone: MelbelCardTone.muted,
+                        onPressed: focus.runCommandBusy
+                            ? null
+                            : () async {
+                                await focus.restAfterCheckIn();
+                                if (!context.mounted) return;
+                                await Navigator.of(context).push(
+                                  MaterialPageRoute<void>(
+                                    builder: (_) => const FocusRestScreen(),
+                                  ),
+                                );
+                              },
+                      ),
+                    ),
+                  if (focus.thoughts.isNotEmpty)
+                    SizedBox(
+                      width: 136,
+                      child: MelbelIconObjectButton(
+                        icon: Icons.inbox_outlined,
+                        label: 'Suy nghĩ',
+                        tooltip: 'Mở hộp suy nghĩ',
+                        badgeCount: focus.thoughts.length,
+                        tone: MelbelCardTone.sage,
+                        onPressed: () => _showThoughts(context, focus),
+                      ),
+                    ),
+                ],
               ),
             ),
+          ],
         ],
       ),
     );
@@ -1735,6 +1725,10 @@ class _FocusScreenState extends State<FocusScreen> with WidgetsBindingObserver {
     );
     if (!mounted) return;
     if (ok) {
+      final streak = StreakProvider.maybeOf(context, listen: false);
+      if (streak != null) {
+        unawaited(streak.syncFromBackend());
+      }
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
           content: Text('Đã cập nhật thời gian làm thực tế.'),
@@ -1754,6 +1748,7 @@ class ThoughtInboxScreen extends StatefulWidget {
 
 class _ThoughtInboxScreenState extends State<ThoughtInboxScreen> {
   final _audioPlayer = AudioPlayer();
+  final TextEditingController _quickThoughtController = TextEditingController();
   String? _playingThoughtId;
   bool _showDraft = false;
   bool _isConverting = false;
@@ -1826,6 +1821,16 @@ class _ThoughtInboxScreenState extends State<ThoughtInboxScreen> {
       if (mounted) await _loadServerDrafts();
     } catch (error) {
       if (!mounted) return;
+      if (error is ApiException && error.isConfirmedDraftTransition) {
+        unawaited(_loadServerDrafts());
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Bản nháp này đã được chốt thành công việc.'),
+            behavior: SnackBarBehavior.floating,
+          ),
+        );
+        return;
+      }
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('$error')),
       );
@@ -1853,6 +1858,16 @@ class _ThoughtInboxScreenState extends State<ThoughtInboxScreen> {
       );
     } catch (error) {
       if (!mounted) return;
+      if (error is ApiException && error.isConfirmedDraftTransition) {
+        unawaited(_loadServerDrafts());
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Bản nháp này đã được chốt thành công việc.'),
+            behavior: SnackBarBehavior.floating,
+          ),
+        );
+        return;
+      }
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('$error')),
       );
@@ -1874,9 +1889,17 @@ class _ThoughtInboxScreenState extends State<ThoughtInboxScreen> {
     return 'Chờ xem lại & lên lịch';
   }
 
+  Future<void> _submitQuickThought(FocusProvider focus) async {
+    final text = _quickThoughtController.text.trim();
+    if (text.isEmpty) return;
+    _quickThoughtController.clear();
+    await focus.saveQuickThought(text);
+  }
+
   @override
   void dispose() {
     _audioPlayer.dispose();
+    _quickThoughtController.dispose();
     super.dispose();
   }
 
@@ -1888,12 +1911,8 @@ class _ThoughtInboxScreenState extends State<ThoughtInboxScreen> {
     final hasUnsavedLocalDraft =
         task.draft == null && task.title.trim().isNotEmpty && !task.planLocked;
     return FocusReviewPage(
-      title: 'Hộp nháp',
+      title: 'Hộp suy nghĩ',
       children: [
-        const ReviewHeader(
-          'Hộp suy nghĩ',
-          'Nghe lại ghi âm hoặc xem ghi chú khi bạn sẵn sàng.',
-        ),
         SegmentedButton<bool>(
           segments: const [
             ButtonSegment(value: true, label: Text('Công việc nháp')),
@@ -1906,6 +1925,38 @@ class _ThoughtInboxScreenState extends State<ThoughtInboxScreen> {
             if (next) unawaited(_loadServerDrafts());
           },
         ),
+        if (!_showDraft)
+          MelbelCard(
+            borderRadius: 24,
+            padding: const EdgeInsets.fromLTRB(14, 8, 8, 8),
+            child: Row(
+              children: [
+                Expanded(
+                  child: TextField(
+                    controller: _quickThoughtController,
+                    textInputAction: TextInputAction.send,
+                    onSubmitted: (_) => unawaited(_submitQuickThought(focus)),
+                    decoration: const InputDecoration(
+                      hintText: 'Ghi nhanh ý chợt nảy ra...',
+                      border: InputBorder.none,
+                      enabledBorder: InputBorder.none,
+                      focusedBorder: InputBorder.none,
+                      filled: false,
+                      isDense: true,
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 6),
+                MelbelIconObjectButton(
+                  icon: Icons.arrow_upward_rounded,
+                  tooltip: 'Cất suy nghĩ',
+                  size: 48,
+                  tone: MelbelCardTone.sage,
+                  onPressed: () => unawaited(_submitQuickThought(focus)),
+                ),
+              ],
+            ),
+          ),
         if (_showDraft &&
             _loadingDrafts &&
             !hasUnsavedLocalDraft &&
@@ -2098,7 +2149,12 @@ class _ThoughtInboxScreenState extends State<ThoughtInboxScreen> {
                   ),
                 ),
                 const SizedBox(width: 12),
-                const Expanded(child: Text('Chưa có suy nghĩ nào được cất.')),
+                const Expanded(
+                  child: Text(
+                    'Chưa có suy nghĩ nào. Gõ nhanh ở trên hoặc giữ mic trong phiên.',
+                    textAlign: TextAlign.start,
+                  ),
+                ),
               ],
             ),
           ),
@@ -2128,6 +2184,8 @@ class _ThoughtInboxScreenState extends State<ThoughtInboxScreen> {
                   },
                 ),
                 if (!focus.isActiveRun &&
+                    !focus.hasUnfinishedServerRun &&
+                    !focus.awaitingCheckIn &&
                     !focus.needsEndSync &&
                     !focus.runCommandBusy &&
                     !task.hasUnconfirmedDraft &&

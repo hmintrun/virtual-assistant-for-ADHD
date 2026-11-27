@@ -63,10 +63,11 @@ class ApiService {
   /// API 2: Lấy danh sách các bản nháp (GET /api/v1/drafts)
   Future<List<PlanningDraftModel>> listDrafts(
       {int limit = 20, String? cursor}) async {
+    final clampedLimit = limit.clamp(1, 100);
     final response = await _dio.get<Map<String, dynamic>>(
       '/drafts',
       queryParameters: {
-        'limit': limit,
+        'limit': clampedLimit,
         if (cursor != null) 'cursor': cursor,
       },
     );
@@ -274,8 +275,8 @@ class ApiService {
     final response = await _dio.get<Map<String, dynamic>>(
       '/schedule',
       queryParameters: {
-        if (fromTime != null) 'from': fromTime.toIso8601String(),
-        if (toTime != null) 'to': toTime.toIso8601String(),
+        if (fromTime != null) 'from': fromTime.toUtc().toIso8601String(),
+        if (toTime != null) 'to': toTime.toUtc().toIso8601String(),
       },
     );
 

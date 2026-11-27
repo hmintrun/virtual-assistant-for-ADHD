@@ -46,6 +46,12 @@ abstract class LocalRunRepository {
   Future<void> markThoughtSynced(String thoughtId, String serverThoughtId);
   Future<void> deleteThought(String thoughtId);
   Future<void> clearAllThoughts();
+
+  /// Giữ lại toàn bộ Thought chưa đồng bộ và tối đa [maxSynced] bản ghi đã đồng bộ gần nhất.
+  Future<int> compactForStorage({int maxSynced = 50}) async => 0;
+
+  /// Xóa đường dẫn audio cục bộ trên Thought đã chuyển thành draft.
+  Future<void> clearThoughtAudioPath(String thoughtId) async {}
 }
 
 /// Triển khai lưu bền bằng FlutterSecureStorage cho thiết bị thật,
@@ -88,11 +94,61 @@ class SecureStorageRunRepository extends LocalRunRepository {
         await _storage.delete(key: runKey);
       });
 
+  static const int maxPersistedSyncedThoughts = 50;
+
+  static List<ThoughtRecord> trimThoughtsForStorage(
+    List<ThoughtRecord> thoughts, {
+    int maxSynced = maxPersistedSyncedThoughts,
+  }) {
+    final syncedIndices = <int>[];
+    for (var i = 0; i < thoughts.length; i++) {
+      if (!thoughts[i].isPendingSync) {
+        syncedIndices.add(i);
+      }
+    }
+    if (syncedIndices.length <= maxSynced) {
+      return List<ThoughtRecord>.from(thoughts);
+    }
+    syncedIndices.sort((a, b) {
+      final cmp = thoughts[b].createdAt.compareTo(thoughts[a].createdAt);
+      return cmp != 0 ? cmp : a.compareTo(b);
+    });
+    final keptSynced = syncedIndices.take(maxSynced < 0 ? 0 : maxSynced).toSet();
+    final trimmed = <ThoughtRecord>[];
+    for (var i = 0; i < thoughts.length; i++) {
+      if (thoughts[i].isPendingSync || keptSynced.contains(i)) {
+        trimmed.add(thoughts[i]);
+      }
+    }
+    return trimmed;
+  }
+
+  Future<List<ThoughtRecord>> _readThoughtsUnlocked() async {
+    final raw = await _storage.read(key: thoughtsKey);
+    if (raw == null || raw.isEmpty) return [];
+    try {
+      return (jsonDecode(raw) as List<dynamic>)
+          .whereType<Map<String, dynamic>>()
+          .map(ThoughtRecord.fromJson)
+          .toList();
+    } catch (_) {
+      return [];
+    }
+  }
+
+  Future<void> _writeThoughtsUnlocked(
+    List<ThoughtRecord> thoughts, {
+    int maxSynced = maxPersistedSyncedThoughts,
+  }) async {
+    final compacted = trimThoughtsForStorage(thoughts, maxSynced: maxSynced);
+    final list = compacted.map((t) => t.toJson()).toList();
+    await _storage.write(key: thoughtsKey, value: jsonEncode(list));
+  }
+
   @override
   Future<void> saveThoughts(List<ThoughtRecord> thoughts) =>
       _thoughtsLock.synchronized(() async {
-        final list = thoughts.map((t) => t.toJson()).toList();
-        await _storage.write(key: thoughtsKey, value: jsonEncode(list));
+        await _writeThoughtsUnlocked(thoughts);
       });
 
   @override
@@ -130,32 +186,20 @@ class SecureStorageRunRepository extends LocalRunRepository {
         }
         existing.removeWhere((item) => item.clientThoughtId == thought.clientThoughtId);
         existing.insert(0, thought);
-        final list = existing.map((t) => t.toJson()).toList();
-        await _storage.write(key: thoughtsKey, value: jsonEncode(list));
+        await _writeThoughtsUnlocked(existing);
       });
 
   @override
   Future<void> markThoughtSynced(String thoughtId, String serverThoughtId) =>
       _thoughtsLock.synchronized(() async {
-        final raw = await _storage.read(key: thoughtsKey);
-        if (raw == null) return;
-        List<ThoughtRecord> existing = [];
-        try {
-          existing = (jsonDecode(raw) as List<dynamic>)
-              .whereType<Map<String, dynamic>>()
-              .map(ThoughtRecord.fromJson)
-              .toList();
-        } catch (_) {
-          return;
-        }
+        final existing = await _readThoughtsUnlocked();
         final index = existing.indexWhere((item) => item.clientThoughtId == thoughtId);
         if (index >= 0) {
           existing[index] = existing[index].copyWith(
             isPendingSync: false,
             serverThoughtId: serverThoughtId,
           );
-          final list = existing.map((t) => t.toJson()).toList();
-          await _storage.write(key: thoughtsKey, value: jsonEncode(list));
+          await _writeThoughtsUnlocked(existing);
         }
       });
 
@@ -176,6 +220,39 @@ class SecureStorageRunRepository extends LocalRunRepository {
         existing.removeWhere((item) => item.clientThoughtId == thoughtId);
         final list = existing.map((t) => t.toJson()).toList();
         await _storage.write(key: thoughtsKey, value: jsonEncode(list));
+      });
+
+  @override
+  Future<int> compactForStorage({int maxSynced = maxPersistedSyncedThoughts}) =>
+      _thoughtsLock.synchronized(() async {
+        final existing = await _readThoughtsUnlocked();
+        if (existing.isEmpty) return 0;
+        final compacted = trimThoughtsForStorage(existing, maxSynced: maxSynced);
+        if (compacted.length >= existing.length) return 0;
+        await _writeThoughtsUnlocked(compacted, maxSynced: maxSynced);
+        return existing.length - compacted.length;
+      });
+
+  @override
+  Future<void> clearThoughtAudioPath(String thoughtId) =>
+      _thoughtsLock.synchronized(() async {
+        final existing = await _readThoughtsUnlocked();
+        if (existing.isEmpty) return;
+        var changed = false;
+        for (var i = 0; i < existing.length; i++) {
+          final item = existing[i];
+          if (item.clientThoughtId == thoughtId ||
+              item.serverThoughtId == thoughtId) {
+            if (item.localAudioPath != null &&
+                item.localAudioPath!.isNotEmpty) {
+              existing[i] = item.copyWith(clearLocalAudioPath: true);
+              changed = true;
+            }
+          }
+        }
+        if (changed) {
+          await _writeThoughtsUnlocked(existing);
+        }
       });
 
   @override
@@ -243,6 +320,37 @@ class InMemoryRunRepository extends LocalRunRepository {
   Future<void> deleteThought(String thoughtId) =>
       _thoughtsLock.synchronized(() async {
         _thoughts.removeWhere((item) => item.clientThoughtId == thoughtId);
+      });
+
+  @override
+  Future<int> compactForStorage({
+    int maxSynced = SecureStorageRunRepository.maxPersistedSyncedThoughts,
+  }) =>
+      _thoughtsLock.synchronized(() async {
+        final before = _thoughts.length;
+        final compacted = SecureStorageRunRepository.trimThoughtsForStorage(
+          _thoughts,
+          maxSynced: maxSynced,
+        );
+        _thoughts
+          ..clear()
+          ..addAll(compacted);
+        return before - _thoughts.length;
+      });
+
+  @override
+  Future<void> clearThoughtAudioPath(String thoughtId) =>
+      _thoughtsLock.synchronized(() async {
+        for (var i = 0; i < _thoughts.length; i++) {
+          final item = _thoughts[i];
+          if (item.clientThoughtId == thoughtId ||
+              item.serverThoughtId == thoughtId) {
+            if (item.localAudioPath != null &&
+                item.localAudioPath!.isNotEmpty) {
+              _thoughts[i] = item.copyWith(clearLocalAudioPath: true);
+            }
+          }
+        }
       });
 
   @override

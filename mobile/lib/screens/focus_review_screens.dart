@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
@@ -26,11 +27,12 @@ class ReviewHeader extends StatelessWidget {
   });
 
   final String title;
-  final String subtitle;
+  final String? subtitle;
   final CatExpression expression;
 
   @override
   Widget build(BuildContext context) {
+    final cleanSubtitle = subtitle?.trim();
     return MelbelEntrance(
       child: MelbelChatBlock(
         avatarOnRight: true,
@@ -39,7 +41,7 @@ class ReviewHeader extends StatelessWidget {
         senderLabel: 'Melbel',
         title: title,
         titleIsHeader: true,
-        message: subtitle,
+        message: (cleanSubtitle?.isNotEmpty ?? false) ? cleanSubtitle : null,
         mascotWidth: 60,
         mascotHeight: 54,
       ),
@@ -137,11 +139,13 @@ class FocusReviewPage extends StatelessWidget {
   const FocusReviewPage({
     required this.title,
     required this.children,
+    this.bottomBar,
     super.key,
   });
 
   final String title;
   final List<Widget> children;
+  final Widget? bottomBar;
 
   @override
   Widget build(BuildContext context) => MelbelPageBackdrop(
@@ -154,9 +158,14 @@ class FocusReviewPage extends StatelessWidget {
             showBack: true,
             showTitleRays: true,
           ),
+          bottomNavigationBar: bottomBar,
           body: SafeArea(
             child: ListView(
-              padding: MelbelLayout.pageInsets(context, top: 12, bottom: 28),
+              padding: MelbelLayout.pageInsets(
+                context,
+                top: 12,
+                bottom: bottomBar != null ? 20 : 28,
+              ),
               children: [
                 for (final child in children)
                   Padding(
@@ -359,7 +368,7 @@ class _NextFocusActionScreenState extends State<NextFocusActionScreen> {
           title: 'Tiếp theo',
           children: [
             const ReviewHeader(
-                'Đã ghi nhận phiên', 'Bạn muốn làm gì tiếp theo?',
+                'Đã ghi nhận phiên', null,
                 expression: CatExpression.happy),
             ReviewSessionCard(session: widget.session),
             if (snapshot.hasData && snapshot.data != null)
@@ -412,7 +421,7 @@ class FocusRestScreen extends StatelessWidget {
         title: 'Nghỉ giải lao',
         children: [
           const ReviewHeader(
-              'Nghỉ một chút', 'Thả lỏng mắt hoặc uống một ngụm nước.',
+              'Nghỉ một chút', 'Thả lỏng mắt hoặc uống nước.',
               expression: CatExpression.sleepy),
           PrimaryCta(
               label: 'Về trang chủ',
@@ -441,6 +450,9 @@ class _ScheduleChangeReasonScreenState
     'checkin_incomplete' => 'Chưa xong',
     'checkin_busy' => 'Bận việc khác',
     'checkin_skipped' => 'Hoãn phiên',
+    'early_completion_pull_forward' => 'Xong sớm · làm phiên tiếp',
+    'missed_start' => 'Bắt đầu trễ',
+    'expand_next_horizon' => 'Mở rộng lịch tiếp',
     _ => null,
   };
   String? _selectedReason;
@@ -451,10 +463,9 @@ class _ScheduleChangeReasonScreenState
         title: 'Đổi lịch',
         children: [
           if (_checkInReason case final reason?)
-            ReviewHeader('Điều chỉnh lịch', reason)
+            ReviewHeader(reason, null)
           else
-            const ReviewHeader(
-                'Vì sao cần đổi lịch?', 'Chọn lý do để xem bước tiếp theo.'),
+            const ReviewHeader('Vì sao cần đổi lịch?', null),
           if (widget.session case final session?)
             ReviewSessionCard(session: session),
           if (_checkInReason == null)
@@ -521,6 +532,7 @@ class _ScheduleChangeReasonScreenState
                                         'Bận việc khác' => 'checkin_busy',
                                         _ => 'checkin_skipped',
                                       },
+                                  taskId: widget.session?.taskId,
                                   session: widget.session,
                                 )),
                       )),
@@ -535,6 +547,7 @@ class ScheduleComparisonScreen extends StatefulWidget {
     required this.reason,
     this.session,
     this.runId,
+    this.taskId,
     this.trigger,
     this.proposalId,
     this.api,
@@ -544,6 +557,7 @@ class ScheduleComparisonScreen extends StatefulWidget {
   final String reason;
   final FocusSessionInfo? session;
   final String? runId;
+  final String? taskId;
   final String? trigger;
   final String? proposalId;
   final AdaptationApi? api;
@@ -558,8 +572,11 @@ class _ScheduleComparisonScreenState extends State<ScheduleComparisonScreen>
   late final _api = widget.api ?? AdaptationApi(ApiClient());
   Map<String, dynamic>? _proposal;
   String? _error;
+  String? _notice;
   bool _busy = false;
   bool _cached = false;
+  bool? _explanationExpanded;
+  bool _showAllChanges = false;
 
   @override
   void initState() {
@@ -567,6 +584,7 @@ class _ScheduleComparisonScreenState extends State<ScheduleComparisonScreen>
     WidgetsBinding.instance.addObserver(this);
     if (widget.proposalId != null ||
         widget.runId != null ||
+        (widget.taskId != null && widget.trigger != null) ||
         widget.trigger == 'resume') {
       _load();
     }
@@ -586,21 +604,67 @@ class _ScheduleComparisonScreenState extends State<ScheduleComparisonScreen>
     super.dispose();
   }
 
+  bool _needsRebuild(Map<String, dynamic>? proposal) =>
+      proposal != null &&
+      proposal['status'] == 'pending' &&
+      (proposal['stale'] == true ||
+          AdaptationApi.hasExpiredProposedSlots(proposal));
+
   Future<void> _perform(Future<void> Function() operation) async {
     if (_busy) return;
     setState(() {
       _busy = true;
       _error = null;
+      _notice = null;
     });
     try {
       await operation();
     } on ApiException catch (error) {
       if (error.statusCode == 409 &&
-          error.code == 'REVISION_CONFLICT' &&
+          error.requiresProposalRebuild &&
+          _proposal != null) {
+        try {
+          Map<String, dynamic>? rebuilt;
+          try {
+            rebuilt = await _api.updateProposal('rebuild', _proposal!);
+          } on ApiException catch (rebuildErr) {
+            if (!rebuildErr.isRevisionConflict) rethrow;
+            final latest = await _api.currentProposal();
+            if (latest != null && latest['status'] == 'pending') {
+              rebuilt = await _api.updateProposal('rebuild', latest);
+            } else {
+              rebuilt = latest;
+            }
+          }
+          await _api.cacheProposal(rebuilt);
+          if (mounted) {
+            setState(() {
+              _proposal = rebuilt;
+              _cached = false;
+              _explanationExpanded = null;
+              _showAllChanges = false;
+              if (rebuilt == null) {
+                _error = 'Lịch đã thay đổi. Phương án cũ không còn để duyệt.';
+              } else {
+                _error = null;
+                _notice =
+                    'Nguồn lịch đã thay đổi. Phương án mới đã sẵn sàng để duyệt.';
+              }
+            });
+          }
+          return;
+        } on ApiException {
+          // Fall through to normal error handling if rebuild also fails.
+        } catch (_) {
+          // Fall through to normal error handling if rebuild also fails.
+        }
+      }
+      if (error.statusCode == 409 &&
+          error.isRevisionConflict &&
           _proposal != null) {
         try {
           var latest = await _api.currentProposal();
-          if (latest?['status'] == 'pending' && latest?['stale'] == true) {
+          if (_needsRebuild(latest)) {
             latest = await _api.updateProposal('rebuild', latest!);
           }
           await _api.cacheProposal(latest);
@@ -608,9 +672,15 @@ class _ScheduleComparisonScreenState extends State<ScheduleComparisonScreen>
             setState(() {
               _proposal = latest;
               _cached = false;
-              _error = latest == null
-                  ? 'Lịch đã thay đổi. Phương án cũ không còn để duyệt.'
-                  : 'Lịch đã thay đổi. Hãy xem lại phương án mới trước khi duyệt.';
+              _explanationExpanded = null;
+              _showAllChanges = false;
+              if (latest == null) {
+                _error = 'Lịch đã thay đổi. Phương án cũ không còn để duyệt.';
+              } else {
+                _error = null;
+                _notice =
+                    'Lịch đã thay đổi. Hãy xem lại phương án mới trước khi duyệt.';
+              }
             });
           }
           return;
@@ -619,6 +689,15 @@ class _ScheduleComparisonScreenState extends State<ScheduleComparisonScreen>
         } catch (_) {
           // Keep the original conflict visible; the Retry action reloads it.
         }
+      }
+      if (error.isActiveRunExists) {
+        if (mounted) {
+          setState(() {
+            _error =
+                'Đang có phiên tập trung hoạt động hoặc chờ check-in. Hãy hoàn tất check-in trước khi duyệt đổi lịch.';
+          });
+        }
+        return;
       }
       final cached = error.statusCode == null && _proposal == null
           ? await _api.cachedProposal()
@@ -644,22 +723,36 @@ class _ScheduleComparisonScreenState extends State<ScheduleComparisonScreen>
             ? null
             : (_proposal?['proposal_id'] as String? ?? widget.proposalId);
         final run = id == null && !forceCurrent ? widget.runId : null;
+        final taskId = id == null && run == null && !forceCurrent
+            ? widget.taskId
+            : null;
         final current = id != null
             ? await _api.proposal(id)
             : run != null
                 ? await _api.createProposal(run, widget.trigger!)
-                : await _api.currentProposal();
+                : (taskId != null && widget.trigger != null)
+                    ? await _api.createProposalForTask(
+                        taskId: taskId,
+                        reason: widget.trigger!,
+                      )
+                    : await _api.currentProposal();
         if (!mounted) return;
         setState(() {
           _proposal = current;
           _cached = false;
+          _explanationExpanded = null;
+          _showAllChanges = false;
         });
         await _api.cacheProposal(current);
-        if (run == null &&
-            current?['status'] == 'pending' &&
-            current?['stale'] == true) {
+        if (run == null && taskId == null && _needsRebuild(current)) {
           final rebuilt = await _api.updateProposal('rebuild', current!);
-          if (mounted) setState(() => _proposal = rebuilt);
+          if (mounted) {
+            setState(() {
+              _proposal = rebuilt;
+              _explanationExpanded = null;
+              _showAllChanges = false;
+            });
+          }
           await _api.cacheProposal(rebuilt);
         }
       });
@@ -673,7 +766,11 @@ class _ScheduleComparisonScreenState extends State<ScheduleComparisonScreen>
         }
         if (!mounted) return;
         if (action == 'rebuild') {
-          setState(() => _proposal = updated);
+          setState(() {
+            _proposal = updated;
+            _explanationExpanded = null;
+            _showAllChanges = false;
+          });
           return;
         }
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(
@@ -710,44 +807,334 @@ class _ScheduleComparisonScreenState extends State<ScheduleComparisonScreen>
     ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
       duration: Duration(seconds: 6),
       content: Text(
-        'Để lùi hạn chót, bạn hãy chọn "Mở thêm giờ rảnh" hoặc chỉnh lại trong bản nháp công việc nhé.',
+        'Chọn "Mở thêm giờ rảnh" hoặc sửa hạn trong bản nháp.',
       ),
     ));
   }
 
-  String _timeRange(Object? startValue, Object? endValue) {
-    DateTime? local(Object? value) =>
-        value is String ? DateTime.tryParse(value)?.toLocal() : null;
-    final start = local(startValue);
-    final end = local(endValue);
-    final labels = MaterialLocalizations.of(context);
-    String clock(DateTime date) =>
-        labels.formatTimeOfDay(TimeOfDay.fromDateTime(date),
-            alwaysUse24HourFormat: true);
-    String full(DateTime date) =>
-        '${labels.formatCompactDate(date)} · ${clock(date)}';
-    if (start == null) return end == null ? 'Chưa có giờ' : 'Đến ${full(end)}';
-    if (end == null) return full(start);
-    return '${full(start)} – ${DateUtils.isSameDay(start, end) ? clock(end) : full(end)}';
+  DateTime? _parseLocal(Object? value) =>
+      value is String ? DateTime.tryParse(value)?.toLocal() : null;
+
+  String _clockOnly(DateTime date) => MaterialLocalizations.of(context)
+      .formatTimeOfDay(TimeOfDay.fromDateTime(date), alwaysUse24HourFormat: true);
+
+  String _shortDay(DateTime date) =>
+      '${date.day.toString().padLeft(2, '0')}/${date.month.toString().padLeft(2, '0')}';
+
+  String _compactClockSpan(
+    DateTime? start,
+    DateTime? end, {
+    DateTime? omitDateIfSameAs,
+  }) {
+    if (start == null) {
+      return end == null
+          ? 'Chưa có giờ'
+          : 'Đến ${_shortDay(end)} · ${_clockOnly(end)}';
+    }
+    final showDate = omitDateIfSameAs == null ||
+        !DateUtils.isSameDay(start, omitDateIfSameAs);
+    final prefix = showDate ? '${_shortDay(start)} · ' : '';
+    if (end == null) return '$prefix${_clockOnly(start)}';
+    if (DateUtils.isSameDay(start, end)) {
+      return '$prefix${_clockOnly(start)}–${_clockOnly(end)}';
+    }
+    return '$prefix${_clockOnly(start)} – ${_shortDay(end)} · ${_clockOnly(end)}';
+  }
+
+  List<_ScheduleDiffEntry> _buildDiffEntries(
+    Map? changes, {
+    required DateTime? sharedDay,
+  }) {
+    Iterable<Map> items(String key) =>
+        (changes?[key] as List? ?? const []).whereType<Map>();
+    final entries = <_ScheduleDiffEntry>[];
+
+    for (final item in items('steps_to_add')) {
+      entries.add(
+        _ScheduleDiffEntry(
+          icon: Icons.add_task_rounded,
+          text: 'Thêm bước: ${item['title'] ?? ''}',
+        ),
+      );
+    }
+    for (final item in items('sessions_to_move')) {
+      final beforeMap = item['before'] as Map?;
+      final afterMap = item['after'] as Map?;
+      final bStart = _parseLocal(beforeMap?['start'] ?? item['from_start']);
+      final bEnd = _parseLocal(beforeMap?['end'] ?? item['from_end']);
+      final aStart = _parseLocal(afterMap?['start'] ?? item['to_start']);
+      final aEnd = _parseLocal(afterMap?['end'] ?? item['to_end']);
+      final baseDay = sharedDay ?? bStart;
+      entries.add(
+        _ScheduleDiffEntry(
+          icon: Icons.swap_horiz_rounded,
+          oldRange: _compactClockSpan(
+            bStart,
+            bEnd,
+            omitDateIfSameAs: sharedDay,
+          ),
+          newRange: _compactClockSpan(
+            aStart,
+            aEnd,
+            omitDateIfSameAs: baseDay,
+          ),
+        ),
+      );
+    }
+    for (final item in items('sessions_to_add')) {
+      final afterMap = item['after'] as Map?;
+      final aStart = _parseLocal(afterMap?['start']);
+      final aEnd = _parseLocal(afterMap?['end']);
+      entries.add(
+        _ScheduleDiffEntry(
+          icon: Icons.add_circle_outline_rounded,
+          newRange: _compactClockSpan(
+            aStart,
+            aEnd,
+            omitDateIfSameAs: sharedDay,
+          ),
+          text: 'Thêm phiên',
+        ),
+      );
+    }
+    for (final item in items('sessions_to_cancel')) {
+      entries.add(
+        _ScheduleDiffEntry(
+          icon: Icons.event_busy_outlined,
+          text: item['reason'] == 'resegmented_by_settings_change'
+              ? 'Chia lại theo cài đặt mới'
+              : 'Bỏ 1 phiên',
+        ),
+      );
+    }
+    return entries;
+  }
+
+  DateTime? _detectSharedDay(Map? changes) {
+    if (changes == null) return null;
+    DateTime? common;
+    void inspect(Object? raw) {
+      final dt = _parseLocal(raw);
+      if (dt == null) return;
+      final d = DateUtils.dateOnly(dt);
+      common ??= d;
+      if (!DateUtils.isSameDay(common, d)) {
+        common = DateTime(1900);
+      }
+    }
+
+    for (final item
+        in (changes['sessions_to_move'] as List? ?? const []).whereType<Map>()) {
+      final b = item['before'] as Map?;
+      final a = item['after'] as Map?;
+      inspect(b?['start'] ?? item['from_start']);
+      inspect(a?['start'] ?? item['to_start']);
+    }
+    for (final item
+        in (changes['sessions_to_add'] as List? ?? const []).whereType<Map>()) {
+      final a = item['after'] as Map?;
+      inspect(a?['start']);
+    }
+    if (common == null || common!.year == 1900) return null;
+    return common;
   }
 
   @override
   Widget build(BuildContext context) {
+    final palette = context.melbel;
+    final textTheme = Theme.of(context).textTheme;
     final proposal = _proposal;
     final changes = proposal?['proposed_changes'] as Map?;
     final feasibility = proposal?['feasibility'] as Map?;
     final deficit = feasibility?['deficit_seconds'] as int?;
     final pending = !_cached && proposal?['status'] == 'pending';
-    final canApply = pending &&
-        proposal?['stale'] != true &&
-        feasibility?['confirmable'] == true &&
-        _error == null;
-    Iterable<Map> items(String key) =>
-        (changes?[key] as List? ?? []).whereType<Map>();
+    final isStale = proposal?['stale'] == true;
+    final confirmable = feasibility?['confirmable'] == true;
+    final canApply = pending && !isStale && confirmable && _error == null;
+    final needsAdjustment =
+        pending && !isStale && ((deficit ?? 0) > 0 || !confirmable);
+
+    final sharedDay = _detectSharedDay(changes);
+    final diffEntries = _buildDiffEntries(changes, sharedDay: sharedDay);
+    final visibleCount = _showAllChanges
+        ? diffEntries.length
+        : math.min(diffEntries.length, 3);
+    final explanation = (proposal?['explanation'] as String?)?.trim();
+    final hasExplanation = explanation != null && explanation.isNotEmpty;
+    final explanationExpanded =
+        _explanationExpanded ?? (hasExplanation && explanation.length <= 80);
+
+    final fallbackReason =
+        widget.reason == 'Đề xuất chờ duyệt' || widget.reason.trim().isEmpty
+            ? 'Xem lại lịch'
+            : widget.reason;
+
+    final String statusHeadline;
+    final String? statusHint;
+    final MelbelCardTone statusTone;
+    if (proposal == null) {
+      statusHeadline = fallbackReason;
+      statusHint = null;
+      statusTone = MelbelCardTone.sage;
+    } else if ((deficit ?? 0) > 0) {
+      statusHeadline = 'Thiếu ${(deficit! / 60).ceil()} phút';
+      statusHint = 'Mở thêm giờ rảnh hoặc lùi hạn chót.';
+      statusTone = MelbelCardTone.amber;
+    } else if (needsAdjustment) {
+      statusHeadline = 'Cần mở thêm giờ rảnh';
+      statusHint = 'Mở thêm giờ rảnh hoặc lùi hạn chót.';
+      statusTone = MelbelCardTone.amber;
+    } else if (canApply) {
+      statusHeadline = diffEntries.isNotEmpty
+          ? 'Đổi ${diffEntries.length} phiên'
+          : 'Sẵn sàng áp dụng lịch mới';
+      statusHint = 'Xem nhanh giờ mới rồi áp dụng.';
+      statusTone = MelbelCardTone.sage;
+    } else if (isStale) {
+      statusHeadline = 'Phương án cần tính lại';
+      statusHint = 'Bấm tính lại để cập nhật giờ mới.';
+      statusTone = MelbelCardTone.amber;
+    } else {
+      statusHeadline = fallbackReason;
+      statusHint = null;
+      statusTone = MelbelCardTone.sage;
+    }
+
+    final narrowDock = MediaQuery.sizeOf(context).width < 340;
+    final Widget dock = Container(
+      decoration: BoxDecoration(
+        color: palette.elevatedSurface,
+        border: Border(top: BorderSide(color: palette.hairline, width: 1)),
+      ),
+      child: SafeArea(
+        top: false,
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(20, 12, 20, 14),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (_error != null) ...[
+                PrimaryCta(
+                  label: 'Thử lại',
+                  icon: Icons.refresh_rounded,
+                  onPressed: _busy ? null : () => _load(forceCurrent: true),
+                ),
+                const SizedBox(height: 8),
+                SecondaryCta(
+                  label: 'Giữ lịch hiện tại',
+                  height: 48,
+                  onPressed: _busy
+                      ? null
+                      : pending
+                          ? () => _act('reject')
+                          : () => Navigator.pop(context),
+                ),
+              ] else if (canApply) ...[
+                PrimaryCta(
+                  label: 'Áp dụng lịch mới',
+                  icon: Icons.check_rounded,
+                  onPressed: _busy ? null : () => _act('approve'),
+                ),
+                const SizedBox(height: 8),
+                SecondaryCta(
+                  label: 'Giữ lịch hiện tại',
+                  height: 48,
+                  onPressed: _busy ? null : () => _act('reject'),
+                ),
+              ] else if (needsAdjustment) ...[
+                PrimaryCta(
+                  label: 'Mở thêm giờ rảnh',
+                  icon: Icons.more_time_rounded,
+                  onPressed: _busy ? null : _openAvailabilityEditor,
+                ),
+                const SizedBox(height: 8),
+                if (narrowDock) ...[
+                  SecondaryCta(
+                    label: 'Lùi hạn chót',
+                    height: 48,
+                    onPressed: _busy ? null : _explainDeadlineEditRequirement,
+                  ),
+                  const SizedBox(height: 8),
+                  SecondaryCta(
+                    label: 'Giữ lịch hiện tại',
+                    height: 48,
+                    onPressed: _busy ? null : () => _act('reject'),
+                  ),
+                ] else
+                  Row(
+                    children: [
+                      Expanded(
+                        child: SecondaryCta(
+                          label: 'Lùi hạn chót',
+                          height: 48,
+                          onPressed:
+                              _busy ? null : _explainDeadlineEditRequirement,
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: SecondaryCta(
+                          label: 'Giữ lịch hiện tại',
+                          height: 48,
+                          onPressed: _busy ? null : () => _act('reject'),
+                        ),
+                      ),
+                    ],
+                  ),
+              ] else if (pending) ...[
+                PrimaryCta(
+                  label: 'Tính lại phương án',
+                  icon: Icons.refresh_rounded,
+                  onPressed: _busy ? null : () => _act('rebuild'),
+                ),
+                const SizedBox(height: 8),
+                SecondaryCta(
+                  label: 'Giữ lịch hiện tại',
+                  height: 48,
+                  onPressed: _busy ? null : () => _act('reject'),
+                ),
+              ] else ...[
+                if (widget.session == null &&
+                    proposal == null &&
+                    widget.trigger != 'resume') ...[
+                  SecondaryCta(
+                    label: 'Mở lịch hiện tại',
+                    height: 48,
+                    onPressed: () =>
+                        Navigator.of(context).pushNamed('/calendar'),
+                  ),
+                  const SizedBox(height: 8),
+                ],
+                SecondaryCta(
+                  label: 'Giữ lịch hiện tại',
+                  height: 48,
+                  onPressed: _busy ? null : () => Navigator.pop(context),
+                ),
+              ],
+            ],
+          ),
+        ),
+      ),
+    );
+
     return FocusReviewPage(
       title: 'Điều chỉnh lịch',
+      bottomBar: dock,
       children: [
-        ReviewHeader('Xem lại lịch', widget.reason),
+        _ScheduleStatusBanner(
+          headline: statusHeadline,
+          hint: statusHint,
+          tone: statusTone,
+          expression:
+              needsAdjustment ? CatExpression.sleepy : CatExpression.neutral,
+          explanation: hasExplanation ? explanation : null,
+          expanded: explanationExpanded,
+          onToggleExplanation: hasExplanation
+              ? () => setState(
+                    () => _explanationExpanded = !explanationExpanded,
+                  )
+              : null,
+        ),
         if (widget.session case final session?)
           ReviewSessionCard(session: session, showSchedule: true),
         if (_busy)
@@ -759,102 +1146,347 @@ class _ScheduleComparisonScreenState extends State<ScheduleComparisonScreen>
           MelbelCard(
             borderRadius: 22,
             tone: MelbelCardTone.amber,
-            child: Text(_error!),
+            child: Text(_error!, textAlign: TextAlign.start),
+          ),
+        if (_notice != null && _error == null)
+          MelbelCard(
+            borderRadius: 22,
+            tone: MelbelCardTone.amber,
+            child: Text(_notice!, textAlign: TextAlign.start),
           ),
         if (_cached)
-          Text(
-            'Bản lưu trên máy. Kết nối lại để kiểm tra lịch trước khi duyệt.',
-            style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                  color: context.melbel.onSurfaceVariant,
+          const Align(
+            alignment: Alignment.centerLeft,
+            child: MelbelStatusPill(
+              label: 'Bản lưu trên máy · cần mạng để duyệt',
+              icon: Icons.cloud_off_outlined,
+              tone: MelbelCardTone.muted,
+            ),
+          ),
+        Row(
+          children: [
+            const Expanded(child: Eyebrow('Lịch đề xuất')),
+            if (diffEntries.isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.only(right: 4),
+                child: Text(
+                  '${diffEntries.length} thay đổi',
+                  style: textTheme.labelSmall?.copyWith(
+                    color: palette.onSurfaceVariant,
+                    fontWeight: FontWeight.w600,
+                    fontFeatures: const [FontFeature.tabularFigures()],
+                  ),
                 ),
-          ),
-        const Eyebrow('Lịch đề xuất'),
-        if (proposal == null && !_busy && _error == null)
-          const MelbelCard(
-            borderRadius: 24,
-            child: Text('Chưa có phương án mới. Lịch hiện tại vẫn được giữ.'),
-          ),
-        if (proposal != null) ...[
-          if (proposal['explanation'] case final String explanation)
-            if (explanation.trim().isNotEmpty)
-              MelbelCard(
-                borderRadius: 24,
-                tone: MelbelCardTone.sage,
-                child: Text(explanation),
               ),
-          if (deficit != null && deficit > 0)
-            Text('Còn thiếu ${(deficit / 60).ceil()} phút.'),
-          if ((deficit ?? 0) > 0 || feasibility?['confirmable'] != true)
-            Wrap(
-              spacing: 8,
-              runSpacing: 4,
-              children: [
-                ActionChip(
-                  label: const Text('Mở thêm giờ rảnh'),
-                  onPressed: _busy ? null : _openAvailabilityEditor,
+            if (pending && needsAdjustment && _error == null)
+              IconButton(
+                tooltip: 'Tính lại phương án',
+                constraints:
+                    const BoxConstraints(minWidth: 48, minHeight: 48),
+                onPressed: _busy ? null : () => _act('rebuild'),
+                icon: Icon(
+                  Icons.refresh_rounded,
+                  size: 20,
+                  color: palette.accentInk,
                 ),
-                ActionChip(
-                  label: const Text('Lùi hạn chót'),
-                  onPressed: _busy ? null : _explainDeadlineEditRequirement,
+              ),
+          ],
+        ),
+        if (proposal == null && !_busy && _error == null)
+          MelbelCard(
+            borderRadius: 22,
+            child: Row(
+              children: [
+                Icon(
+                  Icons.event_available_outlined,
+                  size: 20,
+                  color: palette.accentInk,
+                ),
+                const SizedBox(width: 10),
+                const Expanded(
+                  child: Text(
+                    'Chưa có đề xuất đổi lịch.',
+                    textAlign: TextAlign.start,
+                  ),
                 ),
               ],
             ),
-          for (final item in items('steps_to_add'))
-            MelbelCard(
-              borderRadius: 22,
-              child: Text('Thêm bước: ${item['title']}'),
+          ),
+        if (proposal != null && diffEntries.isNotEmpty)
+          MelbelCard(
+            borderRadius: 22,
+            padding: const EdgeInsets.all(14),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                if (sharedDay != null) ...[
+                  Align(
+                    alignment: Alignment.centerLeft,
+                    child: MelbelStatusPill(
+                      label:
+                          MaterialLocalizations.of(context).formatCompactDate(
+                        sharedDay,
+                      ),
+                      icon: Icons.calendar_today_outlined,
+                      tone: MelbelCardTone.muted,
+                    ),
+                  ),
+                  const SizedBox(height: 10),
+                ],
+                for (var i = 0; i < visibleCount; i++) ...[
+                  if (i > 0)
+                    Divider(
+                      height: 16,
+                      thickness: 1,
+                      color: palette.hairline,
+                    ),
+                  _DiffEntryRow(entry: diffEntries[i]),
+                ],
+                if (diffEntries.length > 3) ...[
+                  Divider(
+                    height: 16,
+                    thickness: 1,
+                    color: palette.hairline,
+                  ),
+                  Center(
+                    child: TextButton.icon(
+                      style: TextButton.styleFrom(
+                        minimumSize: const Size(48, 44),
+                      ),
+                      onPressed: () =>
+                          setState(() => _showAllChanges = !_showAllChanges),
+                      icon: Icon(
+                        _showAllChanges
+                            ? Icons.expand_less_rounded
+                            : Icons.expand_more_rounded,
+                        size: 18,
+                      ),
+                      label: Text(
+                        _showAllChanges
+                            ? 'Thu gọn'
+                            : 'Xem thêm ${diffEntries.length - 3} thay đổi',
+                      ),
+                    ),
+                  ),
+                ],
+              ],
             ),
-          for (final item in items('sessions_to_move'))
-            MelbelCard(
-              borderRadius: 22,
-              child: Text(
-                'Lịch cũ: ${_timeRange((item['before'] as Map?)?['start'] ?? item['from_start'], (item['before'] as Map?)?['end'] ?? item['from_end'])}'
-                '\nĐề xuất: ${_timeRange((item['after'] as Map?)?['start'] ?? item['to_start'], (item['after'] as Map?)?['end'] ?? item['to_end'])}',
+          ),
+      ],
+    );
+  }
+}
+
+class _ScheduleStatusBanner extends StatelessWidget {
+  const _ScheduleStatusBanner({
+    required this.headline,
+    required this.tone,
+    required this.expression,
+    required this.expanded,
+    this.hint,
+    this.explanation,
+    this.onToggleExplanation,
+  });
+
+  final String headline;
+  final String? hint;
+  final MelbelCardTone tone;
+  final CatExpression expression;
+  final String? explanation;
+  final bool expanded;
+  final VoidCallback? onToggleExplanation;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = context.melbel;
+    final textTheme = Theme.of(context).textTheme;
+    final reducedMotion = MediaQuery.disableAnimationsOf(context);
+    final isAmber = tone == MelbelCardTone.amber;
+    final headlineColor = isAmber ? palette.onAmberSoft : palette.onSageSoft;
+    final subColor = isAmber
+        ? palette.onAmberSoft.withValues(alpha: 0.85)
+        : palette.onSurfaceVariant;
+
+    return MelbelCard(
+      tone: tone,
+      borderRadius: 24,
+      padding: const EdgeInsets.fromLTRB(14, 12, 10, 12),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Row(
+            children: [
+              MelbelMascot(
+                expression: expression,
+                width: 52,
+                height: 46,
               ),
-            ),
-          for (final item in items('sessions_to_add'))
-            MelbelCard(
-              borderRadius: 22,
-              child: Text(
-                'Thêm phiên: ${_timeRange((item['after'] as Map?)?['start'], (item['after'] as Map?)?['end'])}',
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      headline,
+                      textAlign: TextAlign.start,
+                      style: textTheme.titleMedium?.copyWith(
+                        fontWeight: FontWeight.w800,
+                        color: headlineColor,
+                      ),
+                    ),
+                    if (hint != null) ...[
+                      const SizedBox(height: 2),
+                      Text(
+                        hint!,
+                        textAlign: TextAlign.start,
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        style: textTheme.bodySmall?.copyWith(
+                          color: subColor,
+                          height: 1.4,
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
               ),
-            ),
-          for (final item in items('sessions_to_cancel'))
-            MelbelCard(
-              borderRadius: 22,
-              child: Text(
-                item['reason'] == 'resegmented_by_settings_change'
-                    ? 'Bỏ một phiên để chia lại theo cài đặt mới'
-                    : 'Bỏ một phiên theo phương án này',
-              ),
-            ),
+              if (onToggleExplanation != null)
+                IconButton(
+                  tooltip: expanded ? 'Ẩn chi tiết' : 'Xem giải thích',
+                  constraints:
+                      const BoxConstraints(minWidth: 48, minHeight: 48),
+                  onPressed: onToggleExplanation,
+                  icon: Icon(
+                    expanded
+                        ? Icons.expand_less_rounded
+                        : Icons.info_outline_rounded,
+                    color: isAmber ? palette.amberInk : palette.accentInk,
+                  ),
+                ),
+            ],
+          ),
+          AnimatedSize(
+            duration: reducedMotion
+                ? Duration.zero
+                : const Duration(milliseconds: 200),
+            curve: Curves.easeOutCubic,
+            alignment: Alignment.topCenter,
+            child: !expanded || explanation == null
+                ? const SizedBox(width: double.infinity, height: 0)
+                : Padding(
+                    padding: const EdgeInsets.only(top: 10),
+                    child: Container(
+                      padding: const EdgeInsets.all(12),
+                      decoration: BoxDecoration(
+                        color: palette.surface.withValues(alpha: 0.68),
+                        borderRadius: BorderRadius.circular(14),
+                      ),
+                      child: Text(
+                        explanation!,
+                        textAlign: TextAlign.start,
+                        style: textTheme.bodySmall?.copyWith(
+                          color: palette.onSurface,
+                          height: 1.5,
+                        ),
+                      ),
+                    ),
+                  ),
+          ),
         ],
-        if (canApply)
-          PrimaryCta(
-              label: 'Áp dụng lịch mới',
-              onPressed: _busy ? null : () => _act('approve')),
-        if (pending && !canApply && _error == null)
-          SecondaryCta(
-              label: 'Tính lại phương án',
-              onPressed: _busy ? null : () => _act('rebuild')),
-        if (_error != null)
-          SecondaryCta(
-              label: 'Thử lại',
-              onPressed:
-                  _busy ? null : () => _load(forceCurrent: true)),
-        if (widget.session == null &&
-            proposal == null &&
-            widget.trigger != 'resume')
-          SecondaryCta(
-              label: 'Mở lịch hiện tại',
-              onPressed: () => Navigator.of(context).pushNamed('/calendar')),
-        SecondaryCta(
-            label: 'Giữ lịch hiện tại',
-            onPressed: _busy
-                ? null
-                : pending
-                    ? () => _act('reject')
-                    : () => Navigator.pop(context)),
+      ),
+    );
+  }
+}
+
+class _ScheduleDiffEntry {
+  const _ScheduleDiffEntry({
+    required this.icon,
+    this.oldRange,
+    this.newRange,
+    this.text,
+  });
+
+  final IconData icon;
+  final String? oldRange;
+  final String? newRange;
+  final String? text;
+}
+
+class _DiffEntryRow extends StatelessWidget {
+  const _DiffEntryRow({required this.entry});
+
+  final _ScheduleDiffEntry entry;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = context.melbel;
+    final textTheme = Theme.of(context).textTheme;
+
+    if (entry.oldRange != null && entry.newRange != null) {
+      return Row(
+        children: [
+          Flexible(
+            child: Text(
+              entry.oldRange!,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: textTheme.bodySmall?.copyWith(
+                color: palette.onSurfaceVariant,
+                decoration: TextDecoration.lineThrough,
+                fontFeatures: const [FontFeature.tabularFigures()],
+              ),
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 8),
+            child: Icon(
+              Icons.arrow_forward_rounded,
+              size: 16,
+              color: palette.accentInk,
+            ),
+          ),
+          Flexible(
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+              decoration: BoxDecoration(
+                color: palette.sageSoft,
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: FittedBox(
+                fit: BoxFit.scaleDown,
+                child: Text(
+                  entry.newRange!,
+                  maxLines: 1,
+                  style: textTheme.labelMedium?.copyWith(
+                    color: palette.onSageSoft,
+                    fontWeight: FontWeight.w800,
+                    fontFeatures: const [FontFeature.tabularFigures()],
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ],
+      );
+    }
+
+    return Row(
+      children: [
+        Icon(entry.icon, size: 18, color: palette.accentInk),
+        const SizedBox(width: 8),
+        Expanded(
+          child: Text(
+            entry.newRange != null && entry.text != null
+                ? '${entry.text}: ${entry.newRange}'
+                : (entry.text ?? entry.newRange ?? ''),
+            textAlign: TextAlign.start,
+            style: textTheme.bodyMedium?.copyWith(
+              color: palette.onSurface,
+              fontWeight: FontWeight.w600,
+              fontFeatures: const [FontFeature.tabularFigures()],
+            ),
+          ),
+        ),
       ],
     );
   }
@@ -1010,6 +1642,7 @@ class _AvailabilityAdjustmentScreenState
   Future<void> _pickTime({required bool start}) async {
     final value = await showMelbelTimePicker(
       context: context,
+      helpText: start ? 'Giờ bắt đầu' : 'Giờ kết thúc',
       initialTime: start ? _start : _end,
     );
     if (value == null || !mounted) return;
@@ -1029,7 +1662,7 @@ class _AvailabilityAdjustmentScreenState
         children: [
           const ReviewHeader(
             'Thêm một khung giờ',
-            'Khung mới chỉ áp dụng cho công việc này. Lịch cũ được giữ đến khi bạn duyệt phương án.',
+            null,
           ),
           TextButton.icon(
             onPressed: _busy ? null : _pickDate,
@@ -1054,10 +1687,6 @@ class _AvailabilityAdjustmentScreenState
           PrimaryCta(
             label: 'Tạo phương án giờ rảnh',
             onPressed: _busy ? null : _save,
-          ),
-          SecondaryCta(
-            label: 'Quay lại',
-            onPressed: _busy ? null : () => Navigator.pop(context),
           ),
         ],
       );

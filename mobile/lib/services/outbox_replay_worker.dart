@@ -156,6 +156,10 @@ class OutboxReplayWorker {
             _isPausedAuth = true;
             break;
           } else if (statusCode == 409) {
+            final parsedError = ApiException.fromDio(dioError);
+            if (await _tryRebaseThoughtDelete(record, parsedError, syncedIds)) {
+              continue;
+            }
             await _repository.markConflict(
               record.clientEventId,
               reason: 'HTTP 409: $errorMessage',
@@ -227,6 +231,9 @@ class OutboxReplayWorker {
             }
             break;
           } else if (statusCode == 409) {
+            if (await _tryRebaseThoughtDelete(record, apiError, syncedIds)) {
+              continue;
+            }
             await _repository.markConflict(
               record.clientEventId,
               reason: 'HTTP 409: $errorMessage',
@@ -333,6 +340,58 @@ class OutboxReplayWorker {
       transientFailedIds: allTransient,
       isPausedAuth: _isPausedAuth,
     );
+  }
+
+  Future<bool> _tryRebaseThoughtDelete(
+    OutboxRecord record,
+    ApiException error,
+    List<String> syncedIds,
+  ) async {
+    final isThoughtDelete = record.eventType == OutboxEventType.thoughtDelete ||
+        (record.httpMethod.toUpperCase() == 'DELETE' &&
+            record.endpoint.contains('/thoughts/'));
+    if (!isThoughtDelete || !error.isRevisionConflict) return false;
+    final latestRevision = error.currentRevisions['thought_revision'];
+    if (latestRevision == null ||
+        latestRevision == record.payload['expected_thought_revision']) {
+      return false;
+    }
+    final rebasedPayload = {
+      ...record.payload,
+      'expected_thought_revision': latestRevision,
+    };
+    try {
+      final response = await _apiClient.dio.request<dynamic>(
+        record.endpoint,
+        data: rebasedPayload,
+        options: Options(
+          method: 'DELETE',
+          headers: {
+            'Idempotency-Key': '${record.clientEventId}_rev_$latestRevision',
+          },
+        ),
+      );
+      await _repository.markSynced(record.clientEventId);
+      syncedIds.add(record.clientEventId);
+      await _handleThoughtLifecycle(record, response);
+      try {
+        _onRecordSynced?.call(record);
+      } catch (_) {}
+      return true;
+    } on DioException catch (retryErr) {
+      if (retryErr.response?.statusCode == 404) {
+        await _repository.markSynced(record.clientEventId);
+        syncedIds.add(record.clientEventId);
+        await _handleThoughtLifecycle(record);
+        try {
+          _onRecordSynced?.call(record);
+        } catch (_) {}
+        return true;
+      }
+      return false;
+    } catch (_) {
+      return false;
+    }
   }
 
   Future<Response<dynamic>> _sendRecord(OutboxRecord record) {

@@ -222,25 +222,38 @@ Future<void> showMelbelStreakSheet(
       context: context,
       isScrollControlled: true,
       showDragHandle: true,
+      backgroundColor: context.melbel.background,
       builder: (sheetContext) => _MelbelStreakSheet(streak: streak),
     );
 
-class _MelbelStreakSheet extends StatelessWidget {
+class _MelbelStreakSheet extends StatefulWidget {
   const _MelbelStreakSheet({required this.streak});
 
   final StreakProvider streak;
 
   @override
+  State<_MelbelStreakSheet> createState() => _MelbelStreakSheetState();
+}
+
+class _MelbelStreakSheetState extends State<_MelbelStreakSheet> {
+  bool _showTiers = false;
+
+  @override
   Widget build(BuildContext context) {
-    final maxH = MediaQuery.sizeOf(context).height * 0.84;
+    final maxH = MediaQuery.sizeOf(context).height * 0.88;
+    final theme = Theme.of(context);
+    final reducedMotion = MediaQuery.disableAnimationsOf(context);
+
     return SafeArea(
+      top: false,
       child: ConstrainedBox(
         constraints: BoxConstraints(maxHeight: maxH),
         child: AnimatedBuilder(
-          animation: streak,
+          animation: widget.streak,
           builder: (context, _) {
-            final theme = Theme.of(context);
+            final streak = widget.streak;
             final palette = context.melbel;
+            final isDark = Theme.of(context).brightness == Brightness.dark;
             final days = streak.effectiveDisplayStreak;
             final unlocked = streak.isUnlocked;
             final tier = streak.currentTier;
@@ -251,19 +264,19 @@ class _MelbelStreakSheet extends StatelessWidget {
             final String progressRatioText;
             if (!unlocked) {
               progressRatio = days / StreakProvider.unlockDays;
-              progressLabel =
-                  'Tiến tới mở khóa Chuỗi (${StreakProvider.unlockDays} ngày)';
-              progressRatioText = '$days / ${StreakProvider.unlockDays} ngày';
+              progressLabel = 'Mở chuỗi';
+              progressRatioText = '$days / ${StreakProvider.unlockDays}';
             } else if (days >= 100) {
               progressRatio = 1.0;
-              progressLabel = 'Đã đạt mốc Đồng hành bền vững';
+              progressLabel = 'Bền vững';
               progressRatioText = '$days ngày';
             } else {
               final span = (tier.nextTarget - tier.minDays).clamp(1, 999);
-              progressRatio =
-                  ((days - tier.minDays) / span).clamp(0.08, 1.0).toDouble();
-              progressLabel = 'Tiến tới mốc ${tier.nextTarget} ngày';
-              progressRatioText = '$days / ${tier.nextTarget} ngày';
+              progressRatio = ((days - tier.minDays) / span)
+                  .clamp(0.08, 1.0)
+                  .toDouble();
+              progressLabel = 'Mốc ${tier.nextTarget} ngày';
+              progressRatioText = '$days / ${tier.nextTarget}';
             }
 
             final expression = streak.repairPending
@@ -272,10 +285,40 @@ class _MelbelStreakSheet extends StatelessWidget {
                     ? CatExpression.happy
                     : CatExpression.neutral;
 
+            final hasAlertNotice = streak.usedFreezeNotice ||
+                streak.repairPending ||
+                streak.warmupMissedNotice ||
+                streak.softResetNotice;
+
+            Widget buildHeaderButton({
+              required String tooltip,
+              required IconData icon,
+              required VoidCallback onPressed,
+            }) =>
+                IconButton(
+                  tooltip: tooltip,
+                  constraints: const BoxConstraints(
+                    minWidth: 48,
+                    minHeight: 48,
+                  ),
+                  padding: EdgeInsets.zero,
+                  onPressed: onPressed,
+                  icon: Container(
+                    width: 40,
+                    height: 40,
+                    decoration: BoxDecoration(
+                      color: palette.mutedSurface,
+                      borderRadius: BorderRadius.circular(14),
+                    ),
+                    alignment: Alignment.center,
+                    child: Icon(icon, size: 20, color: palette.onSurface),
+                  ),
+                );
+
             return Column(
               children: [
                 Padding(
-                  padding: const EdgeInsets.fromLTRB(20, 4, 12, 8),
+                  padding: const EdgeInsets.fromLTRB(20, 0, 12, 8),
                   child: Row(
                     children: [
                       Expanded(
@@ -290,316 +333,511 @@ class _MelbelStreakSheet extends StatelessWidget {
                                 letterSpacing: 0.6,
                               ),
                             ),
-                            Text(
-                              'Chuỗi tập trung',
-                              style: theme.textTheme.titleLarge?.copyWith(
-                                fontWeight: FontWeight.w800,
-                              ),
+                            Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Flexible(
+                                  child: Text(
+                                    'Chuỗi tập trung',
+                                    style: theme.textTheme.titleLarge?.copyWith(
+                                      fontWeight: FontWeight.w800,
+                                      color: palette.onSurface,
+                                    ),
+                                  ),
+                                ),
+                                const SizedBox(width: 6),
+                                Transform.rotate(
+                                  angle: 0.22,
+                                  child: MelbelDoodleRays(
+                                    size: 16,
+                                    color: palette.accentInk
+                                        .withValues(alpha: 0.72),
+                                  ),
+                                ),
+                              ],
                             ),
                           ],
                         ),
                       ),
-                      IconButton(
+                      buildHeaderButton(
                         tooltip: 'Cách hoạt động',
-                        constraints:
-                            const BoxConstraints(minWidth: 48, minHeight: 48),
-                        onPressed: () =>
-                            showMelbelStreakGuide(context, streak: streak),
-                        icon: const Icon(Icons.help_outline_rounded),
+                        icon: Icons.help_outline_rounded,
+                        onPressed: () => showMelbelStreakGuide(
+                          context,
+                          streak: streak,
+                        ),
                       ),
-                      IconButton(
+                      const SizedBox(width: 4),
+                      buildHeaderButton(
                         tooltip: 'Đóng',
-                        constraints:
-                            const BoxConstraints(minWidth: 48, minHeight: 48),
+                        icon: Icons.close_rounded,
                         onPressed: () => Navigator.of(context).pop(),
-                        icon: const Icon(Icons.close_rounded),
                       ),
                     ],
                   ),
                 ),
                 Expanded(
                   child: ListView(
-                    padding: const EdgeInsets.fromLTRB(20, 0, 20, 24),
+                    padding: const EdgeInsets.fromLTRB(18, 4, 18, 24),
                     children: [
-                MelbelCard(
-                  borderRadius: 24,
-                  padding: const EdgeInsets.all(16),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Row(
-                        children: [
-                          _MelbelEvolutionEmblem(
-                            tier: tier,
-                            streakDays: days,
-                            crownEnabled: streak.crownEnabled,
-                            expression: expression,
-                          ),
-                          const SizedBox(width: 14),
-                          Expanded(
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
+                      MelbelCard(
+                        tone: MelbelCardTone.neutral,
+                        borderRadius: 24,
+                        padding: const EdgeInsets.all(16),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Row(
                               children: [
-                                Wrap(
-                                  crossAxisAlignment: WrapCrossAlignment.end,
-                                  spacing: 6,
-                                  children: [
-                                    Text(
-                                      '$days',
-                                      style: theme.textTheme.headlineLarge
-                                          ?.copyWith(
-                                        fontWeight: FontWeight.w800,
-                                        color: palette.onSurface,
-                                        fontFeatures: const [
-                                          FontFeature.tabularFigures(),
+                                _MelbelEvolutionEmblem(
+                                  tier: tier,
+                                  streakDays: days,
+                                  crownEnabled: streak.crownEnabled,
+                                  expression: expression,
+                                ),
+                                const SizedBox(width: 12),
+                                Expanded(
+                                  child: Column(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.start,
+                                    children: [
+                                      Row(
+                                        children: [
+                                          Expanded(
+                                            child: Wrap(
+                                              crossAxisAlignment:
+                                                  WrapCrossAlignment.end,
+                                              spacing: 6,
+                                              children: [
+                                                Text(
+                                                  '$days',
+                                                  style: theme
+                                                      .textTheme.displaySmall
+                                                      ?.copyWith(
+                                                    fontWeight: FontWeight.w800,
+                                                    height: 1.0,
+                                                    color: palette.onSurface,
+                                                    fontFeatures: const [
+                                                      FontFeature
+                                                          .tabularFigures(),
+                                                    ],
+                                                  ),
+                                                ),
+                                                Padding(
+                                                  padding:
+                                                      const EdgeInsets.only(
+                                                    bottom: 4,
+                                                  ),
+                                                  child: Text(
+                                                    unlocked
+                                                        ? 'ngày'
+                                                        : '/ ${StreakProvider.unlockDays} ngày',
+                                                    style: theme
+                                                        .textTheme.bodyMedium
+                                                        ?.copyWith(
+                                                      color: palette
+                                                          .onSurfaceVariant,
+                                                      fontWeight:
+                                                          FontWeight.w700,
+                                                    ),
+                                                  ),
+                                                ),
+                                              ],
+                                            ),
+                                          ),
+                                          Opacity(
+                                            opacity: isDark ? 0.22 : 0.16,
+                                            child: SizedBox(
+                                              width: 24,
+                                              height: 26,
+                                              child: CustomPaint(
+                                                painter: MelbelPawPainter(
+                                                  fillColor: palette.accentInk,
+                                                ),
+                                              ),
+                                            ),
+                                          ),
                                         ],
                                       ),
-                                    ),
-                                    Padding(
-                                      padding: const EdgeInsets.only(bottom: 4),
-                                      child: Text(
-                                        unlocked
-                                            ? 'ngày liên tiếp'
-                                            : '/ ${StreakProvider.unlockDays} ngày mở chuỗi',
-                                        style:
-                                            theme.textTheme.bodySmall?.copyWith(
-                                          color: palette.onSurfaceVariant,
-                                          fontWeight: FontWeight.w600,
-                                        ),
+                                      const SizedBox(height: 6),
+                                      MelbelStatusPill(
+                                        label: unlocked
+                                            ? tier.name
+                                            : 'Khởi động · 3 ngày',
+                                        icon: unlocked
+                                            ? Icons.auto_awesome_rounded
+                                            : Icons.lock_clock_outlined,
+                                        tone: unlocked
+                                            ? MelbelCardTone.sage
+                                            : MelbelCardTone.amber,
                                       ),
-                                    ),
-                                  ],
-                                ),
-                                const SizedBox(height: 6),
-                                MelbelStatusPill(
-                                  label: unlocked
-                                      ? '${tier.name} · Mốc ${tier.nextTarget}'
-                                      : 'Khởi động · Cần 3 ngày liên tiếp',
-                                  icon: unlocked
-                                      ? Icons.auto_awesome_rounded
-                                      : Icons.lock_clock_outlined,
-                                  tone: unlocked
-                                      ? MelbelCardTone.sage
-                                      : MelbelCardTone.amber,
+                                    ],
+                                  ),
                                 ),
                               ],
                             ),
-                          ),
-                        ],
-                      ),
-                      const SizedBox(height: 12),
-                      Container(
-                        width: double.infinity,
-                        padding: const EdgeInsets.all(12),
-                        decoration: BoxDecoration(
-                          color: palette.background,
-                          borderRadius: BorderRadius.circular(16),
-                          border: Border.all(color: palette.hairline),
+                            const SizedBox(height: 12),
+                            if (hasAlertNotice)
+                              _StreakNoticeBanner(streak: streak)
+                            else
+                              _ShortCuePill(message: _shortCue(streak, now)),
+                            const SizedBox(height: 14),
+                            Row(
+                              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                              children: [
+                                Flexible(
+                                  child: Text(
+                                    progressLabel,
+                                    style:
+                                        theme.textTheme.labelMedium?.copyWith(
+                                      fontWeight: FontWeight.w700,
+                                      color: palette.onSurface,
+                                    ),
+                                  ),
+                                ),
+                                Text(
+                                  progressRatioText,
+                                  style: theme.textTheme.labelMedium?.copyWith(
+                                    color: palette.accentInk,
+                                    fontWeight: FontWeight.w800,
+                                    fontFeatures: const [
+                                      FontFeature.tabularFigures(),
+                                    ],
+                                  ),
+                                ),
+                              ],
+                            ),
+                            const SizedBox(height: 6),
+                            MelbelAnimatedProgressBar(
+                              value: progressRatio,
+                              height: 10,
+                              semanticsLabel: progressLabel,
+                            ),
+                            const SizedBox(height: 14),
+                            _WeekStreakStrip(
+                              streak: streak,
+                              today: now,
+                            ),
+                          ],
                         ),
-                        child: Text(
-                          _statusMessage(streak, tier),
-                          style: theme.textTheme.bodySmall?.copyWith(
-                            color: palette.onSurface,
-                            height: 1.4,
-                          ),
+                      ),
+                      const SizedBox(height: 10),
+                      IntrinsicHeight(
+                        child: Row(
+                          crossAxisAlignment: CrossAxisAlignment.stretch,
+                          children: [
+                            Expanded(
+                              child: _MetricTile(
+                                icon: Icons.shield_outlined,
+                                value:
+                                    '${streak.freezeCount}/${StreakProvider.maxFreeze}',
+                                label: 'Khiên',
+                              ),
+                            ),
+                            const SizedBox(width: 8),
+                            Expanded(
+                              child: _MetricTile(
+                                icon: Icons.calendar_today_outlined,
+                                value: '${streak.activeDaysInMonth(now)}/30',
+                                label: 'Tháng này',
+                              ),
+                            ),
+                            const SizedBox(width: 8),
+                            Expanded(
+                              child: _MetricTile(
+                                icon: Icons.workspace_premium_outlined,
+                                value: '${streak.longestStreak}',
+                                label: 'Kỷ lục',
+                              ),
+                            ),
+                          ],
                         ),
                       ),
-                      if (streak.usedFreezeNotice ||
-                          streak.repairPending ||
-                          streak.warmupMissedNotice ||
-                          streak.softResetNotice) ...[
+                      if (!unlocked) ...[
                         const SizedBox(height: 10),
-                        _StreakNoticeBanner(streak: streak),
-                      ],
-                      const SizedBox(height: 14),
-                      Row(
-                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                        children: [
-                          Flexible(
-                            child: Text(
-                              progressLabel,
-                              style: theme.textTheme.labelMedium?.copyWith(
-                                fontWeight: FontWeight.w600,
+                        MelbelCard(
+                          tone: MelbelCardTone.neutral,
+                          borderRadius: 20,
+                          padding: EdgeInsets.zero,
+                          child: SwitchListTile(
+                            secondary: Icon(
+                              streak.introDismissed
+                                  ? Icons.push_pin_outlined
+                                  : Icons.push_pin_rounded,
+                              color: palette.accentInk,
+                            ),
+                            value: !streak.introDismissed,
+                            onChanged: (show) => unawaited(
+                              streak.setIntroDismissed(!show),
+                            ),
+                            title: Text(
+                              'Hiện thẻ ở Trang chủ',
+                              style: theme.textTheme.labelLarge?.copyWith(
+                                fontWeight: FontWeight.w700,
+                                color: palette.onSurface,
                               ),
                             ),
                           ),
-                          Text(
-                            progressRatioText,
-                            style: theme.textTheme.labelMedium?.copyWith(
-                              color: palette.accentInk,
-                              fontWeight: FontWeight.w700,
-                              fontFeatures: const [
-                                FontFeature.tabularFigures(),
+                        ),
+                      ],
+                      const SizedBox(height: 10),
+                      Semantics(
+                        label:
+                            'Quy tắc chuỗi: tối thiểu 2 phút mỗi ngày, ${StreakProvider.unlockDays} ngày mở chuỗi, ${streak.freezeCount}/${StreakProvider.maxFreeze} khiên ngủ nướng, còn ${streak.repairsLeftThisMonth} lượt nối 24 giờ',
+                        child: ExcludeSemantics(
+                          child: MelbelCard(
+                            tone: MelbelCardTone.amber,
+                            elevated: false,
+                            borderRadius: 20,
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 12,
+                              vertical: 10,
+                            ),
+                            child: Row(
+                              children: [
+                                Container(
+                                  width: 30,
+                                  height: 30,
+                                  decoration: BoxDecoration(
+                                    color:
+                                        palette.amber.withValues(alpha: 0.22),
+                                    shape: BoxShape.circle,
+                                  ),
+                                  child: Icon(
+                                    Icons.bolt_rounded,
+                                    size: 18,
+                                    color: palette.amberInk,
+                                  ),
+                                ),
+                                const SizedBox(width: 10),
+                                Expanded(
+                                  child: Wrap(
+                                    spacing: 8,
+                                    runSpacing: 6,
+                                    children: [
+                                      const _RuleMiniChip(
+                                        icon: Icons.timer_outlined,
+                                        label: '≥ 2p/ngày',
+                                      ),
+                                      _RuleMiniChip(
+                                        icon: Icons.shield_outlined,
+                                        label:
+                                            '${streak.freezeCount}/${StreakProvider.maxFreeze}',
+                                      ),
+                                      _RuleMiniChip(
+                                        icon: Icons.replay_rounded,
+                                        label:
+                                            '${streak.repairsLeftThisMonth} lượt',
+                                      ),
+                                    ],
+                                  ),
+                                ),
                               ],
                             ),
                           ),
-                        ],
+                        ),
                       ),
-                      const SizedBox(height: 6),
-                      MelbelAnimatedProgressBar(
-                        value: progressRatio,
-                        height: 8,
-                        semanticsLabel: progressLabel,
+                      if (days >= 30) ...[
+                        const SizedBox(height: 10),
+                        MelbelCard(
+                          tone: MelbelCardTone.neutral,
+                          borderRadius: 20,
+                          padding: EdgeInsets.zero,
+                          child: SwitchListTile(
+                            value: streak.crownEnabled,
+                            onChanged: (value) => unawaited(
+                              streak.setCrownEnabled(value),
+                            ),
+                            title: Text(
+                              'Nơ sao Bạn tri kỷ (30+ ngày)',
+                              style: theme.textTheme.labelLarge?.copyWith(
+                                fontWeight: FontWeight.w700,
+                                color: palette.onSurface,
+                              ),
+                            ),
+                          ),
+                        ),
+                      ],
+                      const SizedBox(height: 10),
+                      MelbelCard(
+                        tone: MelbelCardTone.neutral,
+                        borderRadius: 20,
+                        padding: EdgeInsets.zero,
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            InkWell(
+                              borderRadius: BorderRadius.circular(20),
+                              onTap: () {
+                                HapticFeedback.selectionClick();
+                                setState(() => _showTiers = !_showTiers);
+                              },
+                              child: ConstrainedBox(
+                                constraints: const BoxConstraints(minHeight: 52),
+                                child: Padding(
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 14,
+                                    vertical: 10,
+                                  ),
+                                  child: Row(
+                                    children: [
+                                      Container(
+                                        width: 30,
+                                        height: 30,
+                                        decoration: BoxDecoration(
+                                          color: palette.successSoft,
+                                          shape: BoxShape.circle,
+                                        ),
+                                        child: Icon(
+                                          Icons.eco_rounded,
+                                          size: 17,
+                                          color: palette.successInk,
+                                        ),
+                                      ),
+                                      const SizedBox(width: 10),
+                                      Expanded(
+                                        child: Text(
+                                          'Các chặng tiến hoá cùng Melbel',
+                                          style: theme.textTheme.titleSmall
+                                              ?.copyWith(
+                                            fontWeight: FontWeight.w700,
+                                            color: palette.onSurface,
+                                          ),
+                                        ),
+                                      ),
+                                      AnimatedRotation(
+                                        turns: _showTiers ? 0.25 : 0.0,
+                                        duration: reducedMotion
+                                            ? Duration.zero
+                                            : const Duration(milliseconds: 200),
+                                        child: Icon(
+                                          Icons.chevron_right_rounded,
+                                          color: palette.onSurfaceVariant,
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              ),
+                            ),
+                            AnimatedSize(
+                              duration: reducedMotion
+                                  ? Duration.zero
+                                  : const Duration(milliseconds: 220),
+                              curve: Curves.easeOutCubic,
+                              alignment: Alignment.topCenter,
+                              child: !_showTiers
+                                  ? const SizedBox(
+                                      width: double.infinity,
+                                      height: 0,
+                                    )
+                                  : Padding(
+                                      padding: const EdgeInsets.fromLTRB(
+                                        12,
+                                        0,
+                                        12,
+                                        12,
+                                      ),
+                                      child: Column(
+                                        children: [
+                                          for (final t in StreakProvider.tiers)
+                                            Padding(
+                                              padding: const EdgeInsets.only(
+                                                top: 6,
+                                              ),
+                                              child: Container(
+                                                padding:
+                                                    const EdgeInsets.symmetric(
+                                                  horizontal: 12,
+                                                  vertical: 9,
+                                                ),
+                                                decoration: BoxDecoration(
+                                                  color: tier.level == t.level
+                                                      ? palette.sageSoft
+                                                      : palette.mutedSurface,
+                                                  borderRadius:
+                                                      BorderRadius.circular(14),
+                                                ),
+                                                child: Row(
+                                                  children: [
+                                                    Icon(
+                                                      days >= t.minDays
+                                                          ? Icons
+                                                              .check_circle_rounded
+                                                          : Icons
+                                                              .lock_outline_rounded,
+                                                      size: 17,
+                                                      color: days >= t.minDays
+                                                          ? palette.accentInk
+                                                          : palette
+                                                              .onSurfaceVariant,
+                                                    ),
+                                                    const SizedBox(width: 8),
+                                                    Expanded(
+                                                      child: Text(
+                                                        'Lv.${t.level} · ${t.name}',
+                                                        style: theme.textTheme
+                                                            .labelMedium
+                                                            ?.copyWith(
+                                                          fontWeight:
+                                                              FontWeight.w700,
+                                                          color:
+                                                              palette.onSurface,
+                                                        ),
+                                                      ),
+                                                    ),
+                                                    const SizedBox(width: 8),
+                                                    Text(
+                                                      days >= t.minDays
+                                                          ? 'Đã mở'
+                                                          : '${t.minDays} ngày',
+                                                      style: theme
+                                                          .textTheme.labelSmall
+                                                          ?.copyWith(
+                                                        color:
+                                                            palette.accentInk,
+                                                        fontWeight:
+                                                            FontWeight.w700,
+                                                        fontFeatures: const [
+                                                          FontFeature
+                                                              .tabularFigures(),
+                                                        ],
+                                                      ),
+                                                    ),
+                                                  ],
+                                                ),
+                                              ),
+                                            ),
+                                        ],
+                                      ),
+                                    ),
+                            ),
+                          ],
+                        ),
                       ),
-                      const SizedBox(height: 14),
-                      _WeekStreakStrip(streak: streak, today: now),
                     ],
                   ),
                 ),
-                const SizedBox(height: 12),
-                Row(
-                  children: [
-                    Expanded(
-                      child: _MetricTile(
-                        icon: Icons.shield_outlined,
-                        value:
-                            '${streak.freezeCount}/${StreakProvider.maxFreeze}',
-                        label: 'Khiên ngủ nướng',
-                      ),
-                    ),
-                    const SizedBox(width: 8),
-                    Expanded(
-                      child: _MetricTile(
-                        icon: Icons.calendar_today_outlined,
-                        value: '${streak.activeDaysInMonth(now)}/30',
-                        label: 'Ngày tháng này',
-                      ),
-                    ),
-                    const SizedBox(width: 8),
-                    Expanded(
-                      child: _MetricTile(
-                        icon: Icons.workspace_premium_outlined,
-                        value: '${streak.longestStreak}',
-                        label: 'Kỷ lục chuỗi',
-                      ),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 12),
-                MelbelCard(
-                  tone: MelbelCardTone.amber,
-                  borderRadius: 20,
-                  padding: const EdgeInsets.all(14),
-                  child: Text(
-                    'Quy tắc mở chuỗi: Hoàn thành ít nhất ${StreakProvider.minFocusSeconds ~/ 60} phút tập trung mỗi ngày trong ${StreakProvider.unlockDays} ngày liên tiếp để mở khóa Chuỗi và kích hoạt Khiên ngủ nướng (${streak.freezeCount}/${StreakProvider.maxFreeze}) + Nối lại nhịp 24h (còn ${streak.repairsLeftThisMonth} lượt/tháng).',
-                    style: theme.textTheme.bodySmall?.copyWith(
-                      color: palette.onAmberSoft,
-                      height: 1.45,
-                    ),
-                  ),
-                ),
-                if (days >= 30) ...[
-                  const SizedBox(height: 10),
-                  MelbelCard(
-                    borderRadius: 20,
-                    padding: EdgeInsets.zero,
-                    child: SwitchListTile(
-                      value: streak.crownEnabled,
-                      onChanged: (value) =>
-                          unawaited(streak.setCrownEnabled(value)),
-                      title: const Text('Nơ sao Bạn tri kỷ (30+ ngày)'),
-                      subtitle: const Text(
-                        'Hiển thị phụ kiện nhỏ trên Melbel trong thẻ chuỗi',
-                      ),
-                    ),
-                  ),
-                ],
-                const SizedBox(height: 14),
-                Text(
-                  'Các chặng tiến hoá cùng Melbel',
-                  style: theme.textTheme.titleSmall?.copyWith(
-                    fontWeight: FontWeight.w700,
-                  ),
-                ),
-                const SizedBox(height: 8),
-                for (final t in StreakProvider.tiers)
-                  Padding(
-                    padding: const EdgeInsets.only(bottom: 8),
-                    child: MelbelCard(
-                      tone: tier.level == t.level
-                          ? MelbelCardTone.sage
-                          : MelbelCardTone.neutral,
-                      borderRadius: 18,
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 14,
-                        vertical: 12,
-                      ),
-                      child: Row(
-                        children: [
-                          Icon(
-                            days >= t.minDays
-                                ? Icons.check_circle_rounded
-                                : Icons.lock_outline_rounded,
-                            size: 20,
-                            color: days >= t.minDays
-                                ? palette.accentInk
-                                : palette.onSurfaceVariant,
-                          ),
-                          const SizedBox(width: 10),
-                          Expanded(
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                Text(
-                                  'Lv.${t.level} · ${t.name}',
-                                  style: theme.textTheme.labelLarge?.copyWith(
-                                    fontWeight: FontWeight.w700,
-                                  ),
-                                ),
-                                const SizedBox(height: 2),
-                                Text(
-                                  t.description,
-                                  style: theme.textTheme.bodySmall?.copyWith(
-                                    color: palette.onSurfaceVariant,
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ),
-                          const SizedBox(width: 8),
-                          Text(
-                            days >= t.minDays ? 'Đã mở' : '${t.minDays} ngày',
-                            style: theme.textTheme.labelMedium?.copyWith(
-                              color: palette.accentInk,
-                              fontWeight: FontWeight.w700,
-                              fontFeatures: const [
-                                FontFeature.tabularFigures(),
-                              ],
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
               ],
-            ),
-          ),
-        ],
-      );
+            );
           },
         ),
       ),
     );
   }
 
-  static String _statusMessage(StreakProvider streak, StreakTier tier) {
-    if (streak.usedFreezeNotice) {
-      return 'Hôm qua mình nghỉ ngơi một chút, Khiên ngủ nướng đã giữ trọn chuỗi giúp bạn rồi nhé.';
-    }
-    if (streak.repairPending) {
-      return 'Chuỗi ${streak.repairPreviousStreak} ngày đang chờ bạn thắp lại! Chỉ cần 2 phút khởi động hôm nay thôi.';
-    }
-    if (streak.warmupMissedNotice) {
-      return 'Chuỗi chưa mở (dưới 3 ngày) nên mình khởi động lại 0/3 thật nhẹ, Khiên ngủ nướng vẫn còn nguyên!';
-    }
-    if (streak.softResetNotice) {
-      return 'Chào mừng bạn quay lại! Thành quả tháng này và kỷ lục ${streak.longestStreak} ngày vẫn ở nguyên đây.';
-    }
+  static String _shortCue(StreakProvider streak, DateTime now) {
+    final days = streak.effectiveDisplayStreak;
     if (streak.todayDone) {
-      final mins = streak.dayMinutes(DateTime.now());
-      return 'Hôm nay bạn đã tập trung $mins phút. ${tier.whisper}';
+      return 'Hôm nay đã tập trung ${streak.dayMinutes(now)} phút!';
     }
-    return tier.whisper;
+    if (!streak.isUnlocked) {
+      if (days == 0) {
+        return 'Chạm ≥ 2 phút hôm nay cùng Melbel!';
+      }
+      return 'Còn ${StreakProvider.unlockDays - days} ngày nữa mở chuỗi';
+    }
+    return 'Giữ nhịp ≥ 2 phút hôm nay nhé!';
   }
 }
 
@@ -619,12 +857,15 @@ class _MelbelEvolutionEmblem extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final palette = context.melbel;
+    final isDark = Theme.of(context).brightness == Brightness.dark;
     final unlocked = streakDays >= StreakProvider.unlockDays;
-    final outerBg = !unlocked
-        ? palette.mutedSurface
-        : tier.level >= 2
-            ? palette.sageSoft
-            : palette.amberSoft;
+    final outerBg = isDark
+        ? MelbelMascot.darkBackdropColor
+        : !unlocked
+            ? palette.mutedSurface
+            : tier.level >= 2
+                ? palette.sageSoft
+                : palette.amberSoft;
     final borderColor = !unlocked
         ? palette.hairline
         : tier.level >= 3
@@ -657,6 +898,7 @@ class _MelbelEvolutionEmblem extends StatelessWidget {
             expression: expression,
             width: 78,
             height: 68,
+            showBackdrop: false,
           ),
           if (tier.level >= 2)
             Positioned(
@@ -814,32 +1056,72 @@ class _WeekStreakStrip extends StatelessWidget {
               null => isToday ? palette.amber : null,
             };
 
-            return Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                SizedBox(
-                  width: 30,
-                  height: 32,
-                  child: CustomPaint(
-                    painter: MelbelPawPainter(
-                      fillColor: fillColor,
-                      strokeColor: strokeColor,
-                      strokeWidth: strokeColor != null ? 2.2 : 0,
-                      dashed: status == StreakDayKind.repair,
+            return Expanded(
+              child: FittedBox(
+                fit: BoxFit.scaleDown,
+                alignment: Alignment.center,
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    SizedBox(
+                      width: 32,
+                      height: 34,
+                      child: Stack(
+                        clipBehavior: Clip.none,
+                        alignment: Alignment.bottomCenter,
+                        children: [
+                          if (isToday)
+                            Positioned(
+                              top: -4,
+                              child: IgnorePointer(
+                                child: CustomPaint(
+                                  size: const Size(24, 9),
+                                  painter:
+                                      _MiniPawRaysPainter(color: palette.amber),
+                                ),
+                              ),
+                            ),
+                          SizedBox(
+                            width: 28,
+                            height: 30,
+                            child: CustomPaint(
+                              painter: MelbelPawPainter(
+                                fillColor: fillColor,
+                                strokeColor: strokeColor,
+                                strokeWidth: strokeColor != null ? 2.2 : 0,
+                                dashed: status == StreakDayKind.repair,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
                     ),
-                  ),
+                    const SizedBox(height: 3),
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 5,
+                        vertical: 1,
+                      ),
+                      decoration: isToday
+                          ? BoxDecoration(
+                              color: palette.amberSoft,
+                              borderRadius: BorderRadius.circular(999),
+                            )
+                          : null,
+                      child: Text(
+                        labels[i],
+                        style: theme.textTheme.labelSmall?.copyWith(
+                          fontWeight:
+                              isToday ? FontWeight.w800 : FontWeight.w500,
+                          color: isToday
+                              ? palette.amberInk
+                              : palette.onSurfaceVariant,
+                        ),
+                      ),
+                    ),
+                  ],
                 ),
-                const SizedBox(height: 3),
-                Text(
-                  labels[i],
-                  style: theme.textTheme.labelSmall?.copyWith(
-                    fontWeight: isToday ? FontWeight.w700 : FontWeight.w500,
-                    color: isToday
-                        ? palette.amberInk
-                        : palette.onSurfaceVariant,
-                  ),
-                ),
-              ],
+              ),
             );
           }(),
       ],
@@ -863,17 +1145,20 @@ class _MetricTile extends StatelessWidget {
     final palette = context.melbel;
     final theme = Theme.of(context);
     return MelbelCard(
-      borderRadius: 18,
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 10),
+      tone: MelbelCardTone.neutral,
+      borderRadius: 20,
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 12),
       child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
         children: [
-          Icon(icon, size: 17, color: palette.accentInk),
+          Icon(icon, size: 18, color: palette.accentInk),
           const SizedBox(height: 4),
           Text(
             value,
             maxLines: 1,
             style: theme.textTheme.titleSmall?.copyWith(
               fontWeight: FontWeight.w800,
+              color: palette.onSurface,
               fontFeatures: const [FontFeature.tabularFigures()],
             ),
           ),
@@ -885,12 +1170,120 @@ class _MetricTile extends StatelessWidget {
             overflow: TextOverflow.ellipsis,
             style: theme.textTheme.labelSmall?.copyWith(
               color: palette.onSurfaceVariant,
+              fontWeight: FontWeight.w600,
             ),
           ),
         ],
       ),
     );
   }
+}
+
+class _ShortCuePill extends StatelessWidget {
+  const _ShortCuePill({required this.message});
+
+  final String message;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final palette = context.melbel;
+    return MelbelCard(
+      tone: MelbelCardTone.sage,
+      elevated: false,
+      borderRadius: 16,
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      child: Row(
+        children: [
+          Container(
+            width: 28,
+            height: 28,
+            decoration: BoxDecoration(
+              color: palette.surface,
+              borderRadius: BorderRadius.circular(9),
+            ),
+            child: Icon(
+              Icons.calendar_today_rounded,
+              size: 15,
+              color: palette.accentInk,
+            ),
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(
+              message,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: palette.onSageSoft,
+                fontWeight: FontWeight.w600,
+                height: 1.35,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _RuleMiniChip extends StatelessWidget {
+  const _RuleMiniChip({required this.icon, required this.label});
+
+  final IconData icon;
+  final String label;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final palette = context.melbel;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 4),
+      decoration: BoxDecoration(
+        color: palette.surface,
+        borderRadius: BorderRadius.circular(999),
+        border: Border.all(color: palette.hairline),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, size: 13, color: palette.amberInk),
+          const SizedBox(width: 4),
+          Text(
+            label,
+            style: theme.textTheme.labelSmall?.copyWith(
+              color: palette.onAmberSoft,
+              fontWeight: FontWeight.w700,
+              fontFeatures: const [FontFeature.tabularFigures()],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _MiniPawRaysPainter extends CustomPainter {
+  const _MiniPawRaysPainter({required this.color});
+
+  final Color color;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final paint = Paint()
+      ..color = color
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1.6
+      ..strokeCap = StrokeCap.round;
+    final cx = size.width / 2;
+    canvas.drawLine(Offset(cx, 1), Offset(cx, 6), paint);
+    canvas.drawLine(Offset(cx - 8, 3.5), Offset(cx - 4.5, 7), paint);
+    canvas.drawLine(Offset(cx + 8, 3.5), Offset(cx + 4.5, 7), paint);
+  }
+
+  @override
+  bool shouldRepaint(_MiniPawRaysPainter oldDelegate) =>
+      oldDelegate.color != color;
 }
 
 /// Calm celebration sheet shown once per day upon completing a focus session
@@ -1051,13 +1444,12 @@ class MelbelStreakIntroCard extends StatelessWidget {
                 ),
               ),
               const SizedBox(width: 8),
-              TextButton(
+              MelbelIconObjectButton(
+                icon: Icons.visibility_off_outlined,
+                tooltip: 'Ẩn thẻ Streak',
+                size: 44,
+                tone: MelbelCardTone.neutral,
                 onPressed: onDismiss,
-                style: TextButton.styleFrom(
-                  visualDensity: VisualDensity.compact,
-                  minimumSize: const Size(48, 36),
-                ),
-                child: const Text('Ẩn'),
               ),
             ],
           ),
@@ -1071,7 +1463,7 @@ class MelbelStreakIntroCard extends StatelessWidget {
           ),
           const SizedBox(height: 4),
           Text(
-            'Chỉ cần ≥ 2 phút mỗi ngày. Có Khiên ngủ nướng và 24h nối nhịp, không gây áp lực.',
+            '≥ 2 phút/ngày · có Khiên & nối nhịp 24h.',
             style: theme.textTheme.bodySmall?.copyWith(
               color: palette.onSurfaceVariant,
               height: 1.4,
@@ -1111,10 +1503,12 @@ class MelbelStreakIntroCard extends StatelessWidget {
                     ),
                   ],
                 ),
-                FilledButton.tonalIcon(
+                MelbelIconObjectButton(
+                  icon: Icons.auto_stories_rounded,
+                  tooltip: 'Xem giới thiệu',
+                  size: 48,
+                  tone: MelbelCardTone.neutral,
                   onPressed: onLearnMore,
-                  icon: const Icon(Icons.menu_book_rounded, size: 16),
-                  label: const Text('Xem giới thiệu'),
                 ),
               ],
             ),
@@ -1195,15 +1589,6 @@ Future<void> showMelbelStreakGuide(
                               width: 88,
                               height: 78,
                             ),
-                            const SizedBox(height: 8),
-                            Text(
-                              'Giữ nhịp tập trung dịu nhẹ cho người ADHD-I — không áp lực mất trắng.',
-                              textAlign: TextAlign.center,
-                              style: theme.textTheme.bodyMedium?.copyWith(
-                                color: palette.onSageSoft,
-                                fontWeight: FontWeight.w600,
-                              ),
-                            ),
                             const SizedBox(height: 12),
                             Wrap(
                               spacing: 10,
@@ -1235,25 +1620,25 @@ Future<void> showMelbelStreakGuide(
                         step: '1',
                         title: '3 ngày liên tiếp mở chuỗi (≥ 2 phút/ngày)',
                         description:
-                            'Hoàn thành Khởi động 2 phút hoặc 1 phiên tập trung là tính 1 ngày. Đủ 3 ngày liên tiếp, chuỗi sẽ chính thức sáng và nối dải paw mèo trên Lịch.',
+                            'Làm ≥ 2 phút/ngày trong 3 ngày liên tiếp để bật chuỗi.',
                       ),
                       const _GuideRuleCard(
                         step: '2',
                         title: 'Tầng 1 · Khiên ngủ nướng tự động',
                         description:
-                            'Sau khi mở chuỗi (≥ 3 ngày), lỡ 1 ngày bận/mệt thì Khiên tự động bật giữ nguyên chuỗi (tặng sẵn 1, tối đa 2; nhận thêm ở mốc 7 & bội số 5 ngày).',
+                            'Lỡ 1 ngày sẽ tự bật Khiên giữ chuỗi (tối đa 2 khiên).',
                       ),
                       const _GuideRuleCard(
                         step: '3',
                         title: 'Tầng 2 · Nối lại nhịp trong 24h',
                         description:
-                            'Hết khiên mà lỡ 1 ngày? Chuỗi tạm chờ 24h thay vì xoá ngay — chỉ cần làm ≥ 2 phút hôm sau là nối tiếp được (tối đa 2 lần/tháng).',
+                            'Hết khiên vẫn có 24h làm ≥ 2 phút để nối tiếp (2 lượt/tháng).',
                       ),
                       const _GuideRuleCard(
                         step: '4',
                         title: 'Tầng 3 · Tiến hoá Melbel & Giữ thành quả',
                         description:
-                            'Mở khoá 5 chặng tiến hoá (3 → 7 → 14 → 30 → 100 ngày, có phụ kiện nơ sao ở mốc 30 ngày). Dù nghỉ dài ngày, Kỷ lục và Tổng ngày tháng này vẫn luôn được giữ.',
+                            '5 mốc tiến hoá (3–100 ngày). Nghỉ dài vẫn giữ kỷ lục.',
                       ),
                       const SizedBox(height: 8),
                       PrimaryCta(

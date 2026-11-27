@@ -30,14 +30,24 @@ import 'widgets/melbel_ui.dart';
 import 'screens/settings_screen.dart';
 import 'screens/focus_review_screens.dart';
 import 'services/alarm_service.dart';
+import 'services/audio_recorder_service.dart';
 import 'services/focus_native_controller.dart';
+import 'services/voice_playback_service.dart';
+import 'services/voice_service.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  PaintingBinding.instance.imageCache.maximumSize = 60;
+  PaintingBinding.instance.imageCache.maximumSizeBytes = 25 * 1024 * 1024;
   LicenseRegistry.addLicense(() async* {
     final license = await rootBundle.loadString('assets/fonts/OFL.txt');
     yield LicenseEntryWithLineBreaks(const ['Be Vietnam Pro'], license);
   });
+  if (!kIsWeb) {
+    unawaited(Uf1VoiceRecorderService.cleanupOrphanRecordings());
+    unawaited(AudioRecorderService.cleanupStaleRecordings());
+    unawaited(FileTtsAudioCache.pruneCache());
+  }
   if (!kIsWeb && defaultTargetPlatform == TargetPlatform.android) {
     await AlarmService.instance.init();
     await FocusNativeController.instance.init();
@@ -157,12 +167,14 @@ class _OwnerAppState extends State<_OwnerApp> {
           thoughtsKey: 'proplan.uf4.local_thoughts.v1.${widget.session.ownerId}',
         ),
         onFocusRecorded: onFocusRecorded,
+        onStreakInvalidated: () => unawaited(_streakProvider.syncFromBackend()),
       );
     }
     return FocusProvider.createOfflineAware(
       ownerId: widget.session.ownerId,
       apiClient: ApiClient(),
       onFocusRecorded: onFocusRecorded,
+      onStreakInvalidated: () => unawaited(_streakProvider.syncFromBackend()),
     );
   }
 
@@ -413,6 +425,11 @@ class _ProPlanAppState extends State<ProPlanApp> {
           : (_) => MaterialPageRoute<void>(
                 builder: (_) => const LoginScreen(),
               ),
+      onUnknownRoute: signedIn
+          ? (_) => MaterialPageRoute<void>(
+                builder: (_) => const MainShellScreen(),
+              )
+          : null,
       builder: (context, child) => MediaQuery(
         data: MediaQuery.of(context).copyWith(alwaysUse24HourFormat: true),
         child: AnnotatedRegion<SystemUiOverlayStyle>(

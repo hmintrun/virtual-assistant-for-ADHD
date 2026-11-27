@@ -38,6 +38,7 @@ class _CalendarConnectScreenState extends State<CalendarConnectScreen>
   bool _loading = true;
   bool _working = false;
   bool _waitingForBrowser = false;
+  bool _needsReconnect = false;
   String? _error;
   CalendarConnection? _connection;
   List<CalendarItem> _calendars = const [];
@@ -80,6 +81,7 @@ class _CalendarConnectScreenState extends State<CalendarConnectScreen>
     setState(() {
       _loading = true;
       _error = null;
+      _needsReconnect = false;
     });
     try {
       // Kết nối đã ngắt thì coi như chưa kết nối; needs_reconnect (quyền bị
@@ -117,7 +119,12 @@ class _CalendarConnectScreenState extends State<CalendarConnectScreen>
       });
       await _loadBusyEvents();
     } on ApiException catch (e) {
-      if (mounted) setState(() => _error = e.message);
+      if (mounted) {
+        setState(() {
+          _error = e.message;
+          _needsReconnect = e.requiresCalendarReconnect;
+        });
+      }
     } finally {
       if (mounted) setState(() => _loading = false);
     }
@@ -127,6 +134,7 @@ class _CalendarConnectScreenState extends State<CalendarConnectScreen>
     setState(() {
       _working = true;
       _error = null;
+      _needsReconnect = false;
     });
     try {
       final authUrl = await _api.startAuthorization();
@@ -138,7 +146,12 @@ class _CalendarConnectScreenState extends State<CalendarConnectScreen>
         setState(() => _error = 'Chưa mở được trình duyệt. Thử lại nhé.');
       }
     } on ApiException catch (e) {
-      if (mounted) setState(() => _error = e.message);
+      if (mounted) {
+        setState(() {
+          _error = e.message;
+          _needsReconnect = e.requiresCalendarReconnect;
+        });
+      }
     } finally {
       if (mounted) setState(() => _working = false);
     }
@@ -150,6 +163,7 @@ class _CalendarConnectScreenState extends State<CalendarConnectScreen>
     setState(() {
       _working = true;
       _error = null;
+      _needsReconnect = false;
     });
     try {
       final writeId = _pickWriteCalendarId();
@@ -173,7 +187,12 @@ class _CalendarConnectScreenState extends State<CalendarConnectScreen>
         );
       }
     } on ApiException catch (e) {
-      if (mounted) setState(() => _error = e.message);
+      if (mounted) {
+        setState(() {
+          _error = e.message;
+          _needsReconnect = e.requiresCalendarReconnect;
+        });
+      }
     } finally {
       if (mounted) setState(() => _working = false);
     }
@@ -187,6 +206,7 @@ class _CalendarConnectScreenState extends State<CalendarConnectScreen>
     setState(() {
       _working = true;
       _error = null;
+      _needsReconnect = false;
     });
     try {
       await _api.disconnect(connection.connectionId);
@@ -209,7 +229,12 @@ class _CalendarConnectScreenState extends State<CalendarConnectScreen>
         ),
       );
     } on ApiException catch (e) {
-      if (mounted) setState(() => _error = e.message);
+      if (mounted) {
+        setState(() {
+          _error = e.message;
+          _needsReconnect = e.requiresCalendarReconnect;
+        });
+      }
     } finally {
       if (mounted) setState(() => _working = false);
     }
@@ -328,10 +353,21 @@ class _CalendarConnectScreenState extends State<CalendarConnectScreen>
                       ),
                     ),
                     const SizedBox(height: 6),
-                    TextButton.icon(
-                      icon: const Icon(Icons.refresh_rounded),
-                      onPressed: _working ? null : _refresh,
-                      label: const Text('Tải lại kết nối'),
+                    Wrap(
+                      spacing: 8,
+                      children: [
+                        if (_needsReconnect)
+                          TextButton.icon(
+                            icon: const Icon(Icons.link_rounded),
+                            onPressed: _working ? null : _connect,
+                            label: const Text('Kết nối lại Google Calendar'),
+                          ),
+                        TextButton.icon(
+                          icon: const Icon(Icons.refresh_rounded),
+                          onPressed: _working ? null : _refresh,
+                          label: const Text('Tải lại kết nối'),
+                        ),
+                      ],
                     ),
                     const SizedBox(height: 12),
                   ],
@@ -346,7 +382,6 @@ class _CalendarConnectScreenState extends State<CalendarConnectScreen>
   }
 
   List<Widget> _buildNotConnected(BuildContext context) {
-    final palette = context.melbel;
     return [
       MelbelEntrance(
         child: MelbelCard(
@@ -361,16 +396,8 @@ class _CalendarConnectScreenState extends State<CalendarConnectScreen>
               ),
               const SizedBox(height: 12),
               Text(
-                'ProPlan VA xem giờ bận để tránh xếp phiên trùng lịch.',
+                'Tránh xếp trùng lịch bận · chỉ ghi phiên sau khi bạn duyệt.',
                 style: Theme.of(context).textTheme.bodyMedium,
-              ),
-              const SizedBox(height: 8),
-              Text(
-                'Phiên chỉ được ghi lên lịch sau khi bạn duyệt kế hoạch.',
-                style: Theme.of(context)
-                    .textTheme
-                    .bodySmall
-                    ?.copyWith(color: palette.onSurfaceVariant),
               ),
             ],
           ),
@@ -410,8 +437,7 @@ class _CalendarConnectScreenState extends State<CalendarConnectScreen>
               ),
               const SizedBox(height: 8),
               Text(
-                'ProPlan chưa đọc được giờ bận từ tài khoản này. Khi lập kế hoạch, '
-                'bạn có thể dùng giờ rảnh nhập tay.',
+                'Chưa đọc được giờ bận · bạn vẫn có thể nhập giờ rảnh tay.',
                 style: textTheme.bodySmall?.copyWith(
                   color: palette.onAmberSoft,
                 ),

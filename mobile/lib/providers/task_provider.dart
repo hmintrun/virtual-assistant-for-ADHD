@@ -1099,6 +1099,12 @@ class TaskProvider extends ChangeNotifier {
       try {
         await _planningApi.deleteDraft(draft.draftId);
       } on ApiException catch (error) {
+        if (error.isConfirmedDraftTransition) {
+          _apiError = 'Bản nháp này đã được chốt thành công việc.';
+          notifyListeners();
+          unawaited(restoreBackendState());
+          return;
+        }
         if (error.statusCode != 404) {
           _isApiBusy = false;
           _apiError = error.message;
@@ -1185,6 +1191,12 @@ class TaskProvider extends ChangeNotifier {
       try {
         await _planningApi.deleteDraft(draftId);
       } on ApiException catch (error) {
+        if (error.isConfirmedDraftTransition) {
+          _apiError = 'Bản nháp này đã được chốt thành công việc.';
+          unawaited(restoreBackendState());
+          notifyListeners();
+          rethrow;
+        }
         if (error.statusCode != 404) {
           _apiError = error.message;
           notifyListeners();

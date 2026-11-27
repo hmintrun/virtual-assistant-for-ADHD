@@ -50,6 +50,91 @@ class AdaptationApi {
     }
   }
 
+  /// Creates a UF6 proposal directly from a confirmed task's `source_revisions`
+  /// (e.g. `expand_next_horizon`, `missed_start`, or `early_completion_pull_forward`).
+  Future<Map<String, dynamic>> createProposalForTask({
+    required String taskId,
+    required String reason,
+    Map<String, int>? sourceRevisions,
+    List<String>? allowedTaskIds,
+    String? requestText,
+  }) async {
+    Future<Map<String, dynamic>> send(Map<String, dynamic> revisions) =>
+        _command('/proposals', {
+          'trigger_reason': reason,
+          'target_task_id': taskId,
+          'allowed_task_ids': allowedTaskIds ?? [taskId],
+          'expected_base_schedule_revision': revisions['schedule'] ?? 0,
+          'expected_source_revisions': revisions,
+          if (requestText != null && requestText.isNotEmpty)
+            'request_text': requestText,
+        });
+
+    Future<Map<String, dynamic>> loadRevisionsAndSend() async {
+      final task = await _api.getData('/tasks/${Uri.encodeComponent(taskId)}');
+      final revMap = task['source_revisions'] as Map?;
+      if (revMap == null) {
+        throw const ApiException('Công việc chưa có thông tin source_revisions.');
+      }
+      return send(revMap.cast<String, dynamic>());
+    }
+
+    try {
+      if (sourceRevisions != null) {
+        return await send(sourceRevisions);
+      }
+      return await loadRevisionsAndSend();
+    } on ApiException catch (error) {
+      if (error.statusCode != 409 || !error.isRevisionConflict) rethrow;
+      return loadRevisionsAndSend();
+    }
+  }
+
+  /// Rebuilds a stale or source-changed proposal (`POST /api/v1/proposals/{id}/rebuild`).
+  Future<Map<String, dynamic>> rebuildProposal(
+    Map<String, dynamic> proposal, {
+    String? requestText,
+  }) {
+    final id = proposal['proposal_id'] as String;
+    final body = {
+      'expected_proposal_revision': proposal['proposal_revision'],
+      if (requestText != null && requestText.trim().isNotEmpty)
+        'request_text': requestText.trim(),
+    };
+    return _api.postData(
+      '/proposals/${Uri.encodeComponent(id)}/rebuild',
+      data: body,
+      idempotencyKey: ApiClient.newIdempotencyKey('proposal_rebuild'),
+    );
+  }
+
+  /// Returns true when any proposed schedule slot in [proposal] starts in the past.
+  static bool hasExpiredProposedSlots(
+    Map<String, dynamic> proposal, {
+    DateTime? now,
+  }) {
+    final changes = proposal['proposed_changes'];
+    if (changes is! Map) return false;
+    final cutoff = (now ?? DateTime.now()).toUtc();
+    for (final item in (changes['sessions_to_move'] as List? ?? const [])) {
+      if (item is! Map) continue;
+      final raw = (item['after'] as Map?)?['start'] ?? item['to_start'];
+      if (raw is String) {
+        final parsed = DateTime.tryParse(raw)?.toUtc();
+        if (parsed != null && parsed.isBefore(cutoff)) return true;
+      }
+    }
+    for (final item in (changes['sessions_to_add'] as List? ?? const [])) {
+      if (item is! Map) continue;
+      final raw = (item['after'] as Map?)?['start'];
+      if (raw is String) {
+        final parsed = DateTime.tryParse(raw)?.toUtc();
+        if (parsed != null && parsed.isBefore(cutoff)) return true;
+      }
+    }
+    return false;
+  }
+
   Future<Map<String, dynamic>> _createProposal(
       String runId, String reason, String? requestText) async {
     final context = await _api.getData(
@@ -92,17 +177,25 @@ class AdaptationApi {
   Future<Map<String, dynamic>> _updateProposal(
     String action,
     Map<String, dynamic> proposal,
-  ) =>
-      _command(
-          '/proposals/${Uri.encodeComponent(proposal['proposal_id'] as String)}/$action',
-          {
-            'expected_proposal_revision': proposal['proposal_revision'],
-            if (action == 'approve') ...{
-              'expected_base_schedule_revision':
-                  proposal['base_schedule_revision'],
-              'expected_source_revisions': proposal['source_revisions'],
-            },
-          });
+  ) {
+    final path =
+        '/proposals/${Uri.encodeComponent(proposal['proposal_id'] as String)}/$action';
+    final body = {
+      'expected_proposal_revision': proposal['proposal_revision'],
+      if (action == 'approve') ...{
+        'expected_base_schedule_revision': proposal['base_schedule_revision'],
+        'expected_source_revisions': proposal['source_revisions'],
+      },
+    };
+    if (action == 'rebuild') {
+      return _api.postData(
+        path,
+        data: body,
+        idempotencyKey: ApiClient.newIdempotencyKey('proposal_rebuild'),
+      );
+    }
+    return _command(path, body);
+  }
 
   Future<Map<String, dynamic>?> suggestion() =>
       _api.getOptionalData('/suggestions/current');

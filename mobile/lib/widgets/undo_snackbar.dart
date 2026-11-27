@@ -11,10 +11,11 @@ void showMelbelUndoSnackBar(
   final messenger = ScaffoldMessenger.maybeOf(context);
   if (messenger == null) return;
   messenger
-    ..hideCurrentSnackBar()
+    ..clearSnackBars()
     ..showSnackBar(
       SnackBar(
         duration: duration,
+        showCloseIcon: true,
         content: Text(message),
         action: SnackBarAction(
           label: undoLabel,

@@ -845,7 +845,8 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(find.text('Xem giới thiệu'), findsOneWidget);
+    expect(find.byTooltip('Xem giới thiệu'), findsOneWidget);
+    expect(find.byTooltip('Ẩn thẻ Streak'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
 

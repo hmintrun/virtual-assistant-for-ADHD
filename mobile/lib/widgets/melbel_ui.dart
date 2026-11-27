@@ -10,7 +10,7 @@ import '../core/theme.dart';
 import '../providers/theme_provider.dart';
 import '../services/melbel_sound_service.dart';
 
-enum MelbelCardTone { neutral, muted, sage, amber, softError }
+enum MelbelCardTone { neutral, muted, sage, amber, softError, success }
 
 class MelbelAppBar extends StatelessWidget implements PreferredSizeWidget {
   const MelbelAppBar({
@@ -261,16 +261,22 @@ class MelbelMascot extends StatefulWidget {
     this.interactive = true,
     this.width = 120,
     this.height = 100,
-    this.forceLightSvg = false,
+    this.showBackdrop = true,
     this.onPetted,
     super.key,
   });
+
+  static const Color lightBackdropColor = Color(0xFFFFF8E2);
+  static const Color darkBackdropColor = Color(0xFFA797C4);
+
+  static Color backdropColor(bool isDark) =>
+      isDark ? darkBackdropColor : lightBackdropColor;
 
   final CatExpression expression;
   final bool interactive;
   final double width;
   final double height;
-  final bool forceLightSvg;
+  final bool showBackdrop;
   final ValueChanged<String>? onPetted;
 
   static const List<String> companionWhispers = [
@@ -405,12 +411,15 @@ class MelbelMascotState extends State<MelbelMascot>
   Widget build(BuildContext context) {
     final dark = Theme.of(context).brightness == Brightness.dark;
     final palette = context.melbel;
-    final mode = widget.forceLightSvg ? 'light' : (dark ? 'dark' : 'light');
     final activeExpression = _cuddling
         ? CatExpression.sleepy
         : (_petted ? CatExpression.happy : widget.expression);
     final reducedMotion = MediaQuery.disableAnimationsOf(context);
     final isReacting = _petted || _cuddling;
+    final svgWidth =
+        widget.showBackdrop ? widget.width * 0.86 : widget.width;
+    final svgHeight =
+        widget.showBackdrop ? widget.height * 0.86 : widget.height;
 
     final svg = AnimatedSwitcher(
       duration:
@@ -418,10 +427,10 @@ class MelbelMascotState extends State<MelbelMascot>
       switchInCurve: Curves.easeOut,
       switchOutCurve: Curves.easeIn,
       child: SvgPicture.asset(
-        'assets/melbel_svg/cat_${mode}_${activeExpression.name}.svg',
-        key: ValueKey('${mode}_${activeExpression.name}'),
-        width: widget.width,
-        height: widget.height,
+        'assets/melbel_svg/cat_light_${activeExpression.name}.svg',
+        key: ValueKey('black_${activeExpression.name}'),
+        width: svgWidth,
+        height: svgHeight,
         fit: BoxFit.contain,
         excludeFromSemantics: true,
       ),
@@ -435,6 +444,16 @@ class MelbelMascotState extends State<MelbelMascot>
           clipBehavior: Clip.none,
           alignment: Alignment.center,
           children: [
+            if (widget.showBackdrop)
+              Container(
+                key: const ValueKey('melbel_mascot_backdrop'),
+                width: math.min(widget.width, widget.height),
+                height: math.min(widget.width, widget.height),
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: MelbelMascot.backdropColor(dark),
+                ),
+              ),
             TweenAnimationBuilder<double>(
               tween: Tween<double>(
                 end: reducedMotion ? 0.0 : _strokeLean,
@@ -1241,33 +1260,32 @@ class MelbelCard extends StatelessWidget {
       MelbelCardTone.muted => (palette.mutedSurface, palette.hairline),
       MelbelCardTone.sage => (
           palette.sageSoft,
-          palette.sage.withValues(alpha: 0.3),
+          palette.sage.withValues(alpha: 0.28),
         ),
       MelbelCardTone.amber => (
           palette.amberSoft,
-          palette.amber.withValues(alpha: 0.32),
+          palette.amber.withValues(alpha: 0.30),
         ),
       MelbelCardTone.softError => (
           palette.softErrorSoft,
-          palette.softError.withValues(alpha: 0.32),
+          palette.softError.withValues(alpha: 0.30),
+        ),
+      MelbelCardTone.success => (
+          palette.successSoft,
+          palette.success.withValues(alpha: 0.28),
         ),
     };
 
     final resolvedBg = color ?? bg;
-    final effectiveBorderWidth = borderWidth > 0
-        ? borderWidth
-        : highContrast
-            ? 1.5
-            : (isDark &&
-                    (tone == MelbelCardTone.neutral ||
-                        tone == MelbelCardTone.muted))
-                ? 1.0
-                : 0.0;
+    final effectiveBorderWidth =
+        borderWidth > 0 ? borderWidth : (highContrast ? 1.5 : 1.0);
     final effectiveBorderColor = borderWidth > 0
         ? (borderColor ?? stroke)
         : highContrast
             ? palette.controlOutline
-            : palette.hairline.withValues(alpha: 0.65);
+            : (tone == MelbelCardTone.neutral || tone == MelbelCardTone.muted
+                ? palette.hairline
+                : stroke);
     final side = effectiveBorderWidth <= 0
         ? BorderSide.none
         : BorderSide(color: effectiveBorderColor, width: effectiveBorderWidth);
@@ -1285,9 +1303,9 @@ class MelbelCard extends StatelessWidget {
                 ? const <BoxShadow>[]
                 : [
                     BoxShadow(
-                      color: const Color(0xFF534070).withValues(alpha: 0.06),
-                      blurRadius: 22,
-                      offset: const Offset(0, 7),
+                      color: const Color(0xFF1E1A26).withValues(alpha: 0.03),
+                      blurRadius: 14,
+                      offset: const Offset(0, 4),
                     ),
                   ];
     final content = Padding(padding: padding, child: child);
@@ -1429,6 +1447,10 @@ class MelbelStatusPill extends StatelessWidget {
           palette.softErrorSoft,
           palette.onSoftErrorSoft,
         ),
+      MelbelCardTone.success => (
+          palette.successSoft,
+          palette.onSuccessSoft,
+        ),
     };
 
     return Container(
@@ -1494,9 +1516,9 @@ class PrimaryCta extends StatelessWidget {
             boxShadow: enabled && !isDark
                 ? [
                     BoxShadow(
-                      color: palette.sage.withValues(alpha: 0.25),
-                      blurRadius: 14,
-                      offset: const Offset(0, 5),
+                      color: palette.sage.withValues(alpha: 0.12),
+                      blurRadius: 10,
+                      offset: const Offset(0, 3),
                     ),
                   ]
                 : const [],
@@ -1572,8 +1594,7 @@ class SecondaryCta extends StatelessWidget {
     final isDark = Theme.of(context).brightness == Brightness.dark;
     final highContrast = MediaQuery.highContrastOf(context);
     final enabled = onPressed != null;
-    final bg = backgroundColor ??
-        (isDark ? const Color(0xFF231D2E) : palette.surface);
+    final bg = backgroundColor ?? palette.surface;
 
     return _MelbelPressScale(
       enabled: enabled,
@@ -1585,9 +1606,9 @@ class SecondaryCta extends StatelessWidget {
             boxShadow: enabled && !isDark
                 ? [
                     BoxShadow(
-                      color: const Color(0xFF534070).withValues(alpha: 0.07),
-                      blurRadius: 14,
-                      offset: const Offset(0, 4),
+                      color: const Color(0xFF1E1A26).withValues(alpha: 0.03),
+                      blurRadius: 10,
+                      offset: const Offset(0, 2),
                     ),
                   ]
                 : const [],
@@ -1604,9 +1625,7 @@ class SecondaryCta extends StatelessWidget {
                     palette.onSurfaceVariant.withValues(alpha: 0.6),
                 side: highContrast
                     ? BorderSide(color: palette.controlOutline, width: 1.5)
-                    : isDark
-                        ? BorderSide(color: palette.hairline, width: 1.0)
-                        : BorderSide.none,
+                    : BorderSide(color: palette.hairline, width: 1.0),
                 shape: const StadiumBorder(),
               ),
               onPressed: onPressed == null
@@ -1749,6 +1768,14 @@ class MelbelChatBubble extends StatelessWidget {
           palette.surface.withValues(alpha: 0.72),
           palette.onSoftErrorSoft,
         ),
+      MelbelCardTone.success => (
+          palette.successSoft,
+          palette.success.withValues(alpha: 0.32),
+          palette.onSuccessSoft,
+          palette.success,
+          palette.surface.withValues(alpha: 0.78),
+          palette.onSuccessSoft,
+        ),
       MelbelCardTone.neutral => (
           palette.surface,
           palette.hairline,
@@ -1782,9 +1809,9 @@ class MelbelChatBubble extends StatelessWidget {
               ]
             : [
                 BoxShadow(
-                  color: const Color(0xFF534070).withValues(alpha: 0.06),
-                  blurRadius: 18,
-                  offset: const Offset(0, 6),
+                  color: const Color(0xFF1E1A26).withValues(alpha: 0.03),
+                  blurRadius: 12,
+                  offset: const Offset(0, 3),
                 ),
               ],
         shape: _MelbelBubbleShape(
@@ -1793,8 +1820,8 @@ class MelbelChatBubble extends StatelessWidget {
               ? (tone == MelbelCardTone.softError
                   ? border
                   : palette.hairline.withValues(alpha: 0.55))
-              : Colors.transparent,
-          borderWidth: isDark ? 1.0 : 0,
+              : palette.hairline,
+          borderWidth: 1.0,
         ),
       ),
       child: Column(
@@ -2196,7 +2223,7 @@ class MelbelActionTile extends StatelessWidget {
       borderRadius: 26,
       onTap: onTap,
       child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
+        crossAxisAlignment: CrossAxisAlignment.center,
         children: [
           Container(
             width: badgeSize,
@@ -2210,10 +2237,11 @@ class MelbelActionTile extends StatelessWidget {
           SizedBox(height: compact ? 12 : 16),
           FittedBox(
             fit: BoxFit.scaleDown,
-            alignment: Alignment.centerLeft,
+            alignment: Alignment.center,
             child: Text(
               title,
               maxLines: 1,
+              textAlign: TextAlign.center,
               style: text.titleMedium?.copyWith(
                 fontSize: 16.0,
                 color: palette.onSurface,
@@ -2227,6 +2255,7 @@ class MelbelActionTile extends StatelessWidget {
               subtitle!,
               maxLines: 2,
               overflow: TextOverflow.ellipsis,
+              textAlign: TextAlign.center,
               style: text.labelSmall?.copyWith(
                 color: palette.onSurfaceVariant,
                 height: 1.3,
@@ -2234,6 +2263,220 @@ class MelbelActionTile extends StatelessWidget {
             ),
           ],
         ],
+      ),
+    );
+  }
+}
+
+/// Tactile squircle icon-first control (with optional 1–2 word micro-label and
+/// counter badge) used to replace verbose text buttons across screens.
+class MelbelIconObjectButton extends StatelessWidget {
+  const MelbelIconObjectButton({
+    required this.icon,
+    required this.tooltip,
+    required this.onPressed,
+    this.label,
+    this.badgeCount,
+    this.tone = MelbelCardTone.neutral,
+    this.selected = false,
+    this.size = 48,
+    super.key,
+  });
+
+  final IconData icon;
+  final String tooltip;
+  final VoidCallback? onPressed;
+  final String? label;
+  final int? badgeCount;
+  final MelbelCardTone tone;
+  final bool selected;
+  final double size;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = context.melbel;
+    final theme = Theme.of(context);
+    final effectiveTone = selected ? MelbelCardTone.sage : tone;
+
+    final Color bg;
+    final Color iconColor;
+    final Color labelColor;
+    final Color borderColor;
+    final Color medallionBg;
+
+    switch (effectiveTone) {
+      case MelbelCardTone.sage:
+        bg = palette.sageSoft;
+        iconColor = palette.accentInk;
+        labelColor = palette.onSageSoft;
+        borderColor =
+            selected ? palette.sage : palette.sage.withValues(alpha: 0.25);
+        medallionBg = palette.sage.withValues(alpha: 0.16);
+      case MelbelCardTone.amber:
+        bg = palette.amberSoft;
+        iconColor = palette.amberInk;
+        labelColor = palette.onAmberSoft;
+        borderColor = palette.amber.withValues(alpha: 0.28);
+        medallionBg = palette.amber.withValues(alpha: 0.18);
+      case MelbelCardTone.softError:
+        bg = palette.softErrorSoft;
+        iconColor = palette.errorInk;
+        labelColor = palette.onSoftErrorSoft;
+        borderColor = palette.softError.withValues(alpha: 0.3);
+        medallionBg = palette.softError.withValues(alpha: 0.16);
+      case MelbelCardTone.success:
+        bg = palette.successSoft;
+        iconColor = palette.successInk;
+        labelColor = palette.onSuccessSoft;
+        borderColor = palette.success.withValues(alpha: 0.28);
+        medallionBg = palette.success.withValues(alpha: 0.16);
+      case MelbelCardTone.muted:
+        bg = palette.mutedSurface;
+        iconColor = palette.onSurfaceVariant;
+        labelColor = palette.onSurface;
+        borderColor = palette.hairline.withValues(alpha: 0.6);
+        medallionBg = palette.surface;
+      case MelbelCardTone.neutral:
+        bg = palette.surface;
+        iconColor = palette.onSurface;
+        labelColor = palette.onSurface;
+        borderColor = palette.hairline;
+        medallionBg = palette.mutedSurface;
+    }
+
+    final count = badgeCount ?? 0;
+    final badgeText = count > 9 ? '9+' : '$count';
+    final hasBadge = count > 0;
+
+    void handleTap() {
+      HapticFeedback.selectionClick();
+      onPressed?.call();
+    }
+
+    Widget badgePill() => Container(
+          padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+          constraints: const BoxConstraints(minWidth: 18, minHeight: 16),
+          decoration: BoxDecoration(
+            color: palette.sage,
+            borderRadius: BorderRadius.circular(999),
+          ),
+          alignment: Alignment.center,
+          child: Text(
+            badgeText,
+            style: theme.textTheme.labelSmall?.copyWith(
+              fontSize: 10,
+              fontWeight: FontWeight.w800,
+              color: palette.onSage,
+              height: 1.1,
+              fontFeatures: const [FontFeature.tabularFigures()],
+            ),
+          ),
+        );
+
+    final Widget child;
+    if (label == null) {
+      child = Material(
+        color: bg,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(16),
+          side: BorderSide(color: borderColor, width: selected ? 1.6 : 1.0),
+        ),
+        clipBehavior: Clip.antiAlias,
+        child: InkWell(
+          onTap: onPressed == null ? null : handleTap,
+          borderRadius: BorderRadius.circular(16),
+          child: ConstrainedBox(
+            constraints: BoxConstraints(minWidth: size, minHeight: size),
+            child: Stack(
+              alignment: Alignment.center,
+              children: [
+                Icon(
+                  icon,
+                  size: size >= 52 ? 24 : 21,
+                  color: iconColor,
+                ),
+                if (hasBadge)
+                  Positioned(
+                    top: 4,
+                    right: 4,
+                    child: badgePill(),
+                  ),
+              ],
+            ),
+          ),
+        ),
+      );
+    } else {
+      child = Material(
+        color: bg,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(22),
+          side: BorderSide(color: borderColor, width: selected ? 1.6 : 1.0),
+        ),
+        clipBehavior: Clip.antiAlias,
+        child: InkWell(
+          onTap: onPressed == null ? null : handleTap,
+          borderRadius: BorderRadius.circular(22),
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(minWidth: 56, minHeight: 74),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Stack(
+                    clipBehavior: Clip.none,
+                    alignment: Alignment.center,
+                    children: [
+                      Container(
+                        width: 40,
+                        height: 40,
+                        decoration: BoxDecoration(
+                          color: medallionBg,
+                          borderRadius: BorderRadius.circular(14),
+                        ),
+                        child: Icon(icon, size: 21, color: iconColor),
+                      ),
+                      if (hasBadge)
+                        Positioned(
+                          top: -4,
+                          right: -6,
+                          child: badgePill(),
+                        ),
+                    ],
+                  ),
+                  const SizedBox(height: 6),
+                  FittedBox(
+                    fit: BoxFit.scaleDown,
+                    child: Text(
+                      label!,
+                      maxLines: 1,
+                      style: theme.textTheme.labelMedium?.copyWith(
+                        fontWeight: FontWeight.w700,
+                        color: labelColor,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      );
+    }
+
+    return Tooltip(
+      message: tooltip,
+      child: Semantics(
+        button: true,
+        enabled: onPressed != null,
+        selected: selected,
+        label: tooltip,
+        child: Opacity(
+          opacity: onPressed == null ? 0.45 : 1.0,
+          child: child,
+        ),
       ),
     );
   }
@@ -2309,7 +2552,7 @@ class MelbelHeroBanner extends StatelessWidget {
   const MelbelHeroBanner({
     required this.badge,
     required this.title,
-    required this.message,
+    this.message,
     this.senderLabel = 'Melbel',
     this.expression = CatExpression.neutral,
     this.onPetted,
@@ -2319,7 +2562,7 @@ class MelbelHeroBanner extends StatelessWidget {
   final String senderLabel;
   final String badge;
   final String title;
-  final String message;
+  final String? message;
   final CatExpression expression;
   final ValueChanged<String>? onPetted;
 
@@ -2329,8 +2572,9 @@ class MelbelHeroBanner extends StatelessWidget {
     final isDark = Theme.of(context).brightness == Brightness.dark;
     final textTheme = Theme.of(context).textTheme;
     final reducedMotion = MediaQuery.disableAnimationsOf(context);
-    final datePillBg =
-        isDark ? const Color(0xFF55486F) : const Color(0xB8FFFDFB);
+    final datePillBg = isDark
+        ? palette.elevatedSurface
+        : palette.surface.withValues(alpha: 0.80);
     final datePillFg =
         isDark ? palette.onSageSoft : palette.onSageSoft.withValues(alpha: 0.78);
 
@@ -2345,14 +2589,12 @@ class MelbelHeroBanner extends StatelessWidget {
         return Container(
           width: double.infinity,
           decoration: BoxDecoration(
-            color: palette.sageSoft,
+            color: palette.heroSurface,
             borderRadius: BorderRadius.circular(28),
-            border: isDark
-                ? Border.all(
-                    color: palette.hairline.withValues(alpha: 0.45),
-                    width: 1.0,
-                  )
-                : null,
+            border: Border.all(
+              color: palette.hairline,
+              width: 1.0,
+            ),
             boxShadow: isDark
                 ? [
                     BoxShadow(
@@ -2363,9 +2605,9 @@ class MelbelHeroBanner extends StatelessWidget {
                   ]
                 : [
                     BoxShadow(
-                      color: const Color(0xFF534070).withValues(alpha: 0.06),
-                      blurRadius: 22,
-                      offset: const Offset(0, 7),
+                      color: const Color(0xFF1E1A26).withValues(alpha: 0.03),
+                      blurRadius: 14,
+                      offset: const Offset(0, 4),
                     ),
                   ],
           ),
@@ -2448,24 +2690,27 @@ class MelbelHeroBanner extends StatelessWidget {
                           ),
                         ),
                       ),
-                      const SizedBox(height: 6),
-                      AnimatedSwitcher(
-                        duration: reducedMotion
-                            ? Duration.zero
-                            : const Duration(milliseconds: 200),
-                        child: Align(
-                          key: ValueKey(message),
-                          alignment: Alignment.centerLeft,
-                          child: Text(
-                            message,
-                            style: textTheme.bodyMedium?.copyWith(
-                              fontSize: 15,
-                              height: 1.4,
-                              color: palette.onSageSoft.withValues(alpha: 0.86),
+                      if (message != null && message!.trim().isNotEmpty) ...[
+                        const SizedBox(height: 6),
+                        AnimatedSwitcher(
+                          duration: reducedMotion
+                              ? Duration.zero
+                              : const Duration(milliseconds: 200),
+                          child: Align(
+                            key: ValueKey(message),
+                            alignment: Alignment.centerLeft,
+                            child: Text(
+                              message!,
+                              style: textTheme.bodyMedium?.copyWith(
+                                fontSize: 15,
+                                height: 1.4,
+                                color:
+                                    palette.onSageSoft.withValues(alpha: 0.86),
+                              ),
                             ),
                           ),
                         ),
-                      ),
+                      ],
                     ],
                   ),
                 ),
@@ -2497,7 +2742,7 @@ class MelbelHeroBanner extends StatelessWidget {
                           expression: expression,
                           width: mascotWidth,
                           height: mascotHeight,
-                          forceLightSvg: true,
+                          showBackdrop: false,
                           onPetted: onPetted,
                         ),
                       ),
@@ -2635,7 +2880,7 @@ class MelbelFloatingNavBar extends StatelessWidget {
     final reducedMotion = MediaQuery.disableAnimationsOf(context);
     final activeTint = highContrast
         ? palette.onSageSoft
-        : (isDark ? const Color(0xFFD4C5FA) : palette.accentInk);
+        : (isDark ? palette.onSurface : palette.accentInk);
 
     return ColoredBox(
       color: palette.background,
@@ -2649,16 +2894,14 @@ class MelbelFloatingNavBar extends StatelessWidget {
         child: Container(
           padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
           decoration: BoxDecoration(
-            color: isDark ? const Color(0xFF272136) : palette.surface,
+            color: palette.elevatedSurface,
             borderRadius: BorderRadius.circular(28),
             border: highContrast
                 ? Border.all(color: palette.controlOutline, width: 1.5)
-                : isDark
-                    ? Border.all(
-                        color: palette.hairline.withValues(alpha: 0.65),
-                        width: 1.0,
-                      )
-                    : null,
+                : Border.all(
+                    color: palette.hairline,
+                    width: 1.0,
+                  ),
             boxShadow: isDark
                 ? [
                     BoxShadow(
@@ -2669,9 +2912,9 @@ class MelbelFloatingNavBar extends StatelessWidget {
                   ]
                 : [
                     BoxShadow(
-                      color: const Color(0xFF534070).withValues(alpha: 0.08),
-                      blurRadius: 24,
-                      offset: const Offset(0, 8),
+                      color: const Color(0xFF1E1A26).withValues(alpha: 0.04),
+                      blurRadius: 14,
+                      offset: const Offset(0, 4),
                     ),
                   ],
           ),
@@ -3037,7 +3280,7 @@ class MelbelCushionAvatar extends StatelessWidget {
               expression: expression,
               width: width * 0.88,
               height: height * 0.86,
-              forceLightSvg: true,
+              showBackdrop: false,
               onPetted: onPetted,
             ),
           ),
@@ -3156,7 +3399,7 @@ class MelbelSectionBanner extends StatelessWidget {
     final palette = context.melbel;
     final theme = Theme.of(context);
     final isDark = theme.brightness == Brightness.dark;
-    final bg = isDark ? const Color(0xFF332947) : const Color(0xFFF1E8FD);
+    final bg = palette.heroSurface;
 
     return Semantics(
       header: true,
@@ -3166,12 +3409,10 @@ class MelbelSectionBanner extends StatelessWidget {
         decoration: BoxDecoration(
           color: bg,
           borderRadius: BorderRadius.circular(24),
-          border: isDark
-              ? Border.all(
-                  color: palette.hairline.withValues(alpha: 0.50),
-                  width: 1.0,
-                )
-              : null,
+          border: Border.all(
+            color: palette.hairline,
+            width: 1.0,
+          ),
           boxShadow: isDark
               ? [
                   BoxShadow(
@@ -3182,9 +3423,9 @@ class MelbelSectionBanner extends StatelessWidget {
                 ]
               : [
                   BoxShadow(
-                    color: const Color(0xFF534070).withValues(alpha: 0.05),
-                    blurRadius: 16,
-                    offset: const Offset(0, 5),
+                    color: const Color(0xFF1E1A26).withValues(alpha: 0.03),
+                    blurRadius: 12,
+                    offset: const Offset(0, 3),
                   ),
                 ],
         ),
@@ -3216,7 +3457,7 @@ class MelbelSectionBanner extends StatelessWidget {
                     expression: CatExpression.happy,
                     width: 64,
                     height: 56,
-                    forceLightSvg: true,
+                    showBackdrop: false,
                   ),
                 ),
               ),

@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
@@ -25,6 +27,7 @@ class _TaskSummaryScreenState extends State<TaskSummaryScreen> {
   late final TextEditingController _clarificationController;
   late final FocusNode _scopeFocusNode;
   bool _isSubmitting = false;
+  String? _clarificationError;
 
   DateTime? _initialDeadline;
 
@@ -140,8 +143,22 @@ class _TaskSummaryScreenState extends State<TaskSummaryScreen> {
             task.availability != null ||
             task.availabilityCleared ||
             task.deadline != _initialDeadline);
+    if (draft != null &&
+        !task.canPlan &&
+        blockers.isNotEmpty &&
+        answer.isEmpty &&
+        !hasFormChanges) {
+      setState(() {
+        _clarificationError = 'Nhập ngắn gọn hoặc chọn 1 gợi ý ở trên nhé.';
+      });
+      return;
+    }
     task.setScope(scope);
-    setState(() => _isSubmitting = true);
+    setState(() {
+      _clarificationError = null;
+      _isSubmitting = true;
+    });
+    var creatingCandidate = false;
     try {
       final useAnswerAsAvailability = onlyAvailabilityIsMissing &&
           answer.isNotEmpty &&
@@ -153,8 +170,7 @@ class _TaskSummaryScreenState extends State<TaskSummaryScreen> {
               hasFormChanges)) {
         await task.updateDraftOnBackend(extraRequirement: optionalRequirement);
         if (mounted &&
-            (optionalRequirement.isNotEmpty ||
-                useAnswerAsAvailability && task.canPlan)) {
+            (optionalRequirement.isNotEmpty || useAnswerAsAvailability)) {
           _clarificationController.clear();
         }
         _initialDeadline = task.deadline;
@@ -163,7 +179,7 @@ class _TaskSummaryScreenState extends State<TaskSummaryScreen> {
             !useAnswerAsScope &&
             !useAnswerAsAvailability) {
           await task.submitClarification(answer);
-          if (mounted && task.canPlan) _clarificationController.clear();
+          if (mounted) _clarificationController.clear();
         }
         if (mounted && useAnswerAsScope && task.scope.trim() == answer) {
           _scopeFocusNode.unfocus();
@@ -172,20 +188,23 @@ class _TaskSummaryScreenState extends State<TaskSummaryScreen> {
         }
       } else if (draft != null && !task.canPlan && answer.isNotEmpty) {
         await task.submitClarification(answer);
-        if (mounted && task.canPlan) _clarificationController.clear();
+        if (mounted) _clarificationController.clear();
       } else if (draft == null || !task.canPlan) {
         await task.prepareDraftAndAnalyze();
       }
       if (!mounted) return;
       if (!task.canPlan) {
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-          content: Text('Chưa đủ thông tin bắt buộc.'),
-        ));
+        ScaffoldMessenger.of(context)
+          ..hideCurrentSnackBar()
+          ..showSnackBar(const SnackBar(
+            content: Text('Chưa đủ thông tin bắt buộc.'),
+          ));
         setState(() {});
         return;
       }
       if (!createCandidate) return;
       await task.confirmDraftSummaryOnBackend();
+      creatingCandidate = true;
       await task.generateCandidateOnBackend();
       if (!mounted) return;
       if (widget.returnToReview) {
@@ -199,12 +218,27 @@ class _TaskSummaryScreenState extends State<TaskSummaryScreen> {
           ));
     } on ApiException catch (error) {
       if (!mounted) return;
-      if (isCalendarUnavailable(error)) {
+      if (error.isConfirmedDraftTransition) {
+        unawaited(task.restoreBackendState());
+        ScaffoldMessenger.of(context)
+          ..hideCurrentSnackBar()
+          ..showSnackBar(const SnackBar(
+            content: Text('Bản nháp này đã được chốt thành công việc.'),
+          ));
+      } else if (isCalendarUnavailable(error)) {
+        ScaffoldMessenger.of(context).hideCurrentSnackBar();
         showCalendarFallbackSnackBar(context,
             onUseManualAvailability: _generateWithManualAvailability);
       } else {
-        ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('Chưa cập nhật được bản nháp: $error')));
+        ScaffoldMessenger.of(context)
+          ..hideCurrentSnackBar()
+          ..showSnackBar(SnackBar(
+            content: Text(
+              creatingCandidate
+                  ? 'Đã lưu bản nháp, nhưng chưa tạo được phương án lịch: $error'
+                  : 'Chưa cập nhật được bản nháp: $error',
+            ),
+          ));
       }
     } finally {
       if (mounted) setState(() => _isSubmitting = false);
@@ -249,6 +283,7 @@ class _TaskSummaryScreenState extends State<TaskSummaryScreen> {
     if (day == null || !mounted) return;
     final time = await showMelbelTimePicker(
       context: context,
+      helpText: 'Giờ hạn chót',
       initialTime: TimeOfDay.fromDateTime(initial),
       initialEntryMode: TimePickerEntryMode.input,
     );
@@ -320,18 +355,21 @@ class _TaskSummaryScreenState extends State<TaskSummaryScreen> {
         false;
     final blockers =
         issues.where((issue) => issue['blocking'] == true).toList();
-    final onlyAvailabilityIsMissing = blockers.isNotEmpty &&
-        blockers.every((issue) => const {
-              'availability',
-              'availability_ref',
-            }.contains(issue['field_path']));
+    final anyAvailabilityMissing = blockers.any((issue) {
+      final path = (issue['field_path'] as String?) ?? '';
+      return path == 'availability' ||
+          path == 'availability_ref' ||
+          path == 'summary.availability' ||
+          path.startsWith('availability.') ||
+          path.startsWith('summary.availability.');
+    });
     final quickOptions = <String>[
       for (final issue in blockers)
         for (final key in const ['options', 'quick_options'])
           if (issue[key] is List)
             for (final item in issue[key] as List)
               if (item is String && item.trim().isNotEmpty) item.trim(),
-      if (onlyAvailabilityIsMissing) ...const [
+      if (anyAvailabilityMissing) ...const [
         'Tối nay 20:00–22:00',
         'Sáng mai 09:00–11:00',
         'Tối mai 19:30–21:30',
@@ -385,7 +423,7 @@ class _TaskSummaryScreenState extends State<TaskSummaryScreen> {
                     const SizedBox(width: 8),
                     Expanded(
                       child: Text(
-                        'AI đang gián đoạn. Bạn vẫn có thể sửa thông tin.',
+                        'AI tạm gián đoạn · bạn vẫn có thể chỉnh tay.',
                         style: textTheme.bodySmall?.copyWith(
                           color: palette.onAmberSoft,
                         ),
@@ -399,14 +437,11 @@ class _TaskSummaryScreenState extends State<TaskSummaryScreen> {
             MelbelEntrance(
               child: MelbelChatBlock(
                 senderLabel: 'Melbel',
-                badge: task.canPlan ? 'Sẵn sàng chia việc' : 'Kiểm tra nhẹ',
                 title: task.canPlan
                     ? 'Đủ thông tin để chia việc'
                     : 'Thông tin công việc',
                 titleIsHeader: true,
-                message: task.canPlan
-                    ? 'Mình đã gom đủ ý chính rồi, bạn lướt qua rồi bấm tạo phương án nhé.'
-                    : 'Bạn xem nhanh các mục dưới đây, thiếu gì mình chỉnh lại ngay.',
+                message: null,
                 tone: task.canPlan
                     ? MelbelCardTone.sage
                     : MelbelCardTone.amber,
@@ -678,14 +713,21 @@ class _TaskSummaryScreenState extends State<TaskSummaryScreen> {
                               onPressed: _isSubmitting || task.isApiBusy
                                   ? null
                                   : () {
+                                      final current =
+                                          _clarificationController.text.trim();
+                                      final next = current.isEmpty
+                                          ? option
+                                          : current.contains(option)
+                                              ? current
+                                              : '$current, $option';
                                       _clarificationController.value =
                                           TextEditingValue(
-                                        text: option,
+                                        text: next,
                                         selection: TextSelection.collapsed(
-                                          offset: option.length,
+                                          offset: next.length,
                                         ),
                                       );
-                                      setState(() {});
+                                      setState(() => _clarificationError = null);
                                     },
                             ),
                         ],
@@ -696,9 +738,16 @@ class _TaskSummaryScreenState extends State<TaskSummaryScreen> {
                       controller: _clarificationController,
                       minLines: 1,
                       maxLines: 3,
-                      decoration: const InputDecoration(
+                      decoration: InputDecoration(
                         labelText: 'Nhập thông tin còn thiếu',
+                        errorText: _clarificationError,
+                        errorMaxLines: 2,
                       ),
+                      onChanged: (_) {
+                        if (_clarificationError != null) {
+                          setState(() => _clarificationError = null);
+                        }
+                      },
                     ),
                   ],
                 ),
@@ -804,9 +853,14 @@ List<String> _requiredQuestions(List<JsonMap> issues) {
         fieldGroup(issue),
   };
   final questions = <String>{};
+  final seenGroups = <String>{};
   for (final issue in blockers) {
+    final group = fieldGroup(issue);
     if (genericCodes.contains(issue['code']) &&
-        specificFields.contains(fieldGroup(issue))) {
+        specificFields.contains(group)) {
+      continue;
+    }
+    if (group.isNotEmpty && !seenGroups.add(group)) {
       continue;
     }
     final question = (issue['question'] ?? issue['message'])?.toString().trim();
@@ -842,6 +896,7 @@ class _TimeConflictScreenState extends State<TimeConflictScreen> {
       if (day == null || !mounted) return;
       final time = await showMelbelTimePicker(
         context: context,
+        helpText: 'Giờ hạn chót',
         initialTime: task.deadline == null
             ? const TimeOfDay(hour: 18, minute: 0)
             : TimeOfDay.fromDateTime(task.deadline!.toLocal()),
